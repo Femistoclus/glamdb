@@ -42,6 +42,8 @@
 build/
 Build/
 build-*/
+cmake-build*/
+/out/
 
 # CMake generated files
 CMakeFiles/
@@ -50,6 +52,13 @@ cmake_install.cmake
 Makefile
 install_manifest.txt
 compile_commands.json
+CTestTestfile.cmake
+DartConfiguration.tcl
+build.ninja
+rules.ninja
+.ninja_deps
+.ninja_log
+_deps/
 
 # Temporary files
 *.tmp
@@ -62,7 +71,19 @@ vcpkg_installed/
 
 # debug information files
 *.dwo
+*.dSYM/
+*.gcda
+*.gcno
+*.profraw
+*.profdata
 
 # test output & cache
 Testing/
 .cache/
+
+# Local dependencies and experiment output
+.deps/
+artifacts/
+CMakeUserPresets.json
+__pycache__/
+.DS_Store

@@ -1,0 +1,75 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/build/install/${presetName}",
+        "CMAKE_PREFIX_PATH": "${sourceDir}/.deps/install",
+        "BUILD_TESTING": "ON"
+      }
+    },
+    {
+      "name": "local",
+      "displayName": "Local debug build",
+      "inherits": "base"
+    },
+    {
+      "name": "release",
+      "displayName": "Release build",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "asan-ubsan",
+      "displayName": "Address and undefined behavior sanitizers",
+      "inherits": "base",
+      "cacheVariables": {
+        "GLAMDB_ENABLE_ASAN": "ON",
+        "GLAMDB_ENABLE_UBSAN": "ON"
+      }
+    },
+    {
+      "name": "deps-local",
+      "displayName": "Pinned dependency build",
+      "inherits": "base",
+      "cacheVariables": {
+        "GLAMDB_BUILD_DEPENDENCIES": "ON",
+        "GLAMDB_DEPENDENCY_PREFIX": "${sourceDir}/.deps/install",
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "local", "configurePreset": "local" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "asan-ubsan", "configurePreset": "asan-ubsan" },
+    { "name": "deps-local", "configurePreset": "deps-local" }
+  ],
+  "testPresets": [
+    {
+      "name": "local",
+      "configurePreset": "local",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "asan-ubsan",
+      "configurePreset": "asan-ubsan",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "submodules": [
+    {
+      "name": "arrow",
+      "path": "third_party/arrow",
+      "url": "https://github.com/apache/arrow.git",
+      "version": "25.0.0",
+      "tag": "apache-arrow-25.0.0",
+      "commit": "59bea6ec485e7fe351d1aa6753f964f6a6bc353a"
+    },
+    {
+      "name": "iceberg-cpp",
+      "path": "third_party/iceberg-cpp",
+      "url": "https://github.com/apache/iceberg-cpp.git",
+      "version": "0.4.0",
+      "tag": "v0.4.0",
+      "commit": "64dc66f159bd62c9817a96d74cbce767268934d0"
+    },
+    {
+      "name": "googletest",
+      "path": "third_party/googletest",
+      "url": "https://github.com/google/googletest.git",
+      "version": "1.17.0",
+      "tag": "v1.17.0",
+      "commit": "52eb8108c5bdec04579160ae17225d66034bd723"
+    }
+  ],
+  "archives": {
+    "sqlite": {
+      "version": "3.54.1",
+      "url": "https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip",
+      "sha256": "0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9",
+      "sha3_256": "92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30",
+      "source_id": "2026-10-16 14:45:20 555e07ef33f69a0957d24d8e555b702464a131d6f1607f4c3c1e4551e8e6ca76"
+    }
+  }
+}

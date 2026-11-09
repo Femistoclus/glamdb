@@ -1,0 +1,12 @@
+Checks: >-
+  -*,
+  clang-diagnostic-*,
+  clang-analyzer-*,
+  bugprone-*,
+  performance-*,
+  modernize-use-nullptr,
+  modernize-use-override
+WarningsAsErrors: '*'
+HeaderFilterRegex: '(^|/)(public|core|apps|tests|probes|examples|benchmarks)/.*\.(h|hh|hpp|hxx)$'
+FormatStyle: file
+SystemHeaders: false
