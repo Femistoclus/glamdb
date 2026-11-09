@@ -26,10 +26,20 @@ assigned when the invitation is accepted.
 - Keep the pull request up to date with `main` so checks cover the current base.
 - Use squash merge. Direct pushes, force pushes, and deleting `main` are blocked.
 - These requirements also apply to workflow, dependency, release, policy, and
-  CODEOWNERS changes. There is no normal administrator or bot bypass.
+  CODEOWNERS changes.
 
 The repository ruleset enforces the required maintainer approval. CODEOWNERS
 requests the maintainers' review but does not enforce that count on its own.
+
+### Maintainer force-merge
+
+Members of `@glamourdb/maintainers` can explicitly bypass the review and CI
+requirements when merging a pull request. This is a PR-only bypass: it does not
+permit direct pushes, force pushes, deletion of `main`, or creation of upstream
+branches. Ordinary merges and auto-merge still use the requirements above.
+
+Explain the reason in the pull request when using a bypass. GitHub records the
+bypass in the pull request and ruleset audit history.
 
 ## Checks and testing
 
@@ -37,6 +47,12 @@ The initial `Workflow security` check runs actionlint and zizmor against GitHub
 Actions workflows. It runs on every pull request, including documentation changes.
 External contributors' workflow runs require a maintainer to approve execution;
 approval to run CI does not approve the pull request for merging.
+
+If a run reports **Internal server error** before any job starts, use
+**Re-run all jobs** to retry the same commit. A job that never starts has no
+step logs; the error appears in the run's annotations. Retrying only failed
+jobs may be unavailable when GitHub did not create any jobs. Keep workflow
+validation enabled while investigating the platform error.
 
 Explain how you tested each change in its pull request. As engine code is added,
 include runnable tests for behavior changes. For storage changes, consider

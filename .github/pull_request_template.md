@@ -16,6 +16,7 @@ concurrency, or performance. Write "Not applicable" when none are affected.
 
 Describe dependency changes and any migration or release-note requirements.
 
-One approval from a member of `@glamourdb/maintainers` other than the author and
-all required checks are necessary before merge. Report security vulnerabilities
+Normal merges require one approval from a member of `@glamourdb/maintainers`
+other than the author and all required checks. The maintainer PR-only bypass is
+described in [CONTRIBUTING.md](../CONTRIBUTING.md). Report security vulnerabilities
 privately as described in [SECURITY.md](../SECURITY.md).
