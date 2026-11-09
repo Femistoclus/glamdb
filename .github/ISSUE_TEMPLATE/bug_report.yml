@@ -1,0 +1,43 @@
+name: Bug report
+description: Report a reproducible defect in GlamDB.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a security vulnerability, use **Report a vulnerability** on the
+        [Security page](https://github.com/glamourdb/glamdb/security).
+        Do not include active credentials or private production data.
+  - type: input
+    id: revision
+    attributes:
+      label: Version or commit
+      description: Which GlamDB revision did you test?
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, architecture, and relevant build options.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include a minimal example or commands when possible.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: Include relevant logs with secrets and private data removed.
+    validations:
+      required: true

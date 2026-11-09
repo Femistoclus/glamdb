@@ -1,0 +1,3 @@
+# The main ruleset requires one approval from this team for every PR.
+# CODEOWNERS alone does not enforce the number of approvals.
+* @glamourdb/maintainers
