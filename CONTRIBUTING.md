@@ -43,8 +43,18 @@ bypass in the pull request and ruleset audit history.
 
 ## Checks and testing
 
-The initial `Workflow security` check runs actionlint and zizmor against GitHub
-Actions workflows. It runs on every pull request, including documentation changes.
+The `Workflow security` check runs actionlint and zizmor against GitHub
+Actions workflows. The `C++ quality` workflow runs separate `clang-format` and
+`clang-tidy` checks using LLVM 18 and the checked-in configurations. Formatting
+covers project C++ sources and headers; tidy includes the engine, storage adapters,
+CLI, and tests using the pinned dependencies. Tidy runs two files concurrently
+with grouped diagnostics and per-file timings. Both workflows run on every pull
+request, including documentation changes, and pushes to `main`.
+The `Native tests` workflow runs independent normal, ASan, UBSan, MSan, TSan,
+and LSan jobs. `Workbench checks` runs independent Python, Node, and browser
+jobs. These test workflows skip documentation-only changes; new code paths
+trigger them automatically. See [test CI](docs/development/BUILDING.md#test-ci)
+for discovery, sanitizer scope, and failure logs.
 External contributors' workflow runs require a maintainer to approve execution;
 approval to run CI does not approve the pull request for merging.
 

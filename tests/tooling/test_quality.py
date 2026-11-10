@@ -1,7 +1,12 @@
+import contextlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -37,7 +42,8 @@ class QualityClassificationTest(unittest.TestCase):
 
     def test_root_tidy_excludes_standalone_but_format_includes_it(self):
         with patch.object(quality, "llvm_tool", side_effect=lambda name: name), \
-                patch.object(quality.subprocess, "run") as run:
+                patch.object(quality.subprocess, "run",
+                             return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
             quality.tidy_sources(self.build)
             self.assertEqual(run.call_count, 1)
             self.assertEqual(run.call_args.args[0][1], str(self.core))
@@ -54,7 +60,8 @@ class QualityClassificationTest(unittest.TestCase):
             with self.subTest(path=path):
                 source = self.add_source(path)
                 with patch.object(quality, "llvm_tool", return_value="clang-tidy"), \
-                        patch.object(quality.subprocess, "run") as run:
+                        patch.object(quality.subprocess, "run",
+                             return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
                     with self.assertRaisesRegex(RuntimeError, "Missing compile commands"):
                         quality.tidy_sources(self.build)
                     run.assert_not_called()
@@ -63,7 +70,8 @@ class QualityClassificationTest(unittest.TestCase):
     def test_only_explicitly_disabled_component_is_excluded(self):
         storage = self.add_source("core/storage/adapter.cpp")
         with patch.object(quality, "llvm_tool", return_value="clang-tidy"), \
-                patch.object(quality.subprocess, "run") as run:
+                patch.object(quality.subprocess, "run",
+                             return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
             with self.assertRaisesRegex(RuntimeError, "Missing compile commands"):
                 quality.tidy_sources(self.build)
             run.assert_not_called()
@@ -89,11 +97,55 @@ class QualityClassificationTest(unittest.TestCase):
             {"directory": str(self.root), "file": str(path)} for path in (io, support)
         ]))
         with patch.object(quality, "llvm_tool", return_value="clang-tidy"), \
-                patch.object(quality.subprocess, "run") as run:
+                patch.object(quality.subprocess, "run",
+                             return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
             quality.tidy_sources(self.build, ["core/storage"], io_only=True)
             self.assertEqual({call.args[0][1] for call in run.call_args_list}, {str(io), str(support)})
         self.assertIn(storage, quality.source_files(io_only=True))
         self.assertNotIn(self.core, quality.source_files(io_only=True))
+
+
+class ParallelTidyTest(unittest.TestCase):
+    def test_parallel_checks_keep_all_failure_diagnostics(self):
+        # A sequential implementation cannot pass the two-process rendezvous.
+        with tempfile.TemporaryDirectory(prefix="parallel-tidy-") as temporary:
+            root = Path(temporary)
+            (root / "core").mkdir()
+            sources = [root / "core" / name for name in ("good.cpp", "bad.cpp")]
+            for source in sources:
+                source.write_text("int main() { return 0; }\n")
+            (root / "compile_commands.json").write_text(json.dumps([
+                {"directory": str(root), "file": str(source)} for source in sources
+            ]))
+            executable = root / "tidy"
+            executable.write_text(f"#!{sys.executable}\n" + textwrap.dedent("""\
+                from pathlib import Path
+                import sys
+                import time
+                source = Path(sys.argv[1])
+                source.with_suffix('.started').touch()
+                deadline = time.monotonic() + 5
+                while len(list(source.parent.glob('*.started'))) < 2:
+                    if time.monotonic() > deadline:
+                        print('checks did not overlap', file=sys.stderr)
+                        sys.exit(3)
+                    time.sleep(0.01)
+                print('checked ' + source.name)
+                if source.name == 'bad.cpp':
+                    print('bad.cpp: analyzer diagnostic', file=sys.stderr)
+                    sys.exit(1)
+                """))
+            executable.chmod(0o755)
+            output = io.StringIO()
+            with patch.object(quality, "ROOT", root), \
+                    patch.object(quality, "llvm_tool", return_value=str(executable)), \
+                    contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                with self.assertRaises(RuntimeError):
+                    quality.tidy_sources(root)
+            self.assertIn("checked good.cpp", output.getvalue())
+            self.assertIn("checked bad.cpp", output.getvalue())
+            self.assertIn("bad.cpp: analyzer diagnostic", output.getvalue())
+            self.assertNotIn("checks did not overlap", output.getvalue())
 
 
 if __name__ == "__main__":

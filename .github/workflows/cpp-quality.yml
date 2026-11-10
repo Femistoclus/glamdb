@@ -1,0 +1,103 @@
+name: C++ quality
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  format:
+    name: clang-format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the proposed change
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install clang-format 18
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-format-18
+
+      - name: Check project formatting
+        run: python3 scripts/quality.py format-check
+
+  tidy:
+    name: clang-tidy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CC: clang-18
+      CXX: clang++-18
+      CXXFLAGS: -stdlib=libc++
+    steps:
+      - name: Check out the proposed change and pinned dependencies
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install LLVM 18 and build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang-18 clang-format-18 clang-tidy-18 \
+            libc++-18-dev libc++abi-18-dev libclang-rt-18-dev \
+            cmake ninja-build make pkg-config zlib1g-dev
+
+      - name: Test dependency cache decisions
+        run: python3 tests/tooling/test_ci_dependencies.py
+
+      - name: Verify pins and identify the dependency build
+        id: dependency-key
+        run: |
+          dependency_key=$(python3 scripts/ci_dependencies.py key)
+          printf 'key=%s\n' "$dependency_key" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the exact dependency installation
+        id: dependencies
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        with:
+          path: .deps/install
+          key: ${{ steps.dependency-key.outputs.key }}
+
+      - name: Prepare pinned dependencies
+        env:
+          CACHE_HIT: ${{ steps.dependencies.outputs.cache-hit }}
+        run: python3 scripts/ci_dependencies.py build
+
+      - name: Save the completed dependency installation
+        if: steps.dependencies.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        with:
+          path: .deps/install
+          key: ${{ steps.dependency-key.outputs.key }}
+
+      - name: Generate compile commands for all components and tests
+        # The project uses no C++ modules. Avoid references to unbuilt .modmap files.
+        run: >-
+          cmake --preset local -DGLAMDB_BUILD_STORAGE=ON -DBUILD_TESTING=ON
+          -DCMAKE_CXX_SCAN_FOR_MODULES=OFF
+
+      - name: Check project diagnostics
+        run: cmake --build --preset local --target tidy-check
+
+      - name: Verify formatting and analyzer violations are rejected
+        run: cmake --build --preset local --target quality-negative-check

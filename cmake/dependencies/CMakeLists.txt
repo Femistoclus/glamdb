@@ -115,16 +115,3 @@ ExternalProject_Add(glamdb_iceberg
         -DICEBERG_S3=OFF
     BUILD_COMMAND "${CMAKE_COMMAND}" --build <BINARY_DIR> --parallel ${GLAMDB_DEPENDENCY_JOBS}
 )
-
-ExternalProject_Add(glamdb_googletest
-    SOURCE_DIR "${PROJECT_SOURCE_DIR}/third_party/googletest"
-    BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/googletest"
-    DOWNLOAD_COMMAND ""
-    UPDATE_COMMAND ""
-    CMAKE_ARGS ${dependency_args}
-        -DBUILD_GMOCK=ON
-        -DINSTALL_GTEST=ON
-        -Dgtest_build_tests=OFF
-        -Dgmock_build_tests=OFF
-    BUILD_COMMAND "${CMAKE_COMMAND}" --build <BINARY_DIR> --parallel ${GLAMDB_DEPENDENCY_JOBS}
-)

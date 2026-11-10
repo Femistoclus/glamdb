@@ -152,5 +152,6 @@ of a native scanner. Implement actual file/row-group metadata and report only
 supported pruning. Run fresh-process reopen, full fault and physical power-loss
 campaigns before making durability claims.
 
-Unanswered decisions and assumptions are in [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md).
-The [implementation plan](WORKBENCH_PLAN.md) records scope and completion tasks.
+See the [architecture](../ARCHITECTURE.md), [roadmap](../ROADMAP.md) and
+[validation report](WORKBENCH_VALIDATION.md) for supported behavior and the
+boundaries of the current client/mock implementation.

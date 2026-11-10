@@ -1,0 +1,89 @@
+name: Native tests
+
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/CODEOWNERS'
+      - 'LICENSE'
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/CODEOWNERS'
+      - 'LICENSE'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  native:
+    name: Native / ${{ matrix.profile }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [normal, asan, ubsan, msan, tsan, lsan]
+    env:
+      PROFILE: ${{ matrix.profile }}
+    steps:
+      - name: Check out the proposed change and pinned dependencies
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install LLVM 18 and build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang-18 clang-format-18 clang-tidy-18 llvm-18 \
+            libc++-18-dev libc++abi-18-dev libclang-rt-18-dev \
+            cmake ninja-build make pkg-config zlib1g-dev
+
+      - name: Set address-space layout for LLVM 18 shadow memory
+        if: matrix.profile == 'msan' || matrix.profile == 'tsan'
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Check out LLVM 18.1.8 runtime sources
+        if: matrix.profile == 'msan' || matrix.profile == 'tsan'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llvm/llvm-project
+          ref: 3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff # llvmorg-18.1.8
+          path: .deps/llvm-project
+          persist-credentials: false
+          sparse-checkout: |
+            cmake
+            llvm/cmake
+            libcxx
+            libcxxabi
+            runtimes
+
+      - name: Build the instrumented C++ standard library
+        if: matrix.profile == 'msan' || matrix.profile == 'tsan'
+        run: bash scripts/ci-native.sh "$PROFILE" runtime
+
+      - name: Build pinned dependencies for this profile
+        run: bash scripts/ci-native.sh "$PROFILE" deps
+
+      - name: Build all native tests with storage enabled
+        run: bash scripts/ci-native.sh "$PROFILE" build
+
+      - name: Run all CTest suites and standalone probes
+        run: bash scripts/ci-native.sh "$PROFILE" test

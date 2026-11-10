@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test tests/unit/*.test.mjs",
+    "test": "node --test",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
     "format": "prettier --write .",

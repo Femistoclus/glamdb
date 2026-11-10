@@ -205,5 +205,5 @@ full SQLite-image fault modeling, native process-crash campaigns, qualified
 Linux/ext4 power cuts, S3 and KV/COW/compaction. No destructive test was run on
 the user's volume. The mock and simplified model cannot establish these claims.
 
-Questions/assumptions and the next-session handoff are in
-[OPEN_QUESTIONS.md](OPEN_QUESTIONS.md) and [OWNER_HANDOFF_RU.md](OWNER_HANDOFF_RU.md).
+See the [workbench guide](WORKBENCH.md) for reproducible commands and the
+[roadmap](../ROADMAP.md) for the remaining product milestones.

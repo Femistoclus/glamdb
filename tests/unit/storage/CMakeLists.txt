@@ -1,8 +1,6 @@
+file(GLOB_RECURSE storage_test_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
 add_executable(glamdb_storage_test
-    table_profile_test.cpp metadata_validation_test.cpp capacity_test.cpp format_verifier_test.cpp
-    durable_local_file_io_test.cpp append_stager_test.cpp
-    publication_guard_test.cpp
-    data_file_writer_test.cpp
+    ${storage_test_sources}
     "${PROJECT_SOURCE_DIR}/tests/support/fault_fs.cpp"
 )
 target_include_directories(glamdb_storage_test PRIVATE "${PROJECT_SOURCE_DIR}")
