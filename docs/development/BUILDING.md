@@ -286,8 +286,9 @@ Follow the [C++ style guide](CPP_STYLE_GUIDE.md). `.clang-format` implements
 its mechanical rules; naming, ownership, and error handling also need review.
 
 The [C++ quality workflow](../../.github/workflows/cpp-quality.yml) runs independent
-`clang-format` and `clang-tidy` jobs on pull requests and pushes to `main`; it also
-supports manual runs. Formatting runs without a build. Tidy prepares the pinned
+`clang-format` and `clang-tidy` jobs. Formatting runs on pull requests, pushes to
+`main`, and manual dispatch. Tidy runs only on pushes to `main` and manual dispatch;
+it is skipped on pull requests. Formatting runs without a build. Tidy prepares the pinned
 dependencies with Clang/libc++ 18, then configures `local` with
 `GLAMDB_BUILD_STORAGE=ON` and `BUILD_TESTING=ON` to check all enabled project
 components and tests. It also runs `quality-negative-check`.
