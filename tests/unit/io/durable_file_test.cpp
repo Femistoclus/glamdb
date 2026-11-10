@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <new>
 #include <stdexcept>
 #include <thread>
@@ -382,6 +384,92 @@ TEST_P(TDurableBoundaryTest, FirstFailureSurvivesCloseAndNoReceiptIsIssued)
 INSTANTIATE_TEST_SUITE_P(CloseBoundaries,
     TDurableBoundaryTest,
     ::testing::Values(EIOOp::SyncFile, EIOOp::Stat, EIOOp::Close, EIOOp::SyncDir));
+
+class TAfterDurableBoundaryTest
+    : public TDurableFileTest
+    , public ::testing::WithParamInterface<std::tuple<EFileKind, EIOOp>>
+{ };
+
+TEST_P(TAfterDurableBoundaryTest, SuccessfulNativeSyncCannotAuthorizeAnUnacknowledgedReceipt)
+{
+    const auto [kind, operation] = GetParam();
+    std::string suffix;
+    switch (kind) {
+        case EFileKind::Data:
+            suffix = "data/" + Leaf_;
+            break;
+        case EFileKind::Manifest:
+            suffix = "metadata/" + std::string(KOperation) + "-m0.avro";
+            break;
+        case EFileKind::ManifestList:
+            suffix = "metadata/snap-1-0-" + std::string(KOperation) + ".avro";
+            break;
+        case EFileKind::Metadata:
+            suffix = "metadata/00000-" + std::string(KOperation) + ".metadata.json";
+            break;
+        default:
+            FAIL() << "Unexpected file kind";
+    }
+    const auto uri = std::string("store://") + KStore + "/warehouse/" + KCollection + "/" + suffix;
+    const auto physical = Path_ / std::filesystem::path(suffix).filename();
+    auto injector = std::make_shared<TFaultFS>(static_cast<ILocalFS&>(*Fs_));
+    const auto directory = injector->OpenDir(Path_);
+    ASSERT_TRUE(directory);
+    injector->AddRule({operation, "*", 1, 1, std::make_error_code(std::errc::io_error), std::nullopt, true});
+    const auto created = TDurableFile::Create(injector, directory.Value(), uri, Latch_, Attempt_);
+    ASSERT_TRUE(created);
+    const auto& file = created.Value();
+    ASSERT_FALSE(file->Write(Bytes("durable orphan")));
+    EXPECT_EQ(file->Close(), std::errc::io_error);
+
+    const auto innerEvents = Fs_->Events();
+    const auto outerEvents = injector->Events();
+    const auto observedSync = std::ranges::find_if(innerEvents, [&](const auto& event) {
+        return event.Op == operation;
+    });
+    ASSERT_NE(observedSync, innerEvents.end());
+    EXPECT_FALSE(observedSync->Error);
+    EXPECT_EQ(observedSync->Path, operation == EIOOp::SyncFile ? physical.string() : Path_.string());
+    EXPECT_EQ(std::ranges::count(innerEvents, operation, &TIOEvent::Op), 1);
+    const auto reportedSync = std::ranges::find(outerEvents, operation, &TIOEvent::Op);
+    ASSERT_NE(reportedSync, outerEvents.end());
+    EXPECT_EQ(reportedSync->Error, std::errc::io_error);
+    EXPECT_EQ(std::ranges::count(innerEvents, EIOOp::Close, &TIOEvent::Op), 1);
+    EXPECT_EQ(std::ranges::count(innerEvents, EIOOp::SyncDir, &TIOEvent::Op), operation == EIOOp::SyncDir ? 1 : 0);
+
+    const auto record = Attempt_->Record(uri);
+    ASSERT_TRUE(record);
+    EXPECT_EQ(record.Value().Kind, kind);
+    EXPECT_EQ(record.Value().State, EFileState::Failed);
+    EXPECT_EQ(record.Value().FirstError, std::errc::io_error);
+    EXPECT_FALSE(record.Value().Receipt);
+    EXPECT_FALSE(record.Value().FormatVerified);
+    EXPECT_FALSE(file->Receipt());
+    EXPECT_TRUE(Attempt_->Receipts().empty());
+    EXPECT_EQ(Attempt_->Seal(), std::errc::io_error);
+    EXPECT_TRUE(Latch_->IsSet());
+    EXPECT_FALSE(file->Write(Bytes("discarded")));
+    EXPECT_EQ(file->Close(), std::errc::io_error);
+    EXPECT_EQ(Attempt_->FirstError(), std::errc::io_error);
+    EXPECT_EQ(TIOAttempt::Make({KStore, KCollection, KAttempt, EAttemptKind::Append, KOperation}, Latch_).Error(),
+        std::errc::io_error);
+    EXPECT_EQ(Fs_->Events().size(), innerEvents.size());
+    EXPECT_EQ(injector->Events().size(), outerEvents.size());
+
+    NTesting::TDurabilityTrace oracle({Path_.string()});
+    for (const auto& event : outerEvents) {
+        ASSERT_FALSE(oracle.Apply(event));
+    }
+    EXPECT_TRUE(oracle.Apply({outerEvents.size() + 1, EIOOp::Publish, {}, {}, 0, {}, {physical.string()}}));
+    std::ifstream orphan(physical, std::ios::binary);
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(orphan), {}), "durable orphan");
+}
+
+INSTANTIATE_TEST_SUITE_P(AllFileKinds,
+    TAfterDurableBoundaryTest,
+    ::testing::Combine(
+        ::testing::Values(EFileKind::Data, EFileKind::Manifest, EFileKind::ManifestList, EFileKind::Metadata),
+        ::testing::Values(EIOOp::SyncFile, EIOOp::SyncDir)));
 
 TEST_F(TDurableFileTest, SyncAndCloseAreNotRetriedOnEintr)
 {

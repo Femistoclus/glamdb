@@ -5,6 +5,7 @@
 #include "core/storage/format_verifier.h"
 #include "core/storage/iceberg_error_boundary.h"
 #include "core/storage/metadata_validation.h"
+#include "core/storage/recovery_visited.h"
 #include "core/storage/table_profile.h"
 
 #include <iceberg/constants.h>
@@ -19,6 +20,7 @@
 #include <limits>
 #include <set>
 #include <span>
+#include <unordered_set>
 
 namespace NGlamDB::NStorage {
 using iceberg::Error;
@@ -121,7 +123,7 @@ iceberg::Result<TStorageUsage> CheckManifest(const std::shared_ptr<iceberg::File
     const NIO::TStoreUri& table,
     const std::shared_ptr<NIO::TIOAttempt>& attempt,
     const TStorageLimits& limits,
-    std::set<std::string>* dataPaths)
+    TRecoveryVisited* visited)
 {
     if (manifest.content != iceberg::ManifestContent::kData || manifest.partition_spec_id != metadata.default_spec_id ||
         manifest.added_snapshot_id != snapshot.snapshot_id || manifest.sequence_number != snapshot.sequence_number ||
@@ -155,8 +157,11 @@ iceberg::Result<TStorageUsage> CheckManifest(const std::shared_ptr<iceberg::File
     {
         return iceberg::ValidationFailed("Manifest counters or entry inheritance differ.");
     }
-    if (dataPaths && !dataPaths->insert(entry.data_file->file_path).second) {
-        return iceberg::ValidationFailed("Append reuses a retained data file.");
+    if (visited) {
+        ICEBERG_ASSIGN_OR_RAISE(auto inserted, visited->Insert(NIO::EFileKind::Data, entry.data_file->file_path));
+        if (!inserted) {
+            return iceberg::ValidationFailed("Append reuses a retained data file.");
+        }
     }
     ICEBERG_ASSIGN_OR_RAISE(auto footerBytes, CheckData(fileIO, *entry.data_file, *schema, table, attempt));
     ICEBERG_RETURN_UNEXPECTED(MarkVerified(attempt, manifest.manifest_path));
@@ -179,7 +184,7 @@ iceberg::Result<TBaseState> CheckAppendClosureImpl(const std::shared_ptr<iceberg
     const std::vector<iceberg::ManifestFile>& previousManifests,
     const std::shared_ptr<NIO::TIOAttempt>& attempt,
     const TStorageLimits& limits,
-    std::set<std::string>* dataPaths)
+    TRecoveryVisited* visited)
 {
     return CatchIcebergExceptions([&]() -> iceberg::Result<TBaseState> {
         if (!fileIO || !candidate.Metadata) {
@@ -232,7 +237,7 @@ iceberg::Result<TBaseState> CheckAppendClosureImpl(const std::shared_ptr<iceberg
                     table.Value(),
                     attempt,
                     limits,
-                    dataPaths));
+                    visited));
             auto total = ReplaceUsage(delta, {.Next = fileUsage});
             if (!total) {
                 return iceberg::ValidationFailed("Manifest usage overflows.");
@@ -306,11 +311,17 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
         view->current_snapshot_id = iceberg::kInvalidSnapshotId;
         view->last_sequence_number = 0;
         ICEBERG_RETURN_UNEXPECTED(CheckRecoveryProfile(*view));
-        std::set<std::string> lists;
-        std::set<std::string> dataPaths;
+        ICEBERG_ASSIGN_OR_RAISE(auto visited, TRecoveryVisited::Make());
+        std::unordered_set<std::int64_t> snapshotIDs;
+        snapshotIDs.reserve(original->snapshots.size());
         for (std::size_t index = 0; index < original->snapshots.size(); ++index) {
             const auto& snapshot = original->snapshots[index];
-            if (!snapshot || !lists.insert(snapshot->manifest_list).second) {
+            if (!snapshot || !snapshotIDs.insert(snapshot->snapshot_id).second) {
+                return iceberg::ValidationFailed("Invalid retained snapshot history.");
+            }
+            ICEBERG_ASSIGN_OR_RAISE(auto inserted,
+                visited->Insert(NIO::EFileKind::ManifestList, snapshot->manifest_list));
+            if (!inserted) {
                 return iceberg::ValidationFailed("Invalid retained snapshot history.");
             }
             auto next = std::make_shared<iceberg::TableMetadata>(*view);
@@ -325,9 +336,20 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
             auto candidate = state;
             candidate.Metadata = next;
             ICEBERG_ASSIGN_OR_RAISE(state,
-                CheckAppendClosureImpl(fileIO, std::move(candidate), state.CurrentManifests, {}, limits, &dataPaths));
+                CheckAppendClosureImpl(fileIO,
+                    std::move(candidate),
+                    state.CurrentManifests,
+                    {},
+                    limits,
+                    visited.get()));
+            if (next->snapshots.size() > 1) {
+                next->snapshots.erase(next->snapshots.begin());
+                next->snapshot_log.erase(next->snapshot_log.begin());
+            }
             view = std::move(next);
         }
+        view->snapshots = original->snapshots;
+        view->snapshot_log = original->snapshot_log;
         if (*original != *view) {
             return iceberg::ValidationFailed("Recovery root has an inconsistent current snapshot.");
         }

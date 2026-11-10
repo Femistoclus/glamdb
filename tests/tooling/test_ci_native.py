@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import shutil
@@ -27,6 +28,49 @@ class CiNativeRunnerTest(unittest.TestCase):
             env={**os.environ, "PATH": str(self.root / "bin") + os.pathsep + os.environ["PATH"]},
             text=True, capture_output=True, timeout=15,
         )
+
+    def record_commands(self, *names):
+        log = self.root / "commands.jsonl"
+        for name in names:
+            command = self.root / "bin" / name
+            command.write_text(
+                "#!/usr/bin/env python3\nimport json, sys\n"
+                f"with open({str(log)!r}, 'a') as output:\n"
+                f"    print(json.dumps([{name!r}, *sys.argv[1:]]), file=output)\n"
+            )
+            command.chmod(0o755)
+        return log
+
+    def test_root_build_includes_the_io_probe(self):
+        log = self.record_commands("cmake")
+        result = self.run_script("normal", "build")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        commands = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(len(commands), 2)
+        self.assertIn("-DGLAMDB_BUILD_STORAGE=ON", commands[0])
+        self.assertIn("-DGLAMDB_BUILD_IO_PROBE=ON", commands[0])
+        self.assertEqual(commands[1][:2], ["cmake", "--build"])
+
+    def test_discovers_standalone_probes_without_reconfiguring_the_io_target(self):
+        log = self.record_commands("cmake", "ctest")
+        for name in ("build_install", "new_probe", "toolchain", "io"):
+            source = self.root / "probes" / name
+            source.mkdir(parents=True)
+            (source / "CMakeLists.txt").touch()
+        for profile in ("normal", "asan"):
+            with self.subTest(profile=profile):
+                log.write_text("")
+                result = self.run_script(profile, "test")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                commands = [json.loads(line) for line in log.read_text().splitlines()]
+                configured = [command[2] for command in commands if command[:2] == ["cmake", "-S"]]
+                expected = {"probes/build_install", "probes/new_probe"}
+                if profile == "normal":
+                    expected.add("probes/toolchain")
+                self.assertEqual(set(configured), expected)
+                tested = [command[2] for command in commands if command[:2] == ["ctest", "--test-dir"]]
+                build = str(self.root / f"build/ci-{profile}")
+                self.assertEqual(set(tested), {build, *(f"{build}-probe-{Path(path).name}" for path in expected)})
 
     def test_invalid_profile_or_stage_has_no_build_side_effects(self):
         for arguments in (("bogus", "test"), ("normal", "bogus"), ("asan",), ("normal", "test", "extra")):

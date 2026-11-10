@@ -73,6 +73,15 @@ usage. It registers the required format readers in a fresh process. The catalog
 owner selects the authoritative root and performs SQLite recovery/fencing.
 This verification does not checksum every byte of historical data pages.
 
+Recovery checks snapshot transitions with a two-snapshot window and retains the
+loaded root for the final consistency check. Previously seen manifest-list and
+data paths use a private temporary SQLite database capped at 256 MiB, with an
+eight-page cache. It does not modify the catalog or warehouse; workspace I/O or
+capacity failures fail recovery. SQLite must use disk-backed temporary databases
+and its temporary directory must have sufficient space on local disk. The
+bounded snapshot-ID set and current manifest list remain in memory; total RSS
+and reference-host recovery time still require qualification.
+
 `CopyDurableFile` copies an exact known length through a fixed-size buffer,
 checks source identity/size and source close, and finalizes the target durably.
 The caller must hold an offline snapshot/lock and prepare a durable destination
@@ -100,9 +109,34 @@ target.
 | Schema/profile and permitted metadata changes | `storage/table_profile_test.cpp`, `storage/metadata_validation_test.cpp` |
 | FileIO binding, reads, denied deletes, lifetime | `storage/durable_local_file_io_test.cpp` |
 | Real formats, bounded decoding, writer metrics and failures | `storage/format_verifier_test.cpp`, `storage/data_file_writer_test.cpp` |
+| Writer compatibility and entirely absent footer statistics | `storage/writer_compatibility_test.cpp` |
 | Staging, manifest round trips, no implicit publication | `storage/append_stager_test.cpp` |
 | Guard, closure/recovery, retained history, invalid candidates | `storage/publication_guard_test.cpp` |
+| Recovery visited index, exact duplicates, disk spill and workspace failures | `storage/recovery_visited_test.cpp` |
 | Capacity boundaries, orphans, preflight faults | `storage/capacity_test.cpp`, `io/local_fs_test.cpp` |
+
+The fault adapter also injects errors after a successful native file or directory
+sync. Nested traces distinguish the successful syscall from the reported error;
+all four file kinds retain the first error, issue no receipt and block further
+writes. This exercises conservative error handling, not power loss.
+
+`TManifestMetricsTest.RoundTripsIndependentMetricsThroughRealParquetAndAvro`
+checks serialized field IDs, value/null/NaN counts, numeric bounds, full ASCII
+and 1024-byte UTF-8 key bounds, and column sizes in a real Avro manifest against
+independent row expectations and its Parquet footer. An all-NULL field exercises
+omitted min/max bounds.
+
+`TWriterCompatibilityTest` compares the complete no-key DataFile, physical bytes
+and decoded rows against the upstream DataWriter. Its second test uses the public
+Parquet API to disable statistics for every column, then checks format validation,
+decoded rows, Avro round-trip of absent metrics and recovery. The production
+writer has no test-only statistics switch. These checks passed with ASan/UBSan
+and LLVM 18 analysis; writer RSS measurements remain pending. Run them with:
+
+```sh
+ctest --preset asan-ubsan --output-on-failure --no-tests=error \
+    -R 'TManifestMetricsTest|TWriterCompatibilityTest'
+```
 
 `WritesTwoAppendsAndReopensEveryRetainedFile` in the publication guard suite writes
 1,000 and then 10 rows with duplicate keys through the real Parquet writer,
@@ -111,14 +145,32 @@ the closure in a fresh Linux process. Its upstream in-memory catalog is a test
 double for the catalog integration boundary. The child helper is skipped when CTest
 invokes it alone and is explicitly executed by this pipeline test.
 
-The Linux ARM64 Docker run registered 346 tests: 345 passed with ASan/UBSan,
+With the full build and storage enabled, `glamdb.durable_storage_catalog` combines
+the durable FileIO, real writers and publication guard with the real SqlCatalog
+and SQLite catalog store. It verifies create, appends of 1000 and 10 duplicate
+rows, guard rejection, outer rollback and three actual intervening base changes.
+An independent SQLite connection checks that inner commits remain tentative.
+An observing catalog forwards real commits unchanged and checks the emitted
+table UUID and `main` snapshot requirements, including the first append's absent
+snapshot. A competing staged create is rejected before its publication body or
+guard can run, preserving the winning name, UUID and root.
+A new process selects its root from the reopened catalog, compares exact stored
+outcomes with caller-result fixtures, and reads historical/current rows through
+the manifests. Failed candidates remain unreachable; this raw catalog test leaves
+their bindings unresolved rather than claiming coordinator reconciliation.
+It does not implement the production StorageBackend or scanner. Run it with:
+
+```sh
+ctest --preset asan-ubsan --output-on-failure --no-tests=error -R '^glamdb.durable_storage_catalog$'
+```
+
+The full Linux ARM64 Docker baseline registered 380 tests: 379 passed with ASan/UBSan,
 and the child-process dispatcher skipped its standalone invocation. The parent
 pipeline executed it successfully in a fresh process. Regressions for delayed
 Iceberg commits and unsupported profile extensions failed against the original
-implementation and passed after the fixes. The delayed-commit and existing
-publication pipelines each passed twenty consecutive runs. The Release
-installed-package consumer was also verified separately. Run the current
-checkout with:
+implementation and passed after the fixes. LLVM 18 formatting checked 109 project
+files; changed C++ analyzer checks passed. The Release installed-package consumer
+was verified separately. Run the current checkout with:
 
 ```sh
 ./scripts/test-storage-in-docker.sh asan-ubsan
@@ -132,7 +184,21 @@ long-running fault campaigns, and Linux x86-64/ext4 power-loss qualification are
 deferred. Simulated failures and fresh-process recovery do not establish
 power-loss durability.
 
-LLVM 18 formatting checked all 101 project files, component and incoming-source
-analyzer checks passed, and both quality negative controls passed. Raw generated
-logs include `artifacts/pr-review-fixed.log`, `artifacts/review-regression-before.log`
-and `artifacts/merged-install.log`.
+Recovery tests cover the temporary index, nine retained-history cases and reopening
+at exact usage limits; reducing each positive usage limit rejects the same store
+without modifying it. Collection-copy tests use real Parquet/Avro/JSON files,
+remove their disposable source and reopen old/current roots in new processes.
+Interrupted copies fail on the injected Parquet corruption. These component tests
+do not cover catalog backup, backup leases or restore through the engine API.
+Both copy cases also passed with source temporary files on tmpfs and the destination
+on a different filesystem; deleting the source does not require a cross-device rename.
+The follow-up publication/recovery run registered 57 tests: 56 passed; the child
+dispatcher skipped its standalone invocation and ran through its parent tests.
+The real catalog integration also passed separately.
+The bounded file-I/O probe and its separately checked syscall trace are described in
+[qualification preparation](QUALIFICATION.md#bounded-file-io-probe).
+
+Raw generated logs include `artifacts/qualification-full-engine-check.log`,
+`artifacts/after-success-io.log` and `artifacts/p-io-final-evidence.log`.
+Earlier regression and installed-package evidence is retained in
+`artifacts/review-regression-before.log` and `artifacts/merged-install.log`.
