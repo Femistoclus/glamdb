@@ -195,6 +195,15 @@ qualification test.
 Follow the [C++ style guide](CPP_STYLE_GUIDE.md). `.clang-format` implements
 its mechanical rules; naming, ownership, and error handling also need review.
 
+The [C++ quality workflow](../../.github/workflows/cpp-quality.yml) runs independent
+`clang-format` and `clang-tidy` jobs on pull requests and pushes to `main`; it also
+supports manual runs. Formatting runs without a build. Tidy builds the pinned
+dependencies with Clang/libc++ 18, then configures `local` with
+`GLAMDB_BUILD_STORAGE=ON` and `BUILD_TESTING=ON` to check all enabled project
+components and tests. It also runs `quality-negative-check`.
+Module scanning is disabled for this analysis-only configuration so compile
+commands do not reference `.modmap` files that require a project build.
+
 ```sh
 cmake --build --preset local --target format-check tidy-check quality-negative-check
 cmake --build --preset local --target format

@@ -206,7 +206,9 @@ cmake --build --preset local --target format-check tidy-check quality-negative-c
 
 `quality-negative-check` verifies that deliberate formatting and analyzer
 violations are rejected. `cmake --build --preset local --target format` rewrites
-project C++ formatting. See
+project C++ formatting. `.github/workflows/cpp-quality.yml` runs separate LLVM 18
+format and tidy jobs on PRs and pushes to `main`. The tidy job builds pinned
+dependencies and enables storage and tests; formatting requires no build. See
 [docs/development/BUILDING.md](docs/development/BUILDING.md) for installation,
 tool path overrides, and build details.
 
