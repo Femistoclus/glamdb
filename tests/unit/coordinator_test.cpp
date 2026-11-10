@@ -14,7 +14,8 @@
 namespace glamdb {
 namespace {
 
-class CoordinatorTest : public testing::Test {
+class CoordinatorTest : public testing::Test
+{
 protected:
     test::TempDir temporary;
     std::filesystem::path root = temporary.path / "store";
@@ -22,26 +23,33 @@ protected:
     std::shared_ptr<Engine> engine;
     CreateStoreRequest create{test::store_id, root.string()};
 
-    void SetUp() override {
+    void SetUp() override
+    {
         auto opened = detail::EngineFactory::Create(create, backend);
         ASSERT_TRUE(opened);
         engine = *opened;
         ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", SchemaSpec{{{"n", FieldType::Int64, true}}}})
                       .disposition,
-                  CommitDisposition::Committed);
+            CommitDisposition::Committed);
     }
-    AppendRequest Request(std::string id = test::operation_id) const {
+    AppendRequest Request(std::string id = test::operation_id) const
+    {
         return {test::collection_id, std::move(id), {}, {test::Batch()}};
     }
-    Result<std::shared_ptr<Engine>> Reopen() {
+    Result<std::shared_ptr<Engine>> Reopen()
+    {
         engine.reset();
         return detail::EngineFactory::Open({root.string(), test::store_id}, backend);
     }
 };
 
-class RetryAdmissionTest : public CoordinatorTest, public testing::WithParamInterface<std::tuple<bool, int>> {};
+class RetryAdmissionTest
+    : public CoordinatorTest
+    , public testing::WithParamInterface<std::tuple<bool, int>>
+{ };
 
-TEST_P(RetryAdmissionTest, ResourcePressureCannotChangeAnExistingOperationOutcome) {
+TEST_P(RetryAdmissionTest, ResourcePressureCannotChangeAnExistingOperationOutcome)
+{
     const auto [already_committed, pressure] = GetParam();
     auto active_request = Request(already_committed ? "00000000-0000-0000-0000-000000000006" : test::operation_id);
     active_request.batches = {test::Batch(std::vector<std::optional<int64_t>>(256, 5))};
@@ -70,7 +78,9 @@ TEST_P(RetryAdmissionTest, ResourcePressureCannotChangeAnExistingOperationOutcom
         entered.set_value();
         released.wait();
     };
-    auto write = std::async(std::launch::async, [&] { return engine->AppendDurable(active_request); });
+    auto write = std::async(std::launch::async, [&] {
+        return engine->AppendDurable(active_request);
+    });
     entered.get_future().wait();
     const auto retry_request = already_committed ? Request() : active_request;
     const auto retry = engine->AppendDurable(retry_request);
@@ -96,10 +106,12 @@ TEST_P(RetryAdmissionTest, ResourcePressureCannotChangeAnExistingOperationOutcom
     EXPECT_EQ(backend->prepares, already_committed ? 2 : 1);
 }
 
-INSTANTIATE_TEST_SUITE_P(WriterTimeoutPendingAndInputBudgets, RetryAdmissionTest,
-                         testing::Combine(testing::Bool(), testing::Values(0, 1, 2)));
+INSTANTIATE_TEST_SUITE_P(WriterTimeoutPendingAndInputBudgets,
+    RetryAdmissionTest,
+    testing::Combine(testing::Bool(), testing::Values(0, 1, 2)));
 
-TEST_F(CoordinatorTest, AppendThenNewerAppendThenRetryReturnsExactOldReceipt) {
+TEST_F(CoordinatorTest, AppendThenNewerAppendThenRetryReturnsExactOldReceipt)
+{
     const auto a = engine->AppendDurable(Request());
     ASSERT_EQ(a.disposition, CommitDisposition::Committed);
     const auto b = engine->AppendDurable(Request("00000000-0000-0000-0000-000000000006"));
@@ -117,7 +129,8 @@ TEST_F(CoordinatorTest, AppendThenNewerAppendThenRetryReturnsExactOldReceipt) {
     EXPECT_EQ(backend->prepares, 2);
 }
 
-TEST_F(CoordinatorTest, TerminalRetryDoesNotNeedPayloadCapacity) {
+TEST_F(CoordinatorTest, TerminalRetryDoesNotNeedPayloadCapacity)
+{
     const auto original = engine->AppendDurable(Request());
     ASSERT_EQ(original.disposition, CommitDisposition::Committed);
     engine.reset();
@@ -137,7 +150,8 @@ TEST_F(CoordinatorTest, TerminalRetryDoesNotNeedPayloadCapacity) {
     EXPECT_EQ(backend->prepares, 1);
 }
 
-TEST_F(CoordinatorTest, BusyTentativeCatalogCannotLeakAnOutcomeOrExtendTheWriterWait) {
+TEST_F(CoordinatorTest, BusyTentativeCatalogCannotLeakAnOutcomeOrExtendTheWriterWait)
+{
     const auto original = engine->AppendDurable(Request());
     ASSERT_EQ(original.disposition, CommitDisposition::Committed);
     engine.reset();
@@ -154,10 +168,13 @@ TEST_F(CoordinatorTest, BusyTentativeCatalogCannotLeakAnOutcomeOrExtendTheWriter
         entered.set_value();
         released.wait();
     };
-    auto write = std::async(std::launch::async,
-                            [&] { return engine->AppendDurable(Request("00000000-0000-0000-0000-000000000006")); });
+    auto write = std::async(std::launch::async, [&] {
+        return engine->AppendDurable(Request("00000000-0000-0000-0000-000000000006"));
+    });
     entered.get_future().wait();
-    auto retry = std::async(std::launch::async, [&] { return engine->AppendDurable(Request()); });
+    auto retry = std::async(std::launch::async, [&] {
+        return engine->AppendDurable(Request());
+    });
     const auto status = retry.wait_for(std::chrono::milliseconds(200));
     release.set_value();
     const auto blocked = retry.get();
@@ -171,7 +188,8 @@ TEST_F(CoordinatorTest, BusyTentativeCatalogCannotLeakAnOutcomeOrExtendTheWriter
     EXPECT_EQ(engine->AppendDurable(Request()), original);
 }
 
-TEST_F(CoordinatorTest, BusyCreateRetryCannotTurnAnExistingCollectionIntoDefiniteFailure) {
+TEST_F(CoordinatorTest, BusyCreateRetryCannotTurnAnExistingCollectionIntoDefiniteFailure)
+{
     engine.reset();
     Limits limits;
     limits.writer_wait = std::chrono::milliseconds(1);
@@ -186,7 +204,9 @@ TEST_F(CoordinatorTest, BusyCreateRetryCannotTurnAnExistingCollectionIntoDefinit
         entered.set_value();
         released.wait();
     };
-    auto write = std::async(std::launch::async, [&] { return engine->AppendDurable(Request()); });
+    auto write = std::async(std::launch::async, [&] {
+        return engine->AppendDurable(Request());
+    });
     entered.get_future().wait();
     const CreateCollectionRequest request{test::collection_id, "events", SchemaSpec{{{"n", FieldType::Int64, true}}}};
     const auto blocked = engine->CreateCollection(request);
@@ -200,7 +220,8 @@ TEST_F(CoordinatorTest, BusyCreateRetryCannotTurnAnExistingCollectionIntoDefinit
     EXPECT_EQ(engine->CreateCollection(request).disposition, CommitDisposition::Committed);
 }
 
-TEST_F(CoordinatorTest, RegisteredFailureIsPermanentAndDifferentPayloadConflicts) {
+TEST_F(CoordinatorTest, RegisteredFailureIsPermanentAndDifferentPayloadConflicts)
+{
     backend->fail_prepare = true;
     const auto failed = engine->AppendDurable(Request());
     ASSERT_EQ(failed.disposition, CommitDisposition::DefinitelyNotCommitted);
@@ -219,11 +240,17 @@ TEST_F(CoordinatorTest, RegisteredFailureIsPermanentAndDifferentPayloadConflicts
     EXPECT_EQ(backend->prepares, 1);
 }
 
-class DiagnosticTest : public CoordinatorTest, public testing::WithParamInterface<std::string> {};
+class DiagnosticTest
+    : public CoordinatorTest
+    , public testing::WithParamInterface<std::string>
+{ };
 
-TEST_P(DiagnosticTest, LongProducerFailureRemainsDurableAndRecoverable) {
+TEST_P(DiagnosticTest, LongProducerFailureRemainsDurableAndRecoverable)
+{
     const std::string prefix(2047, 'x');
-    backend->on_prepare = [&] { throw detail::Failure({"IO_ERROR", prefix + GetParam(), RetryHint::OperatorAction}); };
+    backend->on_prepare = [&] {
+        throw detail::Failure({"IO_ERROR", prefix + GetParam(), RetryHint::OperatorAction});
+    };
     const auto failed = engine->AppendDurable(Request());
     backend->on_prepare = {};
     EXPECT_EQ(failed.disposition, CommitDisposition::DefinitelyNotCommitted);
@@ -239,11 +266,14 @@ TEST_P(DiagnosticTest, LongProducerFailureRemainsDurableAndRecoverable) {
     EXPECT_EQ(backend->prepares, 1);
 }
 
-TEST_P(DiagnosticTest, LongVerifierExceptionPreservesAValidUnknownOutcome) {
+TEST_P(DiagnosticTest, LongVerifierExceptionPreservesAValidUnknownOutcome)
+{
     const auto original = engine->AppendDurable(Request());
     ASSERT_EQ(original.disposition, CommitDisposition::Committed);
     const std::string prefix(2047, 'x');
-    backend->on_verify = [&] { throw std::runtime_error(prefix + GetParam()); };
+    backend->on_verify = [&] {
+        throw std::runtime_error(prefix + GetParam());
+    };
     const auto unknown = engine->AppendDurable(Request());
     backend->on_verify = {};
     EXPECT_EQ(unknown.disposition, CommitDisposition::CommitUnknown);
@@ -255,10 +285,12 @@ TEST_P(DiagnosticTest, LongVerifierExceptionPreservesAValidUnknownOutcome) {
     EXPECT_EQ(engine->AppendDurable(Request()), original);
 }
 
-INSTANTIATE_TEST_SUITE_P(Utf8Boundary, DiagnosticTest,
-                         testing::Values(std::string("я"), std::string("€"), std::string("😀")));
+INSTANTIATE_TEST_SUITE_P(Utf8Boundary,
+    DiagnosticTest,
+    testing::Values(std::string("я"), std::string("€"), std::string("😀")));
 
-TEST_F(CoordinatorTest, EmptyInputDoesNotBindAndPreconditionFailureDoes) {
+TEST_F(CoordinatorTest, EmptyInputDoesNotBindAndPreconditionFailureDoes)
+{
     auto empty = Request();
     empty.batches.clear();
     EXPECT_EQ(engine->AppendDurable(empty).disposition, CommitDisposition::DefinitelyNotCommitted);
@@ -271,7 +303,8 @@ TEST_F(CoordinatorTest, EmptyInputDoesNotBindAndPreconditionFailureDoes) {
     EXPECT_EQ(backend->prepares, 0);
 }
 
-TEST_F(CoordinatorTest, GuardOrInnerFailureRollsBackPointerAndStoresFailure) {
+TEST_F(CoordinatorTest, GuardOrInnerFailureRollsBackPointerAndStoresFailure)
+{
     backend->fail_guard = true;
     const auto guarded = engine->AppendDurable(Request());
     ASSERT_EQ(guarded.disposition, CommitDisposition::DefinitelyNotCommitted);
@@ -284,7 +317,8 @@ TEST_F(CoordinatorTest, GuardOrInnerFailureRollsBackPointerAndStoresFailure) {
     EXPECT_TRUE(Reopen());
 }
 
-TEST_F(CoordinatorTest, CreateRetryRequiresExactNameIdAndSchema) {
+TEST_F(CoordinatorTest, CreateRetryRequiresExactNameIdAndSchema)
+{
     const CreateCollectionRequest request{test::collection_id, "events", SchemaSpec{{{"n", FieldType::Int64, true}}}};
     EXPECT_EQ(engine->CreateCollection(request).disposition, CommitDisposition::Committed);
     EXPECT_EQ(engine->ResolveCollection("event").error().code, "COLLECTION_NOT_FOUND");
@@ -296,7 +330,8 @@ TEST_F(CoordinatorTest, CreateRetryRequiresExactNameIdAndSchema) {
     EXPECT_EQ(test::Present(engine->CreateCollection(other).error).code, "ALREADY_EXISTS");
 }
 
-TEST_F(CoordinatorTest, CreateVerifierExceptionUsesRecoverableHintAndRetainsContext) {
+TEST_F(CoordinatorTest, CreateVerifierExceptionUsesRecoverableHintAndRetainsContext)
+{
     const CreateCollectionRequest request{test::collection_id, "events", SchemaSpec{{{"n", FieldType::Int64, true}}}};
     backend->throw_verifier = true;
     const auto first = engine->CreateCollection(request);
@@ -310,7 +345,8 @@ TEST_F(CoordinatorTest, CreateVerifierExceptionUsesRecoverableHintAndRetainsCont
     EXPECT_EQ(engine->CreateCollection(request).disposition, CommitDisposition::Committed);
 }
 
-TEST_F(CoordinatorTest, SameProcessSecondOpenIsLockedAndMissingOpenNeverCreates) {
+TEST_F(CoordinatorTest, SameProcessSecondOpenIsLockedAndMissingOpenNeverCreates)
+{
     const auto second = detail::EngineFactory::Open({root.string(), test::store_id}, backend);
     ASSERT_FALSE(second);
     EXPECT_EQ(second.error().code, "STATE_IN_USE");
@@ -321,7 +357,8 @@ TEST_F(CoordinatorTest, SameProcessSecondOpenIsLockedAndMissingOpenNeverCreates)
     ASSERT_TRUE(opened);
 }
 
-TEST_F(CoordinatorTest, CorruptOrMissingPublishedRootClosesReadiness) {
+TEST_F(CoordinatorTest, CorruptOrMissingPublishedRootClosesReadiness)
+{
     ASSERT_EQ(engine->AppendDurable(Request()).disposition, CommitDisposition::Committed);
     std::filesystem::remove(backend->last_root);
     const auto opened = Reopen();
@@ -330,7 +367,8 @@ TEST_F(CoordinatorTest, CorruptOrMissingPublishedRootClosesReadiness) {
     EXPECT_TRUE(std::filesystem::exists(root / "catalog.sqlite"));
 }
 
-TEST_F(CoordinatorTest, VerifierExceptionCannotTurnCommittedRetryIntoFailure) {
+TEST_F(CoordinatorTest, VerifierExceptionCannotTurnCommittedRetryIntoFailure)
+{
     ASSERT_EQ(engine->AppendDurable(Request()).disposition, CommitDisposition::Committed);
     backend->throw_verifier = true;
     const auto retry = engine->AppendDurable(Request());
@@ -341,7 +379,8 @@ TEST_F(CoordinatorTest, VerifierExceptionCannotTurnCommittedRetryIntoFailure) {
     EXPECT_EQ(engine->AppendDurable(Request()).disposition, CommitDisposition::Committed);
 }
 
-TEST_F(CoordinatorTest, DetectedCorruptionBlocksFurtherWritesInTheLiveProcess) {
+TEST_F(CoordinatorTest, DetectedCorruptionBlocksFurtherWritesInTheLiveProcess)
+{
     ASSERT_EQ(engine->AppendDurable(Request()).disposition, CommitDisposition::Committed);
     std::filesystem::remove(backend->last_root);
     const auto failed = engine->AppendDurable(Request("00000000-0000-0000-0000-000000000006"));
@@ -353,7 +392,8 @@ TEST_F(CoordinatorTest, DetectedCorruptionBlocksFurtherWritesInTheLiveProcess) {
     EXPECT_EQ(backend->prepares, 2);
 }
 
-TEST_F(CoordinatorTest, ActiveLookupAndShutdownTimeoutDoNotInventFailure) {
+TEST_F(CoordinatorTest, ActiveLookupAndShutdownTimeoutDoNotInventFailure)
+{
     std::promise<void> entered;
     std::promise<void> release;
     auto released = release.get_future().share();
@@ -361,7 +401,9 @@ TEST_F(CoordinatorTest, ActiveLookupAndShutdownTimeoutDoNotInventFailure) {
         entered.set_value();
         released.wait();
     };
-    auto write = std::async(std::launch::async, [&] { return engine->AppendDurable(Request()); });
+    auto write = std::async(std::launch::async, [&] {
+        return engine->AppendDurable(Request());
+    });
     entered.get_future().wait();
     const auto lookup = engine->FindAppendOutcome(test::collection_id, test::operation_id);
     ASSERT_FALSE(lookup);
@@ -376,7 +418,8 @@ TEST_F(CoordinatorTest, ActiveLookupAndShutdownTimeoutDoNotInventFailure) {
     EXPECT_TRUE(engine->Shutdown(std::chrono::milliseconds(1000)));
 }
 
-TEST_F(CoordinatorTest, ShutdownCannotTurnAPublishingRetryIntoADefiniteFailure) {
+TEST_F(CoordinatorTest, ShutdownCannotTurnAPublishingRetryIntoADefiniteFailure)
+{
     std::promise<void> entered;
     std::promise<void> release;
     auto released = release.get_future().share();
@@ -384,9 +427,13 @@ TEST_F(CoordinatorTest, ShutdownCannotTurnAPublishingRetryIntoADefiniteFailure) 
         entered.set_value();
         released.wait();
     };
-    auto write = std::async(std::launch::async, [&] { return engine->AppendDurable(Request()); });
+    auto write = std::async(std::launch::async, [&] {
+        return engine->AppendDurable(Request());
+    });
     entered.get_future().wait();
-    auto retry = std::async(std::launch::async, [&] { return engine->AppendDurable(Request()); });
+    auto retry = std::async(std::launch::async, [&] {
+        return engine->AppendDurable(Request());
+    });
     const auto waiting = retry.wait_for(std::chrono::milliseconds(100));
     const auto shutdown = engine->Shutdown(std::chrono::milliseconds(1));
     const auto closing = engine->AppendDurable(Request());
@@ -398,7 +445,7 @@ TEST_F(CoordinatorTest, ShutdownCannotTurnAPublishingRetryIntoADefiniteFailure) 
     ASSERT_FALSE(shutdown);
     EXPECT_EQ(shutdown.error().code, "DEADLINE_EXCEEDED");
     ASSERT_EQ(original.disposition, CommitDisposition::Committed);
-    for (const auto &outcome : {waited, closing}) {
+    for (const auto& outcome : {waited, closing}) {
         EXPECT_EQ(outcome.disposition, CommitDisposition::CommitUnknown);
         EXPECT_EQ(test::Present(outcome.error).retry_hint, RetryHint::SameIdAfterReconcile);
         EXPECT_TRUE(detail::ValidateOutcome(outcome));
@@ -415,7 +462,8 @@ TEST_F(CoordinatorTest, ShutdownCannotTurnAPublishingRetryIntoADefiniteFailure) 
     EXPECT_EQ(backend->prepares, 1);
 }
 
-TEST_F(CoordinatorTest, ShutdownCannotReclassifyAnExistingCollectionAsUncommitted) {
+TEST_F(CoordinatorTest, ShutdownCannotReclassifyAnExistingCollectionAsUncommitted)
+{
     const CreateCollectionRequest request{test::collection_id, "events", SchemaSpec{{{"n", FieldType::Int64, true}}}};
     ASSERT_TRUE(engine->Shutdown(std::chrono::milliseconds(1000)));
     const auto unknown = engine->CreateCollection(request);
@@ -428,7 +476,8 @@ TEST_F(CoordinatorTest, ShutdownCannotReclassifyAnExistingCollectionAsUncommitte
     EXPECT_EQ(engine->CreateCollection(request).disposition, CommitDisposition::Committed);
 }
 
-TEST_F(CoordinatorTest, ShutdownReportsRecoveryExceptionAndRetainsOwnership) {
+TEST_F(CoordinatorTest, ShutdownReportsRecoveryExceptionAndRetainsOwnership)
+{
     ASSERT_EQ(engine->AppendDurable(Request()).disposition, CommitDisposition::Committed);
     backend->throw_verifier = true;
     ASSERT_EQ(engine->AppendDurable(Request()).disposition, CommitDisposition::CommitUnknown);
@@ -448,7 +497,8 @@ TEST_F(CoordinatorTest, ShutdownReportsRecoveryExceptionAndRetainsOwnership) {
     EXPECT_TRUE(engine->Shutdown(std::chrono::milliseconds(1000)));
 }
 
-TEST(EngineBootstrap, NoProducerFailsClosedAndIdentityIsExplicit) {
+TEST(EngineBootstrap, NoProducerFailsClosedAndIdentityIsExplicit)
+{
     test::TempDir temporary;
     const auto root = temporary.path / "store";
     const auto created = CreateStore({test::store_id, root.string()});

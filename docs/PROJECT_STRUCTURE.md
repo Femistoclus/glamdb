@@ -17,6 +17,15 @@ glamdb/
 ├── public/
 │   └── storage/
 ├── core/
+│   ├── CMakeLists.txt
+│   ├── api/
+│   ├── catalog/
+│   ├── engine/
+│   ├── io/
+│   └── storage/
+├── docker/
+│   ├── dev/
+│   └── deps/
 ├── cmake/
 │   ├── CompilerOptions.cmake
 │   ├── Sanitizers.cmake
@@ -24,8 +33,10 @@ glamdb/
 │   └── dependencies/
 │       └── sqlite/
 ├── tests/
+│   ├── support/
 │   ├── verification/
 │   ├── unit/
+│   ├── tooling/
 │   ├── integration/
 │   ├── fault/
 │   └── installed_consumer/
@@ -52,15 +63,18 @@ glamdb/
 | Path | Purpose |
 | --- | --- |
 | `AGENTS.md` | Repository guidance for coding agents, maintained alongside implementation changes. |
-| `public/storage/` | Public C++ API headers. |
-| `core/` | Engine implementation and private headers. Keep each component's `.h` and `.cpp` together. |
+| `public/storage/` | Installed public engine API/request/outcome types, plus the independent storage schema DTO. |
+| `core/api/`, `core/catalog/`, `core/engine/` | `glamdb_core` / `glamdb::core`: canonical input, SQLite catalog, coordinator, and public facade. |
+| `core/io/` | Independent `glamdb_io`: local filesystem, store directories/URIs, attempts, receipts, SHA-256, durable files and copying. |
+| `core/storage/` | Optional `glamdb_storage`: FileIO adapter, profiles, Parquet writer, Iceberg staging, publication, recovery and capacity. |
+| `docker/` | Linux development and dependency toolchains; builds mount product sources read-only. |
 | `apps/glamdb/` | Store-management CLI and transport-only outcome JSON. |
 | `cmake/` | Compiler options, sanitizers, quality targets, and dependency recipes. |
-| `tests/` | Unit, process recovery, real Iceberg catalog, VFS fault, and installed-library consumer tests. |
+| `tests/` | Component/storage pipeline tests, catalog/coordinator tests, process recovery, VFS faults, installed consumers, tooling, and independent client/verification suites. |
 | `fixtures/` | Shared deterministic test inputs and expected outputs. |
 | `apps/mock_server/` | Disposable in-memory adapter with real HTTP/Arrow and runtime config. |
 | `tools/verification/` | Literal canonical vectors, SQL 3VL oracle and receipt/fault-evidence tools. |
-| `probes/` | Isolated dependency and platform experiments. |
+| `probes/` | Standalone installed-dependency consumer and libc++ sanitizer compatibility reproducer. |
 | `benchmarks/` | Performance and capacity measurements. |
 | `sdk/python/` | Independently installable network SDK, unit tests and quickstart. |
 | `ui/` | Source-served HTML/CSS/ES modules, live theme JSON, Node unit and Playwright browser tests. |
@@ -70,11 +84,13 @@ glamdb/
 | `docs/ROADMAP.md` | Implementation stages, prerequisites, and acceptance evidence. |
 | `third_party/` | Pinned upstream submodules and the direct dependency lock. |
 
-The catalog and coordinator are implemented under `core/api/`, `core/catalog/`
-and `core/engine/`; production file I/O and scanning are pending. Client and
-verification code uses an explicit mock seam. Read [ARCHITECTURE.md](ARCHITECTURE.md)
-for engine responsibilities, [ROADMAP.md](ROADMAP.md) for acceptance criteria,
-and [the workbench guide](development/WORKBENCH.md) for runnable client paths.
+The tree contains the catalog/coordinator MVP and independent storage primitives.
+Connecting storage to the engine backend seam and implementing the scanner
+remain separate work. Client and verification code uses an explicit disposable
+mock seam. Read [the module handoff](development/STORAGE_MODULE.md) for storage
+APIs and tests, [ARCHITECTURE.md](ARCHITECTURE.md) for engine responsibilities,
+[ROADMAP.md](ROADMAP.md) for remaining acceptance evidence, and
+[the workbench guide](development/WORKBENCH.md) for runnable client paths.
 
 Generated files belong in ignored `build/`, `.deps/`, and `artifacts/` directories.
 
@@ -93,25 +109,43 @@ files for every anticipated module. The intended responsibilities are:
 | Scanning | Fixed-view planning, conservative pruning, projection, and exact filtering. |
 | Runtime | Shared budgets, cancellation, resource leases, and store ownership. |
 
-These are logical boundaries, not prescribed filenames or existing CMake
-targets. Public headers must install without private implementation headers.
+The public facade and catalog/coordinator are implemented; the real storage
+backend still needs connecting through `core/engine/storage_backend.h`. Public
+scans remain pending. Installed public headers work without private headers.
+`GLAMDB_IO_ONLY=ON` builds independent I/O without the engine or CLI; the default
+full build preserves the installed `glamdb::core` package.
 Transport, SDK, and UI dependencies stay outside `public/storage/` and `core/`;
-all write paths still pass through the engine.
+all production write paths still pass through the engine.
 
 ## Validation layout
 
-`tests/unit/` is intended for local contracts such as types, predicates, and
-state transitions. `tests/integration/` covers embedded append/read/reopen and
-API behavior. `tests/fault/` covers persistence failures, recovery, and corruption
-using disposable stores. `tests/installed_consumer/` exercises the installed
-public package without access to source-tree headers.
+`tests/unit/io/` and `tests/unit/storage/` hold component tests registered with
+CTest label `unit`. Storage tests are enabled by `GLAMDB_BUILD_STORAGE=ON`.
+`tests/support/` provides the filesystem fault injector and durability trace
+checker. The publication guard suite also writes real data/metadata and reopens
+the retained closure in a fresh process. GoogleTest is configured only when
+`BUILD_TESTING=ON`; it is neither a product dependency nor installed.
+
+`tests/tooling/` uses Python's standard library to test the Docker runner and
+CMake configuration, including error propagation, source/build isolation,
+optional GoogleTest, static targets, installation contents, formatting rules,
+and standalone-source classification for quality checks.
+Its CTest label is `tooling`.
+
+`tests/integration/` covers CLI behavior, separate-process recovery, and real
+Iceberg catalog ordering. `tests/fault/` injects SQLite VFS/coordinator failures.
+`tests/installed_consumer/` builds and runs against the installed public package.
+Those coordinator tests use a storage test double; the independent real-file
+pipeline lives in `tests/unit/storage/`. The installed third-party consumer
+lives in `probes/build_install/`.
 
 `probes/` holds bounded dependency/platform experiments, while `benchmarks/`
 holds workload and capacity measurements. Neither a dependency probe nor a
 benchmark replaces correctness tests. Share deterministic inputs and expected
 results through `fixtures/`; put generated stores, traces, and measurements in
-ignored output directories. See [BUILDING.md](development/BUILDING.md) for
-current commands and [COORDINATOR.md](development/COORDINATOR.md) for test scope.
+ignored output directories. See [BUILDING.md](development/BUILDING.md),
+[COORDINATOR.md](development/COORDINATOR.md), and
+[STORAGE_MODULE.md](development/STORAGE_MODULE.md) for commands and test scope.
 
 Independent Python suites live in `tests/verification/`, `sdk/python/tests/`,
 `apps/mock_server/tests/` and `tests/integration/test_network_sdk.py`; browser

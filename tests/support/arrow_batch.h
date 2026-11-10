@@ -7,8 +7,9 @@
 
 namespace glamdb::test {
 
-inline std::shared_ptr<arrow::RecordBatch> Batch(const std::vector<std::optional<int64_t>> &values = {1, std::nullopt,
-                                                                                                      1}) {
+inline std::shared_ptr<arrow::RecordBatch> Batch(
+    const std::vector<std::optional<int64_t>>& values = {1, std::nullopt, 1})
+{
     arrow::Int64Builder builder;
     for (const auto value : values) {
         const auto status = value ? builder.Append(*value) : builder.AppendNull();
@@ -21,7 +22,8 @@ inline std::shared_ptr<arrow::RecordBatch> Batch(const std::vector<std::optional
         throw std::runtime_error(array.status().ToString());
     }
     return arrow::RecordBatch::Make(arrow::schema({arrow::field("n", arrow::int64())}),
-                                    static_cast<int64_t>(values.size()), {*array});
+        static_cast<int64_t>(values.size()),
+        {*array});
 }
 
 } // namespace glamdb::test

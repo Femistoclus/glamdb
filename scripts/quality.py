@@ -13,8 +13,14 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIRS = ("public", "core", "apps", "tests", "probes", "examples", "benchmarks")
+STANDALONE_SOURCE_DIRS = ("probes/build_install", "probes/toolchain")
 HEADERS = {".h", ".hh", ".hpp", ".hxx", ".ipp", ".tpp"}
 TRANSLATION_UNITS = {".c", ".cc", ".cpp", ".cxx"}
+IO_SOURCE_DIRS = ("core/io", "core/storage", "tests/unit/io", "tests/unit/storage",
+                  *STANDALONE_SOURCE_DIRS)
+IO_SOURCE_FILES = {"public/storage/schema.h", "tests/unit/core_test.cpp",
+                   "tests/support/fault_fs.h", "tests/support/fault_fs.cpp",
+                   "tests/support/durability_trace.h", "tests/support/durability_trace.cpp"}
 
 
 def llvm_tool(name):
@@ -31,13 +37,16 @@ def llvm_tool(name):
     return executable
 
 
-def source_files():
+def source_files(io_only=False):
     files = []
     for directory in SOURCE_DIRS:
         for path in (ROOT / directory).rglob("*"):
             if path.is_file() and path.suffix in HEADERS | TRANSLATION_UNITS:
                 if not {"generated", "third_party"}.intersection(path.relative_to(ROOT).parts):
-                    files.append(path)
+                    relative = path.relative_to(ROOT)
+                    if (not io_only or relative.as_posix() in IO_SOURCE_FILES or
+                            any(relative.is_relative_to(directory) for directory in IO_SOURCE_DIRS)):
+                        files.append(path)
     return sorted(files)
 
 
@@ -45,9 +54,9 @@ def header_filter(root):
     return "^" + re.escape(str(root)) + "/(" + "|".join(SOURCE_DIRS) + ")/"
 
 
-def format_sources(write):
+def format_sources(write, io_only=False):
     executable = llvm_tool("clang-format")
-    files = source_files()
+    files = source_files(io_only)
     if not files:
         raise RuntimeError("No project sources found")
     options = ["-i"] if write else ["--dry-run", "--Werror"]
@@ -58,7 +67,7 @@ def format_sources(write):
     print(f"{'Formatted' if write else 'Checked formatting of'} {len(files)} file(s)")
 
 
-def tidy_sources(build_dir):
+def tidy_sources(build_dir, excluded_dirs=(), io_only=False):
     executable = llvm_tool("clang-tidy")
     database = build_dir / "compile_commands.json"
     if not database.is_file():
@@ -68,7 +77,14 @@ def tidy_sources(build_dir):
         (Path(entry["directory"]) / entry["file"]).resolve()
         for entry in commands
     }
-    units = [path for path in source_files() if path.suffix in TRANSLATION_UNITS]
+    exclusions = []
+    for directory in (*STANDALONE_SOURCE_DIRS, *excluded_dirs):
+        path = (ROOT / directory).resolve()
+        if not path.is_relative_to(ROOT.resolve()) or path == ROOT.resolve():
+            raise ValueError("Tidy exclusions must be project subdirectories")
+        exclusions.append(path)
+    units = [path for path in source_files(io_only) if path.suffix in TRANSLATION_UNITS
+             and not any(path.resolve().is_relative_to(directory) for directory in exclusions)]
     if not units:
         raise RuntimeError("No project translation units found")
     missing = [str(path.relative_to(ROOT)) for path in units if path.resolve() not in compiled]
@@ -127,12 +143,15 @@ def main():
     parser = argparse.ArgumentParser(description="Run LLVM 18 checks on project sources.")
     parser.add_argument("command", choices=("format", "format-check", "tidy-check", "quality-negative-check"))
     parser.add_argument("--build-dir", type=Path, default=ROOT / "build" / "local")
+    parser.add_argument("--io-only", action="store_true", help="Check only standalone IO/storage sources")
+    parser.add_argument("--exclude-dir", action="append", default=[],
+                        help="Exclude a disabled component subtree from tidy only")
     args = parser.parse_args()
     try:
         if args.command in ("format", "format-check"):
-            format_sources(args.command == "format")
+            format_sources(args.command == "format", args.io_only)
         elif args.command == "tidy-check":
-            tidy_sources(args.build_dir.resolve())
+            tidy_sources(args.build_dir.resolve(), args.exclude_dir, args.io_only)
         else:
             negative_checks(args.build_dir.resolve())
     except subprocess.CalledProcessError as error:

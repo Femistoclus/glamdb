@@ -8,12 +8,14 @@
 namespace glamdb::test {
 namespace {
 std::mutex registry_mutex;
-std::unordered_map<sqlite3_vfs *, JournalFaultVfs *> registry;
+std::unordered_map<sqlite3_vfs*, JournalFaultVfs*> registry;
 std::atomic<int> next_id{0};
 } // namespace
 
 JournalFaultVfs::JournalFaultVfs()
-    : parent_(sqlite3_vfs_find(nullptr)), name_("glamdb-journal-fault-" + std::to_string(++next_id)) {
+    : parent_(sqlite3_vfs_find(nullptr))
+    , name_("glamdb-journal-fault-" + std::to_string(++next_id))
+{
     detail::Require(parent_ != nullptr, "INTERNAL", "default VFS is missing");
     // Retain the original pAppData: the parent's other callbacks use it.
     vfs_ = *parent_;
@@ -27,22 +29,26 @@ JournalFaultVfs::JournalFaultVfs()
     detail::Require(sqlite3_vfs_register(&vfs_, 0) == SQLITE_OK, "INTERNAL", "cannot register fault VFS");
 }
 
-JournalFaultVfs::~JournalFaultVfs() {
+JournalFaultVfs::~JournalFaultVfs()
+{
     sqlite3_vfs_unregister(&vfs_);
     std::lock_guard lock(registry_mutex);
     registry.erase(&vfs_);
 }
 
-void JournalFaultVfs::Arm(int journal_delete_number, bool after_unlink) {
+void JournalFaultVfs::Arm(int journal_delete_number, bool after_unlink)
+{
     after_unlink_ = after_unlink;
     remaining_ = journal_delete_number;
 }
-void JournalFaultVfs::Disarm() {
+void JournalFaultVfs::Disarm()
+{
     remaining_ = 0;
 }
 
-int JournalFaultVfs::Delete(sqlite3_vfs *vfs, const char *path, int sync_directory) {
-    JournalFaultVfs *owner = nullptr;
+int JournalFaultVfs::Delete(sqlite3_vfs* vfs, const char* path, int sync_directory)
+{
+    JournalFaultVfs* owner = nullptr;
     {
         std::lock_guard lock(registry_mutex);
         const auto found = registry.find(vfs);

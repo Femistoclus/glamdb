@@ -2,7 +2,8 @@
 
 #include <filesystem>
 
-int main(int argc, char **argv) try {
+int main(int argc, char** argv)
+try {
     if (argc != 2) {
         return 1;
     }

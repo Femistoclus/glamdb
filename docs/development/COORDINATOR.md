@@ -10,11 +10,13 @@ Read/configuration APIs use `Result<T> = std::expected<T, ErrorDetail>` and
 `Status = Result<void>`. `ListCollections()` returns the full vector within the
 eight-collection limit; this MVP has no collection pagination.
 
-The production durable file backend and scanner are pending. Public factories
+The bridge from the coordinator to the [durable storage primitives](STORAGE_MODULE.md)
+and the scanner are pending. Public factories
 can create/open an empty catalog; collection creation reports
 `DEPENDENCY_UNAVAILABLE` without a backend. Opening a populated store also
-requires its storage validator. Test doubles are confined to `tests/`; they
-produce no real Parquet or Avro data. There is no HTTP server, scan API, payload
+requires its storage validator. Coordinator test doubles are confined to `tests/`; they
+produce no real Parquet or Avro data. The separate storage component tests do
+exercise real Parquet, Avro and JSON files. There is no HTTP server, scan API, payload
 journal, background job queue, backup or automatic file deletion in this MVP.
 
 ## Persistence and retry rules
@@ -125,7 +127,8 @@ shapes and precision; socket-based SDK/UI integration awaits an HTTP adapter.
 
 ## Validation evidence
 
-Recorded on Linux x86-64 with Clang 18.1.3/libc++ 18.1.3, Arrow/Parquet 25.0.0,
+The coordinator baseline, before combining the storage primitives, was recorded
+on Linux x86-64 with Clang 18.1.3/libc++ 18.1.3, Arrow/Parquet 25.0.0,
 Iceberg 0.4.0 (`64dc66f159bd62c9817a96d74cbce767268934d0`) and locked SQLite
 3.54.1, using disposable stores:
 
@@ -170,6 +173,6 @@ receipt is never committed. The VFS tests separately exercise terminal receipt
 publication. The local test FileIO proves ordering, not file synchronization.
 
 Independent catalog, coordinator and SDK reviews exercised these boundaries;
-their confirmed correctness defects have regression tests. Production
-Parquet/Avro closure, a real successful append/read, scan semantics, restore,
+their confirmed correctness defects have regression tests. A production
+coordinator-to-storage append/read, scan semantics, restore,
 combined capacity/RSS and OS-cache-loss/power-cut qualification remain NOT RUN.

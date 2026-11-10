@@ -11,7 +11,8 @@ namespace {
 
 using detail::Require;
 
-std::string Quote(std::string_view value) {
+std::string Quote(std::string_view value)
+{
     Require(detail::ValidUtf8(value), "INVALID_ARGUMENT", "JSON string is not valid UTF-8");
     constexpr std::string_view hex = "0123456789abcdef";
     std::string result = "\"";
@@ -32,55 +33,74 @@ std::string Quote(std::string_view value) {
     return result;
 }
 
-struct Object {
+struct Object
+{
     std::string bytes = "{";
-    void Add(std::string_view key, std::string_view value) {
+    void Add(std::string_view key, std::string_view value)
+    {
         if (bytes.size() > 1) {
             bytes.push_back(',');
         }
         bytes += Quote(key) + ":" + std::string(value);
     }
-    void String(std::string_view key, std::string_view value) {
+    void String(std::string_view key, std::string_view value)
+    {
         Add(key, Quote(value));
     }
-    void Integer(std::string_view key, int64_t value) {
+    void Integer(std::string_view key, int64_t value)
+    {
         String(key, std::to_string(value));
     }
-    void OptionalInteger(std::string_view key, std::optional<int64_t> value) {
+    void OptionalInteger(std::string_view key, std::optional<int64_t> value)
+    {
         Add(key, value ? Quote(std::to_string(*value)) : "null");
     }
-    void OptionalString(std::string_view key, const std::optional<std::string> &value) {
+    void OptionalString(std::string_view key, const std::optional<std::string>& value)
+    {
         Add(key, value ? Quote(*value) : "null");
     }
-    std::string Finish() const {
+    std::string Finish() const
+    {
         return bytes + "}";
     }
 };
 
-std::string_view Disposition(CommitDisposition disposition) {
+std::string_view Disposition(CommitDisposition disposition)
+{
     switch (disposition) {
-    case CommitDisposition::Committed:
-        return "committed";
-    case CommitDisposition::DefinitelyNotCommitted:
-        return "definitely_not_committed";
-    case CommitDisposition::CommitUnknown:
-        return "commit_unknown";
+        case CommitDisposition::Committed:
+            return "committed";
+        case CommitDisposition::DefinitelyNotCommitted:
+            return "definitely_not_committed";
+        case CommitDisposition::CommitUnknown:
+            return "commit_unknown";
     }
     throw detail::Failure({"INVALID_ARGUMENT", "invalid disposition", RetryHint::OperatorAction});
 }
 
-std::string_view Phase(CommitPhase phase) {
-    constexpr std::array<std::string_view, 10> phases{
-        "validation",     "binding",           "data",        "metadata", "catalog_transaction",
-        "catalog_commit", "recording_failure", "reconciling", "complete", "invalid"};
+std::string_view Phase(CommitPhase phase)
+{
+    constexpr std::array<std::string_view, 10> phases{"validation",
+        "binding",
+        "data",
+        "metadata",
+        "catalog_transaction",
+        "catalog_commit",
+        "recording_failure",
+        "reconciling",
+        "complete",
+        "invalid"};
     const auto value = static_cast<size_t>(phase);
     Require(value < 9, "INVALID_ARGUMENT", "invalid commit phase");
     return phases[value];
 }
 
-std::string Error(const ErrorDetail &error) {
-    constexpr std::array<std::string_view, 4> hints{"SameIdAfterReconcile", "NewOperationId", "FixInput",
-                                                    "OperatorAction"};
+std::string Error(const ErrorDetail& error)
+{
+    constexpr std::array<std::string_view, 4> hints{"SameIdAfterReconcile",
+        "NewOperationId",
+        "FixInput",
+        "OperatorAction"};
     Require(static_cast<size_t>(error.retry_hint) < hints.size(), "INVALID_ARGUMENT", "invalid retry hint");
     Object out;
     out.String("code", error.code);
@@ -89,7 +109,8 @@ std::string Error(const ErrorDetail &error) {
     return out.Finish();
 }
 
-std::string Base(const BaseIdentity &base) {
+std::string Base(const BaseIdentity& base)
+{
     Object out;
     out.String("store_id", base.store_id);
     out.String("collection_id", base.collection_id);
@@ -101,7 +122,8 @@ std::string Base(const BaseIdentity &base) {
     return out.Finish();
 }
 
-std::string Recovery(const RecoveryContext &context) {
+std::string Recovery(const RecoveryContext& context)
+{
     Object out;
     out.String("store_id", context.store_id);
     out.String("collection_id", context.collection_id);
@@ -118,7 +140,8 @@ std::string Recovery(const RecoveryContext &context) {
     return out.Finish();
 }
 
-std::string Receipt(const AppendResult &result) {
+std::string Receipt(const AppendResult& result)
+{
     Object out;
     out.String("collection_id", result.collection_id);
     out.String("operation_id", result.operation_id);
@@ -135,12 +158,14 @@ std::string Receipt(const AppendResult &result) {
     return out.Finish();
 }
 
-int ErrorStatus(const ErrorDetail &error) {
+int ErrorStatus(const ErrorDetail& error)
+{
     if (error.code == "INVALID_ARGUMENT") {
         return 400;
     }
     if (error.code == "OPERATION_CONFLICT" || error.code == "ALREADY_EXISTS" || error.code == "SCHEMA_MISMATCH" ||
-        error.code == "STALE_BASE") {
+        error.code == "STALE_BASE")
+    {
         return 409;
     }
     if (error.code == "PRECONDITION_FAILED") {
@@ -158,7 +183,8 @@ int ErrorStatus(const ErrorDetail &error) {
     return 500;
 }
 
-std::string Collection(const CollectionInfo &collection) {
+std::string Collection(const CollectionInfo& collection)
+{
     constexpr std::array<std::string_view, 5> types{"string", "bool", "int64", "float64", "timestamp_us_utc"};
     Object out;
     out.String("collection_id", collection.collection_id);
@@ -172,7 +198,7 @@ std::string Collection(const CollectionInfo &collection) {
         if (i != 0) {
             fields += ',';
         }
-        const auto &field = collection.schema.fields[i];
+        const auto& field = collection.schema.fields[i];
         const auto type = static_cast<size_t>(field.type);
         Require(type >= 1 && type <= types.size(), "INVALID_ARGUMENT", "invalid field type");
         Object item;
@@ -189,14 +215,16 @@ std::string Collection(const CollectionInfo &collection) {
 
 } // namespace
 
-Result<Response> ToJson(const AppendOutcome &outcome) {
+Result<Response> ToJson(const AppendOutcome& outcome)
+{
     try {
         const auto valid = detail::ValidateOutcome(outcome);
         // Invalid caller IDs still need a structured validation error response.
         Require(valid.has_value() ||
-                    (outcome.disposition == CommitDisposition::DefinitelyNotCommitted &&
-                     outcome.phase == CommitPhase::Validation && outcome.error && !outcome.result && !outcome.recovery),
-                "INVALID_ARGUMENT", "invalid append outcome");
+                (outcome.disposition == CommitDisposition::DefinitelyNotCommitted &&
+                    outcome.phase == CommitPhase::Validation && outcome.error && !outcome.result && !outcome.recovery),
+            "INVALID_ARGUMENT",
+            "invalid append outcome");
         Object out;
         out.String("outcome", Disposition(outcome.disposition));
         out.String("phase", Phase(outcome.phase));
@@ -211,38 +239,41 @@ Result<Response> ToJson(const AppendOutcome &outcome) {
             out.Add("recovery_required", "true");
             out.Add("recovery", Recovery(*outcome.recovery));
         }
-        const auto status = outcome.disposition == CommitDisposition::Committed       ? 200
-                            : outcome.disposition == CommitDisposition::CommitUnknown ? 503
-                                                                                      : ErrorStatus(*outcome.error);
+        const auto status = outcome.disposition == CommitDisposition::Committed ? 200
+            : outcome.disposition == CommitDisposition::CommitUnknown           ? 503
+                                                                                : ErrorStatus(*outcome.error);
         return Response{status, out.Finish()};
-    } catch (const detail::Failure &error) {
+    } catch (const detail::Failure& error) {
         return std::unexpected(error.detail);
     }
 }
 
-Result<Response> ToJson(const CreateOutcome &outcome) {
+Result<Response> ToJson(const CreateOutcome& outcome)
+{
     try {
         if (outcome.disposition == CommitDisposition::Committed) {
             if (!outcome.info.has_value()) {
                 throw detail::Failure({"INVALID_ARGUMENT", "missing collection", RetryHint::FixInput});
             }
-            Require(!outcome.error && !outcome.recovery && outcome.phase == CommitPhase::Complete, "INVALID_ARGUMENT",
-                    "invalid committed create outcome");
+            Require(!outcome.error && !outcome.recovery && outcome.phase == CommitPhase::Complete,
+                "INVALID_ARGUMENT",
+                "invalid committed create outcome");
             return Response{200, Collection(outcome.info.value())};
         }
         Require(outcome.error && !outcome.info && outcome.phase >= CommitPhase::Validation &&
-                    outcome.phase < CommitPhase::Complete &&
-                    ((outcome.disposition == CommitDisposition::CommitUnknown && outcome.recovery.has_value() &&
-                      outcome.phase != CommitPhase::Validation && outcome.phase != CommitPhase::Data &&
-                      outcome.phase != CommitPhase::Metadata) ||
-                     (outcome.disposition == CommitDisposition::DefinitelyNotCommitted && !outcome.recovery)),
-                "INVALID_ARGUMENT", "invalid create outcome");
+                outcome.phase < CommitPhase::Complete &&
+                ((outcome.disposition == CommitDisposition::CommitUnknown && outcome.recovery.has_value() &&
+                     outcome.phase != CommitPhase::Validation && outcome.phase != CommitPhase::Data &&
+                     outcome.phase != CommitPhase::Metadata) ||
+                    (outcome.disposition == CommitDisposition::DefinitelyNotCommitted && !outcome.recovery)),
+            "INVALID_ARGUMENT",
+            "invalid create outcome");
         Object out;
         out.String("outcome", Disposition(outcome.disposition));
         out.String("phase", Phase(outcome.phase));
         out.Add("error", Error(*outcome.error));
         if (outcome.recovery) {
-            const auto &context = *outcome.recovery;
+            const auto& context = *outcome.recovery;
             Object recovery;
             recovery.String("store_id", context.store_id);
             recovery.String("collection_id", context.collection_id);
@@ -256,16 +287,17 @@ Result<Response> ToJson(const CreateOutcome &outcome) {
             out.Add("recovery", recovery.Finish());
         }
         return Response{outcome.disposition == CommitDisposition::CommitUnknown ? 503 : ErrorStatus(*outcome.error),
-                        out.Finish()};
-    } catch (const detail::Failure &error) {
+            out.Finish()};
+    } catch (const detail::Failure& error) {
         return std::unexpected(error.detail);
     }
 }
 
-Result<std::string> CollectionJson(const CollectionInfo &collection) {
+Result<std::string> CollectionJson(const CollectionInfo& collection)
+{
     try {
         return Collection(collection);
-    } catch (const detail::Failure &error) {
+    } catch (const detail::Failure& error) {
         return std::unexpected(error.detail);
     }
 }

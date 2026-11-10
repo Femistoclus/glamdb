@@ -4,14 +4,16 @@
 #include <string_view>
 
 namespace {
-void Usage() {
+void Usage()
+{
     std::cout << "GlamDB catalog MVP\n"
                  "  glamdb create-store --root ABSOLUTE_PATH --store-id UUID\n"
                  "  glamdb inspect-store --root ABSOLUTE_PATH --store-id UUID\n";
 }
 } // namespace
 
-int main(int argc, char **argv) try {
+int main(int argc, char** argv)
+try {
     if (argc == 1 || (argc == 2 && std::string_view(argv[1]) == "--help")) {
         Usage();
         return 0;
@@ -39,7 +41,7 @@ int main(int argc, char **argv) try {
         std::cerr << opened.error().code << ": " << opened.error().message << '\n';
         return 1;
     }
-    const auto &info = (*opened)->GetStoreInfo();
+    const auto& info = (*opened)->GetStoreInfo();
     // StoreInfo contains validated UUID/profile tokens, never arbitrary
     // strings.
     std::cout << "{\"store_id\":\"" << info.store_id << "\",\"profile_id\":\"" << info.profile_id

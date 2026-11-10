@@ -6,7 +6,8 @@
 namespace glamdb::detail {
 namespace {
 
-void WriteResult(Encoder &out, const AppendResult &result) {
+void WriteResult(Encoder& out, const AppendResult& result)
+{
     out.Text(result.collection_id);
     out.Text(result.operation_id);
     out.Text(result.payload_hash);
@@ -21,7 +22,8 @@ void WriteResult(Encoder &out, const AppendResult &result) {
     out.Number(result.receipt_version);
 }
 
-AppendResult ReadResult(Decoder &in) {
+AppendResult ReadResult(Decoder& in)
+{
     AppendResult result;
     result.collection_id = in.Text();
     result.operation_id = in.Text();
@@ -40,24 +42,26 @@ AppendResult ReadResult(Decoder &in) {
 
 } // namespace
 
-Status ValidateOutcome(const AppendOutcome &outcome) {
+Status ValidateOutcome(const AppendOutcome& outcome)
+{
     const auto invalid = [] {
         return std::unexpected(ErrorDetail{"CORRUPTION", "invalid append outcome", RetryHint::OperatorAction});
     };
-    const auto valid_error = [](const ErrorDetail &error) {
+    const auto valid_error = [](const ErrorDetail& error) {
         return !error.code.empty() && error.code.size() <= 128 && error.message.size() <= 2048 &&
-               ValidUtf8(error.code) && ValidUtf8(error.message) &&
-               error.retry_hint >= RetryHint::SameIdAfterReconcile && error.retry_hint <= RetryHint::OperatorAction;
+            ValidUtf8(error.code) && ValidUtf8(error.message) && error.retry_hint >= RetryHint::SameIdAfterReconcile &&
+            error.retry_hint <= RetryHint::OperatorAction;
     };
     if (!ValidUuid(outcome.operation_id) || outcome.phase < CommitPhase::Validation ||
-        outcome.phase > CommitPhase::Complete) {
+        outcome.phase > CommitPhase::Complete)
+    {
         return invalid();
     }
     if (outcome.disposition == CommitDisposition::Committed) {
         if (outcome.phase != CommitPhase::Complete || !outcome.result || outcome.error || outcome.recovery) {
             return invalid();
         }
-        const auto &result = *outcome.result;
+        const auto& result = *outcome.result;
         if (!ValidUuid(result.collection_id) || result.operation_id != outcome.operation_id ||
             !ValidDigest(result.payload_hash) || result.hash_version != 1 || result.receipt_version != 1 ||
             result.rows_appended < 1 || result.rows_appended > 10000 || result.data_files_added != 1 ||
@@ -65,14 +69,16 @@ Status ValidateOutcome(const AppendOutcome &outcome) {
             result.snapshot_created_at_us < -62135596800000000LL ||
             result.snapshot_created_at_us > 253402300799999999LL || result.snapshot_created_at_us % 1000 != 0 ||
             result.durability_profile.empty() || result.durability_profile.size() > 128 ||
-            !ValidUtf8(result.durability_profile) || result.parent_snapshot_id == result.snapshot_id) {
+            !ValidUtf8(result.durability_profile) || result.parent_snapshot_id == result.snapshot_id)
+        {
             return invalid();
         }
     } else {
         if (outcome.result || !outcome.error || outcome.phase == CommitPhase::Complete ||
             outcome.phase > CommitPhase::Reconciling || outcome.error->code.empty() ||
             outcome.error->code.size() > 128 || outcome.error->message.size() > 2048 ||
-            !ValidUtf8(outcome.error->code) || !ValidUtf8(outcome.error->message) || !valid_error(*outcome.error)) {
+            !ValidUtf8(outcome.error->code) || !ValidUtf8(outcome.error->message) || !valid_error(*outcome.error))
+        {
             return invalid();
         }
         if (outcome.disposition == CommitDisposition::DefinitelyNotCommitted) {
@@ -81,11 +87,12 @@ Status ValidateOutcome(const AppendOutcome &outcome) {
             }
         } else if (outcome.disposition == CommitDisposition::CommitUnknown) {
             if (!outcome.recovery || outcome.phase == CommitPhase::Validation || outcome.phase == CommitPhase::Data ||
-                outcome.phase == CommitPhase::Metadata) {
+                outcome.phase == CommitPhase::Metadata)
+            {
                 return invalid();
             }
-            const auto &context = *outcome.recovery;
-            const auto &base = context.base;
+            const auto& context = *outcome.recovery;
+            const auto& base = context.base;
             const auto prefix = "store://" + context.store_id + "/warehouse/";
             if (!ValidUuid(context.store_id) || !ValidUuid(context.collection_id) ||
                 context.operation_id != outcome.operation_id || !ValidDigest(context.payload_hash) ||
@@ -94,11 +101,14 @@ Status ValidateOutcome(const AppendOutcome &outcome) {
                 !base.metadata_location.starts_with(prefix) || base.metadata_location.size() <= prefix.size() ||
                 base.metadata_location.size() > 2048 || !ValidUtf8(base.metadata_location) || base.schema_id < 0 ||
                 base.spec_id < 0 || !valid_error(context.first_error) ||
-                (context.candidate_metadata_location && (!context.candidate_metadata_location->starts_with(prefix) ||
-                                                         context.candidate_metadata_location->size() > 2048 ||
-                                                         !ValidUtf8(*context.candidate_metadata_location))) ||
-                (context.lookup_blocked && (context.publication_started || context.candidate_snapshot_id ||
-                                            context.candidate_metadata_location))) {
+                (context.candidate_metadata_location &&
+                    (!context.candidate_metadata_location->starts_with(prefix) ||
+                        context.candidate_metadata_location->size() > 2048 ||
+                        !ValidUtf8(*context.candidate_metadata_location))) ||
+                (context.lookup_blocked &&
+                    (context.publication_started || context.candidate_snapshot_id ||
+                        context.candidate_metadata_location)))
+            {
                 return invalid();
             }
         } else {
@@ -108,7 +118,8 @@ Status ValidateOutcome(const AppendOutcome &outcome) {
     return {};
 }
 
-Result<std::string> EncodeOutcome(const AppendOutcome &outcome) {
+Result<std::string> EncodeOutcome(const AppendOutcome& outcome)
+{
     const auto valid = ValidateOutcome(outcome);
     if (!valid) {
         return std::unexpected(valid.error());
@@ -135,7 +146,8 @@ Result<std::string> EncodeOutcome(const AppendOutcome &outcome) {
     return out.bytes;
 }
 
-Result<AppendOutcome> DecodeOutcome(std::string_view bytes) {
+Result<AppendOutcome> DecodeOutcome(std::string_view bytes)
+{
     try {
         Require(bytes.size() <= 4096, "CORRUPTION", "oversized outcome");
         Decoder in{bytes};
@@ -152,17 +164,18 @@ Result<AppendOutcome> DecodeOutcome(std::string_view bytes) {
         in.End();
         const auto valid = ValidateOutcome(outcome);
         if (!valid || outcome.disposition == CommitDisposition::CommitUnknown) {
-            return std::unexpected(
-                valid ? ErrorDetail{"CORRUPTION", "persisted unknown outcome", RetryHint::OperatorAction}
-                      : valid.error());
+            return std::unexpected(valid
+                    ? ErrorDetail{"CORRUPTION", "persisted unknown outcome", RetryHint::OperatorAction}
+                    : valid.error());
         }
         return outcome;
-    } catch (const Failure &error) {
+    } catch (const Failure& error) {
         return std::unexpected(error.detail);
     }
 }
 
-std::string EncodeBase(const BaseIdentity &base) {
+std::string EncodeBase(const BaseIdentity& base)
+{
     Encoder out;
     out.Number<uint16_t>(1);
     out.Text(base.store_id);
@@ -175,7 +188,8 @@ std::string EncodeBase(const BaseIdentity &base) {
     return out.bytes;
 }
 
-Result<BaseIdentity> DecodeBase(std::string_view bytes) {
+Result<BaseIdentity> DecodeBase(std::string_view bytes)
+{
     try {
         Require(bytes.size() <= 4096, "CORRUPTION", "oversized base identity");
         Decoder in{bytes};
@@ -190,11 +204,12 @@ Result<BaseIdentity> DecodeBase(std::string_view bytes) {
         base.spec_id = in.Number<int32_t>();
         in.End();
         Require(ValidUuid(base.store_id) && ValidUuid(base.collection_id) && ValidUuid(base.table_uuid) &&
-                    !base.metadata_location.empty() && base.metadata_location.size() <= 2048 && base.schema_id >= 0 &&
-                    base.spec_id >= 0,
-                "CORRUPTION", "invalid base identity");
+                !base.metadata_location.empty() && base.metadata_location.size() <= 2048 && base.schema_id >= 0 &&
+                base.spec_id >= 0,
+            "CORRUPTION",
+            "invalid base identity");
         return base;
-    } catch (const Failure &error) {
+    } catch (const Failure& error) {
         return std::unexpected(error.detail);
     }
 }

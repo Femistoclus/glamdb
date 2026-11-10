@@ -15,22 +15,23 @@ struct EngineFactory;
 
 // Synchronous facade. Storage production and scanning are separate components;
 // unavailable components report DEPENDENCY_UNAVAILABLE rather than success.
-class Engine {
+class Engine
+{
 public:
     struct Impl;
     ~Engine();
-    Engine(const Engine &) = delete;
-    Engine &operator=(const Engine &) = delete;
+    Engine(const Engine&) = delete;
+    Engine& operator=(const Engine&) = delete;
 
-    const StoreInfo &GetStoreInfo() const;
-    CreateOutcome CreateCollection(const CreateCollectionRequest &request);
+    const StoreInfo& GetStoreInfo() const;
+    CreateOutcome CreateCollection(const CreateCollectionRequest& request);
     Result<CollectionInfo> GetCollection(std::string_view collection_id) const;
     Result<CollectionInfo> ResolveCollection(std::string_view exact_name) const;
     Result<std::vector<CollectionInfo>> ListCollections() const;
     Result<std::shared_ptr<const arrow::Schema>> Schema(std::string_view collection_id) const;
-    AppendOutcome AppendDurable(const AppendRequest &request);
+    AppendOutcome AppendDurable(const AppendRequest& request);
     Result<std::optional<AppendOutcome>> FindAppendOutcome(std::string_view collection_id,
-                                                           std::string_view operation_id) const;
+        std::string_view operation_id) const;
     Status Reconcile();
     Status Shutdown(std::chrono::milliseconds timeout);
 
@@ -40,7 +41,7 @@ private:
     friend struct detail::EngineFactory;
 };
 
-Result<std::shared_ptr<Engine>> CreateStore(const CreateStoreRequest &request);
-Result<std::shared_ptr<Engine>> OpenExisting(const OpenStoreRequest &request);
+Result<std::shared_ptr<Engine>> CreateStore(const CreateStoreRequest& request);
+Result<std::shared_ptr<Engine>> OpenExisting(const OpenStoreRequest& request);
 
 } // namespace glamdb

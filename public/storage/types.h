@@ -17,11 +17,12 @@ namespace glamdb {
 
 enum class RetryHint : uint8_t { SameIdAfterReconcile, NewOperationId, FixInput, OperatorAction };
 
-struct ErrorDetail {
+struct ErrorDetail
+{
     std::string code;
     std::string message;
     RetryHint retry_hint = RetryHint::FixInput;
-    bool operator==(const ErrorDetail &) const = default;
+    bool operator==(const ErrorDetail&) const = default;
 };
 
 template <class T>
@@ -30,28 +31,32 @@ using Status = Result<void>;
 
 enum class FieldType : uint8_t { String = 1, Bool, Int64, Float64, TimestampUsUtc };
 
-struct FieldSpec {
+struct FieldSpec
+{
     std::string name;
     FieldType type = FieldType::String;
     bool nullable = false;
-    bool operator==(const FieldSpec &) const = default;
+    bool operator==(const FieldSpec&) const = default;
 };
 
 // Field IDs are assigned in order, starting at 1, and never change.
-struct SchemaSpec {
+struct SchemaSpec
+{
     std::vector<FieldSpec> fields;
-    bool operator==(const SchemaSpec &) const = default;
+    bool operator==(const SchemaSpec&) const = default;
 };
 
-struct TimestampUs {
+struct TimestampUs
+{
     int64_t value = 0;
-    bool operator==(const TimestampUs &) const = default;
+    bool operator==(const TimestampUs&) const = default;
 };
 
 using Cell = std::variant<std::monostate, std::string, bool, int64_t, double, TimestampUs>;
 using Row = std::vector<Cell>;
 
-struct BaseIdentity {
+struct BaseIdentity
+{
     std::string store_id;
     std::string collection_id;
     std::string table_uuid;
@@ -59,7 +64,7 @@ struct BaseIdentity {
     std::optional<int64_t> current_snapshot_id;
     int32_t schema_id = 0;
     int32_t spec_id = 0;
-    bool operator==(const BaseIdentity &) const = default;
+    bool operator==(const BaseIdentity&) const = default;
 };
 
 enum class CommitDisposition : uint8_t { Committed, DefinitelyNotCommitted, CommitUnknown };
@@ -75,7 +80,8 @@ enum class CommitPhase : uint8_t {
     Complete
 };
 
-struct AppendResult {
+struct AppendResult
+{
     std::string collection_id;
     std::string operation_id;
     std::string payload_hash;
@@ -88,10 +94,11 @@ struct AppendResult {
     int64_t snapshot_created_at_us = 0;
     std::string durability_profile;
     int32_t receipt_version = 1;
-    bool operator==(const AppendResult &) const = default;
+    bool operator==(const AppendResult&) const = default;
 };
 
-struct RecoveryContext {
+struct RecoveryContext
+{
     std::string store_id;
     std::string collection_id;
     std::string operation_id;
@@ -107,36 +114,40 @@ struct RecoveryContext {
     // collection view and attempt_id identifies this resolution call. No new
     // operation has been bound or published in that call.
     bool lookup_blocked = false;
-    bool operator==(const RecoveryContext &) const = default;
+    bool operator==(const RecoveryContext&) const = default;
 };
 
-struct AppendOutcome {
+struct AppendOutcome
+{
     std::string operation_id;
     CommitDisposition disposition = CommitDisposition::DefinitelyNotCommitted;
     CommitPhase phase = CommitPhase::Validation;
     std::optional<AppendResult> result;
     std::optional<ErrorDetail> error;
     std::optional<RecoveryContext> recovery;
-    bool operator==(const AppendOutcome &) const = default;
+    bool operator==(const AppendOutcome&) const = default;
 };
 
-struct CollectionInfo {
+struct CollectionInfo
+{
     std::string collection_id;
     std::string name;
     std::string table_uuid;
     SchemaSpec schema;
     int64_t creation_sequence = 0;
     std::optional<int64_t> current_snapshot_id;
-    bool operator==(const CollectionInfo &) const = default;
+    bool operator==(const CollectionInfo&) const = default;
 };
 
-struct CreateCollectionRequest {
+struct CreateCollectionRequest
+{
     std::string collection_id;
     std::string exact_name;
     SchemaSpec schema;
 };
 
-struct CreateRecoveryContext {
+struct CreateRecoveryContext
+{
     std::string store_id;
     std::string collection_id;
     std::string exact_name;
@@ -147,7 +158,8 @@ struct CreateRecoveryContext {
     bool publication_started = false;
 };
 
-struct CreateOutcome {
+struct CreateOutcome
+{
     CommitDisposition disposition = CommitDisposition::DefinitelyNotCommitted;
     CommitPhase phase = CommitPhase::Validation;
     std::optional<CollectionInfo> info;
@@ -156,19 +168,22 @@ struct CreateOutcome {
 };
 
 enum class SnapshotPreconditionKind : uint8_t { Any, NoSnapshot, Equals };
-struct SnapshotPrecondition {
+struct SnapshotPrecondition
+{
     SnapshotPreconditionKind kind = SnapshotPreconditionKind::Any;
     int64_t snapshot_id = 0;
 };
 
-struct AppendRequest {
+struct AppendRequest
+{
     std::string collection_id;
     std::string operation_id;
     SnapshotPrecondition expected_snapshot;
     std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
 };
 
-struct Limits {
+struct Limits
+{
     int64_t max_operations = 4096;
     int64_t max_collections = 8;
     int64_t max_catalog_bytes = 256LL * 1024 * 1024;
@@ -178,20 +193,23 @@ struct Limits {
     std::chrono::milliseconds append_deadline{60000};
 };
 
-struct StoreInfo {
+struct StoreInfo
+{
     std::string store_id;
     std::string profile_id;
     int32_t format_version = 1;
 };
 
-struct CreateStoreRequest {
+struct CreateStoreRequest
+{
     std::string store_id;
     std::string absolute_root;
     std::string profile_id = "local-delete-extra-v1";
     Limits limits{};
 };
 
-struct OpenStoreRequest {
+struct OpenStoreRequest
+{
     std::string absolute_root;
     std::string expected_store_id;
     std::string profile_id = "local-delete-extra-v1";
