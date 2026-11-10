@@ -94,7 +94,7 @@ jobs:
       - name: Generate compile commands for all components and tests
         # The project uses no C++ modules. Avoid references to unbuilt .modmap files.
         run: >-
-          cmake --preset local -DGLAMDB_BUILD_STORAGE=ON -DBUILD_TESTING=ON
+          cmake --preset local -DGLAMDB_BUILD_STORAGE=ON -DGLAMDB_BUILD_IO_PROBE=ON -DBUILD_TESTING=ON
           -DCMAKE_CXX_SCAN_FOR_MODULES=OFF
 
       - name: Check project diagnostics

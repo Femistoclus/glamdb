@@ -75,6 +75,11 @@ class CmakeConfigurationTest(unittest.TestCase):
         commands = json.loads((self.build / "compile_commands.json").read_text())
         self.assertIn(str(added), {entry["file"] for entry in commands})
 
+    def test_io_probe_requires_storage(self):
+        result = self.configure("-DBUILD_TESTING=OFF", "-DGLAMDB_BUILD_IO_PROBE=ON")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("GLAMDB_BUILD_IO_PROBE requires GLAMDB_BUILD_STORAGE=ON", result.stdout)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

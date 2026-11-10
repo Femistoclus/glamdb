@@ -215,8 +215,17 @@ The coordinator supplies owned, immutable normalized batches and expected
 operation summaries, runs capacity preflight before binding an attempt, and
 confirms the outer catalog COMMIT. A publication guard's `GetCandidate()` is
 tentative until that confirmation. Scan callers retain a `ReadOnlyView()` so
-reads do not join the writer's attempt. Storage pipeline tests use an in-memory
-catalog; coordinator tests use a separate test backend.
+reads do not join the writer's attempt. Isolated storage tests use an in-memory
+catalog; coordinator tests use a separate test backend. With storage enabled,
+`glamdb.durable_storage_catalog` also checks the real file/catalog publication
+boundary and catalog-selected recovery in a fresh process.
+
+`GLAMDB_BUILD_IO_PROBE=ON` adds the disposable storage fault probe and requires
+`GLAMDB_BUILD_STORAGE=ON`. Its Python runner checks native receipts and optional
+strace evidence; passing cases without strace remain incomplete. Recovery path
+deduplication uses a bounded temporary SQLite database, separate from the catalog.
+See [qualification preparation](docs/development/QUALIFICATION.md) for commands,
+temporary-workspace prerequisites and the remaining qualification boundaries.
 
 After configuring `local`, check project C++ sources and headers with:
 
@@ -230,8 +239,8 @@ project C++ formatting. `.github/workflows/cpp-quality.yml` runs separate LLVM 1
 format and tidy jobs. Formatting runs on PRs, pushes to `main`, and manual dispatch;
 tidy runs only on pushes to `main` and manual dispatch. The tidy job verifies dependency
 pins and reuses an exact installation cache, rebuilding on a miss. Its key covers
-the build recipe, platform, toolchain, packages and flags. Storage and tests stay
-enabled; formatting requires no build. Tidy uses two concurrent processes
+the build recipe, platform, toolchain, packages and flags. Storage, the I/O probe
+and tests stay enabled; formatting requires no build. Tidy uses two concurrent processes
 (`GLAMDB_TIDY_JOBS` overrides this), with grouped diagnostics and per-file timings. See
 [docs/development/BUILDING.md](docs/development/BUILDING.md) for installation,
 tool path overrides, and build details.
@@ -298,6 +307,8 @@ mechanical rules; vendor and generated code are excluded.
   x86-64 on a dedicated local ext4 volume with verified flush behavior; macOS
   builds and simulated faults alone do not qualify that environment. Record
   environment details with measurements and durability results.
+  See [qualification preparation](docs/development/QUALIFICATION.md) for the
+  separate controller, evidence and remaining campaign requirements.
 - Run destructive fault tests only on disposable test stores or dedicated test
   volumes. Keep credentials and private data out of fixtures, traces, and logs.
 

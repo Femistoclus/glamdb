@@ -90,16 +90,20 @@ class QualityClassificationTest(unittest.TestCase):
     def test_io_only_keeps_io_sources_without_requiring_engine_commands(self):
         io = self.add_source("core/io/local_fs.cpp")
         support = self.add_source("tests/support/fault_fs.cpp")
+        probe = self.add_source("probes/io/main.cpp")
         storage = self.add_source("core/storage/adapter.cpp")
         self.add_source("tests/unit/coordinator_test.cpp")
         self.add_source("tests/support/fake_storage.cpp")
         (self.build / "compile_commands.json").write_text(json.dumps([
-            {"directory": str(self.root), "file": str(path)} for path in (io, support)
+            {"directory": str(self.root), "file": str(path)} for path in (io, support, probe)
         ]))
         with patch.object(quality, "llvm_tool", return_value="clang-tidy"), \
                 patch.object(quality.subprocess, "run",
                              return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
             quality.tidy_sources(self.build, ["core/storage"], io_only=True)
+            self.assertEqual({call.args[0][1] for call in run.call_args_list}, {str(io), str(support), str(probe)})
+            run.reset_mock()
+            quality.tidy_sources(self.build, ["core/storage", "probes/io"], io_only=True)
             self.assertEqual({call.args[0][1] for call in run.call_args_list}, {str(io), str(support)})
         self.assertIn(storage, quality.source_files(io_only=True))
         self.assertNotIn(self.core, quality.source_files(io_only=True))

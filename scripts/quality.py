@@ -19,7 +19,7 @@ STANDALONE_SOURCE_DIRS = ("probes/build_install", "probes/toolchain")
 HEADERS = {".h", ".hh", ".hpp", ".hxx", ".ipp", ".tpp"}
 TRANSLATION_UNITS = {".c", ".cc", ".cpp", ".cxx"}
 IO_SOURCE_DIRS = ("core/io", "core/storage", "tests/unit/io", "tests/unit/storage",
-                  *STANDALONE_SOURCE_DIRS)
+                  "probes/io", *STANDALONE_SOURCE_DIRS)
 IO_SOURCE_FILES = {"public/storage/schema.h", "tests/unit/core_test.cpp",
                    "tests/support/fault_fs.h", "tests/support/fault_fs.cpp",
                    "tests/support/durability_trace.h", "tests/support/durability_trace.cpp"}

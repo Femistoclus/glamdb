@@ -290,8 +290,8 @@ The [C++ quality workflow](../../.github/workflows/cpp-quality.yml) runs indepen
 `main`, and manual dispatch. Tidy runs only on pushes to `main` and manual dispatch;
 it is skipped on pull requests. Formatting runs without a build. Tidy prepares the pinned
 dependencies with Clang/libc++ 18, then configures `local` with
-`GLAMDB_BUILD_STORAGE=ON` and `BUILD_TESTING=ON` to check all enabled project
-components and tests. It also runs `quality-negative-check`.
+`GLAMDB_BUILD_STORAGE=ON`, `GLAMDB_BUILD_IO_PROBE=ON` and `BUILD_TESTING=ON` to check
+all enabled project components and tests. It also runs `quality-negative-check`.
 Module scanning is disabled for this analysis-only configuration so compile
 commands do not reference `.modmap` files that require a project build.
 
@@ -341,6 +341,8 @@ built or installed by the dependency superbuild, and GoogleMock is disabled.
 
 The initial durability qualification targets Linux x86-64 on a dedicated local
 ext4 volume. The development module and its tests do not qualify that environment.
+The [qualification preparation guide](QUALIFICATION.md) includes a read-only
+environment collector and the evidence required before running those campaigns.
 
 ## Validation scope
 

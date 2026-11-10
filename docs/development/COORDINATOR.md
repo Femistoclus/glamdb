@@ -174,6 +174,11 @@ is deliberately rolled back before receipt insertion; a synthetic append
 receipt is never committed. The VFS tests separately exercise terminal receipt
 publication. The local test FileIO proves ordering, not file synchronization.
 
+With storage enabled, `glamdb.durable_storage_catalog` also exercises the real
+durable FileIO and guard inside this catalog's publication transaction, followed
+by catalog-selected recovery and receipt/row checks in a fresh process. See the
+[storage guide](STORAGE_MODULE.md#tests-and-evidence) for its cases and boundaries.
+
 Independent catalog, coordinator and SDK reviews exercised these boundaries;
 their confirmed correctness defects have regression tests. A production
 coordinator-to-storage append/read, scan semantics, restore,

@@ -150,8 +150,12 @@ struct TFaultFS::TState
     TResult<T> Call(EIOOp op, const std::string& path, const TIOTag& tag, Action action)
     {
         auto fault = Match(op, path);
-        TResult<T> result =
-            fault && fault->Error ? TResult<T>(fault->Error) : action(fault ? fault->MaxBytes : std::nullopt);
+        TResult<T> result = fault && fault->Error && !fault->AfterSuccess
+            ? TResult<T>(fault->Error)
+            : action(fault ? fault->MaxBytes : std::nullopt);
+        if (result && fault && fault->AfterSuccess) {
+            result = TResult<T>(fault->Error);
+        }
         std::uint64_t bytes = 0;
         if constexpr (std::is_same_v<T, std::size_t> || std::is_same_v<T, std::uint64_t>) {
             if (result) {
@@ -203,6 +207,7 @@ void TFaultFS::AddRule(TFaultRule rule)
 {
     if (rule.Occurrence == 0 || rule.Repeat == 0 || static_cast<bool>(rule.Error) == rule.MaxBytes.has_value() ||
         (rule.MaxBytes && rule.Op != EIOOp::Write && rule.Op != EIOOp::PRead) || rule.Op == EIOOp::Publish ||
+        (rule.AfterSuccess && (rule.Op != EIOOp::SyncFile && rule.Op != EIOOp::SyncDir)) ||
         rule.PathGlob.find('\0') != std::string::npos)
     {
         throw std::invalid_argument("Invalid fault rule");
