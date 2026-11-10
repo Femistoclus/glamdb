@@ -56,7 +56,10 @@ template <class T>
 T TakeIceberg(iceberg::Result<T> result, std::string_view code, std::string_view context)
 {
     if (!result) {
-        Fail(code, context, result.error().message);
+        const auto kind = result.error().kind;
+        const auto effective =
+            (kind == iceberg::ErrorKind::kNotFound || kind == iceberg::ErrorKind::kInvalid) ? "CORRUPTION" : code;
+        Fail(effective, context, result.error().message);
     }
     return std::move(*result);
 }
@@ -68,6 +71,43 @@ T Take(Result<T> result)
         throw Failure(result.error());
     }
     return std::move(*result);
+}
+
+class TLeaseBuffer final : public arrow::Buffer
+{
+public:
+    TLeaseBuffer(std::shared_ptr<arrow::Buffer> inner, std::shared_ptr<const void> lease)
+        : arrow::Buffer(inner->data(), inner->size())
+        , Lease_(std::move(lease))
+        , Inner_(std::move(inner))
+    { }
+
+private:
+    // Destroy Inner_ before Lease_ so buffer memory is freed while the
+    // store lease is still held.
+    std::shared_ptr<const void> Lease_;
+    std::shared_ptr<arrow::Buffer> Inner_;
+};
+
+std::shared_ptr<arrow::ArrayData> AttachLease(const std::shared_ptr<arrow::ArrayData>& data,
+    const std::shared_ptr<const void>& lease)
+{
+    if (!data || !lease) {
+        return data;
+    }
+    auto copy = data->Copy();
+    for (auto& buffer : copy->buffers) {
+        if (buffer) {
+            buffer = std::make_shared<TLeaseBuffer>(std::move(buffer), lease);
+        }
+    }
+    for (auto& child : copy->child_data) {
+        child = AttachLease(child, lease);
+    }
+    if (copy->dictionary) {
+        copy->dictionary = AttachLease(copy->dictionary, lease);
+    }
+    return copy;
 }
 
 std::vector<size_t> ResolveProjection(const SchemaSpec& schema, const std::optional<std::vector<std::string>>& names)
@@ -130,6 +170,9 @@ public:
             return ReadNext();
         } catch (const Failure& error) {
             Release();
+            if (Context_.OnError) {
+                Context_.OnError(error.detail);
+            }
             if (error.detail.code != "CANCELLED") {
                 Failed_ = error.detail;
             }
@@ -185,6 +228,7 @@ private:
 
     Result<std::shared_ptr<arrow::RecordBatch>> ReadNext()
     {
+        CheckActive();
         while (!Remaining_ || *Remaining_ > 0) {
             CheckActive();
             if (!BatchReader_) {
@@ -194,16 +238,18 @@ private:
                 OpenFile(Plan_.Files[NextFile_++]);
             }
             std::shared_ptr<arrow::RecordBatch> batch;
-            CheckArrow(BatchReader_->ReadNext(&batch), "IO_ERROR", "read Parquet batch");
+            CheckArrow(BatchReader_->ReadNext(&batch), "CORRUPTION", "read Parquet batch");
             if (!batch) {
                 Release();
                 continue;
             }
             if (auto produced = Produce(*batch)) {
+                CheckActive();
                 return produced;
             }
         }
         Release();
+        CheckActive();
         return std::shared_ptr<arrow::RecordBatch>{};
     }
 
@@ -303,7 +349,7 @@ private:
             } else if (count != array->length()) {
                 array = array->Slice(0, count);
             }
-            columns.push_back(std::move(array));
+            columns.push_back(arrow::MakeArray(AttachLease(array->data(), Context_.Lease)));
         }
         if (Remaining_) {
             *Remaining_ -= count;

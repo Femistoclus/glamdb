@@ -296,6 +296,9 @@ struct Engine::Impl
 
     CreateOutcome UnknownCreate(CreateRecoveryContext context, CommitPhase phase, ErrorDetail error)
     {
+        if (backend) {
+            backend->InvalidateCache();
+        }
         error.retry_hint = RetryHint::SameIdAfterReconcile;
         CreateOutcome outcome{CommitDisposition::CommitUnknown,
             phase,
@@ -333,6 +336,9 @@ struct Engine::Impl
     void CloseOnCorruption(const ErrorDetail& error)
     {
         if (error.code == "CORRUPTION" || error.code == "UNSUPPORTED_STORE_VERSION") {
+            if (backend) {
+                backend->InvalidateCache();
+            }
             std::lock_guard lock(state_mutex);
             ready = false;
         }
@@ -356,6 +362,9 @@ struct Engine::Impl
                 }
             }
         } catch (...) {
+            if (backend) {
+                backend->InvalidateCache();
+            }
             std::lock_guard lock(state_mutex);
             ready = false;
             throw;
@@ -369,6 +378,9 @@ struct Engine::Impl
             ready = false;
         }
         if (reopen) {
+            if (backend) {
+                backend->InvalidateCache();
+            }
             catalog->Reopen();
         }
         VerifyStorage();
@@ -410,6 +422,9 @@ struct Engine::Impl
         ErrorDetail error,
         std::optional<AppendOutcome> failure = std::nullopt)
     {
+        if (backend) {
+            backend->InvalidateCache();
+        }
         error.retry_hint = RetryHint::SameIdAfterReconcile;
         std::lock_guard lock(state_mutex);
         ready = false;
@@ -432,6 +447,11 @@ struct Engine::Impl
         auto failure = Rejected(binding.operation_id, phase, error);
         try {
             catalog->RecordFailure(binding, failure);
+            if (error.code == "CORRUPTION" || error.code == "UNSUPPORTED_STORE_VERSION") {
+                if (backend) {
+                    backend->InvalidateCache();
+                }
+            }
             std::lock_guard lock(state_mutex);
             active.reset();
             if (error.code == "CORRUPTION" || error.code == "UNSUPPORTED_STORE_VERSION") {
@@ -632,7 +652,8 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
                 return *blocked;
             }
         }
-        for (const auto& collection : impl->catalog->Collections()) {
+        const auto existing = impl->catalog->Collections();
+        for (const auto& collection : existing) {
             if (collection.collection_id == request.collection_id || collection.name == request.exact_name) {
                 Require(collection.collection_id == request.collection_id && collection.name == request.exact_name,
                     "ALREADY_EXISTS",
@@ -653,6 +674,9 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
                 return {CommitDisposition::Committed, CommitPhase::Complete, collection, std::nullopt, std::nullopt};
             }
         }
+        Require(existing.size() < static_cast<size_t>(impl->limits.max_collections),
+            "RESOURCE_EXHAUSTED",
+            "permanent catalog capacity is full");
         Require(impl->backend != nullptr,
             "DEPENDENCY_UNAVAILABLE",
             "durable storage producer and closure guard are not installed");
@@ -686,6 +710,9 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
                 return staged->Publish(*impl->catalog);
             });
         committed = true;
+        if (context->candidate_metadata_location) {
+            impl->backend->ConfirmPublication(created.collection_id, *context->candidate_metadata_location);
+        }
         impl->RefreshCache();
         return {CommitDisposition::Committed, CommitPhase::Complete, created, std::nullopt, std::nullopt};
     } catch (const Failure& error) {
@@ -848,6 +875,12 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         }
         const auto input = Take(NormalizeBatches(collection.schema, request.collection_id, request.batches));
         Require(input.payload_hash == payload_hash, "INVALID_ARGUMENT", "Arrow input changed during append");
+        if (impl->backend) {
+            const auto admissible = impl->backend->CheckAppendAdmissible(impl->info, collection, input);
+            if (!admissible) {
+                throw Failure(admissible.error());
+            }
+        }
         binding = BoundOperation{request.collection_id,
             request.operation_id,
             input.payload_hash,
@@ -917,6 +950,9 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
                 return staged->Publish(*impl->catalog);
             });
         phase = CommitPhase::Complete;
+        if (context.candidate_metadata_location) {
+            impl->backend->ConfirmPublication(binding->collection_id, *context.candidate_metadata_location);
+        }
         impl->RefreshCache();
         {
             std::lock_guard state_lock(impl->state_mutex);
@@ -1014,6 +1050,10 @@ Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) con
         Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
         context.FileIO = Take(impl->backend->ReadOnlyFileIO());
         context.Closing = std::shared_ptr<const std::atomic<bool>>(impl, &impl->closing);
+        context.Lease = impl->lease;
+        context.OnError = [impl](const ErrorDetail& error) {
+            impl->CloseOnCorruption(error);
+        };
         auto cursor = OpenScan(std::move(context), request);
         if (!cursor) {
             impl->CloseOnCorruption(cursor.error());

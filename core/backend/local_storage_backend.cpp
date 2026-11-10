@@ -14,6 +14,7 @@
 #include "core/storage/table_profile.h"
 
 #include <arrow/record_batch.h>
+#include <arrow/util/byte_size.h>
 #include <iceberg/constants.h>
 #include <iceberg/manifest/manifest_entry.h>
 #include <iceberg/partition_spec.h>
@@ -26,6 +27,7 @@
 #include <iceberg/transaction.h>
 #include <iceberg/util/timepoint.h>
 
+#include <algorithm>
 #include <charconv>
 #include <format>
 #include <limits>
@@ -52,7 +54,9 @@ template <class T>
 T TakeIceberg(iceberg::Result<T> result, std::string_view code, std::string_view context)
 {
     if (!result) {
-        Fail(code, context, result.error().message);
+        const auto effective =
+            result.error().kind == iceberg::ErrorKind::kInvalidArgument ? std::string_view("INVALID_ARGUMENT") : code;
+        Fail(effective, context, result.error().message);
     }
     return std::move(*result);
 }
@@ -135,9 +139,13 @@ std::optional<int64_t> CurrentSnapshot(const iceberg::TableMetadata& metadata)
     return metadata.current_snapshot_id;
 }
 
-int64_t SnapshotTimeUs(const iceberg::Snapshot& snapshot)
+int64_t SnapshotTimeUs(const iceberg::Snapshot& snapshot, std::string_view code)
 {
-    return iceberg::UnixMsFromTimePointMs(snapshot.timestamp_ms) * 1000;
+    const auto ms = iceberg::UnixMsFromTimePointMs(snapshot.timestamp_ms);
+    if (ms < -62135596800000LL || ms > 253402300799999LL) {
+        Fail(code, "snapshot timestamp", "snapshot timestamp is outside supported UTC range");
+    }
+    return ms * 1000;
 }
 
 NStorage::TStorageUsage AddUsage(NStorage::TStorageUsage total, const NStorage::TStorageUsage& item)
@@ -160,6 +168,48 @@ NStorage::TTableProfile MakeProfile(const SchemaSpec& schema, std::string_view c
         Fail(code, "table profile", profile.error().message);
     }
     return std::move(*profile);
+}
+
+void CheckWriterInput(const SchemaSpec& schema, const NormalizedInput& input, const NStorage::TDataWriterLimits& limits)
+{
+    if (limits.MaxInputBytes <= 0 || limits.MaxRows <= 0 || limits.MaxRowGroupBytes <= 0 || limits.MaxFileBytes <= 0) {
+        Fail("INVALID_ARGUMENT", "append", "data writer limits must be positive");
+    }
+    if (input.rows.empty() || static_cast<int64_t>(input.rows.size()) > limits.MaxRows) {
+        Fail("INVALID_ARGUMENT", "append", std::format("an append must contain 1..{} rows", limits.MaxRows));
+    }
+    int64_t maxRowBytes = 1;
+    for (const auto& row : input.rows) {
+        if (row.size() != schema.fields.size()) {
+            Fail("INVALID_ARGUMENT", "append", "row field count does not match the collection schema");
+        }
+        int64_t rowBytes = 0;
+        for (size_t column = 0; column < schema.fields.size(); ++column) {
+            const auto type = schema.fields[column].type;
+            rowBytes += 1 + (type == FieldType::String ? 4 : type == FieldType::Bool ? 1 : 8);
+            if (const auto* text = std::get_if<std::string>(&row[column])) {
+                rowBytes += static_cast<int64_t>(text->size());
+            }
+        }
+        if (rowBytes > (2LL << 20)) {
+            throw Failure({"RESOURCE_EXHAUSTED", "append: Row exceeds its byte limit.", RetryHint::FixInput});
+        }
+        maxRowBytes = std::max(maxRowBytes, rowBytes);
+    }
+    const auto offsetBytes = 4 * static_cast<int64_t>(std::ranges::count_if(schema.fields, [](const auto& field) {
+        return field.type == FieldType::String;
+    }));
+    if (limits.MaxRowGroupBytes < offsetBytes || maxRowBytes > limits.MaxRowGroupBytes - offsetBytes) {
+        throw Failure({"RESOURCE_EXHAUSTED", "append: row exceeds the row group byte limit", RetryHint::FixInput});
+    }
+    const auto batch = MakeRecordBatch(schema, input.rows);
+    if (!batch) {
+        throw Failure(batch.error());
+    }
+    const auto totalBytes = arrow::util::TotalBufferSize(**batch);
+    if (totalBytes < 0 || totalBytes > limits.MaxInputBytes) {
+        throw Failure({"RESOURCE_EXHAUSTED", "append: Input buffers exceed their byte limit.", RetryHint::FixInput});
+    }
 }
 
 void CheckIdentity(const NStorage::TBaseState& state, const BaseIdentity& base)
@@ -191,7 +241,7 @@ void CheckReceipt(const iceberg::Snapshot& snapshot, const AppendResult& receipt
 {
     using Fields = iceberg::SnapshotSummaryFields;
     Require(receipt.snapshot_id == snapshot.snapshot_id && receipt.parent_snapshot_id == snapshot.parent_snapshot_id &&
-            receipt.snapshot_created_at_us == SnapshotTimeUs(snapshot) &&
+            receipt.snapshot_created_at_us == SnapshotTimeUs(snapshot, "CORRUPTION") &&
             SummaryMatches(snapshot, std::string(ContentHashKey), true, receipt.payload_hash) &&
             SummaryMatches(snapshot, Fields::kAddedRecords, false, std::to_string(receipt.rows_appended)) &&
             SummaryMatches(snapshot, Fields::kAddedDataFiles, false, std::to_string(receipt.data_files_added)) &&
@@ -249,6 +299,11 @@ public:
         , Scope_(std::move(scope))
     { }
 
+    ~TStagedCreate() override
+    {
+        Owner_->DiscardCandidate(Info_.collection_id);
+    }
+
     CollectionInfo Info() const override
     {
         return Info_;
@@ -305,6 +360,11 @@ public:
         , Context_(std::move(context))
         , Scope_(std::move(scope))
     { }
+
+    ~TStagedAppend() override
+    {
+        Owner_->DiscardCandidate(CollectionID_);
+    }
 
     AppendResult Receipt() const override
     {
@@ -389,8 +449,12 @@ Result<std::unique_ptr<StagedCreate>> TLocalStorageBackend::PrepareCreate(const 
 {
     return Guarded<Result<std::unique_ptr<StagedCreate>>>([&]() -> Result<std::unique_ptr<StagedCreate>> {
         CheckStore(store);
+        CheckIO(Dirs_->Latch()->Error(), "IO_ERROR", "write latch");
         auto profile = MakeProfile(request.schema, "INVALID_ARGUMENT");
         CheckIO(NStorage::CheckWriteCapacity(*Dirs_, Options_.Storage), "RESOURCE_EXHAUSTED", "storage preflight");
+        CheckIO(NStorage::CheckStorageCapacity(ComputeStoreUsage(), Options_.Storage),
+            "RESOURCE_EXHAUSTED",
+            "storage capacity");
         TakeIO(Dirs_->CreateCollection(request.collection_id), "IO_ERROR", "create collection directories");
         auto attempt = TakeIO(NIO::TIOAttempt::Make({Store_.store_id,
                                                         request.collection_id,
@@ -434,6 +498,23 @@ Result<std::unique_ptr<StagedCreate>> TLocalStorageBackend::PrepareCreate(const 
     });
 }
 
+Status TLocalStorageBackend::CheckAppendAdmissible(const StoreInfo& store,
+    const CollectionInfo& collection,
+    const NormalizedInput& input)
+{
+    return Guarded<Status>([&]() -> Status {
+        CheckStore(store);
+        CheckIO(Dirs_->Latch()->Error(), "IO_ERROR", "write latch");
+        (void)MakeProfile(collection.schema, "INVALID_ARGUMENT");
+        CheckWriterInput(collection.schema, input, Options_.Writer);
+        CheckIO(NStorage::CheckWriteCapacity(*Dirs_, Options_.Storage), "RESOURCE_EXHAUSTED", "storage preflight");
+        CheckIO(NStorage::CheckStorageCapacity(ComputeStoreUsage(), Options_.Storage),
+            "RESOURCE_EXHAUSTED",
+            "storage capacity");
+        return {};
+    });
+}
+
 Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const StoreInfo& store,
     const BoundOperation& binding,
     const CollectionInfo& collection,
@@ -442,16 +523,13 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
 {
     return Guarded<Result<std::unique_ptr<StagedAppend>>>([&]() -> Result<std::unique_ptr<StagedAppend>> {
         CheckStore(store);
+        CheckIO(Dirs_->Latch()->Error(), "IO_ERROR", "write latch");
         Require(binding.collection_id == collection.collection_id &&
                 binding.base.collection_id == collection.collection_id &&
                 binding.base.table_uuid == collection.table_uuid && binding.base.store_id == Store_.store_id,
             "INVALID_ARGUMENT",
             "binding does not match the collection");
-        if (input.rows.empty() || static_cast<int64_t>(input.rows.size()) > Options_.Writer.MaxRows) {
-            Fail("INVALID_ARGUMENT",
-                "append",
-                std::format("an append must contain 1..{} rows", Options_.Writer.MaxRows));
-        }
+        CheckWriterInput(collection.schema, input, Options_.Writer);
         const auto base = ResolveBase(binding.base);
         CheckDeadline(deadline);
         CheckIO(NStorage::CheckWriteCapacity(*Dirs_, Options_.Storage), "RESOURCE_EXHAUSTED", "storage preflight");
@@ -517,7 +595,7 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
             .rows_appended = static_cast<int64_t>(input.rows.size()),
             .data_files_added = 1,
             .compressed_data_bytes_added = data.DataFile->file_size_in_bytes,
-            .snapshot_created_at_us = SnapshotTimeUs(*snapshot),
+            .snapshot_created_at_us = SnapshotTimeUs(*snapshot, "IO_ERROR"),
             .durability_profile = Store_.profile_id,
             .receipt_version = 1};
         NStorage::TPublicationContext context{.Directories = Dirs_,
@@ -541,24 +619,62 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
     });
 }
 
+void TLocalStorageBackend::ConfirmPublication(std::string_view collectionID, std::string_view metadataLocation)
+{
+    std::lock_guard lock(Mutex_);
+    auto it = Collections_.find(collectionID);
+    if (it == Collections_.end()) {
+        return;
+    }
+    auto& state = it->second;
+    if (state.Tentative && state.Tentative->MetadataLocation == metadataLocation) {
+        state.Confirmed = std::move(state.Tentative);
+    }
+    state.Tentative.reset();
+}
+
+void TLocalStorageBackend::DiscardCandidate(std::string_view collectionID)
+{
+    std::lock_guard lock(Mutex_);
+    auto it = Collections_.find(collectionID);
+    if (it != Collections_.end()) {
+        it->second.Tentative.reset();
+    }
+}
+
+void TLocalStorageBackend::InvalidateCache()
+{
+    std::lock_guard lock(Mutex_);
+    VerifiedGeneration_ = false;
+    Collections_.clear();
+}
+
 Status TLocalStorageBackend::VerifyRetained(const StoreInfo& store,
     std::span<const CollectionView> collections,
     std::span<const OperationRecord> operations)
 {
     return Guarded<Status>([&]() -> Status {
         CheckStore(store);
+        CheckIO(Dirs_->Latch()->Error(), "IO_ERROR", "write latch");
         std::map<std::string, TCollectionState, std::less<>> verified;
+        NStorage::TStorageUsage totalUsage;
         for (const auto& view : collections) {
             Require(view.base.collection_id == view.info.collection_id &&
                     view.base.table_uuid == view.info.table_uuid &&
                     view.base.current_snapshot_id == view.info.current_snapshot_id,
                 "CORRUPTION",
                 "collection view identity is inconsistent");
-            auto state = VerifyCollection(view.base);
+            auto state = ResolveVerified(view.base);
             CheckSchema(*state->Metadata, view.info.schema);
             CheckHistory(*state->Metadata, view.info.collection_id, operations);
+            totalUsage = TakeIO(NStorage::ReplaceUsage(totalUsage, {.Previous = {}, .Next = state->Usage}),
+                "CORRUPTION",
+                "aggregate storage usage");
             verified[view.info.collection_id].Confirmed = std::move(state);
         }
+        CheckIO(NStorage::CheckStorageCapacity(totalUsage, Options_.Storage),
+            "CORRUPTION",
+            "retained storage capacity");
         for (const auto& operation : operations) {
             Require(operation.state != OperationState::Committed || verified.contains(operation.binding.collection_id),
                 "CORRUPTION",
@@ -566,6 +682,7 @@ Status TLocalStorageBackend::VerifyRetained(const StoreInfo& store,
         }
         std::lock_guard lock(Mutex_);
         Collections_ = std::move(verified);
+        VerifiedGeneration_ = true;
         return {};
     });
 }
@@ -634,6 +751,32 @@ std::shared_ptr<const NStorage::TBaseState> TLocalStorageBackend::ResolveBase(co
     std::lock_guard lock(Mutex_);
     Collections_[base.collection_id].Confirmed = verified;
     return verified;
+}
+
+std::shared_ptr<const NStorage::TBaseState> TLocalStorageBackend::ResolveVerified(const BaseIdentity& base)
+{
+    std::shared_ptr<const NStorage::TBaseState> cached;
+    {
+        std::lock_guard lock(Mutex_);
+        if (VerifiedGeneration_) {
+            const auto it = Collections_.find(base.collection_id);
+            if (it != Collections_.end() && it->second.Confirmed &&
+                it->second.Confirmed->MetadataLocation == base.metadata_location)
+            {
+                cached = it->second.Confirmed;
+            }
+        }
+    }
+    if (cached) {
+        CheckIdentity(*cached, base);
+        const std::shared_ptr<iceberg::FileIO> view =
+            TakeIceberg(FileIO_->ReadOnlyView(), "IO_ERROR", "open read-only FileIO");
+        (void)TakeIceberg(view->ReadFile(base.metadata_location, static_cast<size_t>(cached->Usage.RootBytes)),
+            "CORRUPTION",
+            "verify retained root");
+        return cached;
+    }
+    return VerifyCollection(base);
 }
 
 std::shared_ptr<const NStorage::TBaseState> TLocalStorageBackend::VerifyCollection(const BaseIdentity& base) const

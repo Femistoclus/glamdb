@@ -22,7 +22,10 @@ template <class T>
 T Take(iceberg::Result<T> result, std::string_view code, std::string_view context)
 {
     if (!result) {
-        throw Failure({std::string(code),
+        const auto kind = result.error().kind;
+        const auto effective =
+            (kind == iceberg::ErrorKind::kNotFound || kind == iceberg::ErrorKind::kInvalid) ? "CORRUPTION" : code;
+        throw Failure({std::string(effective),
             BoundedDiagnostic(std::string(context) + ": " + result.error().message),
             RetryHint::OperatorAction});
     }

@@ -1,7 +1,11 @@
 #include "storage/engine.h"
+
+#include "core/backend/local_storage_backend.h"
+#include "core/engine/engine_factory.h"
 #include "tests/support/temp_dir.h"
 
 #include <arrow/api.h>
+#include <arrow/c/bridge.h>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -387,6 +391,176 @@ TEST_F(EngineVerticalTest, MissingCommittedDataFailsClosed)
     ASSERT_EQ(files.size(), 2U);
     std::filesystem::remove(files.front());
     EXPECT_FALSE(OpenExisting({Root_.string(), test::store_id}));
+}
+
+TEST_F(EngineVerticalTest, CursorDetectedCorruptionClosesReadiness)
+{
+    Committed(FirstOperation, FirstRows);
+    const auto cursor = Open({});
+    ASSERT_NE(cursor, nullptr);
+
+    const auto files = DataFiles();
+    ASSERT_EQ(files.size(), 1U);
+    std::filesystem::remove(files.front());
+
+    const auto next = cursor->Next();
+    ASSERT_FALSE(next);
+    EXPECT_EQ(next.error().code, "CORRUPTION");
+
+    const auto collection = Engine_->GetCollection(test::collection_id);
+    ASSERT_FALSE(collection);
+    EXPECT_EQ(collection.error().code, "RECOVERY_REQUIRED");
+
+    const auto blocked = Append(SecondOperation, SecondRows);
+    EXPECT_EQ(blocked.disposition, CommitDisposition::CommitUnknown);
+    ASSERT_TRUE(blocked.error);
+    EXPECT_EQ(blocked.error->code, "RECOVERY_REQUIRED");
+    Engine_.reset();
+}
+
+TEST_F(EngineVerticalTest, ReturnedArrowBuffersRetainStoreLeaseAfterCursorAndEngineRelease)
+{
+    Committed(FirstOperation, FirstRows);
+    auto cursor = Open({});
+    ASSERT_NE(cursor, nullptr);
+
+    auto batch = cursor->Next();
+    ASSERT_TRUE(batch);
+    ASSERT_NE(*batch, nullptr);
+
+    auto slice = (*batch)->column(0)->Slice(0, 1);
+    ArrowArray exported{};
+    ASSERT_TRUE(arrow::ExportArray(*(*batch)->column(1), &exported).ok());
+
+    batch = std::shared_ptr<arrow::RecordBatch>{};
+    cursor.reset();
+    ASSERT_TRUE(Engine_->Shutdown(1000ms));
+    Engine_.reset();
+
+    const auto lockedBySlice = OpenExisting({Root_.string(), test::store_id});
+    ASSERT_FALSE(lockedBySlice);
+    EXPECT_EQ(lockedBySlice.error().code, "STATE_IN_USE");
+
+    slice.reset();
+    const auto lockedByExport = OpenExisting({Root_.string(), test::store_id});
+    ASSERT_FALSE(lockedByExport);
+    EXPECT_EQ(lockedByExport.error().code, "STATE_IN_USE");
+
+    if (exported.release != nullptr) {
+        exported.release(&exported);
+    }
+
+    auto reopened = OpenExisting({Root_.string(), test::store_id});
+    ASSERT_TRUE(reopened) << reopened.error().code << ": " << reopened.error().message;
+    Engine_ = *reopened;
+}
+
+TEST_F(EngineVerticalTest, ZeroLimitCursorChecksCancellationBeforeReturningEos)
+{
+    Committed(FirstOperation, FirstRows);
+    const auto zeroLimit = Open({.limit = 0});
+    ASSERT_NE(zeroLimit, nullptr);
+    zeroLimit->Cancel();
+    const auto next = zeroLimit->Next();
+    ASSERT_FALSE(next);
+    EXPECT_EQ(next.error().code, "CANCELLED");
+}
+
+TEST_F(EngineVerticalTest, PreBindingWriterRowLimitDoesNotConsumeOperationId)
+{
+    constexpr char WideCollection[] = "00000000-0000-4000-8000-0000000000c1";
+    const SchemaSpec wideSchema{{
+        {"s1", FieldType::String, false},
+        {"s2", FieldType::String, false},
+        {"n", FieldType::Int64, true},
+    }};
+    ASSERT_EQ(Engine_->CreateCollection({WideCollection, "wide", wideSchema}).disposition,
+        CommitDisposition::Committed);
+
+    const auto arrowSchema = arrow::schema({
+        arrow::field("s1", arrow::utf8(), false),
+        arrow::field("s2", arrow::utf8(), false),
+        arrow::field("n", arrow::int64(), true),
+    });
+    const auto oversizedBatch = arrow::RecordBatch::Make(arrowSchema,
+        1,
+        {
+            Column<arrow::StringBuilder>(std::vector<std::optional<std::string>>{std::string(1048576, 'a')},
+                arrow::utf8()),
+            Column<arrow::StringBuilder>(std::vector<std::optional<std::string>>{std::string(1048561, 'b')},
+                arrow::utf8()),
+            Column<arrow::Int64Builder>(std::vector<std::optional<int64_t>>{std::nullopt}, arrow::int64()),
+        });
+
+    const auto rejected = Engine_->AppendDurable({WideCollection, FirstOperation, {}, {oversizedBatch}});
+    EXPECT_EQ(rejected.disposition, CommitDisposition::DefinitelyNotCommitted);
+    ASSERT_TRUE(rejected.error);
+    EXPECT_EQ(rejected.error->code, "RESOURCE_EXHAUSTED");
+    EXPECT_EQ(rejected.error->retry_hint, RetryHint::FixInput);
+
+    const auto lookup = Engine_->FindAppendOutcome(WideCollection, FirstOperation);
+    ASSERT_TRUE(lookup);
+    EXPECT_FALSE(lookup->has_value());
+
+    const auto validBatch = arrow::RecordBatch::Make(arrowSchema,
+        1,
+        {
+            Column<arrow::StringBuilder>(std::vector<std::optional<std::string>>{std::string("ok")}, arrow::utf8()),
+            Column<arrow::StringBuilder>(std::vector<std::optional<std::string>>{std::string("row")}, arrow::utf8()),
+            Column<arrow::Int64Builder>(std::vector<std::optional<int64_t>>{42}, arrow::int64()),
+        });
+    const auto committed = Engine_->AppendDurable({WideCollection, FirstOperation, {}, {validBatch}});
+    EXPECT_EQ(committed.disposition, CommitDisposition::Committed);
+}
+
+TEST_F(EngineVerticalTest, MultiCollectionStoreCapacityEnforcedAcrossCommitsAndRecovery)
+{
+    ASSERT_TRUE(Engine_->Shutdown(1000ms));
+    Engine_.reset();
+
+    const auto customRoot = Temporary_.path / "capped-store";
+    const auto makeFactory = [](std::size_t maxSnapshots) -> detail::BackendFactory {
+        return [maxSnapshots](const std::filesystem::path& path,
+                   const StoreInfo& info) -> Result<std::shared_ptr<detail::StorageBackend>> {
+            detail::TLocalStorageOptions options;
+            options.Storage.Store.Snapshots = maxSnapshots;
+            auto backend = detail::TLocalStorageBackend::Open(path, info, options);
+            if (!backend) {
+                return std::unexpected(backend.error());
+            }
+            return std::shared_ptr<detail::StorageBackend>(std::move(*backend));
+        };
+    };
+
+    constexpr char SecondCollection[] = "00000000-0000-4000-8000-0000000000b2";
+    auto capped = detail::EngineFactory::CreateWith({test::store_id, customRoot.string()}, makeFactory(1));
+    ASSERT_TRUE(capped) << capped.error().message;
+    auto engine = std::move(*capped);
+    ASSERT_EQ(engine->CreateCollection({test::collection_id, "events-a", Schema}).disposition,
+        CommitDisposition::Committed);
+    ASSERT_EQ(engine->CreateCollection({SecondCollection, "events-b", Schema}).disposition,
+        CommitDisposition::Committed);
+
+    const auto first = engine->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
+    ASSERT_EQ(first.disposition, CommitDisposition::Committed);
+
+    const auto second = engine->AppendDurable({SecondCollection, SecondOperation, {}, {Batch(SecondRows)}});
+    EXPECT_EQ(second.disposition, CommitDisposition::DefinitelyNotCommitted);
+    EXPECT_FALSE(engine->GetCollection(SecondCollection)->current_snapshot_id);
+    ASSERT_TRUE(engine->Shutdown(1000ms));
+    engine.reset();
+
+    auto wider = detail::EngineFactory::OpenWith({customRoot.string(), test::store_id}, makeFactory(2));
+    ASSERT_TRUE(wider) << wider.error().message;
+    engine = std::move(*wider);
+    ASSERT_EQ(engine->AppendDurable({SecondCollection, ThirdOperation, {}, {Batch(SecondRows)}}).disposition,
+        CommitDisposition::Committed);
+    ASSERT_TRUE(engine->Shutdown(1000ms));
+    engine.reset();
+
+    const auto tooSmall = detail::EngineFactory::OpenWith({customRoot.string(), test::store_id}, makeFactory(1));
+    ASSERT_FALSE(tooSmall);
+    EXPECT_EQ(tooSmall.error().code, "CORRUPTION");
 }
 
 } // namespace

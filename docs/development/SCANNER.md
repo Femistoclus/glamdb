@@ -8,9 +8,10 @@ them the public factories install no backend and collection creation, appends
 and scans report `DEPENDENCY_UNAVAILABLE`.
 
 > [!IMPORTANT]
-> This code has not yet been built or run against the pinned Iceberg
-> dependency. Only the Arrow-only parts (`storage_mapping`, `predicate`) have
-> executed unit tests. See [Validation status](#validation-status).
+> The bridge and scanner are built and tested against the pinned Arrow, Parquet,
+> Iceberg, and SQLite dependencies (`glamdb_unit` and `glamdb_vertical`).
+> Full-engine sanitizer runs and power-loss qualification remain separate steps.
+> See [Validation status](#validation-status).
 
 ## Write path
 
@@ -34,19 +35,19 @@ ready backend remain for coordinator tests.
   size and the snapshot timestamp in microseconds.
 - `iceberg::Table` requires a catalog; the backend passes `TInertCatalog`,
   whose every operation fails, so no Iceberg commit can bypass the coordinator.
-- Guard candidates are tentative. A later binding whose base is the candidate
-  root proves the outer COMMIT and promotes it; otherwise the backend
-  re-verifies the committed root with `VerifyReachable`.
-- `VerifyRetained` verifies every collection root, its schema, and a one-to-one
-  mapping between retained snapshots and committed receipts. Missing or
+- Guard candidates are tentative until the coordinator confirms the outer
+  SQLite `COMMIT` via `ConfirmPublication` (or a later binding/recovery
+  observes the committed root). Rollback discards the tentative candidate.
+- `VerifyRetained` verifies every collection root, its schema, a one-to-one
+  mapping between retained snapshots and committed receipts, and the aggregate
+  multi-collection store usage against `TStorageLimits::Store`. Missing or
   inconsistent committed state is `CORRUPTION`, which closes readiness.
 
-Known limits: the writer accepts 1..10000 rows and at most 16 MiB per append,
-and capacity preflight runs inside `PrepareAppend`. Both are checked after the
-coordinator has bound the operation, so a rejected append becomes a permanent
-`DefinitelyNotCommitted` outcome for that operation ID. The default storage
-limits require free-space reserves (see `TStorageLimits`). Orphan files from
-failed attempts remain.
+Known limits: `CheckAppendAdmissible` checks writer row/byte limits (1..10000
+rows, 2 MiB per row including fixed slot headers for `NULL` cells, 16 MiB Arrow
+buffer total) and storage capacity preflight before the coordinator binds the
+operation in SQLite. The default storage limits require free-space reserves
+(see `TStorageLimits`). Orphan files from failed attempts remain.
 
 ## Scan path
 
@@ -69,9 +70,11 @@ joins a writer attempt or holds a SQLite read transaction.
   count, then filtered, projected and limited. Batches have at most
   `batch_rows` rows and the exact `Info().output_schema`. `limit = 0` and empty
   views return `nullptr` from the first `Next()`.
-- The cursor retains the engine state, and therefore the store lease, until it
-  is released. `Cancel()` or `Engine::Shutdown()` makes `Next()` return
-  `CANCELLED`; `Info()` remains valid. Read failures are errors, never EOS.
+- Both the cursor and returned Arrow buffers retain the store lease until the
+  last dependent handle (including array slices and C Data exports) is
+  released. `Cancel()` or `Engine::Shutdown()` makes `Next()` return
+  `CANCELLED`; `Info()` remains valid. Detected corruption during `Next()`
+  closes engine readiness. Read failures are errors, never EOS.
 
 Not implemented: file/row-group pruning, compound predicates (`And`, `Or`,
 `Not`, `In`, `IsNull`), streaming planning, runtime memory leases and quotas.
@@ -82,6 +85,6 @@ Not implemented: file/row-group pruning, compound predicates (`And`, `Or`,
 | --- | --- |
 | `cmake --preset local && cmake --build --preset local` (GCC 14.2.0, `GLAMDB_BUILD_STORAGE=ON`) | PASS |
 | `tests/unit/storage_mapping_test.cpp`, `tests/unit/scan_predicate_test.cpp` (`glamdb_unit`) | 10/10 PASS |
-| `tests/vertical/engine_vertical_test.cpp` (`glamdb_vertical`, CTest labels `vertical;scan`) | 10/10 PASS |
-| `ctest --preset local` (`unit`, `vertical`, `fault`, `integration`, `installed_consumer`, `tooling`, `smoke`) | 364/364 PASS (standalone `RecoveryChildProcess` helper skipped as expected; executed by its parent test) |
+| `tests/vertical/engine_vertical_test.cpp` (`glamdb_vertical`, CTest labels `vertical;scan`) | 15/15 PASS |
+| `ctest --preset local` (`unit`, `vertical`, `fault`, `integration`, `installed_consumer`, `tooling`, `smoke`) | 369/369 PASS (standalone `RecoveryChildProcess` helper skipped as expected; executed by its parent test) |
 | `cmake --build --preset local --target format-check` and `clang-tidy-18` on new/modified TUs | PASS (`format-check` 117/117 files; full-repo `tidy-check` and sanitizer presets not run in this session) |

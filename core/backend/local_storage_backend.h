@@ -48,19 +48,25 @@ public:
 
     Result<std::unique_ptr<StagedCreate>>
     PrepareCreate(const StoreInfo& store, const CreateCollectionRequest& request, std::string_view attempt_id) override;
+    Status CheckAppendAdmissible(const StoreInfo& store,
+        const CollectionInfo& collection,
+        const NormalizedInput& input) override;
     Result<std::unique_ptr<StagedAppend>> PrepareAppend(const StoreInfo& store,
         const BoundOperation& binding,
         const CollectionInfo& collection,
         const NormalizedInput& input,
         std::chrono::steady_clock::time_point deadline) override;
+    void ConfirmPublication(std::string_view collectionID, std::string_view metadataLocation) override;
+    void InvalidateCache() override;
     Status VerifyRetained(const StoreInfo& store,
         std::span<const CollectionView> collections,
         std::span<const OperationRecord> operations) override;
     Result<std::shared_ptr<iceberg::FileIO>> ReadOnlyFileIO() override;
 
-    // A verified candidate is tentative until a later binding shows its root
-    // as the committed SQLite pointer, or recovery re-verifies it.
+    // A verified candidate is tentative until the outer COMMIT is confirmed or
+    // a later binding/recovery observes its root as the committed SQLite pointer.
     void RecordCandidate(std::string_view collectionID, std::shared_ptr<const NGlamDB::NStorage::TBaseState> candidate);
+    void DiscardCandidate(std::string_view collectionID);
 
 private:
     struct TCollectionState
@@ -77,6 +83,7 @@ private:
 
     std::mutex Mutex_;
     std::map<std::string, TCollectionState, std::less<>> Collections_;
+    bool VerifiedGeneration_ = false;
 
     TLocalStorageBackend(StoreInfo store,
         TLocalStorageOptions options,
@@ -86,6 +93,7 @@ private:
     void CheckStore(const StoreInfo& store) const;
     NGlamDB::NStorage::TStorageUsage ComputeStoreUsage();
     std::shared_ptr<const NGlamDB::NStorage::TBaseState> ResolveBase(const BaseIdentity& base);
+    std::shared_ptr<const NGlamDB::NStorage::TBaseState> ResolveVerified(const BaseIdentity& base);
     std::shared_ptr<const NGlamDB::NStorage::TBaseState> VerifyCollection(const BaseIdentity& base) const;
 };
 
