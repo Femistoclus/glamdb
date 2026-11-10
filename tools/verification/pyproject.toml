@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glamdb-verify"
+version = "0.1.0"
+description = "Independent GlamDB canonical fixtures, row oracle and fault evidence validation"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+glamdb-verify = "glamdb_verify.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

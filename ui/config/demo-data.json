@@ -1,0 +1,238 @@
+[
+  {
+    "info": {
+      "collection_id": "f5c3a51d-ced5-56fe-bccc-52b7bd68f5ac",
+      "name": "dreamhouse_events",
+      "table_uuid": "947aaa0e-e87c-57e7-8618-2e269cfb92df",
+      "schema": {
+        "schema_id": 0,
+        "fields": [
+          {
+            "field_id": 1,
+            "name": "key",
+            "type": "string",
+            "nullable": false
+          },
+          {
+            "field_id": 2,
+            "name": "event",
+            "type": "string",
+            "nullable": false
+          },
+          {
+            "field_id": 3,
+            "name": "country",
+            "type": "string",
+            "nullable": true
+          },
+          {
+            "field_id": 4,
+            "name": "revenue",
+            "type": "float64",
+            "nullable": true
+          },
+          {
+            "field_id": 5,
+            "name": "active",
+            "type": "bool",
+            "nullable": false
+          },
+          {
+            "field_id": 6,
+            "name": "occurred_at",
+            "type": "timestamp_us_utc",
+            "nullable": false
+          }
+        ]
+      },
+      "mode": "append",
+      "creation_sequence": 1,
+      "current_snapshot_id": "2",
+      "backend": "mock",
+      "mock": true,
+      "durability_validation": "designed"
+    },
+    "snapshots": [
+      {
+        "snapshot_id": "1",
+        "parent_id": null,
+        "created_at_us": "1794317791171406",
+        "operation_id": "48453822-5585-5d12-9093-8afc8f21572e",
+        "rows_added": 2,
+        "rows": [
+          {
+            "key": "dream-001",
+            "event": "dreamhouse_opened",
+            "country": "US",
+            "revenue": 249.0,
+            "active": true,
+            "occurred_at": "2026-01-01T10:00:00.000001Z"
+          },
+          {
+            "key": "dream-002",
+            "event": "pool_party",
+            "country": "FR",
+            "revenue": 175.5,
+            "active": true,
+            "occurred_at": "2026-01-02T10:00:00.000000Z"
+          }
+        ]
+      },
+      {
+        "snapshot_id": "2",
+        "parent_id": "1",
+        "created_at_us": "1794317791171510",
+        "operation_id": "bb986dad-7203-550b-a00e-ebd8e8c28ee3",
+        "rows_added": 2,
+        "rows": [
+          {
+            "key": "dream-001",
+            "event": "dreamhouse_opened",
+            "country": "US",
+            "revenue": 249.0,
+            "active": true,
+            "occurred_at": "2026-01-01T10:00:00.000001Z"
+          },
+          {
+            "key": "dream-002",
+            "event": "pool_party",
+            "country": "FR",
+            "revenue": 175.5,
+            "active": true,
+            "occurred_at": "2026-01-02T10:00:00.000000Z"
+          },
+          {
+            "key": "dream-001",
+            "event": "dreamhouse_opened",
+            "country": null,
+            "revenue": null,
+            "active": false,
+            "occurred_at": "2026-01-03T10:00:00.000000Z"
+          },
+          {
+            "key": "dream-004",
+            "event": "wardrobe_refresh",
+            "country": "GB",
+            "revenue": 89.99,
+            "active": true,
+            "occurred_at": "2026-01-04T10:00:00.000000Z"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "info": {
+      "collection_id": "25e70ee4-1639-5642-bf1c-888c573ee0a7",
+      "name": "pink_inventory",
+      "table_uuid": "2f0f933e-fd0e-54d3-9ac5-e64c79064949",
+      "schema": {
+        "schema_id": 0,
+        "fields": [
+          {
+            "field_id": 1,
+            "name": "key",
+            "type": "string",
+            "nullable": false
+          },
+          {
+            "field_id": 2,
+            "name": "event",
+            "type": "string",
+            "nullable": false
+          },
+          {
+            "field_id": 3,
+            "name": "country",
+            "type": "string",
+            "nullable": true
+          },
+          {
+            "field_id": 4,
+            "name": "revenue",
+            "type": "float64",
+            "nullable": true
+          },
+          {
+            "field_id": 5,
+            "name": "active",
+            "type": "bool",
+            "nullable": false
+          },
+          {
+            "field_id": 6,
+            "name": "occurred_at",
+            "type": "timestamp_us_utc",
+            "nullable": false
+          }
+        ]
+      },
+      "mode": "append",
+      "creation_sequence": 2,
+      "current_snapshot_id": "4",
+      "backend": "mock",
+      "mock": true,
+      "durability_validation": "designed"
+    },
+    "snapshots": [
+      {
+        "snapshot_id": "3",
+        "parent_id": null,
+        "created_at_us": "1794317791171660",
+        "operation_id": "f99370ef-fd9d-5c8e-a014-044614d537d7",
+        "rows_added": 2,
+        "rows": [
+          {
+            "key": "pink-001",
+            "event": "pink_shoes",
+            "country": "IT",
+            "revenue": 120.0,
+            "active": true,
+            "occurred_at": "2026-01-05T09:00:00.000000Z"
+          },
+          {
+            "key": "pink-002",
+            "event": "silk_bow",
+            "country": "FR",
+            "revenue": 24.5,
+            "active": true,
+            "occurred_at": "2026-01-06T09:00:00.000000Z"
+          }
+        ]
+      },
+      {
+        "snapshot_id": "4",
+        "parent_id": "3",
+        "created_at_us": "1794317791171726",
+        "operation_id": "51ad189a-cd07-549f-8e94-43c5478b2192",
+        "rows_added": 1,
+        "rows": [
+          {
+            "key": "pink-001",
+            "event": "pink_shoes",
+            "country": "IT",
+            "revenue": 120.0,
+            "active": true,
+            "occurred_at": "2026-01-05T09:00:00.000000Z"
+          },
+          {
+            "key": "pink-002",
+            "event": "silk_bow",
+            "country": "FR",
+            "revenue": 24.5,
+            "active": true,
+            "occurred_at": "2026-01-06T09:00:00.000000Z"
+          },
+          {
+            "key": "pink-003",
+            "event": "glitter_bag",
+            "country": null,
+            "revenue": 79.0,
+            "active": false,
+            "occurred_at": "2026-01-07T09:00:00.000000Z"
+          }
+        ]
+      }
+    ]
+  }
+]

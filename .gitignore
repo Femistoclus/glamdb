@@ -86,4 +86,13 @@ Testing/
 artifacts/
 CMakeUserPresets.json
 __pycache__/
+.venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+node_modules/
+playwright-report/
+test-results/
 .DS_Store

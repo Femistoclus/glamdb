@@ -2,6 +2,10 @@
 
 ## Requirements
 
+This page covers C++. For the implemented Python SDK/mock and browser UI, use
+[WORKBENCH.md](WORKBENCH.md). Those packages do not link the C++ scaffold or
+require an Arrow/Iceberg source build.
+
 - CMake 3.28 or newer, Ninja, and Python 3.9 or newer.
 - Linux and a C++23 compiler **and standard library** with `std::expected`:
   GCC 14+ or Clang 18+ with a matching STL. Clang with an older system
@@ -85,8 +89,11 @@ power-loss durability.
 | `glamdb.installed_consumer` | Installed CMake package and public facade work without private headers. |
 | Future environment qualification | Durability and supported limits for the specifically tested platform and storage configuration. |
 
-See [COORDINATOR.md](COORDINATOR.md) for implemented behavior and current
-evidence. The [roadmap](../ROADMAP.md) defines the remaining evidence. Describe checks as
+See [COORDINATOR.md](COORDINATOR.md) for native implemented behavior and current
+evidence. Independent fixture, receipt/model and network-client/browser suites
+run separately, as recorded in [WORKBENCH_VALIDATION.md](WORKBENCH_VALIDATION.md).
+They do not qualify production file/scanner integration or physical durability.
+The [roadmap](../ROADMAP.md) defines the remaining evidence. Describe checks as
 designed, run with PASS/FAIL, or NOT RUN; a configured target alone is not a pass.
 Do not use proposed test labels or executable names as if they exist already.
 

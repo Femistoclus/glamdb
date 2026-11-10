@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glamdb-sdk"
+version = "0.1.0"
+description = "Network-only Python client for the GlamDB v0 HTTP API"
+requires-python = ">=3.10"
+dependencies = ["httpx>=0.28,<0.29", "pyarrow>=25,<26"]
+
+[project.optional-dependencies]
+test = ["pytest>=8.3,<10"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

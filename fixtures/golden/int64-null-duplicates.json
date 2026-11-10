@@ -1,0 +1,31 @@
+{
+  "fixture_version": 1,
+  "evidence_kind": "fixture",
+  "power_durability": "NOT VALIDATED",
+  "provenance": "Explicit hand-written schema and row hex; hashes computed independently with stdlib hashlib, without glamdb_verify imports.",
+  "schema": {
+    "fields": [
+      {
+        "name": "n",
+        "type": "int64",
+        "nullable": true
+      }
+    ]
+  },
+  "collection_id": "00112233-4455-6677-8899-aabbccddeeff",
+  "rows": [
+    {
+      "n": "9007199254740993"
+    },
+    {
+      "n": null
+    },
+    {
+      "n": "9007199254740993"
+    }
+  ],
+  "schema_canonical_hex": "434f4c554d4e41522d534348454d4100010001000100000001006e0301",
+  "schema_fingerprint": "4078bb95b0753db6f11470b1507afe1936afc16845b96029fbf1105110301685",
+  "canonical_hex": "434f4c554d4e41522d415050454e4400010000112233445566778899aabbccddeeff4078bb95b0753db6f11470b1507afe1936afc16845b96029fbf1105110301685030000000000000001010000000000200000010100000000002000",
+  "payload_sha256": "e9cbe7131f25c3f2932c48f755529fd10370a936c5182e2bca621d5f9e3c0fd7"
+}

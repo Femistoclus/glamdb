@@ -1,0 +1,63 @@
+{
+  "fixture_version": 1,
+  "evidence_kind": "fixture",
+  "power_durability": "NOT VALIDATED",
+  "provenance": "Explicit hand-written schema and row hex; hashes computed independently with stdlib hashlib, without glamdb_verify imports.",
+  "schema": {
+    "fields": [
+      {
+        "name": "s",
+        "type": "string",
+        "nullable": false
+      },
+      {
+        "name": "b",
+        "type": "bool",
+        "nullable": true
+      },
+      {
+        "name": "i",
+        "type": "int64",
+        "nullable": true
+      },
+      {
+        "name": "f",
+        "type": "float64",
+        "nullable": true
+      },
+      {
+        "name": "t",
+        "type": "timestamp_us_utc",
+        "nullable": true
+      }
+    ]
+  },
+  "collection_id": "00112233-4455-6677-8899-aabbccddeeff",
+  "rows": [
+    {
+      "s": "é",
+      "b": true,
+      "i": "-9223372036854775808",
+      "f": -0.0,
+      "t": "0001-01-01T00:00:00Z"
+    },
+    {
+      "s": "dup",
+      "b": false,
+      "i": "9223372036854775807",
+      "f": 1.5,
+      "t": "9999-12-31T23:59:59.999999Z"
+    },
+    {
+      "s": "dup",
+      "b": null,
+      "i": null,
+      "f": null,
+      "t": null
+    }
+  ],
+  "schema_canonical_hex": "434f4c554d4e41522d534348454d410001000500010000000100730100020000000100620201030000000100690301040000000100660401050000000100740501",
+  "schema_fingerprint": "24e0e6e92c6bf507bbdb0d552f86d237f3ddc945af2f6ae1f06edf4e22a75f3c",
+  "canonical_hex": "434f4c554d4e41522d415050454e4400010000112233445566778899aabbccddeeff24e0e6e92c6bf507bbdb0d552f86d237f3ddc945af2f6ae1f06edf4e22a75f3c03000000000000000102000000c3a90101010000000000000080010000000000000000010040d400014023ff0103000000647570010001ffffffffffffff7f01000000000000f83f01ff5f73cc0c448403010300000064757000000000",
+  "payload_sha256": "72b0d7fbd4d8097a8a848de273fbf13cffa462d20be481e87d8c788f64feef1b"
+}

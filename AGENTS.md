@@ -28,6 +28,16 @@ scanner are pending; collection/data operations require that internal backend.
 See [the coordinator guide](docs/development/COORDINATOR.md) for the integration
 contract and tested boundaries. Full engine durability remains unqualified.
 
+Independent verification tools, a Python network SDK and a browser workbench
+are implemented. They integrate through a separate, explicitly disposable
+in-memory mock adapter, not a production storage writer. The architecture and
+invariants below describe the intended engine, not qualified guarantees.
+
+The same UI can publish as a static browser-only demo on GitHub Pages. It has
+no API token or shared backend: tab-local rows/operations disappear on reload.
+JSON export is available there; network SDK and Arrow IPC remain connected-server
+features. Do not present BrowserDemoAPI as the public HTTP or durable core API.
+
 The first milestone is an embedded, synchronous, durable **append store** on
 local disk. A store has one owning process and one serialized writer; reads may
 run concurrently. Collections are fixed-schema, unpartitioned Iceberg v2 tables.
@@ -35,8 +45,8 @@ Append preserves every input row, including duplicate keys. It provides neither
 key uniqueness nor replacement semantics.
 
 Key-value upserts and deletes are a subsequent extension using copy-on-write
-and an explicit KV collection mode. HTTP, a network Python SDK, a browser UI,
-and object storage are later extensions. Compaction, snapshot expiration,
+and an explicit KV collection mode. Production HTTP/core integration and
+object storage remain later extensions. Compaction, snapshot expiration,
 garbage collection, asynchronous admission, replication, multiple writers, and
 schema evolution are outside the initial append scope. Consult
 [docs/ROADMAP.md](docs/ROADMAP.md) when assessing feature scope.
@@ -110,17 +120,45 @@ Preserve these boundaries when adding or changing engine behavior:
 | `core/` | Canonical input, catalog, coordinator, and internal storage-backend seam. |
 | `apps/glamdb/` | Store-management CLI and transport-only outcome serialization. |
 | `cmake/` | Build options, sanitizers, quality targets, and dependency recipes. |
-| `tests/` | Unit, new-process recovery, real SqlCatalog, SQLite VFS fault, and installed-consumer suites. |
-| `fixtures/`, `probes/`, `benchmarks/` | Deterministic inputs, isolated experiments, and measurements. |
+| `tests/` | Native unit/recovery/SqlCatalog/VFS/consumer suites, verification and actual SDK HTTP/HTTPS tests. |
+
+| `apps/mock_server/` | Disposable Python mock, real HTTP/Arrow, no warehouse/catalog access. |
+| `fixtures/`, `tools/verification/` | Literal canonical/metadata inputs, independent row oracle and evidence helpers. |
+| `sdk/python/`, `ui/` | Standalone Python HTTP SDK; HTML/CSS/ES-module pink workbench and browser/unit tests. |
+| `probes/`, `benchmarks/` | Reserved engine experiments and measurements. |
 | `scripts/` | Developer tooling, including quality checks. |
 | `third_party/` | Pinned upstream submodules and `lock.json`. |
 
 Read [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md) when placing new
-components. `sdk/` and `ui/` are reserved empty directories and may be absent
-from a fresh clone. Add components as needed by the task; the reserved layout
-does not imply implemented functionality.
+components. Read [the workbench guide](docs/development/WORKBENCH.md) for
+installation, runtime theme changes and testing. Its HTTP shapes are provisional
+mock adapter contracts; do not change the public C++ API to match them silently.
+For branding/static hosting read [PUBLIC_DEMO.md](docs/development/PUBLIC_DEMO.md).
+Preserve the supplied PNGs unchanged. Brand paths must be local assets; sizes
+belong in theme.json. Asset URLs must support both / and /glamdb/.
 
 ## Build and development commands
+
+Client/mock development uses Python 3.13 and Node 22+:
+
+```sh
+bash scripts/bootstrap-workbench.sh
+npm --prefix ui exec -- playwright install chromium
+bash scripts/check-workbench.sh
+```
+
+On Linux, install browser system dependencies with Playwright's `--with-deps`.
+All network tests require localhost sockets; HTTPS tests require OpenSSL. The
+check script runs real HTTP/HTTPS tests and Chromium, not only transport doubles.
+Node API tests also open localhost sockets to exercise Fetch gzip/Brotli decoding
+and Arrow cancellation. Session-isolation browser tests delay responses across
+collection, snapshot and connection changes.
+The check script also packages/serves the public demo under /glamdb/ and verifies no /v0/
+requests, token prompt, cross-visitor state or credential files are introduced.
+See [validation](docs/development/WORKBENCH_VALIDATION.md) for exact evidence and
+limits. Keep secrets in environment or process memory; never browser storage.
+Mock faults require explicit development configuration. Do not give the mock a
+production store path. Every production write must eventually use the C++ core.
 
 Requirements: CMake 3.28+, Ninja, Python 3.9+, Linux, and a C++23 compiler and
 standard library with `std::expected` (GCC 14+ or Clang 18+ with a matching STL).

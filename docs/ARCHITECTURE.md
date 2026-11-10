@@ -3,9 +3,12 @@
 This document describes the intended engine and its correctness boundaries.
 The current checkout implements the catalog and coordinator; the production
 durable file backend and scanner are pending. See the
-[coordinator guide](development/COORDINATOR.md) for tested behavior, the
-[roadmap](ROADMAP.md) for acceptance gates, and the
-[build guide](development/BUILDING.md) for commands that exist today.
+[coordinator guide](development/COORDINATOR.md) for tested behavior and the
+[roadmap](ROADMAP.md) for acceptance gates. The implemented SDK, workbench and
+independent verification tools use a disposable mock seam, described in the
+[adapter contract](development/HTTP_MOCK_CONTRACT.md); they do not qualify native
+storage integration. See the [build guide](development/BUILDING.md) and
+[workbench guide](development/WORKBENCH.md) for runnable commands.
 
 ## Model and scope
 

@@ -1,0 +1,113 @@
+{
+  "fixture_version": 1,
+  "evidence_kind": "expected-metadata-fixture",
+  "physical_manifest_validated": false,
+  "provenance": "Literal expected full key bounds and scan matches. Inputs for a future real writer/manifest harness; no physical Parquet or manifest is claimed.",
+  "schema": {
+    "fields": [
+      {
+        "name": "key",
+        "type": "string",
+        "nullable": false
+      },
+      {
+        "name": "value",
+        "type": "int64",
+        "nullable": true
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "long-ascii-truncated-footer",
+      "rows": [
+        {
+          "key": "common_ascii_prefix_longer_than_16_a",
+          "value": "10"
+        },
+        {
+          "key": "common_ascii_prefix_longer_than_16_z",
+          "value": null
+        }
+      ],
+      "footer_key_bounds": {
+        "lower": "common_ascii_pre",
+        "upper": "common_ascii_pre",
+        "truncated": true
+      },
+      "expected_key_bounds": {
+        "lower": "common_ascii_prefix_longer_than_16_a",
+        "upper": "common_ascii_prefix_longer_than_16_z"
+      },
+      "predicate": {
+        "op": "eq",
+        "field": "key",
+        "value": "common_ascii_prefix_longer_than_16_z"
+      },
+      "expected_keys": [
+        "common_ascii_prefix_longer_than_16_z"
+      ],
+      "expected_manifest_record_count": 2,
+      "expected_key_field_id": 1,
+      "expected_value_null_count": 1
+    },
+    {
+      "name": "utf8-key-1024-bytes-missing-footer",
+      "rows": [
+        {
+          "key": "💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖",
+          "value": "20"
+        },
+        {
+          "key": "é",
+          "value": "30"
+        }
+      ],
+      "footer_key_bounds": null,
+      "expected_key_bounds": {
+        "lower": "é",
+        "upper": "💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖"
+      },
+      "predicate": {
+        "op": "eq",
+        "field": "key",
+        "value": "💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖"
+      },
+      "expected_keys": [
+        "💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖"
+      ],
+      "expected_manifest_record_count": 2,
+      "expected_key_field_id": 1,
+      "expected_value_null_count": 0
+    },
+    {
+      "name": "binary-utf8-without-normalization",
+      "rows": [
+        {
+          "key": "é",
+          "value": null
+        },
+        {
+          "key": "é",
+          "value": "40"
+        }
+      ],
+      "footer_key_bounds": null,
+      "expected_key_bounds": {
+        "lower": "é",
+        "upper": "é"
+      },
+      "predicate": {
+        "op": "eq",
+        "field": "key",
+        "value": "é"
+      },
+      "expected_keys": [
+        "é"
+      ],
+      "expected_manifest_record_count": 2,
+      "expected_key_field_id": 1,
+      "expected_value_null_count": 1
+    }
+  ]
+}

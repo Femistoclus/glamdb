@@ -12,6 +12,12 @@ their scope and results. No whole-engine acceptance gate is claimed complete:
 production data-file integration, scan, capacity and power-loss qualification
 remain **NOT RUN**.
 
+Independent golden fixtures, a typed row oracle, receipt/fault-evidence helpers,
+a network SDK and pink browser UI are also implemented against a disposable
+mock. See the [client validation report](development/WORKBENCH_VALIDATION.md)
+for their separately executed checks. Production HTTP/core integration remains
+open; passing client mocks does not close a native qualification gate.
+
 ## Scope and dependencies
 
 G0 through G4 establish local append before the KV release. Build packaging,

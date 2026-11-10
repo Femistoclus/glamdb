@@ -10,6 +10,7 @@ glamdb/
 ├── .editorconfig
 ├── .gitmodules
 ├── apps/
+│   ├── mock_server/
 │   └── glamdb/
 │       ├── CMakeLists.txt
 │       └── main.cpp
@@ -23,11 +24,13 @@ glamdb/
 │   └── dependencies/
 │       └── sqlite/
 ├── tests/
+│   ├── verification/
 │   ├── unit/
 │   ├── integration/
 │   ├── fault/
 │   └── installed_consumer/
 ├── fixtures/
+├── tools/verification/
 ├── probes/
 ├── benchmarks/
 ├── sdk/
@@ -55,22 +58,23 @@ glamdb/
 | `cmake/` | Compiler options, sanitizers, quality targets, and dependency recipes. |
 | `tests/` | Unit, process recovery, real Iceberg catalog, VFS fault, and installed-library consumer tests. |
 | `fixtures/` | Shared deterministic test inputs and expected outputs. |
+| `apps/mock_server/` | Disposable in-memory adapter with real HTTP/Arrow and runtime config. |
+| `tools/verification/` | Literal canonical vectors, SQL 3VL oracle and receipt/fault-evidence tools. |
 | `probes/` | Isolated dependency and platform experiments. |
 | `benchmarks/` | Performance and capacity measurements. |
-| `sdk/`, `ui/` | Reserved empty directories. |
+| `sdk/python/` | Independently installable network SDK, unit tests and quickstart. |
+| `ui/` | Source-served HTML/CSS/ES modules, live theme JSON, Node unit and Playwright browser tests. |
 | `scripts/` | Developer tooling. |
 | `docs/development/` | Build and tooling instructions. |
 | `docs/ARCHITECTURE.md` | Intended engine semantics, persistence boundaries, and resource ownership. |
 | `docs/ROADMAP.md` | Implementation stages, prerequisites, and acceptance evidence. |
 | `third_party/` | Pinned upstream submodules and the direct dependency lock. |
 
-The tree includes reserved directories. The catalog and coordinator are
-implemented under `core/api/`, `core/catalog/` and `core/engine/`; production
-file I/O and scanning are pending. Read [ARCHITECTURE.md](ARCHITECTURE.md) for component responsibilities
-and [ROADMAP.md](ROADMAP.md) for the criteria that establish working behavior.
-
-`sdk/` and `ui/` contain no files, including placeholders. Git does not retain
-empty directories. Other reserved directories use `.gitkeep`.
+The catalog and coordinator are implemented under `core/api/`, `core/catalog/`
+and `core/engine/`; production file I/O and scanning are pending. Client and
+verification code uses an explicit mock seam. Read [ARCHITECTURE.md](ARCHITECTURE.md)
+for engine responsibilities, [ROADMAP.md](ROADMAP.md) for acceptance criteria,
+and [the workbench guide](development/WORKBENCH.md) for runnable client paths.
 
 Generated files belong in ignored `build/`, `.deps/`, and `artifacts/` directories.
 
@@ -108,3 +112,7 @@ benchmark replaces correctness tests. Share deterministic inputs and expected
 results through `fixtures/`; put generated stores, traces, and measurements in
 ignored output directories. See [BUILDING.md](development/BUILDING.md) for
 current commands and [COORDINATOR.md](development/COORDINATOR.md) for test scope.
+
+Independent Python suites live in `tests/verification/`, `sdk/python/tests/`,
+`apps/mock_server/tests/` and `tests/integration/test_network_sdk.py`; browser
+tests live in `ui/tests/`. Their results do not qualify the full native storage integration.

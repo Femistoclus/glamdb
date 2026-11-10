@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glamdb-mock"
+version = "0.1.0"
+description = "Disposable, explicitly synthetic development adapter for the GlamDB workbench"
+requires-python = ">=3.11"
+dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1", "pyarrow==25.0.0", "glamdb-verify==0.1.0"]
+
+[project.scripts]
+glamdb-mock = "glamdb_mock.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
