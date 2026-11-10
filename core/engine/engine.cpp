@@ -4,7 +4,13 @@
 #include "core/api/canonical.h"
 #include "core/api/codec.h"
 #include "core/engine/engine_factory.h"
+#include "core/engine/storage_mapping.h"
 #include "core/engine/store_lease.h"
+
+#if GLAMDB_HAS_STORAGE
+#include "core/backend/local_storage_backend.h"
+#include "core/scan/scan_cursor.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -88,6 +94,40 @@ AppendOutcome UnresolvedAppend(RecoveryContext context, std::string_view payload
         std::move(context)};
 }
 
+std::shared_ptr<StorageBackend>
+MakeBackend(const BackendFactory& factory, const std::filesystem::path& root, const StoreInfo& info)
+{
+    if (!factory) {
+        return {};
+    }
+    return Take(factory(root, info));
+}
+
+BackendFactory DefaultBackendFactory()
+{
+#if GLAMDB_HAS_STORAGE
+    return [](const std::filesystem::path& root, const StoreInfo& info) -> Result<std::shared_ptr<StorageBackend>> {
+        auto backend = TLocalStorageBackend::Open(root, info);
+        if (!backend) {
+            return std::unexpected(backend.error());
+        }
+        return std::shared_ptr<StorageBackend>(std::move(*backend));
+    };
+#else
+    return {};
+#endif
+}
+
+BackendFactory FixedBackend(std::shared_ptr<StorageBackend> backend)
+{
+    if (!backend) {
+        return {};
+    }
+    return [backend = std::move(backend)](const std::filesystem::path&, const StoreInfo&) {
+        return Result<std::shared_ptr<StorageBackend>>(backend);
+    };
+}
+
 } // namespace
 
 struct Engine::Impl
@@ -98,10 +138,19 @@ struct Engine::Impl
     std::shared_ptr<DurableSqliteCatalogStore> catalog;
     std::shared_ptr<StorageBackend> backend;
     mutable std::mutex state_mutex;
+    // Orders corruption reports against a publication decision. The writer
+    // takes it immediately before its final health check, inside the catalog
+    // guard, and holds it through the outer COMMIT or rollback. A reader that
+    // detects corruption takes it before closing readiness, so its error
+    // either prevents that publication or is surfaced after it completes.
+    // Lock order: catalog mutex -> commit_gate -> state_mutex. The writer
+    // never reports corruption while holding it.
+    std::mutex commit_gate;
     std::timed_mutex writer;
     std::atomic<bool> closing{false};
     bool ready = false;
     bool closed = false;
+    uint64_t health_generation = 0;
     int64_t pending_calls = 0;
     size_t owned_input_bytes = 0;
     std::vector<CollectionInfo> collections;
@@ -129,6 +178,29 @@ struct Engine::Impl
     {
         Require(!closing.load(), "CANCELLED", "engine is closing");
         Require(ready && !closed, "RECOVERY_REQUIRED", "authoritative reconciliation is required");
+    }
+
+    void CheckHealthy(uint64_t expected_generation) const
+    {
+        CheckReady();
+        Require(health_generation == expected_generation,
+            "RECOVERY_REQUIRED",
+            "authoritative reconciliation is required");
+    }
+
+    // The caller holds commit_gate. Final decision of a publication guard.
+    Status PublicationHealth(uint64_t expected_generation) const
+    {
+        std::lock_guard lock(state_mutex);
+        if (closing.load()) {
+            return std::unexpected(ErrorDetail{"CANCELLED", "engine is closing", RetryHint::OperatorAction});
+        }
+        if (!ready || closed || health_generation != expected_generation) {
+            return std::unexpected(ErrorDetail{"RECOVERY_REQUIRED",
+                "authoritative reconciliation is required",
+                RetryHint::SameIdAfterReconcile});
+        }
+        return {};
     }
 
     // The caller holds state_mutex. Recheck at every admission/writer boundary:
@@ -256,6 +328,9 @@ struct Engine::Impl
 
     CreateOutcome UnknownCreate(CreateRecoveryContext context, CommitPhase phase, ErrorDetail error)
     {
+        if (backend) {
+            backend->InvalidateCache();
+        }
         error.retry_hint = RetryHint::SameIdAfterReconcile;
         CreateOutcome outcome{CommitDisposition::CommitUnknown,
             phase,
@@ -264,6 +339,7 @@ struct Engine::Impl
             std::move(context)};
         std::lock_guard lock(state_mutex);
         ready = false;
+        ++health_generation;
         unresolved_create = outcome;
         return outcome;
     }
@@ -293,8 +369,13 @@ struct Engine::Impl
     void CloseOnCorruption(const ErrorDetail& error)
     {
         if (error.code == "CORRUPTION" || error.code == "UNSUPPORTED_STORE_VERSION") {
+            std::lock_guard gate(commit_gate);
+            if (backend) {
+                backend->InvalidateCache();
+            }
             std::lock_guard lock(state_mutex);
             ready = false;
+            ++health_generation;
         }
     }
 
@@ -316,19 +397,28 @@ struct Engine::Impl
                 }
             }
         } catch (...) {
+            if (backend) {
+                backend->InvalidateCache();
+            }
             std::lock_guard lock(state_mutex);
             ready = false;
+            ++health_generation;
             throw;
         }
     }
 
     void Recover(bool reopen)
     {
+        uint64_t start_generation = 0;
         {
             std::lock_guard lock(state_mutex);
             ready = false;
+            start_generation = ++health_generation;
         }
         if (reopen) {
+            if (backend) {
+                backend->InvalidateCache();
+            }
             catalog->Reopen();
         }
         VerifyStorage();
@@ -358,6 +448,12 @@ struct Engine::Impl
         catalog->ValidateInventory();
         RefreshCache();
         std::lock_guard lock(state_mutex);
+        if (health_generation != start_generation) {
+            if (backend) {
+                backend->InvalidateCache();
+            }
+            throw Failure({"CORRUPTION", "concurrent corruption detected during recovery", RetryHint::OperatorAction});
+        }
         active.reset();
         recovery.reset();
         pending_failure.reset();
@@ -370,9 +466,13 @@ struct Engine::Impl
         ErrorDetail error,
         std::optional<AppendOutcome> failure = std::nullopt)
     {
+        if (backend) {
+            backend->InvalidateCache();
+        }
         error.retry_hint = RetryHint::SameIdAfterReconcile;
         std::lock_guard lock(state_mutex);
         ready = false;
+        ++health_generation;
         active.reset();
         recovery = context;
         pending_failure = std::move(failure);
@@ -388,14 +488,24 @@ struct Engine::Impl
     FailBound(const BoundOperation& binding, CommitPhase phase, ErrorDetail error, bool publication_started = false)
     {
         error.message = BoundedDiagnostic(error.message);
-        error.retry_hint = RetryHint::NewOperationId;
+        // The bound ID is consumed either way. Capacity and corruption need
+        // operator action before any new operation can succeed.
+        const bool operatorAction = error.code == "RESOURCE_EXHAUSTED" || error.code == "CORRUPTION" ||
+            error.code == "UNSUPPORTED_STORE_VERSION";
+        error.retry_hint = operatorAction ? RetryHint::OperatorAction : RetryHint::NewOperationId;
         auto failure = Rejected(binding.operation_id, phase, error);
         try {
             catalog->RecordFailure(binding, failure);
+            if (error.code == "CORRUPTION" || error.code == "UNSUPPORTED_STORE_VERSION") {
+                if (backend) {
+                    backend->InvalidateCache();
+                }
+            }
             std::lock_guard lock(state_mutex);
             active.reset();
             if (error.code == "CORRUPTION" || error.code == "UNSUPPORTED_STORE_VERSION") {
                 ready = false;
+                ++health_generation;
             }
             return failure;
         } catch (const Failure& record_error) {
@@ -418,17 +528,29 @@ Result<std::shared_ptr<Engine>> EngineFactory::Create(const CreateStoreRequest& 
     std::shared_ptr<StorageBackend> backend,
     std::string sqlite_vfs)
 {
+    return CreateWith(request, FixedBackend(std::move(backend)), std::move(sqlite_vfs));
+}
+
+Result<std::shared_ptr<Engine>>
+EngineFactory::Open(const OpenStoreRequest& request, std::shared_ptr<StorageBackend> backend, std::string sqlite_vfs)
+{
+    return OpenWith(request, FixedBackend(std::move(backend)), std::move(sqlite_vfs));
+}
+
+Result<std::shared_ptr<Engine>>
+EngineFactory::CreateWith(const CreateStoreRequest& request, const BackendFactory& backend, std::string sqlite_vfs)
+{
     try {
         auto impl = std::make_shared<Engine::Impl>();
         impl->info = {request.store_id, request.profile_id, 1};
         impl->limits = request.limits;
         ValidateConfig(impl->info, impl->limits);
         impl->lease = StoreLease::Create(request.absolute_root, impl->info);
+        impl->backend = MakeBackend(backend, impl->lease->Root(), impl->info);
         impl->catalog = DurableSqliteCatalogStore::Create(impl->lease->Root() / "catalog.sqlite",
             impl->info,
             impl->limits,
             std::move(sqlite_vfs));
-        impl->backend = std::move(backend);
         impl->Recover(false);
         impl->lease->MarkReady(impl->info);
         return std::shared_ptr<Engine>(new Engine(std::move(impl)));
@@ -440,7 +562,7 @@ Result<std::shared_ptr<Engine>> EngineFactory::Create(const CreateStoreRequest& 
 }
 
 Result<std::shared_ptr<Engine>>
-EngineFactory::Open(const OpenStoreRequest& request, std::shared_ptr<StorageBackend> backend, std::string sqlite_vfs)
+EngineFactory::OpenWith(const OpenStoreRequest& request, const BackendFactory& backend, std::string sqlite_vfs)
 {
     try {
         auto impl = std::make_shared<Engine::Impl>();
@@ -448,11 +570,11 @@ EngineFactory::Open(const OpenStoreRequest& request, std::shared_ptr<StorageBack
         impl->limits = request.limits;
         ValidateConfig(impl->info, impl->limits);
         impl->lease = StoreLease::Open(request.absolute_root, impl->info);
+        impl->backend = MakeBackend(backend, impl->lease->Root(), impl->info);
         impl->catalog = DurableSqliteCatalogStore::Open(impl->lease->Root() / "catalog.sqlite",
             impl->info,
             impl->limits,
             std::move(sqlite_vfs));
-        impl->backend = std::move(backend);
         impl->Recover(false);
         return std::shared_ptr<Engine>(new Engine(std::move(impl)));
     } catch (const Failure& error) {
@@ -471,11 +593,11 @@ Engine::~Engine() = default;
 
 Result<std::shared_ptr<Engine>> CreateStore(const CreateStoreRequest& request)
 {
-    return detail::EngineFactory::Create(request);
+    return detail::EngineFactory::CreateWith(request, DefaultBackendFactory());
 }
 Result<std::shared_ptr<Engine>> OpenExisting(const OpenStoreRequest& request)
 {
-    return detail::EngineFactory::Open(request);
+    return detail::EngineFactory::OpenWith(request, DefaultBackendFactory());
 }
 const StoreInfo& Engine::GetStoreInfo() const
 {
@@ -528,29 +650,7 @@ Result<std::shared_ptr<const arrow::Schema>> Engine::Schema(std::string_view id)
     if (!collection) {
         return std::unexpected(collection.error());
     }
-    std::vector<std::shared_ptr<arrow::Field>> fields;
-    for (const auto& field : collection->schema.fields) {
-        std::shared_ptr<arrow::DataType> type;
-        switch (field.type) {
-            case FieldType::String:
-                type = arrow::utf8();
-                break;
-            case FieldType::Bool:
-                type = arrow::boolean();
-                break;
-            case FieldType::Int64:
-                type = arrow::int64();
-                break;
-            case FieldType::Float64:
-                type = arrow::float64();
-                break;
-            case FieldType::TimestampUsUtc:
-                type = arrow::timestamp(arrow::TimeUnit::MICRO, "UTC");
-                break;
-        }
-        fields.push_back(arrow::field(field.name, type, field.nullable));
-    }
-    return arrow::schema(std::move(fields));
+    return MakeArrowSchema(collection->schema);
 }
 
 CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
@@ -595,14 +695,17 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
                     RetryHint::SameIdAfterReconcile},
                 context};
         }
+        uint64_t expected_generation = 0;
         {
             std::lock_guard state_lock(impl->state_mutex);
             const auto blocked = impl->BlockedCreate(*context);
             if (blocked) {
                 return *blocked;
             }
+            expected_generation = impl->health_generation;
         }
-        for (const auto& collection : impl->catalog->Collections()) {
+        const auto existing = impl->catalog->Collections();
+        for (const auto& collection : existing) {
             if (collection.collection_id == request.collection_id || collection.name == request.exact_name) {
                 Require(collection.collection_id == request.collection_id && collection.name == request.exact_name,
                     "ALREADY_EXISTS",
@@ -623,6 +726,9 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
                 return {CommitDisposition::Committed, CommitPhase::Complete, collection, std::nullopt, std::nullopt};
             }
         }
+        Require(existing.size() < static_cast<size_t>(impl->limits.max_collections),
+            "RESOURCE_EXHAUSTED",
+            "permanent catalog capacity is full");
         Require(impl->backend != nullptr,
             "DEPENDENCY_UNAVAILABLE",
             "durable storage producer and closure guard are not installed");
@@ -643,19 +749,38 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
             "IO_ERROR",
             "producer changed collection identity or schema");
         context->candidate_table_uuid = info.table_uuid;
-        Require(!impl->closing.load(), "CANCELLED", "engine is closing");
+        {
+            std::lock_guard state_lock(impl->state_mutex);
+            impl->CheckHealthy(expected_generation);
+        }
         publication_started = true;
         context->publication_started = true;
+        // Held from the final health check through the outer COMMIT or
+        // rollback; see Impl::commit_gate.
+        std::unique_lock gate(impl->commit_gate, std::defer_lock);
         auto created = impl->catalog->PublishCreate(
             info,
-            [&](std::string_view location) {
+            [&](std::string_view location) -> Status {
                 context->candidate_metadata_location = std::string(location);
-                return staged->VerifyClosure(location);
+                auto verified = staged->VerifyClosure(location);
+                if (!verified) {
+                    return verified;
+                }
+                if (!gate.owns_lock()) {
+                    gate.lock();
+                }
+                return impl->PublicationHealth(expected_generation);
             },
             [&] {
                 return staged->Publish(*impl->catalog);
             });
         committed = true;
+        if (gate.owns_lock()) {
+            if (context->candidate_metadata_location) {
+                impl->backend->ConfirmPublication(created.collection_id, *context->candidate_metadata_location);
+            }
+            gate.unlock();
+        }
         impl->RefreshCache();
         return {CommitDisposition::Committed, CommitPhase::Complete, created, std::nullopt, std::nullopt};
     } catch (const Failure& error) {
@@ -753,11 +878,13 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
                         RetryHint::SameIdAfterReconcile});
             }
         }
+        uint64_t expected_generation = 0;
         {
             std::lock_guard state_lock(impl->state_mutex);
             unresolved = impl->BlockedAppend(request);
             collection = impl->CachedCollection(request.collection_id);
             if (!unresolved) {
+                expected_generation = impl->health_generation;
                 context = impl->AppendLookupContext(request,
                     payload_hash,
                     {"RECOVERY_REQUIRED", "outcome lookup is unresolved", RetryHint::SameIdAfterReconcile});
@@ -803,6 +930,7 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         const auto reservation = Take(InputReservation(collection.schema, request.batches));
         {
             std::lock_guard lock(impl->state_mutex);
+            impl->CheckHealthy(expected_generation);
             if (!admission.owner) {
                 Require(impl->pending_calls < impl->limits.max_pending_calls,
                     "RESOURCE_EXHAUSTED",
@@ -818,12 +946,18 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         }
         const auto input = Take(NormalizeBatches(collection.schema, request.collection_id, request.batches));
         Require(input.payload_hash == payload_hash, "INVALID_ARGUMENT", "Arrow input changed during append");
-        binding = BoundOperation{request.collection_id,
-            request.operation_id,
-            input.payload_hash,
-            1,
-            impl->catalog->Base(request.collection_id),
-            NewUuid()};
+        const auto base = impl->catalog->Base(request.collection_id);
+        if (impl->backend) {
+            const auto admissible = impl->backend->CheckAppendAdmissible(impl->info, collection, base, input);
+            if (!admissible) {
+                throw Failure(admissible.error());
+            }
+        }
+        {
+            std::lock_guard state_lock(impl->state_mutex);
+            impl->CheckHealthy(expected_generation);
+        }
+        binding = BoundOperation{request.collection_id, request.operation_id, input.payload_hash, 1, base, NewUuid()};
         context = Context(*binding,
             {"RECOVERY_REQUIRED", "append outcome is unresolved", RetryHint::SameIdAfterReconcile},
             false);
@@ -849,7 +983,10 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
                 "PRECONDITION_FAILED",
                 "snapshot precondition does not match");
         }
-        Require(!impl->closing.load(), "CANCELLED", "engine is closing");
+        {
+            std::lock_guard state_lock(impl->state_mutex);
+            impl->CheckHealthy(expected_generation);
+        }
         Require(std::chrono::steady_clock::now() < deadline,
             "DEADLINE_EXCEEDED",
             "append deadline expired before execution");
@@ -868,7 +1005,10 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
                 receipt.rows_appended == static_cast<int64_t>(input.rows.size()),
             "IO_ERROR",
             "producer returned an invalid receipt or row count");
-        Require(!impl->closing.load(), "CANCELLED", "engine is closing");
+        {
+            std::lock_guard state_lock(impl->state_mutex);
+            impl->CheckHealthy(expected_generation);
+        }
         Require(std::chrono::steady_clock::now() < deadline,
             "DEADLINE_EXCEEDED",
             "append deadline expired before publication");
@@ -876,17 +1016,33 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         publication_started = true;
         context.publication_started = true;
         context.candidate_snapshot_id = receipt.snapshot_id;
+        // Held from the final health check through the outer COMMIT or
+        // rollback; see Impl::commit_gate.
+        std::unique_lock gate(impl->commit_gate, std::defer_lock);
         impl->catalog->PublishAppend(
             *binding,
             receipt,
-            [&](std::string_view location) {
+            [&](std::string_view location) -> Status {
                 context.candidate_metadata_location = std::string(location);
-                return staged->VerifyClosure(location);
+                auto verified = staged->VerifyClosure(location);
+                if (!verified) {
+                    return verified;
+                }
+                if (!gate.owns_lock()) {
+                    gate.lock();
+                }
+                return impl->PublicationHealth(expected_generation);
             },
             [&] {
                 return staged->Publish(*impl->catalog);
             });
         phase = CommitPhase::Complete;
+        if (gate.owns_lock()) {
+            if (context.candidate_metadata_location) {
+                impl->backend->ConfirmPublication(binding->collection_id, *context.candidate_metadata_location);
+            }
+            gate.unlock();
+        }
         impl->RefreshCache();
         {
             std::lock_guard state_lock(impl->state_mutex);
@@ -959,6 +1115,48 @@ Result<std::optional<AppendOutcome>> Engine::FindAppendOutcome(std::string_view 
     } catch (const Failure& error) {
         impl->CloseOnCorruption(error.detail);
         return std::unexpected(error.detail);
+    }
+}
+
+Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) const
+{
+    const auto impl = impl_;
+    try {
+        Require(ValidUuid(request.collection_id), "INVALID_ARGUMENT", "scan requires a canonical collection UUID");
+#if GLAMDB_HAS_STORAGE
+        TScanContext context;
+        {
+            // Latest is resolved here exactly once, from the confirmed view;
+            // no SQLite read transaction is held while files are read.
+            std::lock_guard lock(impl->state_mutex);
+            impl->CheckReady();
+            context.Collection = impl->CachedCollection(request.collection_id);
+            const auto view = std::ranges::find_if(impl->confirmed_views, [&](const auto& item) {
+                return item.info.collection_id == request.collection_id;
+            });
+            Require(view != impl->confirmed_views.end(), "CORRUPTION", "confirmed collection view is missing");
+            context.Base = view->base;
+        }
+        Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
+        context.FileIO = Take(impl->backend->ReadOnlyFileIO());
+        context.Closing = std::shared_ptr<const std::atomic<bool>>(impl, &impl->closing);
+        context.Lease = impl->lease;
+        context.OnError = [impl](const ErrorDetail& error) {
+            impl->CloseOnCorruption(error);
+        };
+        auto cursor = OpenScan(std::move(context), request);
+        if (!cursor) {
+            impl->CloseOnCorruption(cursor.error());
+        }
+        return cursor;
+#else
+        throw Failure({"DEPENDENCY_UNAVAILABLE", "storage scanner is not built", RetryHint::OperatorAction});
+#endif
+    } catch (const Failure& error) {
+        impl->CloseOnCorruption(error.detail);
+        return std::unexpected(error.detail);
+    } catch (const std::exception& error) {
+        return std::unexpected(ExceptionError(error));
     }
 }
 

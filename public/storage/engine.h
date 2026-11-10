@@ -1,5 +1,6 @@
 #pragma once
 
+#include "storage/scan.h"
 #include "storage/types.h"
 
 #include <string_view>
@@ -32,6 +33,8 @@ public:
     AppendOutcome AppendDurable(const AppendRequest& request);
     Result<std::optional<AppendOutcome>> FindAppendOutcome(std::string_view collection_id,
         std::string_view operation_id) const;
+    // Reads one fixed view. The cursor retains the store until it is released.
+    Result<std::shared_ptr<ScanCursor>> Scan(const ScanRequest& request) const;
     Status Reconcile();
     Status Shutdown(std::chrono::milliseconds timeout);
 

@@ -12,10 +12,17 @@ add_library(glamdb_storage STATIC
 )
 target_include_directories(glamdb_storage
     PRIVATE "${PROJECT_SOURCE_DIR}"
-    PUBLIC "${PROJECT_SOURCE_DIR}/public"
+    PUBLIC "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/public>"
+           "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
 target_link_libraries(glamdb_storage
     PUBLIC glamdb_io Arrow::arrow_static Parquet::parquet_static iceberg::iceberg_bundle_static
     PRIVATE ZLIB::ZLIB SQLite::SQLite3
-    PRIVATE glamdb_build_options
+    PRIVATE "$<BUILD_INTERFACE:glamdb_build_options>"
 )
+
+if(NOT GLAMDB_IO_ONLY)
+    # glamdb::core links this static library privately, so installed consumers need it.
+    set_target_properties(glamdb_storage PROPERTIES EXPORT_NAME storage)
+    install(TARGETS glamdb_storage EXPORT GlamDBTargets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+endif()
