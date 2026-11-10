@@ -501,7 +501,9 @@ TEST(EngineBootstrap, NoProducerFailsClosedAndIdentityIsExplicit)
 {
     test::TempDir temporary;
     const auto root = temporary.path / "store";
-    const auto created = CreateStore({test::store_id, root.string()});
+    // The public factory installs the real storage backend when it is built;
+    // the internal factory without a backend must still fail closed.
+    const auto created = detail::EngineFactory::Create({test::store_id, root.string()});
     ASSERT_TRUE(created);
     EXPECT_EQ((*created)->GetStoreInfo().store_id, test::store_id);
     const auto collection =

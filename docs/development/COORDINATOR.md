@@ -11,13 +11,15 @@ Read/configuration APIs use `Result<T> = std::expected<T, ErrorDetail>` and
 eight-collection limit; this MVP has no collection pagination.
 
 The bridge from the coordinator to the [durable storage primitives](STORAGE_MODULE.md)
-and the scanner are pending. Public factories
-can create/open an empty catalog; collection creation reports
-`DEPENDENCY_UNAVAILABLE` without a backend. Opening a populated store also
-requires its storage validator. Coordinator test doubles are confined to `tests/`; they
-produce no real Parquet or Avro data. The separate storage component tests do
-exercise real Parquet, Avro and JSON files. There is no HTTP server, scan API, payload
-journal, background job queue, backup or automatic file deletion in this MVP.
+and the scanner are described in [SCANNER.md](SCANNER.md); they are built with
+`GLAMDB_BUILD_STORAGE=ON` and are not yet validated against the pinned Iceberg
+build. Without them, public factories can create/open an empty catalog and
+collection creation reports `DEPENDENCY_UNAVAILABLE`. Opening a populated store
+requires the storage validator. Coordinator test doubles are confined to
+`tests/`; they produce no real Parquet or Avro data. The separate storage
+component tests do exercise real Parquet, Avro and JSON files. There is no HTTP
+server, payload journal, background job queue, backup or automatic file
+deletion in this MVP.
 
 ## Persistence and retry rules
 

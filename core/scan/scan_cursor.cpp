@@ -1,0 +1,356 @@
+#include "core/scan/scan_cursor.h"
+
+#include "core/api/binary.h"
+#include "core/api/canonical.h"
+#include "core/engine/storage_mapping.h"
+#include "core/scan/predicate.h"
+#include "core/scan/scan_planner.h"
+
+#include <arrow/api.h>
+#include <arrow/io/memory.h>
+#include <iceberg/file_io.h>
+#include <parquet/arrow/reader.h>
+#include <parquet/file_reader.h>
+#include <parquet/metadata.h>
+#include <parquet/schema.h>
+
+#include <algorithm>
+#include <mutex>
+#include <numeric>
+#include <span>
+
+namespace glamdb::detail {
+namespace {
+
+constexpr int64_t MaxBatchRows = 65536;
+
+void RequireInput(bool condition, std::string_view message)
+{
+    if (!condition) {
+        throw Failure({"INVALID_ARGUMENT", std::string(message), RetryHint::FixInput});
+    }
+}
+
+[[noreturn]] void Fail(std::string_view code, std::string_view context, std::string_view message)
+{
+    throw Failure({std::string(code),
+        BoundedDiagnostic(std::string(context) + ": " + std::string(message)),
+        RetryHint::OperatorAction});
+}
+
+void CheckArrow(const arrow::Status& status, std::string_view code, std::string_view context)
+{
+    if (!status.ok()) {
+        Fail(code, context, status.ToString());
+    }
+}
+
+template <class T>
+T TakeArrow(arrow::Result<T> result, std::string_view code, std::string_view context)
+{
+    CheckArrow(result.status(), code, context);
+    return std::move(result).ValueUnsafe();
+}
+
+template <class T>
+T TakeIceberg(iceberg::Result<T> result, std::string_view code, std::string_view context)
+{
+    if (!result) {
+        Fail(code, context, result.error().message);
+    }
+    return std::move(*result);
+}
+
+template <class T>
+T Take(Result<T> result)
+{
+    if (!result) {
+        throw Failure(result.error());
+    }
+    return std::move(*result);
+}
+
+std::vector<size_t> ResolveProjection(const SchemaSpec& schema, const std::optional<std::vector<std::string>>& names)
+{
+    std::vector<size_t> fields;
+    if (!names) {
+        fields.resize(schema.fields.size());
+        std::iota(fields.begin(), fields.end(), size_t{0});
+        return fields;
+    }
+    RequireInput(!names->empty(), "projection must select at least one field");
+    for (const auto& name : *names) {
+        const auto it = std::ranges::find_if(schema.fields, [&](const auto& field) {
+            return field.name == name;
+        });
+        RequireInput(it != schema.fields.end(), "projection field does not exist");
+        const auto index = static_cast<size_t>(it - schema.fields.begin());
+        RequireInput(std::ranges::find(fields, index) == fields.end(), "projection repeats a field");
+        fields.push_back(index);
+    }
+    return fields;
+}
+
+class TScanCursor final : public ScanCursor
+{
+public:
+    TScanCursor(TScanContext context,
+        std::shared_ptr<arrow::Schema> outputSchema,
+        TScanPlan plan,
+        TBoundPredicate predicate,
+        std::vector<size_t> outputFields,
+        std::vector<size_t> readFields,
+        int64_t batchRows,
+        std::optional<int64_t> limit)
+        : Context_(std::move(context))
+        , OutputSchema_(std::move(outputSchema))
+        , Info_{OutputSchema_,
+              Context_.Base,
+              plan.SnapshotID ? SnapshotSelector::Id(*plan.SnapshotID) : SnapshotSelector::InitialEmpty()}
+        , Plan_(std::move(plan))
+        , Predicate_(std::move(predicate))
+        , OutputFields_(std::move(outputFields))
+        , ReadFields_(std::move(readFields))
+        , BatchRows_(batchRows)
+        , Remaining_(limit)
+    { }
+
+    const ScanInfo& Info() const override
+    {
+        return Info_;
+    }
+
+    Result<std::shared_ptr<arrow::RecordBatch>> Next() override
+    {
+        std::lock_guard lock(Mutex_);
+        if (Failed_) {
+            return std::unexpected(*Failed_);
+        }
+        try {
+            return ReadNext();
+        } catch (const Failure& error) {
+            Release();
+            if (error.detail.code != "CANCELLED") {
+                Failed_ = error.detail;
+            }
+            return std::unexpected(error.detail);
+        } catch (const std::exception& error) {
+            Release();
+            Failed_ = ErrorDetail{"INTERNAL", BoundedDiagnostic(error.what()), RetryHint::OperatorAction};
+            return std::unexpected(*Failed_);
+        }
+    }
+
+    void Cancel() override
+    {
+        Cancelled_ = true;
+    }
+
+private:
+    const TScanContext Context_;
+    const std::shared_ptr<arrow::Schema> OutputSchema_;
+    const ScanInfo Info_;
+    const TScanPlan Plan_;
+    const TBoundPredicate Predicate_;
+    // Schema field indices in output order, and every field read from files.
+    const std::vector<size_t> OutputFields_;
+    const std::vector<size_t> ReadFields_;
+    const int64_t BatchRows_;
+
+    std::mutex Mutex_;
+    std::atomic<bool> Cancelled_{false};
+    std::optional<ErrorDetail> Failed_;
+    size_t NextFile_ = 0;
+    // A RecordBatchReader must not outlive its FileReader; members are
+    // destroyed in reverse order.
+    std::unique_ptr<parquet::arrow::FileReader> FileReader_;
+    std::unique_ptr<arrow::RecordBatchReader> BatchReader_;
+    std::optional<int64_t> Remaining_;
+
+    void CheckActive() const
+    {
+        if (Cancelled_.load()) {
+            throw Failure({"CANCELLED", "scan was cancelled", RetryHint::OperatorAction});
+        }
+        if (Context_.Closing && Context_.Closing->load()) {
+            throw Failure({"CANCELLED", "engine is closing", RetryHint::OperatorAction});
+        }
+    }
+
+    void Release()
+    {
+        BatchReader_.reset();
+        FileReader_.reset();
+    }
+
+    Result<std::shared_ptr<arrow::RecordBatch>> ReadNext()
+    {
+        while (!Remaining_ || *Remaining_ > 0) {
+            CheckActive();
+            if (!BatchReader_) {
+                if (NextFile_ >= Plan_.Files.size()) {
+                    break;
+                }
+                OpenFile(Plan_.Files[NextFile_++]);
+            }
+            std::shared_ptr<arrow::RecordBatch> batch;
+            CheckArrow(BatchReader_->ReadNext(&batch), "IO_ERROR", "read Parquet batch");
+            if (!batch) {
+                Release();
+                continue;
+            }
+            if (auto produced = Produce(*batch)) {
+                return produced;
+            }
+        }
+        Release();
+        return std::shared_ptr<arrow::RecordBatch>{};
+    }
+
+    void OpenFile(const TScanFile& file)
+    {
+        // Writer limits bound one data file to 32 MiB in this profile.
+        auto bytes = TakeIceberg(Context_.FileIO->ReadFile(file.Path, static_cast<size_t>(file.SizeBytes)),
+            "IO_ERROR",
+            "read data file");
+        if (static_cast<int64_t>(bytes.size()) != file.SizeBytes) {
+            Fail("CORRUPTION", "read data file", "file length differs from its manifest");
+        }
+        auto source = std::make_shared<arrow::io::BufferReader>(arrow::Buffer::FromString(std::move(bytes)));
+        auto reader = TakeArrow(parquet::arrow::OpenFile(source, arrow::default_memory_pool()),
+            "CORRUPTION",
+            "open Parquet file");
+        reader->set_batch_size(BatchRows_);
+        CheckFileSchema(*reader->parquet_reader()->metadata()->schema());
+        if (reader->parquet_reader()->metadata()->num_rows() != file.RecordCount) {
+            Fail("CORRUPTION", "open Parquet file", "row count differs from its manifest");
+        }
+        std::vector<int> rowGroups(static_cast<size_t>(reader->num_row_groups()));
+        std::iota(rowGroups.begin(), rowGroups.end(), 0);
+        std::vector<int> columns;
+        columns.reserve(ReadFields_.size());
+        for (const auto field : ReadFields_) {
+            columns.push_back(static_cast<int>(field));
+        }
+        BatchReader_ =
+            TakeArrow(reader->GetRecordBatchReader(rowGroups, columns), "CORRUPTION", "open Parquet batches");
+        FileReader_ = std::move(reader);
+    }
+
+    // The flat fixed schema maps field i to leaf column i with field ID i + 1.
+    void CheckFileSchema(const parquet::SchemaDescriptor& schema) const
+    {
+        const auto& fields = Context_.Collection.schema.fields;
+        if (schema.num_columns() != static_cast<int>(fields.size())) {
+            Fail("CORRUPTION", "open Parquet file", "column count differs from the collection schema");
+        }
+        for (int index = 0; index < schema.num_columns(); ++index) {
+            const auto* column = schema.Column(index);
+            const auto fieldID = column->schema_node()->field_id();
+            if (column->name() != fields[static_cast<size_t>(index)].name || (fieldID >= 0 && fieldID != index + 1)) {
+                Fail("CORRUPTION", "open Parquet file", "column identity differs from the collection schema");
+            }
+        }
+    }
+
+    std::shared_ptr<arrow::Array> Column(const arrow::RecordBatch& batch, size_t field) const
+    {
+        const auto& spec = Context_.Collection.schema.fields[field];
+        auto array = batch.GetColumnByName(spec.name);
+        if (!array) {
+            Fail("CORRUPTION", "read Parquet batch", "batch lacks a requested column");
+        }
+        const auto expected = MakeArrowType(spec.type);
+        if (!array->type()->Equals(*expected)) {
+            const bool sameTimestamp = expected->id() == arrow::Type::TIMESTAMP &&
+                array->type_id() == arrow::Type::TIMESTAMP &&
+                static_cast<const arrow::TimestampType&>(*array->type()).unit() == arrow::TimeUnit::MICRO;
+            if (!sameTimestamp) {
+                Fail("CORRUPTION", "read Parquet batch", "column type differs from the collection schema");
+            }
+            array = TakeArrow(array->View(expected), "CORRUPTION", "normalize timestamp type");
+        }
+        if (!spec.nullable && array->null_count() != 0) {
+            Fail("CORRUPTION", "read Parquet batch", "required column contains NULL");
+        }
+        return array;
+    }
+
+    // Filters, projects and applies the limit. Returns nullptr for no rows.
+    std::shared_ptr<arrow::RecordBatch> Produce(const arrow::RecordBatch& batch)
+    {
+        std::optional<std::vector<int64_t>> selected;
+        if (Predicate_.Kind == Predicate::Kind::Compare) {
+            auto rows = Take(SelectRows(Predicate_, *Column(batch, Predicate_.FieldIndex)));
+            if (static_cast<int64_t>(rows.size()) != batch.num_rows()) {
+                selected = std::move(rows);
+            }
+        }
+        auto count = selected ? static_cast<int64_t>(selected->size()) : batch.num_rows();
+        if (Remaining_) {
+            count = std::min(count, *Remaining_);
+        }
+        if (count == 0) {
+            return nullptr;
+        }
+        std::vector<std::shared_ptr<arrow::Array>> columns;
+        columns.reserve(OutputFields_.size());
+        for (const auto field : OutputFields_) {
+            auto array = Column(batch, field);
+            if (selected) {
+                const auto rows = std::span<const int64_t>(*selected).first(static_cast<size_t>(count));
+                array = Take(TakeRows(*array, rows));
+            } else if (count != array->length()) {
+                array = array->Slice(0, count);
+            }
+            columns.push_back(std::move(array));
+        }
+        if (Remaining_) {
+            *Remaining_ -= count;
+        }
+        return arrow::RecordBatch::Make(OutputSchema_, count, std::move(columns));
+    }
+};
+
+} // namespace
+
+Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanRequest& request)
+{
+    try {
+        RequireInput(request.batch_rows >= 1 && request.batch_rows <= MaxBatchRows,
+            "batch_rows must be within 1..65536");
+        RequireInput(!request.limit || *request.limit >= 0, "limit must not be negative");
+        const auto& schema = context.Collection.schema;
+        auto outputFields = ResolveProjection(schema, request.projection);
+        auto predicate = Take(BindPredicate(request.predicate, schema));
+
+        auto readFields = outputFields;
+        if (predicate.Kind == Predicate::Kind::Compare) {
+            readFields.push_back(predicate.FieldIndex);
+        }
+        std::ranges::sort(readFields);
+        readFields.erase(std::unique(readFields.begin(), readFields.end()), readFields.end());
+
+        const auto fullSchema = MakeArrowSchema(schema);
+        std::vector<std::shared_ptr<arrow::Field>> fields;
+        fields.reserve(outputFields.size());
+        for (const auto field : outputFields) {
+            fields.push_back(fullSchema->field(static_cast<int>(field)));
+        }
+        auto plan = Take(PlanScan(context.FileIO, context.Base, request.selector));
+        return std::make_shared<TScanCursor>(std::move(context),
+            arrow::schema(std::move(fields)),
+            std::move(plan),
+            std::move(predicate),
+            std::move(outputFields),
+            std::move(readFields),
+            request.batch_rows,
+            request.limit);
+    } catch (const Failure& error) {
+        return std::unexpected(error.detail);
+    } catch (const std::exception& error) {
+        return std::unexpected(ErrorDetail{"INTERNAL", BoundedDiagnostic(error.what()), RetryHint::OperatorAction});
+    }
+}
+
+} // namespace glamdb::detail

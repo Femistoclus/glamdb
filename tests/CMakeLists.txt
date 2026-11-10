@@ -43,11 +43,22 @@ if(NOT GLAMDB_IO_ONLY)
     set_tests_properties(glamdb.smoke PROPERTIES LABELS "smoke" TIMEOUT 10)
 
     add_executable(glamdb_unit unit/api_test.cpp unit/catalog_test.cpp unit/arrow_input_test.cpp
-        unit/coordinator_test.cpp unit/outcome_json_test.cpp support/fake_storage.cpp)
+        unit/coordinator_test.cpp unit/outcome_json_test.cpp unit/storage_mapping_test.cpp
+        unit/scan_predicate_test.cpp support/fake_storage.cpp)
     target_link_libraries(glamdb_unit PRIVATE glamdb::core GTest::gtest_main glamdb_build_options
         SQLite::SQLite3 iceberg::iceberg_sql_catalog_static Arrow::arrow_static glamdb_json)
     target_include_directories(glamdb_unit PRIVATE "${PROJECT_SOURCE_DIR}")
     gtest_discover_tests(glamdb_unit TEST_PREFIX glamdb.unit. PROPERTIES LABELS unit TIMEOUT 30)
+
+    if(GLAMDB_BUILD_STORAGE)
+        # Public API with the real storage backend: Parquet, Iceberg metadata and SQLite.
+        add_executable(glamdb_vertical vertical/engine_vertical_test.cpp)
+        target_include_directories(glamdb_vertical PRIVATE "${PROJECT_SOURCE_DIR}")
+        target_link_libraries(glamdb_vertical PRIVATE glamdb::core glamdb_storage glamdb_build_options
+            GTest::gtest_main)
+        gtest_discover_tests(glamdb_vertical TEST_PREFIX glamdb.vertical.
+            PROPERTIES LABELS "vertical;scan" TIMEOUT 60)
+    endif()
 
     add_executable(glamdb_fault fault/coordinator_fault_test.cpp support/fake_storage.cpp support/journal_fault_vfs.cpp)
     target_include_directories(glamdb_fault PRIVATE "${PROJECT_SOURCE_DIR}")

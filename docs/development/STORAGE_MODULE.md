@@ -2,13 +2,13 @@
 
 The module supplies local durable files and Arrow/Parquet/Iceberg integration
 for the append-store MVP. The catalog/coordinator and installed public API are
-separate components; their `StorageBackend` bridge to these primitives and the
-scanner remain pending. See [the coordinator guide](COORDINATOR.md) for that
-integration contract. The CLI can create and inspect an empty store.
+separate components; `core/backend/` bridges them to these primitives and
+`core/scan/` reads them, as described in [SCANNER.md](SCANNER.md). See
+[the coordinator guide](COORDINATOR.md) for the integration contract.
 
-`glamdb_io` contains the independent local I/O components. Optional
-`glamdb_storage` adds the pinned dependency adapters; enable it with
-`GLAMDB_BUILD_STORAGE=ON`. See [Building](BUILDING.md#storage-adapters) for the
+`glamdb_io` contains the independent local I/O components. `glamdb_storage`
+adds the pinned dependency adapters; `GLAMDB_BUILD_STORAGE` enables it and
+defaults to `ON` unless `GLAMDB_IO_ONLY=ON`. See [Building](BUILDING.md#storage-adapters) for the
 Docker runner and [dependency validation](DEPENDENCY_VALIDATION.md) for the
 installed-prefix consumer and toolchain constraints.
 

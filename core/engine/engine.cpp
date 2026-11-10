@@ -4,7 +4,13 @@
 #include "core/api/canonical.h"
 #include "core/api/codec.h"
 #include "core/engine/engine_factory.h"
+#include "core/engine/storage_mapping.h"
 #include "core/engine/store_lease.h"
+
+#if GLAMDB_HAS_STORAGE
+#include "core/backend/local_storage_backend.h"
+#include "core/scan/scan_cursor.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -86,6 +92,40 @@ AppendOutcome UnresolvedAppend(RecoveryContext context, std::string_view payload
         std::nullopt,
         std::move(error),
         std::move(context)};
+}
+
+std::shared_ptr<StorageBackend>
+MakeBackend(const BackendFactory& factory, const std::filesystem::path& root, const StoreInfo& info)
+{
+    if (!factory) {
+        return {};
+    }
+    return Take(factory(root, info));
+}
+
+BackendFactory DefaultBackendFactory()
+{
+#if GLAMDB_HAS_STORAGE
+    return [](const std::filesystem::path& root, const StoreInfo& info) -> Result<std::shared_ptr<StorageBackend>> {
+        auto backend = TLocalStorageBackend::Open(root, info);
+        if (!backend) {
+            return std::unexpected(backend.error());
+        }
+        return std::shared_ptr<StorageBackend>(std::move(*backend));
+    };
+#else
+    return {};
+#endif
+}
+
+BackendFactory FixedBackend(std::shared_ptr<StorageBackend> backend)
+{
+    if (!backend) {
+        return {};
+    }
+    return [backend = std::move(backend)](const std::filesystem::path&, const StoreInfo&) {
+        return Result<std::shared_ptr<StorageBackend>>(backend);
+    };
 }
 
 } // namespace
@@ -418,17 +458,29 @@ Result<std::shared_ptr<Engine>> EngineFactory::Create(const CreateStoreRequest& 
     std::shared_ptr<StorageBackend> backend,
     std::string sqlite_vfs)
 {
+    return CreateWith(request, FixedBackend(std::move(backend)), std::move(sqlite_vfs));
+}
+
+Result<std::shared_ptr<Engine>>
+EngineFactory::Open(const OpenStoreRequest& request, std::shared_ptr<StorageBackend> backend, std::string sqlite_vfs)
+{
+    return OpenWith(request, FixedBackend(std::move(backend)), std::move(sqlite_vfs));
+}
+
+Result<std::shared_ptr<Engine>>
+EngineFactory::CreateWith(const CreateStoreRequest& request, const BackendFactory& backend, std::string sqlite_vfs)
+{
     try {
         auto impl = std::make_shared<Engine::Impl>();
         impl->info = {request.store_id, request.profile_id, 1};
         impl->limits = request.limits;
         ValidateConfig(impl->info, impl->limits);
         impl->lease = StoreLease::Create(request.absolute_root, impl->info);
+        impl->backend = MakeBackend(backend, impl->lease->Root(), impl->info);
         impl->catalog = DurableSqliteCatalogStore::Create(impl->lease->Root() / "catalog.sqlite",
             impl->info,
             impl->limits,
             std::move(sqlite_vfs));
-        impl->backend = std::move(backend);
         impl->Recover(false);
         impl->lease->MarkReady(impl->info);
         return std::shared_ptr<Engine>(new Engine(std::move(impl)));
@@ -440,7 +492,7 @@ Result<std::shared_ptr<Engine>> EngineFactory::Create(const CreateStoreRequest& 
 }
 
 Result<std::shared_ptr<Engine>>
-EngineFactory::Open(const OpenStoreRequest& request, std::shared_ptr<StorageBackend> backend, std::string sqlite_vfs)
+EngineFactory::OpenWith(const OpenStoreRequest& request, const BackendFactory& backend, std::string sqlite_vfs)
 {
     try {
         auto impl = std::make_shared<Engine::Impl>();
@@ -448,11 +500,11 @@ EngineFactory::Open(const OpenStoreRequest& request, std::shared_ptr<StorageBack
         impl->limits = request.limits;
         ValidateConfig(impl->info, impl->limits);
         impl->lease = StoreLease::Open(request.absolute_root, impl->info);
+        impl->backend = MakeBackend(backend, impl->lease->Root(), impl->info);
         impl->catalog = DurableSqliteCatalogStore::Open(impl->lease->Root() / "catalog.sqlite",
             impl->info,
             impl->limits,
             std::move(sqlite_vfs));
-        impl->backend = std::move(backend);
         impl->Recover(false);
         return std::shared_ptr<Engine>(new Engine(std::move(impl)));
     } catch (const Failure& error) {
@@ -471,11 +523,11 @@ Engine::~Engine() = default;
 
 Result<std::shared_ptr<Engine>> CreateStore(const CreateStoreRequest& request)
 {
-    return detail::EngineFactory::Create(request);
+    return detail::EngineFactory::CreateWith(request, DefaultBackendFactory());
 }
 Result<std::shared_ptr<Engine>> OpenExisting(const OpenStoreRequest& request)
 {
-    return detail::EngineFactory::Open(request);
+    return detail::EngineFactory::OpenWith(request, DefaultBackendFactory());
 }
 const StoreInfo& Engine::GetStoreInfo() const
 {
@@ -528,29 +580,7 @@ Result<std::shared_ptr<const arrow::Schema>> Engine::Schema(std::string_view id)
     if (!collection) {
         return std::unexpected(collection.error());
     }
-    std::vector<std::shared_ptr<arrow::Field>> fields;
-    for (const auto& field : collection->schema.fields) {
-        std::shared_ptr<arrow::DataType> type;
-        switch (field.type) {
-            case FieldType::String:
-                type = arrow::utf8();
-                break;
-            case FieldType::Bool:
-                type = arrow::boolean();
-                break;
-            case FieldType::Int64:
-                type = arrow::int64();
-                break;
-            case FieldType::Float64:
-                type = arrow::float64();
-                break;
-            case FieldType::TimestampUsUtc:
-                type = arrow::timestamp(arrow::TimeUnit::MICRO, "UTC");
-                break;
-        }
-        fields.push_back(arrow::field(field.name, type, field.nullable));
-    }
-    return arrow::schema(std::move(fields));
+    return MakeArrowSchema(collection->schema);
 }
 
 CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
@@ -959,6 +989,44 @@ Result<std::optional<AppendOutcome>> Engine::FindAppendOutcome(std::string_view 
     } catch (const Failure& error) {
         impl->CloseOnCorruption(error.detail);
         return std::unexpected(error.detail);
+    }
+}
+
+Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) const
+{
+    const auto impl = impl_;
+    try {
+        Require(ValidUuid(request.collection_id), "INVALID_ARGUMENT", "scan requires a canonical collection UUID");
+#if GLAMDB_HAS_STORAGE
+        TScanContext context;
+        {
+            // Latest is resolved here exactly once, from the confirmed view;
+            // no SQLite read transaction is held while files are read.
+            std::lock_guard lock(impl->state_mutex);
+            impl->CheckReady();
+            context.Collection = impl->CachedCollection(request.collection_id);
+            const auto view = std::ranges::find_if(impl->confirmed_views, [&](const auto& item) {
+                return item.info.collection_id == request.collection_id;
+            });
+            Require(view != impl->confirmed_views.end(), "CORRUPTION", "confirmed collection view is missing");
+            context.Base = view->base;
+        }
+        Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
+        context.FileIO = Take(impl->backend->ReadOnlyFileIO());
+        context.Closing = std::shared_ptr<const std::atomic<bool>>(impl, &impl->closing);
+        auto cursor = OpenScan(std::move(context), request);
+        if (!cursor) {
+            impl->CloseOnCorruption(cursor.error());
+        }
+        return cursor;
+#else
+        throw Failure({"DEPENDENCY_UNAVAILABLE", "storage scanner is not built", RetryHint::OperatorAction});
+#endif
+    } catch (const Failure& error) {
+        impl->CloseOnCorruption(error.detail);
+        return std::unexpected(error.detail);
+    } catch (const std::exception& error) {
+        return std::unexpected(ExceptionError(error));
     }
 }
 

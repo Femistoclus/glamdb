@@ -5,6 +5,8 @@
 
 #include <array>
 #include <cerrno>
+#include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <fcntl.h>
 #include <sys/file.h>
@@ -200,7 +202,13 @@ std::string NewUuid()
         Check(count > 0, "generate attempt UUID");
         offset += static_cast<size_t>(count);
     }
-    bytes[6] = static_cast<unsigned char>((bytes[6] & 15U) | 64U);
+    const auto now_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    for (size_t i = 0; i < 6; ++i) {
+        bytes[i] = static_cast<unsigned char>((now_ms >> ((5 - i) * 8)) & 255U);
+    }
+    bytes[6] = static_cast<unsigned char>((bytes[6] & 15U) | 112U);
     bytes[8] = static_cast<unsigned char>((bytes[8] & 63U) | 128U);
     constexpr std::string_view hex = "0123456789abcdef";
     std::string uuid;

@@ -5,6 +5,10 @@
 
 #include <span>
 
+namespace iceberg {
+class FileIO;
+} // namespace iceberg
+
 namespace glamdb::detail {
 
 struct CollectionView
@@ -57,6 +61,12 @@ public:
     virtual Status VerifyRetained(const StoreInfo& store,
         std::span<const CollectionView> collections,
         std::span<const OperationRecord> operations) = 0;
+    // Independent read-only view for scans; it never joins a writer attempt.
+    virtual Result<std::shared_ptr<iceberg::FileIO>> ReadOnlyFileIO()
+    {
+        return std::unexpected(
+            ErrorDetail{"DEPENDENCY_UNAVAILABLE", "storage reader is not installed", RetryHint::OperatorAction});
+    }
 };
 
 } // namespace glamdb::detail

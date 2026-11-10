@@ -23,12 +23,15 @@ must remain usable from a standalone checkout.
 GlamDB is an open-source C++23 columnar key-value storage engine in early
 development. The checkout implements the SQLite catalog, synchronous write and
 recovery coordinator, canonical Arrow input, public C++ facade, outcome JSON,
-and store-management CLI. Independent durable I/O and optional Arrow/Parquet/Iceberg
+and store-management CLI. Independent durable I/O and Arrow/Parquet/Iceberg
 storage primitives provide file production, staging, publication validation,
-recovery verification, and capacity checks. Connecting these primitives to the
-coordinator StorageBackend and implementing the scanner remain pending.
-See [the coordinator guide](docs/development/COORDINATOR.md) for the integration
-contract and tested boundaries, and [the storage guide](docs/development/STORAGE_MODULE.md)
+recovery verification, and capacity checks. `core/backend/` connects them to the
+coordinator StorageBackend and `core/scan/` implements a minimal `Engine::Scan`
+(fixed snapshot, one-comparison predicate, projection, limit; no pruning). That
+bridge and scanner are not yet built or tested against the pinned Iceberg
+dependency; see [the scanner guide](docs/development/SCANNER.md) for their
+contract and validation status, [the coordinator guide](docs/development/COORDINATOR.md)
+for the integration contract, and [the storage guide](docs/development/STORAGE_MODULE.md)
 for the file-layer contract. Full engine durability remains unqualified.
 
 Independent verification tools, a Python network SDK and a browser workbench
@@ -119,13 +122,15 @@ Preserve these boundaries when adding or changing engine behavior:
 
 | Path | Use |
 | --- | --- |
-| `public/storage/` | Installed C++ types and synchronous engine facade. |
+| `public/storage/` | Installed C++ types, scan API and synchronous engine facade. |
 | `core/api/`, `core/catalog/`, `core/engine/` | Canonical input, catalog, coordinator, and internal storage-backend seam. |
+| `core/backend/` | Production StorageBackend over `glamdb_storage`, built with `GLAMDB_BUILD_STORAGE`. |
+| `core/scan/` | Predicate evaluation, snapshot planning and Parquet scan cursor. |
 | `core/io/` | Independent local filesystem, attempts, receipts, durable files and copying (`glamdb_io`). |
-| `core/storage/` | Optional FileIO, Parquet writer, Iceberg staging, publication/recovery and capacity checks (`glamdb_storage`). |
+| `core/storage/` | FileIO, Parquet writer, Iceberg staging, publication/recovery and capacity checks (`glamdb_storage`). |
 | `apps/glamdb/` | Store-management CLI and transport-only outcome serialization. |
 | `cmake/` | Build options, sanitizers, quality targets, and dependency recipes. |
-| `tests/` | Native unit/recovery/SqlCatalog/VFS/consumer suites, verification and actual SDK HTTP/HTTPS tests. |
+| `tests/` | Native unit/recovery/SqlCatalog/VFS/consumer suites, `vertical/` public-API storage tests, verification and actual SDK HTTP/HTTPS tests. |
 | `apps/mock_server/` | Disposable Python mock, real HTTP/Arrow, no warehouse/catalog access. |
 | `fixtures/`, `tools/verification/` | Literal canonical/metadata inputs, independent row oracle and evidence helpers. |
 | `sdk/python/`, `ui/` | Standalone Python HTTP SDK; HTML/CSS/ES-module pink workbench and browser/unit tests. |
@@ -180,9 +185,13 @@ ctest --preset local
 
 The application links the pinned SQLite, Arrow and Iceberg installation. Tests
 also require GoogleTest. Use `release` or `asan-ubsan` in place of `local` for
-the corresponding configure, build, and test presets. Core protocol tests use a
-test-only backend; the real SqlCatalog test verifies the catalog integration
-separately. Neither establishes durable user-file production or power-loss safety.
+the corresponding configure, build, and test presets. `GLAMDB_BUILD_STORAGE`
+defaults to `ON` (unless `GLAMDB_IO_ONLY=ON`) and adds `glamdb_storage`, the
+production backend, the scanner and `glamdb_vertical` (CTest labels
+`vertical;scan`); with it `OFF`, public factories install no backend. Core
+protocol tests use a test-only backend through `EngineFactory::Create/Open`;
+the real SqlCatalog test verifies the catalog integration separately. Neither
+establishes durable user-file production or power-loss safety.
 
 For Linux tests on macOS, `./scripts/test-in-docker.sh asan-ubsan` builds only
 independent I/O with `GLAMDB_IO_ONLY=ON`, without Arrow/Iceberg/SQLite. The full
