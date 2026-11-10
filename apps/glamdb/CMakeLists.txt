@@ -1,3 +1,7 @@
+add_library(glamdb_json STATIC outcome_json.cpp)
+target_link_libraries(glamdb_json PUBLIC glamdb::core PRIVATE glamdb_build_options)
+target_include_directories(glamdb_json PRIVATE "${PROJECT_SOURCE_DIR}")
 add_executable(glamdb main.cpp)
-target_link_libraries(glamdb PRIVATE glamdb_build_options)
+target_link_libraries(glamdb PRIVATE glamdb_build_options glamdb_json)
+target_include_directories(glamdb PRIVATE "${PROJECT_SOURCE_DIR}")
 install(TARGETS glamdb RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")

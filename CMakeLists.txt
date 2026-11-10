@@ -23,6 +23,7 @@ include(cmake/CompilerOptions.cmake)
 include(cmake/Sanitizers.cmake)
 include(cmake/Quality.cmake)
 
+add_subdirectory(core)
 add_subdirectory(apps)
 if(BUILD_TESTING)
     add_subdirectory(tests)

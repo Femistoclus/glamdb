@@ -51,9 +51,9 @@ glamdb/
 | `AGENTS.md` | Repository guidance for coding agents, maintained alongside implementation changes. |
 | `public/storage/` | Public C++ API headers. |
 | `core/` | Engine implementation and private headers. Keep each component's `.h` and `.cpp` together. |
-| `apps/glamdb/` | Application entry point. The current executable exits successfully without output. |
+| `apps/glamdb/` | Store-management CLI and transport-only outcome JSON. |
 | `cmake/` | Compiler options, sanitizers, quality targets, and dependency recipes. |
-| `tests/` | Unit, integration, fault, and installed-library consumer tests. Only the executable smoke test exists today. |
+| `tests/` | Unit, process recovery, real Iceberg catalog, VFS fault, and installed-library consumer tests. |
 | `fixtures/` | Shared deterministic test inputs and expected outputs. |
 | `probes/` | Isolated dependency and platform experiments. |
 | `benchmarks/` | Performance and capacity measurements. |
@@ -64,8 +64,9 @@ glamdb/
 | `docs/ROADMAP.md` | Implementation stages, prerequisites, and acceptance evidence. |
 | `third_party/` | Pinned upstream submodules and the direct dependency lock. |
 
-The tree shows the current scaffold and reserved directories, not an implemented
-engine. Read [ARCHITECTURE.md](ARCHITECTURE.md) for component responsibilities
+The tree includes reserved directories. The catalog and coordinator are
+implemented under `core/api/`, `core/catalog/` and `core/engine/`; production
+file I/O and scanning are pending. Read [ARCHITECTURE.md](ARCHITECTURE.md) for component responsibilities
 and [ROADMAP.md](ROADMAP.md) for the criteria that establish working behavior.
 
 `sdk/` and `ui/` contain no files, including placeholders. Git does not retain
@@ -105,5 +106,5 @@ public package without access to source-tree headers.
 holds workload and capacity measurements. Neither a dependency probe nor a
 benchmark replaces correctness tests. Share deterministic inputs and expected
 results through `fixtures/`; put generated stores, traces, and measurements in
-ignored output directories. Only the smoke test exists at present; additional
-test names and commands must be documented when they are implemented.
+ignored output directories. See [BUILDING.md](development/BUILDING.md) for
+current commands and [COORDINATOR.md](development/COORDINATOR.md) for test scope.

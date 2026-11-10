@@ -23,8 +23,8 @@ prerequisites of Arrow and Iceberg, including zlib development files. Set
 `GLAMDB_DEPENDENCY_JOBS` when configuring to change parallelism within each
 dependency build; the default is two.
 
-The normal application build does not require this step yet. Check the local
-submodule revisions without building dependencies:
+The application build requires this installation (or an equivalent installation
+of the locked dependencies). Check the local submodule revisions without building dependencies:
 
 ```sh
 cmake -P cmake/dependencies/VerifySubmodules.cmake
@@ -46,8 +46,8 @@ hashes, and source ID. Preserve upstream licenses and notices in the submodules.
 
 ## Engine integration requirements
 
-These are intended integration boundaries to verify in bounded experiments;
-the current application does not yet implement them. See the
+These boundaries include implemented catalog integration and pending production
+file I/O, writer and scanner work. See the
 [architecture](../docs/ARCHITECTURE.md) and [G1 requirements](../docs/ROADMAP.md#g1-integration-experiments).
 
 - Use one installed Arrow/Parquet runtime shared with Iceberg. C++ dependencies

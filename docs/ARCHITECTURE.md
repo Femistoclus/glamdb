@@ -1,8 +1,10 @@
 # Architecture
 
 This document describes the intended engine and its correctness boundaries.
-The current checkout contains scaffolding, not an implemented or qualified
-storage engine. See the [roadmap](ROADMAP.md) for acceptance gates and the
+The current checkout implements the catalog and coordinator; the production
+durable file backend and scanner are pending. See the
+[coordinator guide](development/COORDINATOR.md) for tested behavior, the
+[roadmap](ROADMAP.md) for acceptance gates, and the
 [build guide](development/BUILDING.md) for commands that exist today.
 
 ## Model and scope
@@ -69,7 +71,7 @@ synchronization of its directory entries through the durable root. If a rename
 is used, affected directory entries also require synchronization. The first
 failure remains recorded even if a later close or cleanup succeeds.
 
-The planned catalog integration is Iceberg `SqlCatalog` with a narrow GlamDB
+The catalog integration uses Iceberg `SqlCatalog` with a narrow GlamDB
 `DurableSqliteCatalogStore`. SQLite owns its database and rollback-journal
 durability; the file-I/O layer owns external files. The working connection uses
 `journal_mode=DELETE` and `synchronous=EXTRA`, set and read back before serving
@@ -105,9 +107,14 @@ versioned and tested with byte fixtures. A committed receipt is stored with the
 catalog pointer and cross-checked against operation information in the snapshot
 summary. Retrying A after a later B returns A's receipt without modifying B.
 
-An unknown outcome holds the writer barrier. Resolve outstanding SQLite
-transactions, reopen the authoritative catalog, validate identities and retained
-history, and check reachable files before releasing it. Recovery includes a
+An uncertain write closes readiness and holds the writer barrier. A retry whose
+outcome lookup is blocked by writer contention, admission limits or shutdown may
+return `CommitUnknown` without replacing the unresolved write. Resource pressure
+alone does not close readiness.
+Resource refusal alone never proves that an earlier operation did not commit.
+Resolve outstanding SQLite transactions, reopen the authoritative catalog,
+validate identities and retained history, and check reachable files before
+releasing it. Recovery includes a
 **durability fence**: a real increment of the store's fence counter committed
 through SQLite's configured durability mode. A SELECT or no-op update cannot
 substitute for that transaction. The fence creates no Iceberg snapshot and does

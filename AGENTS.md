@@ -21,10 +21,12 @@ must remain usable from a standalone checkout.
 ## Project context
 
 GlamDB is an open-source C++23 columnar key-value storage engine in early
-development. The checkout currently contains build scaffolding, a no-op
-`glamdb` executable, and one smoke test. Engine APIs and storage behavior are
-not implemented yet. The architecture and invariants below describe the intended
-engine, not guarantees already demonstrated by this checkout.
+development. The checkout implements the SQLite catalog, synchronous write and
+recovery coordinator, canonical Arrow input, public C++ facade, outcome JSON,
+and store-management CLI. The production file producer, durable FileIO and
+scanner are pending; collection/data operations require that internal backend.
+See [the coordinator guide](docs/development/COORDINATOR.md) for the integration
+contract and tested boundaries. Full engine durability remains unqualified.
 
 The first milestone is an embedded, synchronous, durable **append store** on
 local disk. A store has one owning process and one serialized writer; reads may
@@ -104,11 +106,11 @@ Preserve these boundaries when adding or changing engine behavior:
 
 | Path | Use |
 | --- | --- |
-| `public/storage/` | Public C++ headers; currently a placeholder. |
-| `core/` | Engine implementation and private headers; currently a placeholder. |
-| `apps/glamdb/` | Executable entry point. |
+| `public/storage/` | Installed C++ types and synchronous engine facade. |
+| `core/` | Canonical input, catalog, coordinator, and internal storage-backend seam. |
+| `apps/glamdb/` | Store-management CLI and transport-only outcome serialization. |
 | `cmake/` | Build options, sanitizers, quality targets, and dependency recipes. |
-| `tests/` | Smoke test and reserved unit, integration, fault, and installed-consumer suites. |
+| `tests/` | Unit, new-process recovery, real SqlCatalog, SQLite VFS fault, and installed-consumer suites. |
 | `fixtures/`, `probes/`, `benchmarks/` | Deterministic inputs, isolated experiments, and measurements. |
 | `scripts/` | Developer tooling, including quality checks. |
 | `third_party/` | Pinned upstream submodules and `lock.json`. |
@@ -120,21 +122,25 @@ does not imply implemented functionality.
 
 ## Build and development commands
 
-Requirements: CMake 3.28+, Ninja, Python 3.9+, and a C++23 compiler. Linux builds
-use GCC 14+ or Clang 18+. Recent Apple Clang is suitable for development builds.
+Requirements: CMake 3.28+, Ninja, Python 3.9+, Linux, and a C++23 compiler and
+standard library with `std::expected` (GCC 14+ or Clang 18+ with a matching STL).
 Quality targets require LLVM major version 18 for both `clang-format` and
 `clang-tidy`.
 
 ```sh
+git submodule update --init --recursive
+cmake --preset deps-local
+cmake --build --preset deps-local --parallel 2
 cmake --preset local
 cmake --build --preset local
 ctest --preset local
 ```
 
-The application build currently needs no engine dependencies. The test above
-only checks that the no-op executable exits successfully. Use `release` or
-`asan-ubsan` in place of `local` for the corresponding configure, build, and
-test presets.
+The application links the pinned SQLite, Arrow and Iceberg installation. Tests
+also require GoogleTest. Use `release` or `asan-ubsan` in place of `local` for
+the corresponding configure, build, and test presets. Core protocol tests use a
+test-only backend; the real SqlCatalog test verifies the catalog integration
+separately. Neither establishes durable user-file production or power-loss safety.
 
 After configuring `local`, check project C++ sources and headers with:
 
@@ -169,7 +175,8 @@ cmake --build --preset deps-local --parallel 2
 
 - Use C++23 with the checked-in `.clang-format`, `.clang-tidy`, and
   `.editorconfig` as the formatting and diagnostic authorities. Project compiler
-  warnings and configured tidy diagnostics are errors.
+  warnings and configured tidy diagnostics are errors. The C++ line limit is
+  120 columns.
 - Keep each component's private `.h` and `.cpp` together in `core/`. Installed
   public headers belong in `public/storage/` and must be usable without private
   headers, source-tree paths, or transport dependencies.

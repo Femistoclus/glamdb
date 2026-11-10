@@ -3,37 +3,49 @@
 ## Requirements
 
 - CMake 3.28 or newer, Ninja, and Python 3.9 or newer.
-- C++23 compiler: GCC 14+ or Clang 18+ on Linux. Recent Apple Clang supports
-  development builds on macOS.
+- Linux and a C++23 compiler **and standard library** with `std::expected`:
+  GCC 14+ or Clang 18+ with a matching STL. Clang with an older system
+  libstdc++ may lack this feature. Use the same C++ ABI for all dependencies.
 - LLVM 18 `clang-format` and `clang-tidy` for quality targets.
 
-## Scaffold
+## Build and install
+
+First install the [pinned dependencies](../../third_party/README.md):
+
+```sh
+git submodule update --init --recursive
+cmake --preset deps-local
+cmake --build --preset deps-local --parallel 2
+```
 
 ```sh
 cmake --preset local
 cmake --build --preset local
 ctest --preset local
-./build/local/apps/glamdb/glamdb
+./build/local/apps/glamdb/glamdb --help
 ```
 
-The executable has a no-op `main`. This build does not fetch or link engine
-dependencies. The smoke test verifies that it starts and exits successfully.
+The executable creates or inspects an empty store with an explicit identity.
+It links the installed SQLite, Arrow and Iceberg dependencies. Tests also link
+GoogleTest. The production durable file backend and scanner remain pending;
+the executable does not serve HTTP or write user-data files.
 
 Use `release` or `asan-ubsan` in place of `local` for the other build profiles.
 
 ```sh
 cmake --install build/local
-./build/install/local/bin/glamdb
+./build/install/local/bin/glamdb --help
 ```
 
-The install currently contains the executable. A public library package and its
-consumer test will be added with the engine API.
-
-The future consumer must build against the installed prefix without source-tree
-or private headers and without HTTP/Python dependencies. Its acceptance scenario
-opens an existing store, resolves a collection, obtains its schema, constructs a
-public predicate, and inspects a fixed-snapshot, zero-limit scan. The reserved
-`tests/installed_consumer/` directory is not yet a buildable consumer project.
+The install contains the executable, `storage/*.h`, `glamdb::core` static library
+and `GlamDBConfig.cmake`. Consumers use `find_package(GlamDB CONFIG REQUIRED)`
+with both the GlamDB and dependency prefixes in `CMAKE_PREFIX_PATH`.
+`glamdb.installed_consumer` installs to a disposable build prefix and compiles
+and runs a separate public-header consumer. It exercises create/open and the
+missing-collection error from `GetCollection` and `FindAppendOutcome`, without
+source-tree headers or HTTP/Python dependencies. Scan/predicate
+acceptance awaits the scanner. The installed-consumer test is omitted from
+sanitizer builds; instrumented static libraries require matching consumer flags.
 
 ## Quality
 
@@ -47,7 +59,8 @@ Tools must report LLVM major version 18. Versioned binaries such as
 with `GLAMDB_CLANG_FORMAT` and `GLAMDB_CLANG_TIDY`.
 
 Checks cover project sources and headers, excluding generated and third-party
-files. `tidy-check` uses `compile_commands.json` and rejects missing translation
+files. C++ formatting uses a 120-column limit. `tidy-check` uses
+`compile_commands.json` and rejects missing translation
 units. `quality-negative-check` verifies that a formatting violation and a null
 dereference in a project header both fail their respective checks.
 
@@ -57,26 +70,28 @@ See [the dependency guide](../../third_party/README.md). The separate
 `deps-local` build installs dependencies into `.deps/install`.
 
 The initial durability qualification targets Linux x86-64 on a dedicated local
-ext4 volume. A successful scaffold build, including on macOS, does not validate
-engine behavior or durability.
+ext4 volume. Successful builds and process-crash tests do not establish
+power-loss durability.
 
 ## Validation scope
 
 | Check | What it establishes |
 | --- | --- |
-| Scaffold build and `glamdb.smoke` | The current entry point compiles, starts, and exits successfully. |
+| Build and `glamdb.smoke` | The entry point compiles, starts, and exits successfully. |
 | Formatting, tidy, and negative controls | Configured C++ checks execute and reject deliberate violations. |
-| Dependency build | The selected dependency recipes build/install; engine integration still needs its own probes. |
-| Future integration/fault suites | Engine behavior at the tested boundaries, with recorded inputs and results. |
+| Unit and VFS fault suites | Canonical input, catalog transactions, bindings/outcomes and coordinator state transitions. Storage production uses a test double. |
+| `glamdb.process_recovery` | Separate-process reopen, interrupted operations, SQLite hot-journal recovery and exclusive ownership. |
+| `glamdb.real_sqlcatalog` | Real Iceberg create/property-update ordering, outer rollback, exact base and fresh-process load. Local FileIO is test-only. |
+| `glamdb.installed_consumer` | Installed CMake package and public facade work without private headers. |
 | Future environment qualification | Durability and supported limits for the specifically tested platform and storage configuration. |
 
-Only the first three categories have build infrastructure in this checkout.
-The [roadmap](../ROADMAP.md) defines the remaining evidence. Describe checks as
+See [COORDINATOR.md](COORDINATOR.md) for implemented behavior and current
+evidence. The [roadmap](../ROADMAP.md) defines the remaining evidence. Describe checks as
 designed, run with PASS/FAIL, or NOT RUN; a configured target alone is not a pass.
 Do not use proposed test labels or executable names as if they exist already.
 
 Use `local`, `release`, and `asan-ubsan` with the configure/build/test commands
-above when the corresponding suites exist. Lifetime changes require sanitizer
+above. Lifetime changes require sanitizer
 coverage; reopen and recovery require a fresh process. The eventual qualification
 also needs calibrated fault modeling and dedicated-volume power cuts, which
 ordinary CTest or a macOS build cannot establish on its own.

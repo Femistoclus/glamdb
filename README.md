@@ -15,13 +15,18 @@ See the [architecture](docs/ARCHITECTURE.md) for semantics and the
 
 ## Current status
 
-The repository currently contains a build scaffold, a no-op executable, a smoke
-test, quality tooling, and pinned dependency build recipes. Engine APIs,
-persistence, recovery, and durability qualification are not implemented yet.
-The commands below build and test the scaffold; they do not run a storage server
-or demonstrate data durability.
+The SQLite catalog, write/recovery coordinator, canonical Arrow input, public
+C++ facade, outcome JSON and store-management CLI are implemented. Persistent
+operation bindings and outcomes, atomic publication, uncertain-commit recovery,
+and the real Iceberg catalog seam have executable tests. The production durable
+file backend and scanner remain pending; there is no storage HTTP server yet.
+See the [coordinator guide](docs/development/COORDINATOR.md) for the supported
+boundary and validation limits. Full append-store durability is not qualified.
 
 ```sh
+git submodule update --init --recursive
+cmake --preset deps-local
+cmake --build --preset deps-local --parallel 2
 cmake --preset local
 cmake --build --preset local
 ctest --preset local

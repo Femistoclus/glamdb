@@ -5,10 +5,12 @@ Parquet, Iceberg, and SQLite. Its critical path is durable append, reopen in a
 new process, fixed-snapshot reads, and fault qualification. Append preserves
 duplicate keys; it is not yet the key-value API.
 
-The checkout currently provides build scaffolding, one smoke test, quality
-tooling, and dependency recipes. No engine acceptance gate is claimed complete;
-engine integration, fault, capacity, and power-loss results are **NOT RUN**.
-Update these statements as code and recorded evidence become available.
+The checkout implements the catalog and write/recovery coordinator, with unit,
+SQLite VFS fault, new-process recovery, installed-consumer and real Iceberg
+SqlCatalog tests. See [the coordinator guide](development/COORDINATOR.md) for
+their scope and results. No whole-engine acceptance gate is claimed complete:
+production data-file integration, scan, capacity and power-loss qualification
+remain **NOT RUN**.
 
 ## Scope and dependencies
 
