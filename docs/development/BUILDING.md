@@ -197,12 +197,26 @@ its mechanical rules; naming, ownership, and error handling also need review.
 
 The [C++ quality workflow](../../.github/workflows/cpp-quality.yml) runs independent
 `clang-format` and `clang-tidy` jobs on pull requests and pushes to `main`; it also
-supports manual runs. Formatting runs without a build. Tidy builds the pinned
+supports manual runs. Formatting runs without a build. Tidy prepares the pinned
 dependencies with Clang/libc++ 18, then configures `local` with
 `GLAMDB_BUILD_STORAGE=ON` and `BUILD_TESTING=ON` to check all enabled project
 components and tests. It also runs `quality-negative-check`.
 Module scanning is disabled for this analysis-only configuration so compile
 commands do not reference `.modmap` files that require a project build.
+
+CI caches only `.deps/install`, using an exact key for dependency pins, build
+recipes, OS/architecture, compiler versions/targets, installed package versions,
+build flags and the installation path. Submodule pins are verified even on a hit.
+A miss, partial match or restore failure rebuilds from clean dependency build
+and installation directories. A completed installation is saved before analysis,
+so a later code diagnostic does not discard it. Cache service failures do not
+skip the build or analysis. The first run of a new key still builds dependencies;
+PR caches remain scoped to that PR, while the default branch can supply shared
+caches. Run the cache-decision tests with:
+
+```sh
+python3 tests/tooling/test_ci_dependencies.py
+```
 
 ```sh
 cmake --build --preset local --target format-check tidy-check quality-negative-check
@@ -224,7 +238,9 @@ units have compile commands too.
 ## Dependencies
 
 See [the dependency guide](../../third_party/README.md). The separate
-`deps-local` build installs dependencies into `.deps/install`.
+`deps-local` build installs dependencies into `.deps/install`. GoogleTest is built
+once from its pinned submodule by the project test configuration; it is not
+built or installed by the dependency superbuild, and GoogleMock is disabled.
 
 The initial durability qualification targets Linux x86-64 on a dedicated local
 ext4 volume. The development module and its tests do not qualify that environment.

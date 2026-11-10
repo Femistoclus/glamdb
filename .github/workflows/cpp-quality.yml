@@ -60,10 +60,35 @@ jobs:
             libc++-18-dev libc++abi-18-dev libclang-rt-18-dev \
             cmake ninja-build make pkg-config zlib1g-dev
 
-      - name: Build and install pinned dependencies
+      - name: Test dependency cache decisions
+        run: python3 tests/tooling/test_ci_dependencies.py
+
+      - name: Verify pins and identify the dependency build
+        id: dependency-key
         run: |
-          cmake --preset deps-local -DGLAMDB_DEPENDENCY_JOBS=2
-          cmake --build --preset deps-local --parallel 2
+          dependency_key=$(python3 scripts/ci_dependencies.py key)
+          printf 'key=%s\n' "$dependency_key" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the exact dependency installation
+        id: dependencies
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        with:
+          path: .deps/install
+          key: ${{ steps.dependency-key.outputs.key }}
+
+      - name: Prepare pinned dependencies
+        env:
+          CACHE_HIT: ${{ steps.dependencies.outputs.cache-hit }}
+        run: python3 scripts/ci_dependencies.py build
+
+      - name: Save the completed dependency installation
+        if: steps.dependencies.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        with:
+          path: .deps/install
+          key: ${{ steps.dependency-key.outputs.key }}
 
       - name: Generate compile commands for all components and tests
         # The project uses no C++ modules. Avoid references to unbuilt .modmap files.
