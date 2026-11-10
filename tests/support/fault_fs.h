@@ -42,6 +42,7 @@ struct TFaultRule
     std::uint64_t Repeat = 1;
     std::error_code Error;
     std::optional<std::size_t> MaxBytes;
+    bool AfterSuccess = false;
 };
 
 class TFaultFS final : public NIO::ILocalFS

@@ -59,6 +59,15 @@ if(NOT GLAMDB_IO_ONLY)
     add_test(NAME glamdb.real_sqlcatalog COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/integration/sqlcatalog_test.py" "$<TARGET_FILE:glamdb_sqlcatalog_driver>")
     set_tests_properties(glamdb.real_sqlcatalog PROPERTIES LABELS integration TIMEOUT 90)
+    if(GLAMDB_BUILD_STORAGE)
+        add_executable(glamdb_storage_catalog_driver integration/storage_catalog_driver.cpp)
+        target_include_directories(glamdb_storage_catalog_driver PRIVATE "${PROJECT_SOURCE_DIR}")
+        target_link_libraries(glamdb_storage_catalog_driver PRIVATE glamdb::core glamdb_storage glamdb_build_options
+            iceberg::iceberg_sql_catalog_static SQLite::SQLite3)
+        add_test(NAME glamdb.durable_storage_catalog COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/integration/sqlcatalog_test.py" "$<TARGET_FILE:glamdb_storage_catalog_driver>")
+        set_tests_properties(glamdb.durable_storage_catalog PROPERTIES LABELS integration TIMEOUT 90)
+    endif()
     add_executable(glamdb_public_consumer_compile installed_consumer/main.cpp)
     target_link_libraries(glamdb_public_consumer_compile PRIVATE glamdb::core glamdb_build_options)
     if(NOT GLAMDB_ENABLE_ASAN AND NOT GLAMDB_ENABLE_UBSAN)

@@ -56,6 +56,7 @@ class TMemoryFS final : public ILocalFS
 public:
     int CloseCalls = 0;
     int SyncCalls = 0;
+    std::error_code SyncError;
     TResult<THandle> OpenDir(const std::filesystem::path& path) override
     {
         return Open(path.generic_string(), EFileType::Directory);
@@ -104,12 +105,12 @@ public:
     std::error_code SyncFile(const THandle&) override
     {
         ++SyncCalls;
-        return {};
+        return SyncError;
     }
     std::error_code SyncDir(const THandle&) override
     {
         ++SyncCalls;
-        return {};
+        return SyncError;
     }
     std::error_code Close(const THandle& handle) override
     {
@@ -290,6 +291,43 @@ TEST_F(TFaultFSTest, PreservesUnderlyingErrorsAndRejectsForeignHandles)
     }
 }
 
+class TAfterSyncFaultTest
+    : public TFaultFSTest
+    , public ::testing::WithParamInterface<EIOOp>
+{ };
+
+TEST_P(TAfterSyncFaultTest, ReportsFailureOnlyAfterTheUnderlyingSyncSucceeds)
+{
+    TFaultFS outer(static_cast<ILocalFS&>(Fs_));
+    const auto root = outer.OpenDir("/store");
+    ASSERT_TRUE(root);
+    const auto file = outer.OpenRead(root.Value(), "file.parquet");
+    ASSERT_TRUE(file);
+    outer.AddRule({GetParam(), "*", 1, 1, std::make_error_code(std::errc::io_error), std::nullopt, true});
+    const auto sync = [&] {
+        return GetParam() == EIOOp::SyncFile ? outer.SyncFile(file.Value()) : outer.SyncDir(root.Value());
+    };
+    EXPECT_EQ(sync(), std::errc::io_error);
+    EXPECT_EQ(Underlying_.SyncCalls, 1);
+    EXPECT_EQ(Fs_.Events().back().Op, GetParam());
+    EXPECT_FALSE(Fs_.Events().back().Error);
+    EXPECT_EQ(outer.Events().back().Error, std::errc::io_error);
+    EXPECT_FALSE(sync());
+    EXPECT_EQ(Underlying_.SyncCalls, 2);
+}
+
+TEST_P(TAfterSyncFaultTest, PreservesTheUnderlyingFailureWithoutRetry)
+{
+    Underlying_.SyncError = std::make_error_code(std::errc::no_space_on_device);
+    Fs_.AddRule({GetParam(), "*", 1, 1, std::make_error_code(std::errc::io_error), std::nullopt, true});
+    const auto error = GetParam() == EIOOp::SyncFile ? Fs_.SyncFile(File_) : Fs_.SyncDir(Root_);
+    EXPECT_EQ(error, Underlying_.SyncError);
+    EXPECT_EQ(Fs_.Events().back().Error, Underlying_.SyncError);
+    EXPECT_EQ(Underlying_.SyncCalls, 1);
+}
+
+INSTANTIATE_TEST_SUITE_P(SyncBoundaries, TAfterSyncFaultTest, ::testing::Values(EIOOp::SyncFile, EIOOp::SyncDir));
+
 TEST(FaultRules, RejectInvalidSchedules)
 {
     TMemoryFS underlying;
@@ -302,6 +340,11 @@ TEST(FaultRules, RejectInvalidSchedules)
     EXPECT_THROW(fs.AddRule({EIOOp::SyncFile, "*", 1, 1, {}, 1}), std::invalid_argument);
     EXPECT_THROW(fs.AddRule({EIOOp::Publish, "*", 1, 1, error, {}}), std::invalid_argument);
     EXPECT_THROW(fs.AddRule({EIOOp::Write, std::string("a\0b", 3), 1, 1, error, {}}), std::invalid_argument);
+    for (const auto op : {EIOOp::Write, EIOOp::Close, EIOOp::CreateExclusive, EIOOp::MakeDir, EIOOp::PRead}) {
+        EXPECT_THROW(fs.AddRule({op, "*", 1, 1, error, std::nullopt, true}), std::invalid_argument);
+    }
+    EXPECT_THROW(fs.AddRule({EIOOp::SyncFile, "*", 1, 1, {}, std::nullopt, true}), std::invalid_argument);
+    EXPECT_THROW(fs.AddRule({EIOOp::SyncDir, "*", 1, 1, error, 1, true}), std::invalid_argument);
 }
 
 TEST(FaultTrace, JsonEscapesStringsAndExportsPublicationReferences)

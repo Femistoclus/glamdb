@@ -1,7 +1,10 @@
+#include "core/io/durable_copy.h"
 #include "core/storage/append_stager.h"
 #include "core/storage/data_file_writer.h"
 #include "core/storage/durable_local_file_io.h"
 #include "core/storage/publication_guard.h"
+#include "tests/support/fault_fs.h"
+#include "tests/support/temp_dir.h"
 
 #include <arrow/array/array_binary.h>
 #include <arrow/array/builder_binary.h>
@@ -10,15 +13,20 @@
 #include <arrow/table.h>
 #include <gtest/gtest.h>
 #include <iceberg/catalog/memory/in_memory_catalog.h>
+#include <iceberg/manifest/manifest_entry.h>
 #include <iceberg/partition_spec.h>
 #include <iceberg/snapshot.h>
 #include <iceberg/sort_order.h>
 #include <iceberg/table.h>
 #include <iceberg/table_metadata.h>
 #include <iceberg/transaction.h>
+#include <iceberg/update/fast_append.h>
 #include <parquet/arrow/reader.h>
 
+#include <algorithm>
+#include <array>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -37,18 +45,25 @@ constexpr auto StoreID = "11111111-1111-4111-8111-111111111111";
 constexpr auto CollectionID = "22222222-2222-4222-8222-222222222222";
 constexpr auto AttemptID = "33333333-3333-7333-8333-333333333333";
 
-void ExpectFreshProcess(const std::filesystem::path& root, const std::string& location)
+void ExpectFreshProcess(const std::filesystem::path& root,
+    const std::string& location,
+    std::optional<std::uint64_t> expectedSnapshots = 2,
+    std::string_view corruptFile = {})
 {
 #ifdef __linux__
     std::vector<std::string> environment;
     for (auto** entry = environ; *entry; ++entry) {
         const std::string_view value(*entry);
-        if (!value.starts_with("GLAMDB_RECOVERY_ROOT=") && !value.starts_with("GLAMDB_RECOVERY_METADATA=")) {
+        if (!value.starts_with("GLAMDB_RECOVERY_ROOT=") && !value.starts_with("GLAMDB_RECOVERY_METADATA=") &&
+            !value.starts_with("GLAMDB_RECOVERY_EXPECTED_SNAPSHOTS="))
+        {
             environment.emplace_back(value);
         }
     }
     environment.push_back("GLAMDB_RECOVERY_ROOT=" + root.string());
     environment.push_back("GLAMDB_RECOVERY_METADATA=" + location);
+    environment.push_back("GLAMDB_RECOVERY_EXPECTED_SNAPSHOTS=" +
+        (expectedSnapshots ? std::to_string(*expectedSnapshots) : "CORRUPTION: " + std::string(corruptFile)));
     std::vector<char*> variables;
     variables.reserve(environment.size() + 1);
     for (auto& value : environment) {
@@ -71,6 +86,8 @@ void ExpectFreshProcess(const std::filesystem::path& root, const std::string& lo
 #else
     static_cast<void>(root);
     static_cast<void>(location);
+    static_cast<void>(expectedSnapshots);
+    static_cast<void>(corruptFile);
     GTEST_SKIP() << "Fresh-process recovery is checked on Linux.";
 #endif
 }
@@ -79,6 +96,7 @@ TEST(RecoveryChildProcess, ReopensPublishedRoot)
 {
     const auto* root = std::getenv("GLAMDB_RECOVERY_ROOT");
     const auto* location = std::getenv("GLAMDB_RECOVERY_METADATA");
+    const auto* expected = std::getenv("GLAMDB_RECOVERY_EXPECTED_SNAPSHOTS");
     if (!root || !location) {
         GTEST_SKIP() << "Invoked by the storage pipeline test in a fresh process.";
     }
@@ -88,9 +106,21 @@ TEST(RecoveryChildProcess, ReopensPublishedRoot)
     auto fileIO = TDurableLocalFileIO::Make(directories.Value(), StoreID);
     ASSERT_TRUE(fileIO);
     const auto recovered = VerifyReachable(*fileIO, location, StoreID, CollectionID);
+    ASSERT_NE(expected, nullptr);
+    const std::string_view expectation(expected);
+    if (expectation.starts_with("CORRUPTION: ")) {
+        ASSERT_FALSE(recovered);
+        EXPECT_EQ(recovered.error().kind, iceberg::ErrorKind::kInvalid);
+        EXPECT_TRUE(recovered.error().message.starts_with(expectation)) << recovered.error().message;
+        return;
+    }
+    std::uint64_t snapshots = 0;
+    const auto parsed = std::from_chars(expectation.data(), expectation.data() + expectation.size(), snapshots);
+    ASSERT_EQ(parsed.ec, std::errc{});
+    ASSERT_EQ(parsed.ptr, expectation.data() + expectation.size());
     ASSERT_TRUE(recovered) << recovered.error().message;
-    EXPECT_EQ(recovered->Usage.Snapshots, 2);
-    EXPECT_EQ(recovered->Usage.DataFiles, 2);
+    EXPECT_EQ(recovered->Usage.Snapshots, snapshots);
+    EXPECT_EQ(recovered->Usage.DataFiles, snapshots);
 }
 
 class TPublicationGuardTest : public ::testing::Test
@@ -175,7 +205,8 @@ protected:
     iceberg::Result<std::shared_ptr<const TBaseState>> Append(int index,
         const std::shared_ptr<const TBaseState>& base,
         int rows,
-        const std::function<void(TPublicationContext*, TPointerChange*)>& mutate = {})
+        const std::function<void(TPublicationContext*, TPointerChange*)>& mutate = {},
+        const std::string& retainedDataPath = {})
     {
         Scope_.reset();
         const auto attemptID = std::string("33333333-3333-7333-8333-33333333333") + std::to_string(index + 3);
@@ -202,6 +233,10 @@ protected:
             arrow::RecordBatch::Make(arrow::schema({arrow::field("key", arrow::utf8(), false)}), rows, {*array});
         const auto dataPath = Location_ + "/data/" + operationID + "-" + attemptID + "-00000.parquet";
         ICEBERG_ASSIGN_OR_RAISE(auto data, WriteDataFile(IO_, Attempt_, *base->Metadata, dataPath, {batch}));
+        const auto reusesData = !retainedDataPath.empty();
+        if (reusesData) {
+            data.DataFile->file_path = retainedDataPath;
+        }
         DataLocations_.push_back(dataPath);
         ICEBERG_ASSIGN_OR_RAISE(auto catalog, iceberg::InMemoryCatalog::Make("guard-test-double", IO_, Location_, {}));
         ICEBERG_ASSIGN_OR_RAISE(auto table,
@@ -212,9 +247,22 @@ protected:
                 catalog));
         const std::unordered_map<std::string, std::string> summary{{"glamdb.operation-id", operationID},
             {"glamdb.content-hash", "test-fixture-hash"}};
-        ICEBERG_ASSIGN_OR_RAISE(auto staged, StageAppend(table, data.DataFile, summary, Attempt_));
+        std::shared_ptr<iceberg::Transaction> transaction;
+        if (!reusesData) {
+            ICEBERG_ASSIGN_OR_RAISE(auto staged, StageAppend(table, data.DataFile, summary, Attempt_));
+            transaction = std::move(staged.Transaction);
+        } else {
+            ICEBERG_ASSIGN_OR_RAISE(transaction,
+                iceberg::Transaction::Make(std::move(table), iceberg::TransactionKind::kUpdate));
+            ICEBERG_ASSIGN_OR_RAISE(auto append, transaction->NewFastAppend());
+            append->AppendFile(data.DataFile);
+            for (const auto& [key, value] : summary) {
+                append->Set(key, value);
+            }
+            ICEBERG_RETURN_UNEXPECTED(append->Commit());
+        }
         const auto location = Location_ + "/metadata/0000" + std::to_string(index) + "-" + attemptID + ".metadata.json";
-        ICEBERG_RETURN_UNEXPECTED(iceberg::TableMetadataUtil::Write(*IO_, location, staged.Transaction->current()));
+        ICEBERG_RETURN_UNEXPECTED(iceberg::TableMetadataUtil::Write(*IO_, location, transaction->current()));
         auto context = Context();
         context.Base = base;
         context.StoreUsage = base->Usage;
@@ -226,6 +274,22 @@ protected:
         TStoragePublicationGuard guard(std::move(context));
         ICEBERG_RETURN_UNEXPECTED(guard.BeforePointerChange(change));
         return guard.GetCandidate();
+    }
+
+    iceberg::Result<std::string> WriteRecoveryRoot(const iceberg::TableMetadata& metadata)
+    {
+        constexpr auto attemptID = "33333333-3333-7333-8333-333333333339";
+        constexpr auto operationID = "44444444-4444-4444-8444-444444444449";
+        auto attempt = NIO::TIOAttempt::Make({StoreID, CollectionID, attemptID, NIO::EAttemptKind::Append, operationID},
+            Dirs_->Latch());
+        if (!attempt) {
+            return iceberg::IOError(attempt.Error().message());
+        }
+        ICEBERG_ASSIGN_OR_RAISE(auto scope, IO_->BindAttempt(attempt.Value()));
+        auto location = Location_;
+        location.append("/metadata/00009-").append(attemptID).append(".metadata.json");
+        ICEBERG_RETURN_UNEXPECTED(iceberg::TableMetadataUtil::Write(*IO_, location, metadata));
+        return location;
     }
 
     void CheckRows(const std::string& path, std::int64_t count)
@@ -416,6 +480,275 @@ TEST_F(TPublicationGuardTest, WritesTwoAppendsAndReopensEveryRetainedFile)
     CheckRows(DataLocations_[0], 1000);
     CheckRows(DataLocations_[1], 10);
     ExpectFreshProcess(Root_, (*second)->MetadataLocation);
+}
+
+TEST_F(TPublicationGuardTest, RecoveryHonorsExactAndReducedLimitsWithoutChangingTheStore)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto first = Append(1, create.GetCandidate(), 3);
+    ASSERT_TRUE(first);
+    const auto second = Append(2, *first, 2);
+    ASSERT_TRUE(second);
+    const auto readOnly = IO_->ReadOnlyView();
+    ASSERT_TRUE(readOnly);
+    const auto original = (*readOnly)->ReadFile((*second)->MetadataLocation, std::nullopt);
+    ASSERT_TRUE(original);
+    TStorageLimits exact;
+    exact.Store = (*second)->Usage;
+    exact.RootBytes = (*second)->Usage.RootBytes;
+    const auto reopen = [&](const auto& limits) {
+        return VerifyReachable(*readOnly, (*second)->MetadataLocation, StoreID, CollectionID, limits);
+    };
+    const auto accepted = reopen(exact);
+    ASSERT_TRUE(accepted) << accepted.error().message;
+    EXPECT_EQ(accepted->Usage, (*second)->Usage);
+    constexpr std::array fields{&TStorageUsage::RootBytes,
+        &TStorageUsage::Snapshots,
+        &TStorageUsage::SnapshotLogEntries,
+        &TStorageUsage::DataFiles,
+        &TStorageUsage::Manifests,
+        &TStorageUsage::ManifestBytes,
+        &TStorageUsage::ManifestListBytes,
+        &TStorageUsage::FooterBytes};
+    for (const auto field : fields) {
+        auto reduced = exact;
+        ASSERT_GT(reduced.Store.*field, 0);
+        --(reduced.Store.*field);
+        EXPECT_FALSE(reopen(reduced));
+    }
+    auto reduced = exact;
+    --reduced.RootBytes;
+    EXPECT_FALSE(reopen(reduced));
+    EXPECT_TRUE(reopen(exact));
+    const auto unchanged = (*readOnly)->ReadFile((*second)->MetadataLocation, std::nullopt);
+    ASSERT_TRUE(unchanged);
+    EXPECT_EQ(*unchanged, *original);
+    EXPECT_FALSE(Dirs_->Latch()->IsSet());
+}
+
+class TCollectionCopyTest
+    : public TPublicationGuardTest
+    , public ::testing::WithParamInterface<bool>
+{ };
+
+TEST_P(TCollectionCopyTest, ReopensCopiedRootsWithoutTheSourceAndRejectsInterruptedCopies)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto first = Append(1, create.GetCandidate(), 3);
+    ASSERT_TRUE(first);
+    const auto second = Append(2, *first, 2);
+    ASSERT_TRUE(second);
+    Scope_.reset();
+    const glamdb::test::TempDir temporary;
+    const auto destination = std::filesystem::canonical(temporary.path) / "copy";
+    auto posix = std::make_shared<NIO::TPosixLocalFS>();
+    auto targetFS = std::make_shared<NTesting::TFaultFS>(*posix);
+    const auto directories = NIO::TStoreDirs::Create(targetFS, destination, std::make_shared<NIO::TWriteLatch>());
+    ASSERT_TRUE(directories);
+    const auto target = directories.Value()->CreateCollection(CollectionID);
+    ASSERT_TRUE(target);
+    const auto source = Dirs_->OpenCollection(CollectionID);
+    ASSERT_TRUE(source);
+    const auto targetIO = TDurableLocalFileIO::Make(directories.Value(), StoreID);
+    ASSERT_TRUE(targetIO);
+    if (GetParam()) {
+        targetFS->AddRule({NTesting::EIOOp::Write, "*.parquet", 1, 1, std::make_error_code(std::errc::io_error), {}});
+    }
+    bool interrupted = false;
+    for (const bool metadata : {true, false}) {
+        const std::string name = metadata ? "metadata" : "data";
+        std::vector<std::filesystem::path> paths;
+        for (const auto& entry : std::filesystem::directory_iterator(Root_ / "warehouse" / CollectionID / name)) {
+            ASSERT_TRUE(entry.is_regular_file());
+            paths.push_back(entry.path());
+        }
+        std::ranges::sort(paths);
+        for (const auto& path : paths) {
+            const auto leaf = path.filename().string();
+            const auto copied =
+                NIO::CopyDurableFile({Dirs_->Fs(), metadata ? source.Value().Metadata : source.Value().Data, leaf},
+                    {targetFS,
+                        metadata ? target.Value().Metadata : target.Value().Data,
+                        leaf,
+                        directories.Value()->Latch()},
+                    std::filesystem::file_size(path));
+            if (!copied) {
+                ASSERT_TRUE(GetParam());
+                ASSERT_FALSE(metadata);
+                ASSERT_EQ(leaf, std::filesystem::path(DataLocations_.front()).filename());
+                EXPECT_EQ(copied.Error(), std::errc::io_error);
+                const auto partial = destination / "warehouse" / CollectionID / name / leaf;
+                ASSERT_EQ(std::filesystem::file_size(partial), 0);
+                EXPECT_EQ(std::ranges::count_if(targetFS->Events(),
+                              [&](const auto& event) {
+                                  return event.Op == NTesting::EIOOp::Write && event.Path == partial &&
+                                      event.Error == std::errc::io_error;
+                              }),
+                    1);
+                interrupted = true;
+                break;
+            }
+            EXPECT_EQ(copied.Value().Length, std::filesystem::file_size(path));
+            auto uri = Location_;
+            uri.append("/").append(name).append("/").append(leaf);
+            const auto original = IO_->ReadFile(uri, std::nullopt);
+            const auto actual = (*targetIO)->ReadFile(uri, std::nullopt);
+            ASSERT_TRUE(original);
+            ASSERT_TRUE(actual);
+            EXPECT_EQ(*actual, *original);
+        }
+        if (interrupted) {
+            break;
+        }
+    }
+    ASSERT_EQ(interrupted, GetParam());
+    ASSERT_TRUE(std::filesystem::exists(destination / "warehouse" / CollectionID / "metadata" /
+        std::filesystem::path((*second)->MetadataLocation).filename()));
+    auto movedSource = Root_;
+    movedSource += "-unavailable-source";
+    std::filesystem::rename(Root_, movedSource);
+    ASSERT_GT(std::filesystem::remove_all(movedSource), 0);
+    ASSERT_FALSE(std::filesystem::exists(Root_));
+    ASSERT_FALSE(std::filesystem::exists(movedSource));
+    EXPECT_FALSE(IO_->ReadFile((*second)->MetadataLocation, std::nullopt));
+    const auto reopenedDirs = NIO::TStoreDirs::Open(posix, destination, std::make_shared<NIO::TWriteLatch>());
+    ASSERT_TRUE(reopenedDirs);
+    const auto reopened = TDurableLocalFileIO::Make(reopenedDirs.Value(), StoreID);
+    ASSERT_TRUE(reopened);
+    IO_ = *reopened;
+    for (const auto& expected : {*first, *second}) {
+        const auto recovered = VerifyReachable(IO_, expected->MetadataLocation, StoreID, CollectionID);
+        if (interrupted) {
+            ASSERT_FALSE(recovered);
+            EXPECT_EQ(recovered.error().kind, iceberg::ErrorKind::kInvalid);
+            EXPECT_TRUE(recovered.error().message.starts_with("CORRUPTION: " + DataLocations_.front()))
+                << recovered.error().message;
+            ExpectFreshProcess(destination, expected->MetadataLocation, std::nullopt, DataLocations_.front());
+        } else {
+            ASSERT_TRUE(recovered) << recovered.error().message;
+            EXPECT_EQ(recovered->Usage, expected->Usage);
+            EXPECT_EQ(*recovered->Metadata, *expected->Metadata);
+            EXPECT_EQ(recovered->Metadata->current_snapshot_id, expected->Metadata->current_snapshot_id);
+            ExpectFreshProcess(destination, expected->MetadataLocation, expected->Usage.Snapshots);
+        }
+    }
+    if (!interrupted) {
+        CheckRows(DataLocations_[0], 3);
+        CheckRows(DataLocations_[1], 2);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(CompleteAndInterrupted, TCollectionCopyTest, ::testing::Bool());
+
+class TRecoveryHistoryTest
+    : public TPublicationGuardTest
+    , public ::testing::WithParamInterface<int>
+{ };
+
+TEST_P(TRecoveryHistoryTest, ChecksEveryRetainedTransitionAndTheFinalRoot)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    auto base = create.GetCandidate();
+    for (int index = 1; index <= 3; ++index) {
+        auto appended = Append(index, base, 1);
+        ASSERT_TRUE(appended) << appended.error().message;
+        base = *appended;
+    }
+    auto metadata = *base->Metadata;
+    for (auto& snapshot : metadata.snapshots) {
+        snapshot = std::make_shared<iceberg::Snapshot>(*snapshot);
+    }
+    std::string expectedError;
+    switch (GetParam()) {
+        case 0:
+            break;
+        case 1: {
+            metadata.snapshots.back()->snapshot_id = metadata.snapshots.front()->snapshot_id;
+            expectedError = "Invalid retained snapshot history";
+            break;
+        }
+        case 2: {
+            metadata.snapshots.back()->manifest_list = metadata.snapshots.front()->manifest_list;
+            expectedError = "Invalid retained snapshot history";
+            break;
+        }
+        case 3: {
+            metadata.snapshots[1]->parent_snapshot_id.reset();
+            expectedError = "Invalid append snapshot identity";
+            break;
+        }
+        case 4: {
+            metadata.snapshot_log[1].timestamp_ms += std::chrono::milliseconds(1);
+            expectedError = "Append snapshot log differs";
+            break;
+        }
+        case 5: {
+            metadata.current_snapshot_id = metadata.snapshots.front()->snapshot_id;
+            expectedError = "Recovery root has an inconsistent current snapshot";
+            break;
+        }
+        case 6: {
+            ++metadata.snapshots[1]->sequence_number;
+            expectedError = "Invalid append metadata delta";
+            break;
+        }
+        default: {
+            auto ref = std::make_shared<iceberg::SnapshotRef>(*metadata.refs.at("main"));
+            ref->snapshot_id = metadata.snapshots.front()->snapshot_id;
+            metadata.refs["main"] = std::move(ref);
+            expectedError = "Recovery root has an inconsistent current snapshot";
+            break;
+        }
+    }
+    const auto root = WriteRecoveryRoot(metadata);
+    ASSERT_TRUE(root) << root.error().message;
+    const auto readOnly = IO_->ReadOnlyView();
+    ASSERT_TRUE(readOnly);
+    const auto recovered = VerifyReachable(*readOnly, *root, StoreID, CollectionID);
+    if (expectedError.empty()) {
+        ASSERT_TRUE(recovered) << recovered.error().message;
+        EXPECT_EQ(*recovered->Metadata, metadata);
+        EXPECT_EQ(recovered->Usage.DataFiles, 3);
+    } else {
+        ASSERT_FALSE(recovered);
+        EXPECT_NE(recovered.error().message.find(expectedError), std::string::npos) << recovered.error().message;
+    }
+    EXPECT_TRUE(VerifyReachable(*readOnly, base->MetadataLocation, StoreID, CollectionID));
+}
+
+INSTANTIATE_TEST_SUITE_P(RetainedHistory, TRecoveryHistoryTest, ::testing::Range(0, 8));
+
+TEST_F(TPublicationGuardTest, RecoveryRejectsADataFileReusedByDistinctManifests)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto first = Append(1, create.GetCandidate(), 1);
+    ASSERT_TRUE(first) << first.error().message;
+    std::string candidateRoot;
+    const auto reused = Append(
+        2,
+        *first,
+        1,
+        [&](auto* /*context*/, auto* change) {
+            candidateRoot = change->NewLocation;
+        },
+        DataLocations_.front());
+    ASSERT_FALSE(reused);
+    ASSERT_FALSE(candidateRoot.empty());
+    const auto readOnly = IO_->ReadOnlyView();
+    ASSERT_TRUE(readOnly);
+    const auto recovered = VerifyReachable(*readOnly, candidateRoot, StoreID, CollectionID);
+    ASSERT_FALSE(recovered);
+    EXPECT_NE(recovered.error().message.find("Append reuses a retained data file"), std::string::npos)
+        << recovered.error().message;
+    EXPECT_TRUE(VerifyReachable(*readOnly, (*first)->MetadataLocation, StoreID, CollectionID));
 }
 
 TEST_F(TPublicationGuardTest, ValidatesDelayedCommittedRootsAndReopensHistory)

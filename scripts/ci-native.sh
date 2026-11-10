@@ -91,7 +91,7 @@ case "$stage" in
     ;;
   build)
     cmake --preset local -B "$build" "${configure[@]}" \
-      -DGLAMDB_BUILD_STORAGE=ON -DGLAMDB_IO_ONLY=OFF -DBUILD_TESTING=ON \
+      -DGLAMDB_BUILD_STORAGE=ON -DGLAMDB_BUILD_IO_PROBE=ON -DGLAMDB_IO_ONLY=OFF -DBUILD_TESTING=ON \
       -DCMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE=PRE_TEST
     cmake --build "$build" --parallel 2
     ;;
@@ -115,6 +115,8 @@ case "$stage" in
       [[ -f $project ]] || continue
       source_dir=${project%/CMakeLists.txt}
       name=${source_dir##*/}
+      # The I/O probe is a root-owned target, not a standalone CMake project.
+      if [[ $name == io ]]; then continue; fi
       # This regression probe intentionally compares mixed ASan annotations;
       # its baseline must remain the ordinary, uninstrumented dependency prefix.
       if [[ $name == toolchain && $profile != normal ]]; then continue; fi
