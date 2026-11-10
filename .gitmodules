@@ -7,3 +7,6 @@
 [submodule "third_party/googletest"]
 	path = third_party/googletest
 	url = https://github.com/google/googletest.git
+[submodule "third_party/cli11"]
+	path = third_party/cli11
+	url = https://github.com/CLIUtils/CLI11.git

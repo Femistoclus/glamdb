@@ -123,7 +123,7 @@ Preserve these boundaries when adding or changing engine behavior:
 | `core/api/`, `core/catalog/`, `core/engine/` | Canonical input, catalog, coordinator, and internal storage-backend seam. |
 | `core/io/` | Independent local filesystem, attempts, receipts, durable files and copying (`glamdb_io`). |
 | `core/storage/` | Optional FileIO, Parquet writer, Iceberg staging, publication/recovery and capacity checks (`glamdb_storage`). |
-| `apps/glamdb/` | Store-management CLI and transport-only outcome serialization. |
+| `apps/glamdb/` | Store-management CLI using CLI11 and transport-only outcome serialization. |
 | `cmake/` | Build options, sanitizers, quality targets, and dependency recipes. |
 | `tests/` | Native unit/recovery/SqlCatalog/VFS/consumer suites, verification and actual SDK HTTP/HTTPS tests. |
 | `apps/mock_server/` | Disposable Python mock, real HTTP/Arrow, no warehouse/catalog access. |
@@ -190,7 +190,9 @@ ctest --preset local
 ```
 
 The application links the pinned SQLite, Arrow and Iceberg installation. Tests
-also require GoogleTest. Use `release` or `asan-ubsan` in place of `local` for
+also require GoogleTest. The CLI uses the pinned, header-only CLI11 submodule;
+it is not part of the public engine API or dependency installation.
+Use `release` or `asan-ubsan` in place of `local` for
 the corresponding configure, build, and test presets. Core protocol tests use a
 test-only backend; the real SqlCatalog test verifies the catalog integration
 separately. Neither establishes durable user-file production or power-loss safety.

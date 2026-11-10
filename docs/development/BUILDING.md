@@ -33,6 +33,14 @@ not serve HTTP. The real file module is available separately, but connecting it
 through `core/engine/storage_backend.h` remains integration work. Public factories
 do not yet write user-data files, and the scanner is pending.
 
+CLI11 provides argument parsing and help from its pinned submodule. Run
+`glamdb --help` or `glamdb create-store --help` / `glamdb inspect-store --help`
+for usage. Both commands require `--root ABSOLUTE_PATH` and `--store-id UUID`;
+options may appear in either order and also accept `--name=value` syntax.
+No arguments prints help successfully. Invalid command lines exit with code 2
+before opening a store; engine errors exit with code 1. Successful commands
+retain the store-info JSON output.
+
 Use `release` or `asan-ubsan` in place of `local` for the other build profiles.
 For a build without tests or GoogleTest, use a separate directory:
 
