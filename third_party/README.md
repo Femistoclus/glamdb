@@ -4,7 +4,7 @@
 | --- | --- | --- |
 | Arrow / Parquet | 25.0.0 | `arrow/` submodule; Parquet is part of Arrow. |
 | Iceberg C++ | 0.4.0 | `iceberg-cpp/` submodule. |
-| GoogleTest / GoogleMock | 1.17.0 | `googletest/` submodule. |
+| GoogleTest | 1.17.0 | `googletest/` submodule; built with project tests. |
 | SQLite | 3.54.1 | Official amalgamation archive. |
 
 Exact commits, URLs, and SQLite checksums are recorded in [lock.json](lock.json).
@@ -17,7 +17,10 @@ cmake --preset deps-local
 cmake --build --preset deps-local --parallel 2
 ```
 
-This explicitly builds and installs dependencies into `.deps/install`. It needs
+This explicitly builds and installs Arrow/Parquet, Iceberg and SQLite into
+`.deps/install`. GoogleTest is built directly from the pinned submodule when
+`BUILD_TESTING=ON`; the dependency build does not compile or install it again.
+GoogleMock is disabled. The dependency build needs
 network access for SQLite and upstream transitive dependencies, plus the build
 prerequisites of Arrow and Iceberg, including zlib development files. Set
 `GLAMDB_DEPENDENCY_JOBS` when configuring to change parallelism within each
