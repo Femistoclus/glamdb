@@ -37,6 +37,8 @@ if(NOT GLAMDB_IO_ONLY)
     gtest_discover_tests(glamdb_unit TEST_PREFIX glamdb.unit. PROPERTIES LABELS unit TIMEOUT 30)
 
     if(GLAMDB_BUILD_STORAGE)
+        target_compile_definitions(glamdb_unit PRIVATE GLAMDB_HAS_STORAGE=1)
+        target_link_libraries(glamdb_unit PRIVATE glamdb_storage)
         # Public API with the real storage backend: Parquet, Iceberg metadata and SQLite.
         file(GLOB_RECURSE vertical_test_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/vertical/*.cpp")
         add_executable(glamdb_vertical ${vertical_test_sources})

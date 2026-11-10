@@ -142,6 +142,7 @@ struct Engine::Impl
     std::atomic<bool> closing{false};
     bool ready = false;
     bool closed = false;
+    uint64_t health_generation = 0;
     int64_t pending_calls = 0;
     size_t owned_input_bytes = 0;
     std::vector<CollectionInfo> collections;
@@ -169,6 +170,14 @@ struct Engine::Impl
     {
         Require(!closing.load(), "CANCELLED", "engine is closing");
         Require(ready && !closed, "RECOVERY_REQUIRED", "authoritative reconciliation is required");
+    }
+
+    void CheckHealthy(uint64_t expected_generation) const
+    {
+        CheckReady();
+        Require(health_generation == expected_generation,
+            "RECOVERY_REQUIRED",
+            "authoritative reconciliation is required");
     }
 
     // The caller holds state_mutex. Recheck at every admission/writer boundary:
@@ -307,6 +316,7 @@ struct Engine::Impl
             std::move(context)};
         std::lock_guard lock(state_mutex);
         ready = false;
+        ++health_generation;
         unresolved_create = outcome;
         return outcome;
     }
@@ -341,6 +351,7 @@ struct Engine::Impl
             }
             std::lock_guard lock(state_mutex);
             ready = false;
+            ++health_generation;
         }
     }
 
@@ -367,15 +378,18 @@ struct Engine::Impl
             }
             std::lock_guard lock(state_mutex);
             ready = false;
+            ++health_generation;
             throw;
         }
     }
 
     void Recover(bool reopen)
     {
+        uint64_t start_generation = 0;
         {
             std::lock_guard lock(state_mutex);
             ready = false;
+            start_generation = ++health_generation;
         }
         if (reopen) {
             if (backend) {
@@ -410,6 +424,12 @@ struct Engine::Impl
         catalog->ValidateInventory();
         RefreshCache();
         std::lock_guard lock(state_mutex);
+        if (health_generation != start_generation) {
+            if (backend) {
+                backend->InvalidateCache();
+            }
+            throw Failure({"CORRUPTION", "concurrent corruption detected during recovery", RetryHint::OperatorAction});
+        }
         active.reset();
         recovery.reset();
         pending_failure.reset();
@@ -428,6 +448,7 @@ struct Engine::Impl
         error.retry_hint = RetryHint::SameIdAfterReconcile;
         std::lock_guard lock(state_mutex);
         ready = false;
+        ++health_generation;
         active.reset();
         recovery = context;
         pending_failure = std::move(failure);
@@ -456,6 +477,7 @@ struct Engine::Impl
             active.reset();
             if (error.code == "CORRUPTION" || error.code == "UNSUPPORTED_STORE_VERSION") {
                 ready = false;
+                ++health_generation;
             }
             return failure;
         } catch (const Failure& record_error) {
@@ -645,12 +667,14 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
                     RetryHint::SameIdAfterReconcile},
                 context};
         }
+        uint64_t expected_generation = 0;
         {
             std::lock_guard state_lock(impl->state_mutex);
             const auto blocked = impl->BlockedCreate(*context);
             if (blocked) {
                 return *blocked;
             }
+            expected_generation = impl->health_generation;
         }
         const auto existing = impl->catalog->Collections();
         for (const auto& collection : existing) {
@@ -697,23 +721,48 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
             "IO_ERROR",
             "producer changed collection identity or schema");
         context->candidate_table_uuid = info.table_uuid;
-        Require(!impl->closing.load(), "CANCELLED", "engine is closing");
+        {
+            std::lock_guard state_lock(impl->state_mutex);
+            impl->CheckHealthy(expected_generation);
+        }
         publication_started = true;
         context->publication_started = true;
         auto created = impl->catalog->PublishCreate(
             info,
-            [&](std::string_view location) {
+            [&](std::string_view location) -> Status {
                 context->candidate_metadata_location = std::string(location);
-                return staged->VerifyClosure(location);
+                auto verified = staged->VerifyClosure(location);
+                if (!verified) {
+                    return verified;
+                }
+                std::lock_guard state_lock(impl->state_mutex);
+                if (impl->closing.load()) {
+                    return std::unexpected(ErrorDetail{"CANCELLED", "engine is closing", RetryHint::OperatorAction});
+                }
+                if (!impl->ready || impl->closed || impl->health_generation != expected_generation) {
+                    return std::unexpected(ErrorDetail{"RECOVERY_REQUIRED",
+                        "authoritative reconciliation is required",
+                        RetryHint::SameIdAfterReconcile});
+                }
+                return {};
             },
             [&] {
                 return staged->Publish(*impl->catalog);
             });
         committed = true;
-        if (context->candidate_metadata_location) {
-            impl->backend->ConfirmPublication(created.collection_id, *context->candidate_metadata_location);
+        bool healthy_after_commit = false;
+        {
+            std::lock_guard state_lock(impl->state_mutex);
+            healthy_after_commit = impl->ready && !impl->closed && impl->health_generation == expected_generation;
         }
-        impl->RefreshCache();
+        if (healthy_after_commit) {
+            if (context->candidate_metadata_location) {
+                impl->backend->ConfirmPublication(created.collection_id, *context->candidate_metadata_location);
+            }
+            impl->RefreshCache();
+        } else if (impl->backend) {
+            impl->backend->InvalidateCache();
+        }
         return {CommitDisposition::Committed, CommitPhase::Complete, created, std::nullopt, std::nullopt};
     } catch (const Failure& error) {
         impl->CloseOnCorruption(error.detail);
@@ -810,11 +859,13 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
                         RetryHint::SameIdAfterReconcile});
             }
         }
+        uint64_t expected_generation = 0;
         {
             std::lock_guard state_lock(impl->state_mutex);
             unresolved = impl->BlockedAppend(request);
             collection = impl->CachedCollection(request.collection_id);
             if (!unresolved) {
+                expected_generation = impl->health_generation;
                 context = impl->AppendLookupContext(request,
                     payload_hash,
                     {"RECOVERY_REQUIRED", "outcome lookup is unresolved", RetryHint::SameIdAfterReconcile});
@@ -860,6 +911,7 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         const auto reservation = Take(InputReservation(collection.schema, request.batches));
         {
             std::lock_guard lock(impl->state_mutex);
+            impl->CheckHealthy(expected_generation);
             if (!admission.owner) {
                 Require(impl->pending_calls < impl->limits.max_pending_calls,
                     "RESOURCE_EXHAUSTED",
@@ -880,6 +932,10 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
             if (!admissible) {
                 throw Failure(admissible.error());
             }
+        }
+        {
+            std::lock_guard state_lock(impl->state_mutex);
+            impl->CheckHealthy(expected_generation);
         }
         binding = BoundOperation{request.collection_id,
             request.operation_id,
@@ -912,7 +968,10 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
                 "PRECONDITION_FAILED",
                 "snapshot precondition does not match");
         }
-        Require(!impl->closing.load(), "CANCELLED", "engine is closing");
+        {
+            std::lock_guard state_lock(impl->state_mutex);
+            impl->CheckHealthy(expected_generation);
+        }
         Require(std::chrono::steady_clock::now() < deadline,
             "DEADLINE_EXCEEDED",
             "append deadline expired before execution");
@@ -931,7 +990,10 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
                 receipt.rows_appended == static_cast<int64_t>(input.rows.size()),
             "IO_ERROR",
             "producer returned an invalid receipt or row count");
-        Require(!impl->closing.load(), "CANCELLED", "engine is closing");
+        {
+            std::lock_guard state_lock(impl->state_mutex);
+            impl->CheckHealthy(expected_generation);
+        }
         Require(std::chrono::steady_clock::now() < deadline,
             "DEADLINE_EXCEEDED",
             "append deadline expired before publication");
@@ -942,18 +1004,40 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         impl->catalog->PublishAppend(
             *binding,
             receipt,
-            [&](std::string_view location) {
+            [&](std::string_view location) -> Status {
                 context.candidate_metadata_location = std::string(location);
-                return staged->VerifyClosure(location);
+                auto verified = staged->VerifyClosure(location);
+                if (!verified) {
+                    return verified;
+                }
+                std::lock_guard state_lock(impl->state_mutex);
+                if (impl->closing.load()) {
+                    return std::unexpected(ErrorDetail{"CANCELLED", "engine is closing", RetryHint::OperatorAction});
+                }
+                if (!impl->ready || impl->closed || impl->health_generation != expected_generation) {
+                    return std::unexpected(ErrorDetail{"RECOVERY_REQUIRED",
+                        "authoritative reconciliation is required",
+                        RetryHint::SameIdAfterReconcile});
+                }
+                return {};
             },
             [&] {
                 return staged->Publish(*impl->catalog);
             });
         phase = CommitPhase::Complete;
-        if (context.candidate_metadata_location) {
-            impl->backend->ConfirmPublication(binding->collection_id, *context.candidate_metadata_location);
+        bool healthy_after_commit = false;
+        {
+            std::lock_guard state_lock(impl->state_mutex);
+            healthy_after_commit = impl->ready && !impl->closed && impl->health_generation == expected_generation;
         }
-        impl->RefreshCache();
+        if (healthy_after_commit) {
+            if (context.candidate_metadata_location) {
+                impl->backend->ConfirmPublication(binding->collection_id, *context.candidate_metadata_location);
+            }
+            impl->RefreshCache();
+        } else if (impl->backend) {
+            impl->backend->InvalidateCache();
+        }
         {
             std::lock_guard state_lock(impl->state_mutex);
             impl->active.reset();

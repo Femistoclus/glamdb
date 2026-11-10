@@ -52,16 +52,35 @@ T TakeArrow(arrow::Result<T> result, std::string_view code, std::string_view con
     return std::move(result).ValueUnsafe();
 }
 
+bool IsCorruptionKind(iceberg::ErrorKind kind)
+{
+    return kind == iceberg::ErrorKind::kNotFound || kind == iceberg::ErrorKind::kInvalid ||
+        kind == iceberg::ErrorKind::kValidationFailed || kind == iceberg::ErrorKind::kDecompressError ||
+        kind == iceberg::ErrorKind::kUnknownError;
+}
+
 template <class T>
 T TakeIceberg(iceberg::Result<T> result, std::string_view code, std::string_view context)
 {
     if (!result) {
-        const auto kind = result.error().kind;
-        const auto effective =
-            (kind == iceberg::ErrorKind::kNotFound || kind == iceberg::ErrorKind::kInvalid) ? "CORRUPTION" : code;
+        const auto effective = IsCorruptionKind(result.error().kind) ? "CORRUPTION" : code;
         Fail(effective, context, result.error().message);
     }
     return std::move(*result);
+}
+
+template <class TFunction>
+decltype(auto) DecodeParquet(std::string_view context, TFunction&& fn)
+{
+    try {
+        return fn();
+    } catch (const Failure&) {
+        throw;
+    } catch (const std::bad_alloc&) {
+        throw;
+    } catch (const std::exception& error) {
+        Fail("CORRUPTION", context, error.what());
+    }
 }
 
 template <class T>
@@ -238,7 +257,9 @@ private:
                 OpenFile(Plan_.Files[NextFile_++]);
             }
             std::shared_ptr<arrow::RecordBatch> batch;
-            CheckArrow(BatchReader_->ReadNext(&batch), "CORRUPTION", "read Parquet batch");
+            DecodeParquet("read Parquet batch", [&] {
+                CheckArrow(BatchReader_->ReadNext(&batch), "CORRUPTION", "read Parquet batch");
+            });
             if (!batch) {
                 Release();
                 continue;
@@ -262,25 +283,27 @@ private:
         if (static_cast<int64_t>(bytes.size()) != file.SizeBytes) {
             Fail("CORRUPTION", "read data file", "file length differs from its manifest");
         }
-        auto source = std::make_shared<arrow::io::BufferReader>(arrow::Buffer::FromString(std::move(bytes)));
-        auto reader = TakeArrow(parquet::arrow::OpenFile(source, arrow::default_memory_pool()),
-            "CORRUPTION",
-            "open Parquet file");
-        reader->set_batch_size(BatchRows_);
-        CheckFileSchema(*reader->parquet_reader()->metadata()->schema());
-        if (reader->parquet_reader()->metadata()->num_rows() != file.RecordCount) {
-            Fail("CORRUPTION", "open Parquet file", "row count differs from its manifest");
-        }
-        std::vector<int> rowGroups(static_cast<size_t>(reader->num_row_groups()));
-        std::iota(rowGroups.begin(), rowGroups.end(), 0);
-        std::vector<int> columns;
-        columns.reserve(ReadFields_.size());
-        for (const auto field : ReadFields_) {
-            columns.push_back(static_cast<int>(field));
-        }
-        BatchReader_ =
-            TakeArrow(reader->GetRecordBatchReader(rowGroups, columns), "CORRUPTION", "open Parquet batches");
-        FileReader_ = std::move(reader);
+        DecodeParquet("open Parquet file", [&] {
+            auto source = std::make_shared<arrow::io::BufferReader>(arrow::Buffer::FromString(std::move(bytes)));
+            auto reader = TakeArrow(parquet::arrow::OpenFile(source, arrow::default_memory_pool()),
+                "CORRUPTION",
+                "open Parquet file");
+            reader->set_batch_size(BatchRows_);
+            CheckFileSchema(*reader->parquet_reader()->metadata()->schema());
+            if (reader->parquet_reader()->metadata()->num_rows() != file.RecordCount) {
+                Fail("CORRUPTION", "open Parquet file", "row count differs from its manifest");
+            }
+            std::vector<int> rowGroups(static_cast<size_t>(reader->num_row_groups()));
+            std::iota(rowGroups.begin(), rowGroups.end(), 0);
+            std::vector<int> columns;
+            columns.reserve(ReadFields_.size());
+            for (const auto field : ReadFields_) {
+                columns.push_back(static_cast<int>(field));
+            }
+            BatchReader_ =
+                TakeArrow(reader->GetRecordBatchReader(rowGroups, columns), "CORRUPTION", "open Parquet batches");
+            FileReader_ = std::move(reader);
+        });
     }
 
     // The flat fixed schema maps field i to leaf column i with field ID i + 1.

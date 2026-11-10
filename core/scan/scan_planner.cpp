@@ -18,18 +18,40 @@
 namespace glamdb::detail {
 namespace {
 
+bool IsCorruptionKind(iceberg::ErrorKind kind)
+{
+    return kind == iceberg::ErrorKind::kNotFound || kind == iceberg::ErrorKind::kInvalid ||
+        kind == iceberg::ErrorKind::kValidationFailed || kind == iceberg::ErrorKind::kDecompressError ||
+        kind == iceberg::ErrorKind::kUnknownError;
+}
+
 template <class T>
 T Take(iceberg::Result<T> result, std::string_view code, std::string_view context)
 {
     if (!result) {
-        const auto kind = result.error().kind;
-        const auto effective =
-            (kind == iceberg::ErrorKind::kNotFound || kind == iceberg::ErrorKind::kInvalid) ? "CORRUPTION" : code;
+        const auto effective = IsCorruptionKind(result.error().kind) ? "CORRUPTION" : code;
         throw Failure({std::string(effective),
             BoundedDiagnostic(std::string(context) + ": " + result.error().message),
             RetryHint::OperatorAction});
     }
     return std::move(*result);
+}
+
+// Upstream Avro/Iceberg manifest decoders may throw avro::Exception (derived from
+// std::exception) on malformed persisted files instead of returning iceberg::Status.
+template <class TFunction>
+decltype(auto) DecodePersisted(std::string_view context, TFunction&& fn)
+{
+    try {
+        return fn();
+    } catch (const Failure&) {
+        throw;
+    } catch (const std::bad_alloc&) {
+        throw;
+    } catch (const std::exception& error) {
+        throw Failure(
+            {"CORRUPTION", BoundedDiagnostic(std::string(context) + ": " + error.what()), RetryHint::OperatorAction});
+    }
 }
 
 [[noreturn]] void Unsupported(std::string_view message)
@@ -84,8 +106,13 @@ void AppendFiles(const iceberg::TableMetadata& metadata,
     if (!spec->IsUnpartitioned()) {
         Unsupported("partitioned manifests are not supported");
     }
-    auto reader = Take(iceberg::ManifestReader::Make(manifest, io, schema, spec), "IO_ERROR", "open manifest");
-    for (const auto& entry : Take(reader->LiveEntries(), "IO_ERROR", "read manifest")) {
+    auto reader = DecodePersisted("open manifest", [&] {
+        return Take(iceberg::ManifestReader::Make(manifest, io, schema, spec), "IO_ERROR", "open manifest");
+    });
+    const auto entries = DecodePersisted("read manifest", [&] {
+        return Take(reader->LiveEntries(), "IO_ERROR", "read manifest");
+    });
+    for (const auto& entry : entries) {
         const auto& file = entry.data_file;
         Require(file != nullptr, "CORRUPTION", "manifest entry has no data file");
         if (file->content != iceberg::DataFile::Content::kData ||
@@ -120,9 +147,15 @@ PlanScan(const std::shared_ptr<iceberg::FileIO>& io, const BaseIdentity& base, c
             return plan;
         }
         plan.SnapshotID = snapshot->snapshot_id;
-        const auto list =
-            Take(iceberg::ManifestListReader::Make(snapshot->manifest_list, io), "IO_ERROR", "open manifest list");
-        for (const auto& manifest : Take(list->Files(), "IO_ERROR", "read manifest list")) {
+        const auto list = DecodePersisted("open manifest list", [&] {
+            return Take(iceberg::ManifestListReader::Make(snapshot->manifest_list, io),
+                "IO_ERROR",
+                "open manifest list");
+        });
+        const auto manifests = DecodePersisted("read manifest list", [&] {
+            return Take(list->Files(), "IO_ERROR", "read manifest list");
+        });
+        for (const auto& manifest : manifests) {
             AppendFiles(*metadata, io, manifest, plan.Files);
         }
         return plan;

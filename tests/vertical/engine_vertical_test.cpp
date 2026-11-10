@@ -11,8 +11,11 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <future>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace glamdb {
@@ -519,6 +522,15 @@ TEST_F(EngineVerticalTest, MultiCollectionStoreCapacityEnforcedAcrossCommitsAndR
     Engine_.reset();
 
     const auto customRoot = Temporary_.path / "capped-store";
+    const auto countWarehouseFiles = [](const std::filesystem::path& warehouse) {
+        std::size_t count = 0;
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(warehouse)) {
+            if (entry.is_regular_file()) {
+                ++count;
+            }
+        }
+        return count;
+    };
     const auto makeFactory = [](std::size_t maxSnapshots) -> detail::BackendFactory {
         return [maxSnapshots](const std::filesystem::path& path,
                    const StoreInfo& info) -> Result<std::shared_ptr<detail::StorageBackend>> {
@@ -543,9 +555,16 @@ TEST_F(EngineVerticalTest, MultiCollectionStoreCapacityEnforcedAcrossCommitsAndR
 
     const auto first = engine->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
     ASSERT_EQ(first.disposition, CommitDisposition::Committed);
+    const auto filesBefore = countWarehouseFiles(customRoot / "warehouse");
 
     const auto second = engine->AppendDurable({SecondCollection, SecondOperation, {}, {Batch(SecondRows)}});
     EXPECT_EQ(second.disposition, CommitDisposition::DefinitelyNotCommitted);
+    ASSERT_TRUE(second.error);
+    EXPECT_EQ(second.error->code, "RESOURCE_EXHAUSTED");
+    const auto secondLookup = engine->FindAppendOutcome(SecondCollection, SecondOperation);
+    ASSERT_TRUE(secondLookup);
+    EXPECT_FALSE(secondLookup->has_value());
+    EXPECT_EQ(countWarehouseFiles(customRoot / "warehouse"), filesBefore);
     EXPECT_FALSE(engine->GetCollection(SecondCollection)->current_snapshot_id);
     ASSERT_TRUE(engine->Shutdown(1000ms));
     engine.reset();
@@ -553,7 +572,7 @@ TEST_F(EngineVerticalTest, MultiCollectionStoreCapacityEnforcedAcrossCommitsAndR
     auto wider = detail::EngineFactory::OpenWith({customRoot.string(), test::store_id}, makeFactory(2));
     ASSERT_TRUE(wider) << wider.error().message;
     engine = std::move(*wider);
-    ASSERT_EQ(engine->AppendDurable({SecondCollection, ThirdOperation, {}, {Batch(SecondRows)}}).disposition,
+    ASSERT_EQ(engine->AppendDurable({SecondCollection, SecondOperation, {}, {Batch(SecondRows)}}).disposition,
         CommitDisposition::Committed);
     ASSERT_TRUE(engine->Shutdown(1000ms));
     engine.reset();
@@ -561,6 +580,235 @@ TEST_F(EngineVerticalTest, MultiCollectionStoreCapacityEnforcedAcrossCommitsAndR
     const auto tooSmall = detail::EngineFactory::OpenWith({customRoot.string(), test::store_id}, makeFactory(1));
     ASSERT_FALSE(tooSmall);
     EXPECT_EQ(tooSmall.error().code, "CORRUPTION");
+}
+
+TEST_F(EngineVerticalTest, ConcurrentCursorCorruptionAbortsPreparedAppendPublication)
+{
+    ASSERT_TRUE(Engine_->Shutdown(1000ms));
+    Engine_.reset();
+
+    class TBarrierBackend final : public detail::StorageBackend
+    {
+    public:
+        explicit TBarrierBackend(std::shared_ptr<detail::StorageBackend> inner)
+            : Inner_(std::move(inner))
+        { }
+
+        void ArmBarrier(std::string targetCollection)
+        {
+            TargetCollection_ = std::move(targetCollection);
+        }
+
+        void WaitEntered()
+        {
+            Entered_.get_future().wait();
+        }
+
+        void Release()
+        {
+            Continue_.set_value();
+        }
+
+        Result<std::unique_ptr<detail::StagedCreate>>
+        PrepareCreate(const StoreInfo& store, const CreateCollectionRequest& request, std::string_view attempt) override
+        {
+            return Inner_->PrepareCreate(store, request, attempt);
+        }
+
+        Status CheckAppendAdmissible(const StoreInfo& store,
+            const CollectionInfo& collection,
+            const detail::NormalizedInput& input) override
+        {
+            return Inner_->CheckAppendAdmissible(store, collection, input);
+        }
+
+        Result<std::unique_ptr<detail::StagedAppend>> PrepareAppend(const StoreInfo& store,
+            const detail::BoundOperation& binding,
+            const CollectionInfo& collection,
+            const detail::NormalizedInput& input,
+            std::chrono::steady_clock::time_point deadline) override
+        {
+            auto staged = Inner_->PrepareAppend(store, binding, collection, input, deadline);
+            if (staged && binding.collection_id == TargetCollection_) {
+                Entered_.set_value();
+                Continue_.get_future().wait();
+            }
+            return staged;
+        }
+
+        void ConfirmPublication(std::string_view collectionID, std::string_view location) override
+        {
+            Inner_->ConfirmPublication(collectionID, location);
+        }
+
+        void InvalidateCache() override
+        {
+            Inner_->InvalidateCache();
+        }
+
+        Status VerifyRetained(const StoreInfo& store,
+            std::span<const detail::CollectionView> collections,
+            std::span<const detail::OperationRecord> operations) override
+        {
+            return Inner_->VerifyRetained(store, collections, operations);
+        }
+
+        Result<std::shared_ptr<iceberg::FileIO>> ReadOnlyFileIO() override
+        {
+            return Inner_->ReadOnlyFileIO();
+        }
+
+    private:
+        std::shared_ptr<detail::StorageBackend> Inner_;
+        std::string TargetCollection_;
+        std::promise<void> Entered_;
+        std::promise<void> Continue_;
+    };
+
+    const auto customRoot = Temporary_.path / "concurrent-corruption-store";
+    std::shared_ptr<TBarrierBackend> barrierBackend;
+    const detail::BackendFactory factory =
+        [&](const std::filesystem::path& path,
+            const StoreInfo& info) -> Result<std::shared_ptr<detail::StorageBackend>> {
+        auto inner = detail::TLocalStorageBackend::Open(path, info);
+        if (!inner) {
+            return std::unexpected(inner.error());
+        }
+        barrierBackend = std::make_shared<TBarrierBackend>(std::move(*inner));
+        return barrierBackend;
+    };
+
+    constexpr char SecondCollection[] = "00000000-0000-4000-8000-0000000000b2";
+    auto created = detail::EngineFactory::CreateWith({test::store_id, customRoot.string()}, factory);
+    ASSERT_TRUE(created) << created.error().message;
+    auto engine = std::move(*created);
+    ASSERT_EQ(engine->CreateCollection({test::collection_id, "events-a", Schema}).disposition,
+        CommitDisposition::Committed);
+    ASSERT_EQ(engine->CreateCollection({SecondCollection, "events-b", Schema}).disposition,
+        CommitDisposition::Committed);
+    ASSERT_EQ(engine->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}}).disposition,
+        CommitDisposition::Committed);
+
+    auto cursor = engine->Scan({.collection_id = test::collection_id});
+    ASSERT_TRUE(cursor) << cursor.error().message;
+
+    std::filesystem::path dataFile;
+    for (const auto& entry :
+        std::filesystem::directory_iterator(customRoot / "warehouse" / test::collection_id / "data"))
+    {
+        dataFile = entry.path();
+    }
+    ASSERT_FALSE(dataFile.empty());
+    const auto backupPath = Temporary_.path / "saved.parquet";
+    std::filesystem::copy_file(dataFile, backupPath);
+
+    barrierBackend->ArmBarrier(SecondCollection);
+    auto writerFuture = std::async(std::launch::async, [&] {
+        return engine->AppendDurable({SecondCollection, SecondOperation, {}, {Batch(SecondRows)}});
+    });
+    barrierBackend->WaitEntered();
+
+    std::filesystem::remove(dataFile);
+    const auto next = (*cursor)->Next();
+    ASSERT_FALSE(next);
+    EXPECT_EQ(next.error().code, "CORRUPTION");
+    cursor->reset();
+
+    barrierBackend->Release();
+    const auto outcomeB = writerFuture.get();
+    EXPECT_EQ(outcomeB.disposition, CommitDisposition::DefinitelyNotCommitted);
+    ASSERT_TRUE(outcomeB.error);
+    EXPECT_EQ(outcomeB.error->code, "RECOVERY_REQUIRED");
+
+    const auto blockedGet = engine->GetCollection(SecondCollection);
+    ASSERT_FALSE(blockedGet);
+    EXPECT_EQ(blockedGet.error().code, "RECOVERY_REQUIRED");
+
+    std::filesystem::copy_file(backupPath, dataFile);
+    ASSERT_TRUE(engine->Reconcile());
+    EXPECT_FALSE(engine->GetCollection(SecondCollection)->current_snapshot_id);
+    const auto lookupB = engine->FindAppendOutcome(SecondCollection, SecondOperation);
+    ASSERT_TRUE(lookupB);
+    ASSERT_TRUE(lookupB->has_value());
+    EXPECT_EQ((*lookupB)->disposition, CommitDisposition::DefinitelyNotCommitted);
+    ASSERT_TRUE(engine->Shutdown(1000ms));
+}
+
+TEST_F(EngineVerticalTest, MalformedAvroManifestAndOutOfRangeTimestampFailClosedAsCorruption)
+{
+    Committed(FirstOperation, FirstRows);
+
+    std::filesystem::path manifestPath;
+    std::filesystem::path metadataPath;
+    for (const auto& entry :
+        std::filesystem::directory_iterator(Root_ / "warehouse" / test::collection_id / "metadata"))
+    {
+        const auto filename = entry.path().filename().string();
+        if (entry.path().extension() == ".avro" && !filename.starts_with("snap-")) {
+            manifestPath = entry.path();
+        } else if (filename.starts_with("00001-") && filename.ends_with(".metadata.json")) {
+            metadataPath = entry.path();
+        }
+    }
+    ASSERT_FALSE(manifestPath.empty());
+    ASSERT_FALSE(metadataPath.empty());
+
+    std::string manifestBytes;
+    {
+        std::ifstream input(manifestPath, std::ios::binary);
+        manifestBytes.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    }
+    ASSERT_FALSE(manifestBytes.empty());
+    {
+        auto corrupted = manifestBytes;
+        corrupted[0] = 'X';
+        std::ofstream output(manifestPath, std::ios::binary | std::ios::trunc);
+        output.write(corrupted.data(), static_cast<std::streamsize>(corrupted.size()));
+    }
+
+    const auto scan = Engine_->Scan({.collection_id = test::collection_id});
+    ASSERT_FALSE(scan);
+    EXPECT_EQ(scan.error().code, "CORRUPTION");
+    const auto afterManifestCorruption = Engine_->ListCollections();
+    ASSERT_FALSE(afterManifestCorruption);
+    EXPECT_EQ(afterManifestCorruption.error().code, "RECOVERY_REQUIRED");
+
+    {
+        std::ofstream output(manifestPath, std::ios::binary | std::ios::trunc);
+        output.write(manifestBytes.data(), static_cast<std::streamsize>(manifestBytes.size()));
+    }
+    ASSERT_TRUE(Engine_->Reconcile());
+
+    std::string metadataJson;
+    {
+        std::ifstream input(metadataPath, std::ios::binary);
+        metadataJson.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    }
+    const std::string key = "\"timestamp-ms\"";
+    const auto keyPos = metadataJson.find(key);
+    ASSERT_NE(keyPos, std::string::npos);
+    const auto colonPos = metadataJson.find(':', keyPos + key.size());
+    ASSERT_NE(colonPos, std::string::npos);
+    const auto valueStart = metadataJson.find_first_of("-0123456789", colonPos + 1);
+    ASSERT_NE(valueStart, std::string::npos);
+    const auto valueEnd = metadataJson.find_first_not_of("-0123456789", valueStart);
+    ASSERT_NE(valueEnd, std::string::npos);
+    {
+        auto badMetadata = metadataJson;
+        badMetadata.replace(valueStart, valueEnd - valueStart, "-62135596800001");
+        std::ofstream output(metadataPath, std::ios::binary | std::ios::trunc);
+        output.write(badMetadata.data(), static_cast<std::streamsize>(badMetadata.size()));
+    }
+
+    const auto badReconcile = Engine_->Reconcile();
+    ASSERT_FALSE(badReconcile);
+    EXPECT_EQ(badReconcile.error().code, "CORRUPTION");
+
+    {
+        std::ofstream output(metadataPath, std::ios::binary | std::ios::trunc);
+        output.write(metadataJson.data(), static_cast<std::streamsize>(metadataJson.size()));
+    }
+    ASSERT_TRUE(Engine_->Reconcile());
 }
 
 } // namespace

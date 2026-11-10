@@ -452,9 +452,11 @@ Result<std::unique_ptr<StagedCreate>> TLocalStorageBackend::PrepareCreate(const 
         CheckIO(Dirs_->Latch()->Error(), "IO_ERROR", "write latch");
         auto profile = MakeProfile(request.schema, "INVALID_ARGUMENT");
         CheckIO(NStorage::CheckWriteCapacity(*Dirs_, Options_.Storage), "RESOURCE_EXHAUSTED", "storage preflight");
-        CheckIO(NStorage::CheckStorageCapacity(ComputeStoreUsage(), Options_.Storage),
-            "RESOURCE_EXHAUSTED",
-            "storage capacity");
+        const auto minUsage =
+            TakeIO(NStorage::ReplaceUsage(ComputeStoreUsage(), {.Previous = {}, .Next = {.RootBytes = 1}}),
+                "RESOURCE_EXHAUSTED",
+                "storage capacity");
+        CheckIO(NStorage::CheckStorageCapacity(minUsage, Options_.Storage), "RESOURCE_EXHAUSTED", "storage capacity");
         TakeIO(Dirs_->CreateCollection(request.collection_id), "IO_ERROR", "create collection directories");
         auto attempt = TakeIO(NIO::TIOAttempt::Make({Store_.store_id,
                                                         request.collection_id,
@@ -508,9 +510,18 @@ Status TLocalStorageBackend::CheckAppendAdmissible(const StoreInfo& store,
         (void)MakeProfile(collection.schema, "INVALID_ARGUMENT");
         CheckWriterInput(collection.schema, input, Options_.Writer);
         CheckIO(NStorage::CheckWriteCapacity(*Dirs_, Options_.Storage), "RESOURCE_EXHAUSTED", "storage preflight");
-        CheckIO(NStorage::CheckStorageCapacity(ComputeStoreUsage(), Options_.Storage),
+        const auto minUsage = TakeIO(NStorage::ReplaceUsage(ComputeStoreUsage(),
+                                         {.Previous = {},
+                                             .Next = {.Snapshots = 1,
+                                                 .SnapshotLogEntries = 1,
+                                                 .DataFiles = 1,
+                                                 .Manifests = 1,
+                                                 .ManifestBytes = 1,
+                                                 .ManifestListBytes = 1,
+                                                 .FooterBytes = 1}}),
             "RESOURCE_EXHAUSTED",
             "storage capacity");
+        CheckIO(NStorage::CheckStorageCapacity(minUsage, Options_.Storage), "RESOURCE_EXHAUSTED", "storage capacity");
         return {};
     });
 }
@@ -646,7 +657,6 @@ void TLocalStorageBackend::InvalidateCache()
 {
     std::lock_guard lock(Mutex_);
     VerifiedGeneration_ = false;
-    Collections_.clear();
 }
 
 Status TLocalStorageBackend::VerifyRetained(const StoreInfo& store,
@@ -732,18 +742,20 @@ std::shared_ptr<const NStorage::TBaseState> TLocalStorageBackend::ResolveBase(co
 {
     {
         std::lock_guard lock(Mutex_);
-        auto it = Collections_.find(base.collection_id);
-        if (it != Collections_.end()) {
-            auto& state = it->second;
-            // The coordinator builds a binding from the committed SQLite
-            // pointer, so a matching tentative root is now confirmed.
-            if (state.Tentative && state.Tentative->MetadataLocation == base.metadata_location) {
-                state.Confirmed = std::move(state.Tentative);
-            }
-            state.Tentative.reset();
-            if (state.Confirmed && state.Confirmed->MetadataLocation == base.metadata_location) {
-                CheckIdentity(*state.Confirmed, base);
-                return state.Confirmed;
+        if (VerifiedGeneration_) {
+            auto it = Collections_.find(base.collection_id);
+            if (it != Collections_.end()) {
+                auto& state = it->second;
+                // The coordinator builds a binding from the committed SQLite
+                // pointer, so a matching tentative root is now confirmed.
+                if (state.Tentative && state.Tentative->MetadataLocation == base.metadata_location) {
+                    state.Confirmed = std::move(state.Tentative);
+                }
+                state.Tentative.reset();
+                if (state.Confirmed && state.Confirmed->MetadataLocation == base.metadata_location) {
+                    CheckIdentity(*state.Confirmed, base);
+                    return state.Confirmed;
+                }
             }
         }
     }
