@@ -13,43 +13,31 @@ add_subdirectory("${PROJECT_SOURCE_DIR}/third_party/googletest"
 include(GoogleTest)
 add_subdirectory(unit)
 
-add_test(NAME glamdb.tooling.docker-runner
-    COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/tooling/test_docker_runner.py"
+# The compiler-configuration tests take the active compiler through the environment.
+add_test(NAME glamdb.tooling
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "CC=${CMAKE_C_COMPILER}" "CXX=${CMAKE_CXX_COMPILER}"
+        "GLAMDB_TEST_CMAKE=${CMAKE_COMMAND}" "GLAMDB_TEST_GENERATOR=${CMAKE_GENERATOR}"
+        "GLAMDB_TEST_TOOLCHAIN=${CMAKE_TOOLCHAIN_FILE}"
+        "${Python3_EXECUTABLE}" -m unittest discover
+        -s "${CMAKE_CURRENT_SOURCE_DIR}/tooling" -p "test_*.py" -v
 )
-set_tests_properties(glamdb.tooling.docker-runner PROPERTIES LABELS "tooling" TIMEOUT 30)
-
-add_test(NAME glamdb.tooling.cmake-configuration
-    COMMAND "${Python3_EXECUTABLE}"
-            "${PROJECT_SOURCE_DIR}/tests/tooling/test_cmake_configuration.py"
-            --cmake "${CMAKE_COMMAND}"
-            --generator "${CMAKE_GENERATOR}"
-            --c-compiler "${CMAKE_C_COMPILER}"
-            --cxx-compiler "${CMAKE_CXX_COMPILER}"
-)
-set_tests_properties(glamdb.tooling.cmake-configuration PROPERTIES LABELS "tooling" TIMEOUT 120)
-
-add_test(NAME glamdb.tooling.quality
-    COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/tooling/test_quality.py"
-)
-set_tests_properties(glamdb.tooling.quality PROPERTIES LABELS "tooling" TIMEOUT 30)
-
-add_test(NAME glamdb.tooling.format-style
-    COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/tooling/test_format_style.py"
-)
-set_tests_properties(glamdb.tooling.format-style PROPERTIES LABELS "tooling" TIMEOUT 30)
+set_tests_properties(glamdb.tooling PROPERTIES LABELS "tooling" TIMEOUT 240)
 
 if(NOT GLAMDB_IO_ONLY)
     add_test(NAME glamdb.smoke COMMAND glamdb)
     set_tests_properties(glamdb.smoke PROPERTIES LABELS "smoke" TIMEOUT 10)
 
-    add_executable(glamdb_unit unit/api_test.cpp unit/catalog_test.cpp unit/arrow_input_test.cpp
-        unit/coordinator_test.cpp unit/outcome_json_test.cpp support/fake_storage.cpp)
+    file(GLOB_RECURSE unit_test_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/unit/*.cpp")
+    list(FILTER unit_test_sources EXCLUDE REGEX "/unit/(io|storage)/|/unit/core_test\\.cpp$")
+    add_executable(glamdb_unit ${unit_test_sources} support/fake_storage.cpp)
     target_link_libraries(glamdb_unit PRIVATE glamdb::core GTest::gtest_main glamdb_build_options
         SQLite::SQLite3 iceberg::iceberg_sql_catalog_static Arrow::arrow_static glamdb_json)
     target_include_directories(glamdb_unit PRIVATE "${PROJECT_SOURCE_DIR}")
     gtest_discover_tests(glamdb_unit TEST_PREFIX glamdb.unit. PROPERTIES LABELS unit TIMEOUT 30)
 
-    add_executable(glamdb_fault fault/coordinator_fault_test.cpp support/fake_storage.cpp support/journal_fault_vfs.cpp)
+    file(GLOB_RECURSE fault_test_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/fault/*.cpp")
+    add_executable(glamdb_fault ${fault_test_sources} support/fake_storage.cpp support/journal_fault_vfs.cpp)
     target_include_directories(glamdb_fault PRIVATE "${PROJECT_SOURCE_DIR}")
     target_link_libraries(glamdb_fault PRIVATE glamdb::core glamdb_build_options GTest::gtest_main
         SQLite::SQLite3 iceberg::iceberg_sql_catalog_static Arrow::arrow_static)

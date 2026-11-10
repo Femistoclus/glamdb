@@ -190,6 +190,88 @@ exclude `probes/toolchain`; root formatting still checks it. This probe captures
 the Clang/libc++ 18 development compatibility issue, not a general toolchain
 qualification test.
 
+## Test CI
+
+`Native tests` runs six independent jobs: normal, ASan, UBSan, MSan, TSan,
+and standalone LSan. A failing profile does not cancel the others. Each enables
+storage and `BUILD_TESTING`, builds all native test targets, and runs CTest without
+label/name filters. Installed-consumer tests remain included because the CI
+toolchain propagates instrumentation to consumer builds too.
+
+CMake recursively discovers `.cpp` files inside the unit, I/O, storage, and fault
+suites, with `CONFIGURE_DEPENDS`; GoogleTest discovers their test cases. Add new
+cases or test files there without editing CI. Tooling Python files are discovered
+by unittest. Native integration drivers remain registered in CMake because their
+binary arguments differ. New standalone CMake projects under `probes/` are also
+discovered. The mixed-annotation compatibility probe runs only in the normal job:
+it deliberately compares ASan callers against an uninstrumented dependency prefix.
+
+`Workbench checks` has independent Python, Node, and Playwright jobs. Pytest searches
+the repository, excluding vendor/generated trees, UI, and native tooling; native
+`*_test.py` drivers run through CTest instead. Node discovers `*.test.mjs` files;
+Playwright discovers browser specs under `ui/tests/e2e`. New files following these
+conventions need no CI list entry. `bash scripts/check-workbench.sh` runs all three
+suites locally even if an earlier suite fails; an optional `python`, `node`, or
+`browser` argument selects one suite.
+
+Both workflows run on PRs, pushes to `main`, and manual dispatch. They skip changes
+limited to `docs/`, Markdown, issue templates, CODEOWNERS, and LICENSE. These are
+exclusions rather than a source-directory allowlist, so new code directories still
+trigger tests. Manual dispatch bypasses these filters. Do not require a skipped
+workflow as an unconditional branch-protection check.
+
+### Instrumentation and reproduction
+
+All profiles use Clang 18. ASan, UBSan, and LSan instrument the project and test
+binaries with an ordinary dependency prefix. ASan uses the same documented
+`_LIBCPP_HAS_NO_ASAN` compatibility flag as the existing storage Docker runner;
+heap bounds, use-after-free and leak detection remain enabled. UBSan aborts on
+the first report. LSan has its own job in addition to ASan's leak detection.
+Sanitizer jobs select Arrow's system memory pool so its ordinary mimalloc build
+cannot bypass sanitizer allocation hooks.
+
+MSan and TSan use a separate dependency prefix and rebuild libc++/libc++abi from
+LLVM 18.1.8, pinned in the workflow. Instrumentation propagates to Arrow, Iceberg,
+SQLite, GoogleTest, and transitive source dependencies. Iceberg/Avro's zlib and
+zstd lookups use separately instrumented builds with Arrow's existing versions
+and checksums. Compiled FetchContent dependencies cannot substitute system packages.
+MSan also disables Arrow's mimalloc and jemalloc at build time. Selecting the
+system pool at runtime alone does not stop a linked allocator's pre-main
+initialization; the pinned mimalloc reports an uninitialized THP buffer there.
+Arrow itself remains instrumented, with no MSan suppressions.
+MSan tracks origins. These profiles dynamically link the instrumented C++ runtime;
+the others use the existing static C++ runtime workaround. Standard-library paths
+are explicit, and no sanitizer error is ignored or retried. Hosted MSan/TSan jobs
+set `vm.mmap_rnd_bits=28` for LLVM 18's shadow-memory layout.
+
+On a Linux machine with the packages from the workflow installed, initialize the
+submodules, then run (replace `normal` with the desired profile):
+
+```sh
+bash scripts/ci-native.sh normal deps
+bash scripts/ci-native.sh normal build
+bash scripts/ci-native.sh normal test
+```
+
+For MSan/TSan, first check out the workflow's pinned LLVM source into
+`.deps/llvm-project` and run `bash scripts/ci-native.sh msan runtime` (or `tsan`).
+Builds and dependency prefixes are isolated by profile. The toolchain is CI-only;
+existing developer presets and Docker commands are unchanged.
+
+### Failure logs
+
+Open the failed job and its failed step in GitHub Actions. Compiler output,
+sanitizer stack traces (with LLVM symbolization), and failing test output are
+streamed to the step log. CTest failures also print the complete `LastTest.log`
+so CTest's console-size limit cannot hide diagnostics. Download the workflow's
+log archive from GitHub to retain the output. Shell pipelines preserve failing
+exit codes; no job uses `continue-on-error`.
+
+Local copies and JUnit reports are written under `artifacts/native-<profile>/`
+and `artifacts/`. Browser runs retain traces/screenshots locally under
+`artifacts/e2e/`. These workspace files are not uploaded as Actions artifacts;
+the repository currently permits only checkout and setup-python Actions.
+
 ## Quality
 
 Follow the [C++ style guide](CPP_STYLE_GUIDE.md). `.clang-format` implements
