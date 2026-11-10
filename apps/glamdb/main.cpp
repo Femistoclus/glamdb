@@ -1,42 +1,33 @@
 #include "storage/engine.h"
 
-#include <iostream>
-#include <string_view>
+#include <CLI/CLI.hpp>
 
-namespace {
-void Usage()
-{
-    std::cout << "GlamDB catalog MVP\n"
-                 "  glamdb create-store --root ABSOLUTE_PATH --store-id UUID\n"
-                 "  glamdb inspect-store --root ABSOLUTE_PATH --store-id UUID\n";
-}
-} // namespace
+#include <iostream>
+#include <string>
 
 int main(int argc, char** argv)
 try {
-    if (argc == 1 || (argc == 2 && std::string_view(argv[1]) == "--help")) {
-        Usage();
-        return 0;
-    }
-    const std::string_view command = argv[1];
-    if (argc != 6 || (command != "create-store" && command != "inspect-store")) {
-        Usage();
-        return 2;
-    }
+    CLI::App app{"GlamDB catalog MVP"};
+    app.require_subcommand(1);
     std::string root;
     std::string id;
-    for (int i = 2; i < argc; i += 2) {
-        const std::string_view option = argv[i];
-        if (option == "--root" && root.empty()) {
-            root = argv[i + 1];
-        } else if (option == "--store-id" && id.empty()) {
-            id = argv[i + 1];
-        } else {
-            Usage();
-            return 2;
-        }
+    auto* create = app.add_subcommand("create-store", "Create an empty store");
+    auto* inspect = app.add_subcommand("inspect-store", "Inspect an existing store");
+    for (auto* command : {create, inspect}) {
+        command->add_option("--root", root, "Absolute store path")->required();
+        command->add_option("--store-id", id, "Store UUID")->required();
     }
-    const auto opened = command == "create-store" ? glamdb::CreateStore({id, root}) : glamdb::OpenExisting({root, id});
+    if (argc == 1) {
+        std::cout << app.help(argv[0]);
+        return 0;
+    }
+    try {
+        app.parse(argc, argv);
+    } catch (const CLI::ParseError& error) {
+        const auto code = app.exit(error);
+        return code == 0 ? 0 : 2;
+    }
+    const auto opened = create->parsed() ? glamdb::CreateStore({id, root}) : glamdb::OpenExisting({root, id});
     if (!opened) {
         std::cerr << opened.error().code << ": " << opened.error().message << '\n';
         return 1;

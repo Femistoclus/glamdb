@@ -2,6 +2,14 @@
   "schema_version": 1,
   "submodules": [
     {
+      "name": "cli11",
+      "path": "third_party/cli11",
+      "url": "https://github.com/CLIUtils/CLI11.git",
+      "version": "2.7.2",
+      "tag": "v2.7.2",
+      "commit": "cbd58a3696887b34c70949aef21a71735a0c2ad5"
+    },
+    {
       "name": "arrow",
       "path": "third_party/arrow",
       "url": "https://github.com/apache/arrow.git",

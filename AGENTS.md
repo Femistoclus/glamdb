@@ -126,8 +126,13 @@ Preserve these boundaries when adding or changing engine behavior:
 | `core/backend/` | Production StorageBackend over `glamdb_storage`, built with `GLAMDB_BUILD_STORAGE`. |
 | `core/scan/` | Predicate evaluation, snapshot planning and Parquet scan cursor. |
 | `core/io/` | Independent local filesystem, attempts, receipts, durable files and copying (`glamdb_io`). |
+<<<<<<< HEAD
 | `core/storage/` | FileIO, Parquet writer, Iceberg staging, publication/recovery and capacity checks (`glamdb_storage`). |
 | `apps/glamdb/` | Store-management CLI and transport-only outcome serialization. |
+=======
+| `core/storage/` | Optional FileIO, Parquet writer, Iceberg staging, publication/recovery and capacity checks (`glamdb_storage`). |
+| `apps/glamdb/` | Store-management CLI using CLI11 and transport-only outcome serialization. |
+>>>>>>> origin/main
 | `cmake/` | Build options, sanitizers, quality targets, and dependency recipes. |
 | `tests/` | Native unit/recovery/SqlCatalog/VFS/consumer suites, `vertical/` public-API storage tests, verification and actual SDK HTTP/HTTPS tests. |
 | `apps/mock_server/` | Disposable Python mock, real HTTP/Arrow, no warehouse/catalog access. |
@@ -194,12 +199,13 @@ ctest --preset local
 ```
 
 The application links the pinned SQLite, Arrow and Iceberg installation. Tests
-also require GoogleTest. Use `release` or `asan-ubsan` in place of `local` for
-the corresponding configure, build, and test presets. `GLAMDB_BUILD_STORAGE`
-defaults to `ON` (unless `GLAMDB_IO_ONLY=ON`) and adds `glamdb_storage`, the
-production backend, the scanner and `glamdb_vertical` (CTest labels
-`vertical;scan`); with it `OFF`, public factories install no backend. Core
-protocol tests use a test-only backend through `EngineFactory::Create/Open`;
+also require GoogleTest. The CLI uses the pinned, header-only CLI11 submodule;
+it is not part of the public engine API or dependency installation. Use `release`
+or `asan-ubsan` in place of `local` for the corresponding configure, build, and
+test presets. `GLAMDB_BUILD_STORAGE` defaults to `ON` (unless `GLAMDB_IO_ONLY=ON`)
+and adds `glamdb_storage`, the production backend, the scanner and `glamdb_vertical`
+(CTest labels `vertical;scan`); with it `OFF`, public factories install no backend.
+Core protocol tests use a test-only backend through `EngineFactory::Create/Open`;
 the real SqlCatalog test verifies the catalog integration separately. Neither
 establishes durable user-file production or power-loss safety.
 
@@ -226,7 +232,8 @@ cmake --build --preset local --target format-check tidy-check quality-negative-c
 `quality-negative-check` verifies that deliberate formatting and analyzer
 violations are rejected. `cmake --build --preset local --target format` rewrites
 project C++ formatting. `.github/workflows/cpp-quality.yml` runs separate LLVM 18
-format and tidy jobs on PRs and pushes to `main`. The tidy job verifies dependency
+format and tidy jobs. Formatting runs on PRs, pushes to `main`, and manual dispatch;
+tidy runs only on pushes to `main` and manual dispatch. The tidy job verifies dependency
 pins and reuses an exact installation cache, rebuilding on a miss. Its key covers
 the build recipe, platform, toolchain, packages and flags. Storage and tests stay
 enabled; formatting requires no build. Tidy uses two concurrent processes

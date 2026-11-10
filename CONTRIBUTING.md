@@ -48,8 +48,9 @@ Actions workflows. The `C++ quality` workflow runs separate `clang-format` and
 `clang-tidy` checks using LLVM 18 and the checked-in configurations. Formatting
 covers project C++ sources and headers; tidy includes the engine, storage adapters,
 CLI, and tests using the pinned dependencies. Tidy runs two files concurrently
-with grouped diagnostics and per-file timings. Both workflows run on every pull
-request, including documentation changes, and pushes to `main`.
+with grouped diagnostics and per-file timings. Workflow security and formatting
+run on every pull request, including documentation changes, and pushes to `main`.
+Clang-tidy runs only on pushes to `main` and manual dispatch; it is skipped on PRs.
 The `Native tests` workflow runs independent normal, ASan, UBSan, MSan, TSan,
 and LSan jobs. `Workbench checks` runs independent Python, Node, and browser
 jobs. These test workflows skip documentation-only changes; new code paths
