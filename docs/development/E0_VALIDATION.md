@@ -1,7 +1,7 @@
-# Person 1: E0 validation
+# Build and test scaffold validation
 
-Date: 2026-11-10. Scope: the first build/test scaffold step in
-[PERSON_1_PLAN](https://github.com/glamourdb/glamdb-rfc/blob/6123cc3/PERSON_1_PLAN.md).
+Date: 2026-11-10. Scope: the initial build and test scaffold described in the
+[build guide](BUILDING.md).
 No storage behavior or durability gate is implemented by this step.
 
 ## Environment
