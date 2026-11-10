@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,7 +69,9 @@ def format_sources(write, io_only=False):
     print(f"{'Formatted' if write else 'Checked formatting of'} {len(files)} file(s)")
 
 
-def tidy_sources(build_dir, excluded_dirs=(), io_only=False):
+def tidy_sources(build_dir, excluded_dirs=(), io_only=False, jobs=2):
+    if jobs < 1:
+        raise ValueError("Tidy jobs must be positive")
     executable = llvm_tool("clang-tidy")
     database = build_dir / "compile_commands.json"
     if not database.is_file():
@@ -90,13 +94,30 @@ def tidy_sources(build_dir, excluded_dirs=(), io_only=False):
     missing = [str(path.relative_to(ROOT)) for path in units if path.resolve() not in compiled]
     if missing:
         raise RuntimeError("Missing compile commands for: " + ", ".join(missing))
-    for path in units:
-        subprocess.run(
+    def check(path):
+        started = time.monotonic()
+        result = subprocess.run(
             [executable, str(path), "-p", str(build_dir),
              "--config-file=" + str(ROOT / ".clang-tidy"),
              "--header-filter=" + header_filter(ROOT), "--warnings-as-errors=*"],
-            check=True,
+            text=True, capture_output=True,
         )
+        return path, result, time.monotonic() - started
+
+    failures = []
+    print(f"Checking {len(units)} translation unit(s) with {jobs} worker(s)", flush=True)
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        futures = [executor.submit(check, path) for path in units]
+        for completed, future in enumerate(as_completed(futures), 1):
+            path, result, elapsed = future.result()
+            # Group each file's diagnostics so concurrent processes cannot mix them.
+            print(f"[{completed}/{len(units)}] {path.relative_to(ROOT)} ({elapsed:.1f}s)", flush=True)
+            print(result.stdout, end="", flush=True)
+            print(result.stderr, end="", file=sys.stderr, flush=True)
+            if result.returncode:
+                failures.append(str(path.relative_to(ROOT)))
+    if failures:
+        raise RuntimeError("clang-tidy failed for: " + ", ".join(failures))
     print(f"Checked {len(units)} translation unit(s)")
 
 
@@ -146,12 +167,14 @@ def main():
     parser.add_argument("--io-only", action="store_true", help="Check only standalone IO/storage sources")
     parser.add_argument("--exclude-dir", action="append", default=[],
                         help="Exclude a disabled component subtree from tidy only")
+    parser.add_argument("--jobs", type=int, default=os.environ.get("GLAMDB_TIDY_JOBS", "2"),
+                        help="Concurrent clang-tidy processes (default: GLAMDB_TIDY_JOBS or 2)")
     args = parser.parse_args()
     try:
         if args.command in ("format", "format-check"):
             format_sources(args.command == "format", args.io_only)
         elif args.command == "tidy-check":
-            tidy_sources(args.build_dir.resolve(), args.exclude_dir, args.io_only)
+            tidy_sources(args.build_dir.resolve(), args.exclude_dir, args.io_only, args.jobs)
         else:
             negative_checks(args.build_dir.resolve())
     except subprocess.CalledProcessError as error:

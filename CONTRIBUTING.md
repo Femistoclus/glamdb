@@ -47,7 +47,8 @@ The `Workflow security` check runs actionlint and zizmor against GitHub
 Actions workflows. The `C++ quality` workflow runs separate `clang-format` and
 `clang-tidy` checks using LLVM 18 and the checked-in configurations. Formatting
 covers project C++ sources and headers; tidy includes the engine, storage adapters,
-CLI, and tests using the pinned dependencies. Both workflows run on every pull
+CLI, and tests using the pinned dependencies. Tidy runs two files concurrently
+with grouped diagnostics and per-file timings. Both workflows run on every pull
 request, including documentation changes, and pushes to `main`.
 External contributors' workflow runs require a maintainer to approve execution;
 approval to run CI does not approve the pull request for merging.

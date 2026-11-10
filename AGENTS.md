@@ -210,7 +210,8 @@ project C++ formatting. `.github/workflows/cpp-quality.yml` runs separate LLVM 1
 format and tidy jobs on PRs and pushes to `main`. The tidy job verifies dependency
 pins and reuses an exact installation cache, rebuilding on a miss. Its key covers
 the build recipe, platform, toolchain, packages and flags. Storage and tests stay
-enabled; formatting requires no build. See
+enabled; formatting requires no build. Tidy uses two concurrent processes
+(`GLAMDB_TIDY_JOBS` overrides this), with grouped diagnostics and per-file timings. See
 [docs/development/BUILDING.md](docs/development/BUILDING.md) for installation,
 tool path overrides, and build details.
 

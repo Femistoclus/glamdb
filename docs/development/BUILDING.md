@@ -204,6 +204,12 @@ components and tests. It also runs `quality-negative-check`.
 Module scanning is disabled for this analysis-only configuration so compile
 commands do not reference `.modmap` files that require a project build.
 
+Tidy checks all translation units using two concurrent processes, preserving each
+file's diagnostics and reporting its elapsed time. Set `GLAMDB_TIDY_JOBS=1` to
+serialize or use `python3 scripts/quality.py tidy-check --jobs N`. The default of
+two limits memory use on hosted runners; increase it only when memory permits.
+A failed translation unit still fails the job, after the remaining files finish.
+
 CI caches only `.deps/install`, using an exact key for dependency pins, build
 recipes, OS/architecture, compiler versions/targets, installed package versions,
 build flags and the installation path. Submodule pins are verified even on a hit.
