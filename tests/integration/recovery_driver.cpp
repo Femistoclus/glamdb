@@ -9,7 +9,8 @@
 #include <sqlite3.h>
 #include <unistd.h>
 
-int main(int argc, char **argv) try {
+int main(int argc, char** argv)
+try {
     using namespace glamdb;
     if (argc != 3) {
         return 2;
@@ -33,16 +34,17 @@ int main(int argc, char **argv) try {
         if (!engine->Shutdown(std::chrono::milliseconds(1000))) {
             return 3;
         }
-        sqlite3 *database = nullptr;
-        if (sqlite3_open_v2((root / "catalog.sqlite").c_str(), &database, SQLITE_OPEN_READWRITE, nullptr) !=
-            SQLITE_OK) {
+        sqlite3* database = nullptr;
+        if (sqlite3_open_v2((root / "catalog.sqlite").c_str(), &database, SQLITE_OPEN_READWRITE, nullptr) != SQLITE_OK)
+        {
             return 4;
         }
-        const auto sql = [&](const char *text) {
+        const auto sql = [&](const char* text) {
             return sqlite3_exec(database, text, nullptr, nullptr, nullptr) == SQLITE_OK;
         };
         if (!sql("PRAGMA synchronous=EXTRA") || !sql("PRAGMA cache_size=1") || !sql("BEGIN IMMEDIATE") ||
-            !sql("CREATE TABLE interrupted_spill(value BLOB)")) {
+            !sql("CREATE TABLE interrupted_spill(value BLOB)"))
+        {
             return 5;
         }
         for (int i = 0; i < 200; ++i) {
@@ -67,10 +69,14 @@ int main(int argc, char **argv) try {
         operation = "00000000-0000-0000-0000-000000000008";
     }
     if (mode == "bound-crash") {
-        backend->on_prepare = [] { _exit(77); };
+        backend->on_prepare = [] {
+            _exit(77);
+        };
     }
     if (mode == "pointer-crash") {
-        backend->on_pointer = [] { _exit(78); };
+        backend->on_pointer = [] {
+            _exit(78);
+        };
     }
     AppendOutcome outcome;
     if (mode.starts_with("lookup-")) {
@@ -80,12 +86,11 @@ int main(int argc, char **argv) try {
         }
         outcome = test::Present(found.value());
     } else {
-        outcome = engine->AppendDurable(
-            {test::collection_id,
-             operation,
-             {mode == "read" || mode == "create" ? SnapshotPreconditionKind::NoSnapshot : SnapshotPreconditionKind::Any,
-              0},
-             {test::Batch()}});
+        outcome = engine->AppendDurable({test::collection_id,
+            operation,
+            {mode == "read" || mode == "create" ? SnapshotPreconditionKind::NoSnapshot : SnapshotPreconditionKind::Any,
+                0},
+            {test::Batch()}});
     }
     const auto json = json_adapter::ToJson(outcome);
     if (!json) {

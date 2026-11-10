@@ -7,22 +7,25 @@
 
 namespace glamdb::test {
 
-class TempDir {
+class TempDir
+{
 public:
-    TempDir() {
+    TempDir()
+    {
         std::string pattern = "/tmp/glamdb-test-XXXXXX";
-        const char *created = mkdtemp(pattern.data());
+        const char* created = mkdtemp(pattern.data());
         if (created == nullptr) {
             throw std::runtime_error("mkdtemp failed");
         }
         path = created;
     }
-    ~TempDir() {
+    ~TempDir()
+    {
         std::error_code ignored;
         std::filesystem::remove_all(path, ignored);
     }
-    TempDir(const TempDir &) = delete;
-    TempDir &operator=(const TempDir &) = delete;
+    TempDir(const TempDir&) = delete;
+    TempDir& operator=(const TempDir&) = delete;
     std::filesystem::path path;
 };
 

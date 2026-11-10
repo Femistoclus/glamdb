@@ -8,17 +8,22 @@ namespace glamdb::test {
 
 // Dependency double only. These files represent metadata evidence, not Parquet,
 // Iceberg manifests, durable file receipts or a usable storage implementation.
-class FakeStorage final : public detail::StorageBackend {
+class FakeStorage final : public detail::StorageBackend
+{
 public:
-    explicit FakeStorage(std::filesystem::path root) : root(std::move(root)) {
-    }
+    explicit FakeStorage(std::filesystem::path root)
+        : root(std::move(root))
+    { }
     Result<std::unique_ptr<detail::StagedCreate>>
-    PrepareCreate(const StoreInfo &store, const CreateCollectionRequest &request, std::string_view attempt) override;
-    Result<std::unique_ptr<detail::StagedAppend>>
-    PrepareAppend(const StoreInfo &store, const detail::BoundOperation &binding, const CollectionInfo &collection,
-                  const detail::NormalizedInput &input, std::chrono::steady_clock::time_point deadline) override;
-    Status VerifyRetained(const StoreInfo &store, std::span<const detail::CollectionView> collections,
-                          std::span<const detail::OperationRecord> operations) override;
+    PrepareCreate(const StoreInfo& store, const CreateCollectionRequest& request, std::string_view attempt) override;
+    Result<std::unique_ptr<detail::StagedAppend>> PrepareAppend(const StoreInfo& store,
+        const detail::BoundOperation& binding,
+        const CollectionInfo& collection,
+        const detail::NormalizedInput& input,
+        std::chrono::steady_clock::time_point deadline) override;
+    Status VerifyRetained(const StoreInfo& store,
+        std::span<const detail::CollectionView> collections,
+        std::span<const detail::OperationRecord> operations) override;
 
     std::filesystem::path Physical(std::string_view uri) const;
     std::filesystem::path root;

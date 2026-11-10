@@ -11,17 +11,73 @@
 namespace glamdb::detail {
 namespace {
 
-constexpr std::array<uint32_t, 64> round_constants{
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+constexpr std::array<uint32_t, 64> round_constants{0x428a2f98,
+    0x71374491,
+    0xb5c0fbcf,
+    0xe9b5dba5,
+    0x3956c25b,
+    0x59f111f1,
+    0x923f82a4,
+    0xab1c5ed5,
+    0xd807aa98,
+    0x12835b01,
+    0x243185be,
+    0x550c7dc3,
+    0x72be5d74,
+    0x80deb1fe,
+    0x9bdc06a7,
+    0xc19bf174,
+    0xe49b69c1,
+    0xefbe4786,
+    0x0fc19dc6,
+    0x240ca1cc,
+    0x2de92c6f,
+    0x4a7484aa,
+    0x5cb0a9dc,
+    0x76f988da,
+    0x983e5152,
+    0xa831c66d,
+    0xb00327c8,
+    0xbf597fc7,
+    0xc6e00bf3,
+    0xd5a79147,
+    0x06ca6351,
+    0x14292967,
+    0x27b70a85,
+    0x2e1b2138,
+    0x4d2c6dfc,
+    0x53380d13,
+    0x650a7354,
+    0x766a0abb,
+    0x81c2c92e,
+    0x92722c85,
+    0xa2bfe8a1,
+    0xa81a664b,
+    0xc24b8b70,
+    0xc76c51a3,
+    0xd192e819,
+    0xd6990624,
+    0xf40e3585,
+    0x106aa070,
+    0x19a4c116,
+    0x1e376c08,
+    0x2748774c,
+    0x34b0bcb5,
+    0x391c0cb3,
+    0x4ed8aa4a,
+    0x5b9cca4f,
+    0x682e6ff3,
+    0x748f82ee,
+    0x78a5636f,
+    0x84c87814,
+    0x8cc70208,
+    0x90befffa,
+    0xa4506ceb,
+    0xbef9a3f7,
+    0xc67178f2};
 
-int Hex(char c) {
+int Hex(char c)
+{
     if (c >= '0' && c <= '9') {
         return c - '0';
     }
@@ -31,7 +87,8 @@ int Hex(char c) {
     return -1;
 }
 
-std::string Unhex(std::string_view text) {
+std::string Unhex(std::string_view text)
+{
     std::string bytes;
     for (size_t i = 0; i < text.size(); i += 2) {
         bytes.push_back(static_cast<char>(Hex(text[i]) * 16 + Hex(text[i + 1])));
@@ -39,21 +96,26 @@ std::string Unhex(std::string_view text) {
     return bytes;
 }
 
-void ValidateSchema(const SchemaSpec &schema) {
+void ValidateSchema(const SchemaSpec& schema)
+{
     Require(!schema.fields.empty() && schema.fields.size() <= 64, "INVALID_ARGUMENT", "schema requires 1..64 fields");
     std::unordered_set<std::string> names;
-    for (const auto &field : schema.fields) {
+    for (const auto& field : schema.fields) {
         Require(!field.name.empty() && field.name.size() <= 128 && ValidUtf8(field.name) &&
-                    field.name.find('\0') == std::string::npos && names.insert(field.name).second,
-                "INVALID_ARGUMENT", "invalid or duplicate field name");
-        Require(field.type >= FieldType::String && field.type <= FieldType::TimestampUsUtc, "INVALID_ARGUMENT",
-                "unsupported field type");
-        Require(field.name != "key" || (field.type == FieldType::String && !field.nullable), "INVALID_ARGUMENT",
-                "key must be a required string");
+                field.name.find('\0') == std::string::npos && names.insert(field.name).second,
+            "INVALID_ARGUMENT",
+            "invalid or duplicate field name");
+        Require(field.type >= FieldType::String && field.type <= FieldType::TimestampUsUtc,
+            "INVALID_ARGUMENT",
+            "unsupported field type");
+        Require(field.name != "key" || (field.type == FieldType::String && !field.nullable),
+            "INVALID_ARGUMENT",
+            "key must be a required string");
     }
 }
 
-void EncodeCell(Encoder &encoder, const FieldSpec &field, Cell &cell) {
+void EncodeCell(Encoder& encoder, const FieldSpec& field, Cell& cell)
+{
     if (std::holds_alternative<std::monostate>(cell)) {
         Require(field.nullable, "INVALID_ARGUMENT", "NULL in required field");
         encoder.Number<uint8_t>(0);
@@ -62,41 +124,44 @@ void EncodeCell(Encoder &encoder, const FieldSpec &field, Cell &cell) {
     Require(cell.index() == static_cast<size_t>(field.type), "INVALID_ARGUMENT", "value has the wrong type");
     encoder.Number<uint8_t>(1);
     switch (field.type) {
-    case FieldType::String: {
-        const auto &value = std::get<std::string>(cell);
-        Require(value.size() <= (field.name == "key" ? 1024U : 1024U * 1024) && ValidUtf8(value), "INVALID_ARGUMENT",
+        case FieldType::String: {
+            const auto& value = std::get<std::string>(cell);
+            Require(value.size() <= (field.name == "key" ? 1024U : 1024U * 1024) && ValidUtf8(value),
+                "INVALID_ARGUMENT",
                 "invalid UTF-8 or oversized string");
-        encoder.Text(value);
-        break;
-    }
-    case FieldType::Bool:
-        encoder.Number<uint8_t>(std::get<bool>(cell) ? 1 : 0);
-        break;
-    case FieldType::Int64:
-        encoder.Number(std::get<int64_t>(cell));
-        break;
-    case FieldType::Float64: {
-        auto &value = std::get<double>(cell);
-        Require(std::isfinite(value), "INVALID_ARGUMENT", "non-finite float");
-        if (value == 0) {
-            value = 0.0;
+            encoder.Text(value);
+            break;
         }
-        encoder.Number(std::bit_cast<uint64_t>(value));
-        break;
-    }
-    case FieldType::TimestampUsUtc: {
-        const auto value = std::get<TimestampUs>(cell).value;
-        Require(value >= -62135596800000000LL && value <= 253402300799999999LL, "INVALID_ARGUMENT",
+        case FieldType::Bool:
+            encoder.Number<uint8_t>(std::get<bool>(cell) ? 1 : 0);
+            break;
+        case FieldType::Int64:
+            encoder.Number(std::get<int64_t>(cell));
+            break;
+        case FieldType::Float64: {
+            auto& value = std::get<double>(cell);
+            Require(std::isfinite(value), "INVALID_ARGUMENT", "non-finite float");
+            if (value == 0) {
+                value = 0.0;
+            }
+            encoder.Number(std::bit_cast<uint64_t>(value));
+            break;
+        }
+        case FieldType::TimestampUsUtc: {
+            const auto value = std::get<TimestampUs>(cell).value;
+            Require(value >= -62135596800000000LL && value <= 253402300799999999LL,
+                "INVALID_ARGUMENT",
                 "timestamp outside years 0001..9999");
-        encoder.Number(value);
-        break;
-    }
+            encoder.Number(value);
+            break;
+        }
     }
 }
 
 } // namespace
 
-bool ValidUuid(std::string_view value) {
+bool ValidUuid(std::string_view value)
+{
     if (value.size() != 36) {
         return false;
     }
@@ -112,11 +177,15 @@ bool ValidUuid(std::string_view value) {
     return true;
 }
 
-bool ValidDigest(std::string_view value) {
-    return value.size() == 64 && std::ranges::all_of(value, [](char c) { return Hex(c) >= 0; });
+bool ValidDigest(std::string_view value)
+{
+    return value.size() == 64 && std::ranges::all_of(value, [](char c) {
+        return Hex(c) >= 0;
+    });
 }
 
-bool ValidUtf8(std::string_view value) {
+bool ValidUtf8(std::string_view value)
+{
     for (size_t i = 0; i < value.size();) {
         const auto first = static_cast<uint8_t>(value[i++]);
         if (first < 0x80) {
@@ -142,7 +211,8 @@ bool ValidUtf8(std::string_view value) {
     return true;
 }
 
-std::string BoundedDiagnostic(std::string_view message) {
+std::string BoundedDiagnostic(std::string_view message)
+{
     message = message.substr(0, 2048);
     size_t bytes = 0;
     while (bytes < message.size()) {
@@ -156,7 +226,8 @@ std::string BoundedDiagnostic(std::string_view message) {
     return std::string(message.substr(0, bytes));
 }
 
-void Sha256State::Transform() {
+void Sha256State::Transform()
+{
     std::array<uint32_t, 64> words{};
     for (size_t i = 0; i < block_.size(); ++i) {
         words[i / 4] |= static_cast<uint32_t>(static_cast<uint8_t>(block_[i])) << ((3 - i % 4) * 8);
@@ -165,7 +236,7 @@ void Sha256State::Transform() {
         const auto a = words[i - 15];
         const auto b = words[i - 2];
         words[i] = words[i - 16] + (std::rotr(a, 7) ^ std::rotr(a, 18) ^ (a >> 3)) + words[i - 7] +
-                   (std::rotr(b, 17) ^ std::rotr(b, 19) ^ (b >> 10));
+            (std::rotr(b, 17) ^ std::rotr(b, 19) ^ (b >> 10));
     }
     auto work = hash_;
     for (size_t i = 0; i < 64; ++i) {
@@ -185,7 +256,8 @@ void Sha256State::Transform() {
     }
 }
 
-void Sha256State::Update(std::string_view input) {
+void Sha256State::Update(std::string_view input)
+{
     bytes_ += input.size();
     while (!input.empty()) {
         const auto count = std::min(block_.size() - used_, input.size());
@@ -199,7 +271,8 @@ void Sha256State::Update(std::string_view input) {
     }
 }
 
-std::string Sha256State::Digest() const {
+std::string Sha256State::Digest() const
+{
     auto final = *this;
     const uint64_t bits = bytes_ * 8;
     final.Update(std::string_view("\x80", 1));
@@ -222,13 +295,15 @@ std::string Sha256State::Digest() const {
     return result;
 }
 
-std::string Sha256(std::string_view input) {
+std::string Sha256(std::string_view input)
+{
     Sha256State hash;
     hash.Update(input);
     return hash.Digest();
 }
 
-Result<std::string> EncodeSchema(const SchemaSpec &schema) {
+Result<std::string> EncodeSchema(const SchemaSpec& schema)
+{
     try {
         ValidateSchema(schema);
         Encoder out;
@@ -236,7 +311,7 @@ Result<std::string> EncodeSchema(const SchemaSpec &schema) {
         out.Number<uint16_t>(1);
         out.Number(static_cast<uint16_t>(schema.fields.size()));
         uint32_t id = 1;
-        for (const auto &field : schema.fields) {
+        for (const auto& field : schema.fields) {
             out.Number(id++);
             out.Number(static_cast<uint16_t>(field.name.size()));
             out.bytes.append(field.name);
@@ -244,15 +319,17 @@ Result<std::string> EncodeSchema(const SchemaSpec &schema) {
             out.Number<uint8_t>(field.nullable ? 1 : 0);
         }
         return out.bytes;
-    } catch (const Failure &error) {
+    } catch (const Failure& error) {
         return std::unexpected(error.detail);
     }
 }
 
-Result<SchemaSpec> DecodeSchema(std::string_view bytes) {
+Result<SchemaSpec> DecodeSchema(std::string_view bytes)
+{
     try {
-        Require(bytes.size() <= 16384 && bytes.starts_with(std::string_view("COLUMNAR-SCHEMA\0", 16)), "CORRUPTION",
-                "invalid schema encoding");
+        Require(bytes.size() <= 16384 && bytes.starts_with(std::string_view("COLUMNAR-SCHEMA\0", 16)),
+            "CORRUPTION",
+            "invalid schema encoding");
         Decoder in{bytes.substr(16)};
         Require(in.Number<uint16_t>() == 1, "UNSUPPORTED_STORE_VERSION", "unknown schema version");
         const auto count = in.Number<uint16_t>();
@@ -271,12 +348,13 @@ Result<SchemaSpec> DecodeSchema(std::string_view bytes) {
         in.End();
         ValidateSchema(schema);
         return schema;
-    } catch (const Failure &error) {
+    } catch (const Failure& error) {
         return std::unexpected(error.detail);
     }
 }
 
-Result<std::string> SchemaFingerprint(const SchemaSpec &schema) {
+Result<std::string> SchemaFingerprint(const SchemaSpec& schema)
+{
     const auto encoded = EncodeSchema(schema);
     if (!encoded) {
         return std::unexpected(encoded.error());
@@ -284,7 +362,8 @@ Result<std::string> SchemaFingerprint(const SchemaSpec &schema) {
     return Sha256(*encoded);
 }
 
-Result<std::string> EncodeAppendHeader(const SchemaSpec &schema, std::string_view collection_id, size_t rows) {
+Result<std::string> EncodeAppendHeader(const SchemaSpec& schema, std::string_view collection_id, size_t rows)
+{
     try {
         ValidateSchema(schema);
         Require(ValidUuid(collection_id), "INVALID_ARGUMENT", "collection ID must be a canonical UUID");
@@ -302,15 +381,16 @@ Result<std::string> EncodeAppendHeader(const SchemaSpec &schema, std::string_vie
         out.bytes += Unhex(*SchemaFingerprint(schema));
         out.Number(static_cast<uint64_t>(rows));
         return out.bytes;
-    } catch (const Failure &error) {
+    } catch (const Failure& error) {
         auto detail = error.detail;
         detail.retry_hint = RetryHint::FixInput;
         return std::unexpected(std::move(detail));
     }
 }
 
-Result<NormalizedInput> NormalizeRows(const SchemaSpec &schema, std::string_view collection_id,
-                                      const std::vector<Row> &rows) {
+Result<NormalizedInput>
+NormalizeRows(const SchemaSpec& schema, std::string_view collection_id, const std::vector<Row>& rows)
+{
     try {
         const auto header = EncodeAppendHeader(schema, collection_id, rows.size());
         if (!header) {
@@ -321,11 +401,11 @@ Result<NormalizedInput> NormalizeRows(const SchemaSpec &schema, std::string_view
         const auto header_size = out.bytes.size();
         NormalizedInput result;
         result.rows.reserve(rows.size());
-        for (const auto &row : rows) {
+        for (const auto& row : rows) {
             Require(row.size() == schema.fields.size(), "INVALID_ARGUMENT", "row width does not match schema");
             // Validate sizes before making an owned copy of caller memory.
-            for (const auto &cell : row) {
-                if (const auto *text = std::get_if<std::string>(&cell)) {
+            for (const auto& cell : row) {
+                if (const auto* text = std::get_if<std::string>(&cell)) {
                     Require(text->size() <= 1024ULL * 1024, "INVALID_ARGUMENT", "oversized string");
                 }
             }
@@ -334,15 +414,16 @@ Result<NormalizedInput> NormalizeRows(const SchemaSpec &schema, std::string_view
             for (size_t i = 0; i < row.size(); ++i) {
                 EncodeCell(out, schema.fields[i], normalized[i]);
                 Require(out.bytes.size() - before <= 2ULL * 1024 * 1024 &&
-                            out.bytes.size() - header_size <= 16ULL * 1024 * 1024,
-                        "RESOURCE_EXHAUSTED", "append exceeds decoded input limit");
+                        out.bytes.size() - header_size <= 16ULL * 1024 * 1024,
+                    "RESOURCE_EXHAUSTED",
+                    "append exceeds decoded input limit");
             }
             result.rows.push_back(std::move(normalized));
         }
         result.decoded_bytes = out.bytes.size() - header_size;
         result.payload_hash = Sha256(out.bytes);
         return result;
-    } catch (const Failure &error) {
+    } catch (const Failure& error) {
         auto detail = error.detail;
         detail.retry_hint = RetryHint::FixInput;
         return std::unexpected(std::move(detail));

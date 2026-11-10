@@ -3,7 +3,7 @@
 ## Requirements
 
 This page covers C++. For the implemented Python SDK/mock and browser UI, use
-[WORKBENCH.md](WORKBENCH.md). Those packages do not link the C++ scaffold or
+[WORKBENCH.md](WORKBENCH.md). Those packages do not link the C++ core or
 require an Arrow/Iceberg source build.
 
 - CMake 3.28 or newer, Ninja, and Python 3.9 or newer.
@@ -14,44 +14,186 @@ require an Arrow/Iceberg source build.
 
 ## Build and install
 
-First install the [pinned dependencies](../../third_party/README.md):
+First install the [pinned dependencies](../../third_party/README.md) with the
+same compiler and C++ standard library used for the engine:
 
 ```sh
 git submodule update --init --recursive
 cmake --preset deps-local
 cmake --build --preset deps-local --parallel 2
-```
-
-```sh
-cmake --preset local
+cmake --preset local -DCMAKE_PREFIX_PATH="$PWD/.deps/install"
 cmake --build --preset local
-ctest --preset local
+ctest --preset local --no-tests=error
 ./build/local/apps/glamdb/glamdb --help
 ```
 
-The executable creates or inspects an empty store with an explicit identity.
-It links the installed SQLite, Arrow and Iceberg dependencies. Tests also link
-GoogleTest. The production durable file backend and scanner remain pending;
-the executable does not serve HTTP or write user-data files.
+The default full build provides the catalog/coordinator and public C++ facade.
+The CLI creates or inspects an empty store with an explicit identity; it does
+not serve HTTP. The real file module is available separately, but connecting it
+through `core/engine/storage_backend.h` remains integration work. Public factories
+do not yet write user-data files, and the scanner is pending.
 
 Use `release` or `asan-ubsan` in place of `local` for the other build profiles.
+For a build without tests or GoogleTest, use a separate directory:
 
 ```sh
+cmake -S . -B build/no-tests -G Ninja -DBUILD_TESTING=OFF -DCMAKE_PREFIX_PATH="$PWD/.deps/install"
+cmake --build build/no-tests
 cmake --install build/local
 ./build/install/local/bin/glamdb --help
 ```
 
-The install contains the executable, `storage/*.h`, `glamdb::core` static library
-and `GlamDBConfig.cmake`. Consumers use `find_package(GlamDB CONFIG REQUIRED)`
-with both the GlamDB and dependency prefixes in `CMAKE_PREFIX_PATH`.
-`glamdb.installed_consumer` installs to a disposable build prefix and compiles
-and runs a separate public-header consumer. It exercises create/open and the
-missing-collection error from `GetCollection` and `FindAppendOutcome`, without
-source-tree headers or HTTP/Python dependencies. Scan/predicate
-acceptance awaits the scanner. The installed-consumer test is omitted from
-sanitizer builds; instrumented static libraries require matching consumer flags.
+The install contains the executable, `storage/*.h`, the `glamdb::core` static
+library and `GlamDBConfig.cmake`. Consumers use
+`find_package(GlamDB CONFIG REQUIRED)` with both GlamDB and dependency prefixes
+in `CMAKE_PREFIX_PATH`. `glamdb.installed_consumer` installs to a disposable
+prefix and builds/runs a public-header consumer without source-tree headers or
+HTTP/Python dependencies. It exercises create/open and missing-collection
+results. Scan/predicate acceptance awaits the scanner. The consumer test is
+omitted from sanitizer builds because instrumented static libraries require
+matching consumer flags.
+
+### Independent local I/O build
+
+`GLAMDB_IO_ONLY=ON` builds `glamdb_io` and its tests without Arrow, Iceberg,
+SQLite, the engine, or CLI. It does not install the engine package:
+
+```sh
+git submodule update --init third_party/googletest
+cmake --preset local -B build/io -DGLAMDB_IO_ONLY=ON -DGLAMDB_BUILD_STORAGE=OFF
+cmake --build build/io
+ctest --test-dir build/io --output-on-failure --no-tests=error
+```
+
+The I/O target contains filesystem access, directory/URI checks, attempts and
+receipts, SHA-256, and durable file copying. GoogleTest comes from the pinned
+submodule; missing sources produce a configure error with the initialization
+command, without downloading during configuration. `BUILD_TESTING=OFF` does
+not require GoogleTest. Tooling tests check runner failure propagation, source
+isolation, optional tests, static libraries, and the I/O-only install boundary.
+
+## Linux tests with Docker
+
+With a running Docker daemon and the GoogleTest submodule initialized:
+
+```sh
+./scripts/test-in-docker.sh
+./scripts/test-in-docker.sh asan-ubsan
+```
+
+The runner also accepts `release` and selects `GLAMDB_IO_ONLY=ON`. It builds the image from
+`docker/dev/Dockerfile` with no filesystem build context, mounts the source
+checkout read-only at `/src`, and builds in `/build` inside a disposable
+container. Each run configures, builds, requires a nonempty `unit` suite,
+runs all CTest suites, then runs formatting, tidy, and negative controls.
+Failures stop the command and propagate its exit status. Build outputs are
+removed with the container, so Linux and macOS CMake caches cannot collide.
+The test container runs without network access; the initial image build needs
+network access to download packages.
+
+One macOS setup uses [Colima](https://colima.run/docs/installation/) and a
+separate Docker client configuration. Run this once from the repository root:
+
+```sh
+brew install colima docker docker-buildx
+colima start glamdb --cpus 4 --memory 4 --disk 20 --activate=false --ssh-config=false
+export DOCKER_CONFIG="$PWD/artifacts/docker-client"
+mkdir -p "$DOCKER_CONFIG/cli-plugins"
+ln -s "$(brew --prefix)/lib/docker/cli-plugins/docker-buildx" "$DOCKER_CONFIG/cli-plugins/docker-buildx"
+docker context create glamdb --docker "host=unix://$HOME/.colima/glamdb/docker.sock"
+docker context use glamdb
+./scripts/test-in-docker.sh
+./scripts/test-in-docker.sh asan-ubsan
+```
+
+In a new shell, export `DOCKER_CONFIG` again before invoking the runner. This
+keeps credential helpers and the active context in the default Docker client
+configuration unchanged, including settings left by a previous Docker Desktop
+installation. The isolated configuration is for this public development image;
+it does not inherit registry credentials.
+`colima stop glamdb` releases the VM's CPU/RAM when finished. A separate Docker
+context avoids changing the active context for other projects.
+
+The image pins the Ubuntu 24.04 multi-architecture base digest and uses Clang
+and LLVM quality tools 18. It runs on the daemon's native architecture, including
+ARM64 on Apple Silicon. Distribution packages are not snapshot-pinned: this is
+a development environment, not Linux x86-64/ext4 power-loss qualification.
+Toolchain versions and executed results belong in the validation
+record for each change.
+
+### Storage adapters
+
+Initialize and build the pinned Linux dependencies once, then use the storage runner:
+
+```sh
+git submodule update --init third_party/arrow third_party/iceberg-cpp third_party/googletest
+./scripts/build-deps-in-docker.sh
+./scripts/test-storage-in-docker.sh
+./scripts/test-storage-in-docker.sh asan-ubsan
+./scripts/test-storage-in-docker.sh release
+```
+
+`test-storage-in-docker.sh` reuses `glamdb-deps:clang18` and the installed prefix
+from the `glamdb-deps-clang18` volume. It does not rebuild dependencies. Set
+`GLAMDB_DEPS_VOLUME` to select another compatible prefix. The prefix and checkout
+are mounted read-only; each offline run uses a fresh `/build` and at most two
+compile jobs. All unit and CTest suites and the three quality targets run with
+`GLAMDB_IO_ONLY=OFF` and `GLAMDB_BUILD_STORAGE=ON`, including catalog/coordinator
+and storage components and their tests.
+The [storage module handoff](STORAGE_MODULE.md) maps components to tests and
+defines the responsibilities of the catalog/coordinator and scan callers.
+
+With a compatible installed prefix, the equivalent local configuration is:
+
+```sh
+cmake --preset local -DGLAMDB_IO_ONLY=OFF -DGLAMDB_BUILD_STORAGE=ON -DCMAKE_PREFIX_PATH=/path/to/prefix
+cmake --build --preset local
+ctest --preset local --no-tests=error
+```
+
+Use the prefix's compiler and C++ standard library. Linux dependency binaries
+cannot be linked into a macOS build. The Docker runner handles this separation.
+
+This runner uses Clang 18 with libc++ and statically links the C++ runtime using
+`-static-libstdc++`. This avoids the independently reproduced Ubuntu libc++abi
+exception mismatch under ASan without suppressing sanitizer checks. See
+[dependency validation](DEPENDENCY_VALIDATION.md) for the build pins, installed
+API probe, runtime issue, and development environment limits. The regular
+`test-in-docker.sh` selects the independent I/O-only build.
+
+Only the storage `asan-ubsan` profile also defines `_LIBCPP_HAS_NO_ASAN`. The
+installed dependency prefix is not instrumented; mixing its libc++ container
+templates with instrumented callers produces a reproducible container-overflow
+report in the upstream Avro manifest writer. This is the
+[documented mixed instrumentation problem](https://github.com/google/sanitizers/wiki/AddressSanitizerContainerOverflow).
+The flag disables libc++ container bounds annotations. ASan allocation bounds,
+use-after-free checks and UBSan remain enabled for GlamDB; the ordinary IO-only
+ASan runner retains its full instrumentation. No runtime suppression is set.
+
+The standalone probe uses only installed upstream APIs. One test requires the
+original container-overflow report, while another checks the same program with
+the compatibility flag. Run it against the development prefix:
+
+```sh
+docker run --rm --network none --volume "$PWD:/src:ro" \
+    --mount "type=volume,src=${GLAMDB_DEPS_VOLUME:-glamdb-deps-clang18},dst=/prefix,readonly,volume-subpath=install" \
+    glamdb-deps:clang18 sh -eu -c '
+        cmake -S /src/probes/toolchain -B /build -G Ninja -DCMAKE_PREFIX_PATH=/prefix
+        cmake --build /build --parallel 2
+        ctest --test-dir /build --output-on-failure --no-tests=error -L toolchain-repro
+        clang-tidy-18 /src/probes/toolchain/libcxx_asan.cpp -p /build --config-file=/src/.clang-tidy
+    '
+```
+
+Its compilation database is separate from the normal build, so root tidy checks
+exclude `probes/toolchain`; root formatting still checks it. This probe captures
+the Clang/libc++ 18 development compatibility issue, not a general toolchain
+qualification test.
 
 ## Quality
+
+Follow the [C++ style guide](CPP_STYLE_GUIDE.md). `.clang-format` implements
+its mechanical rules; naming, ownership, and error handling also need review.
 
 ```sh
 cmake --build --preset local --target format-check tidy-check quality-negative-check
@@ -67,6 +209,8 @@ files. C++ formatting uses a 120-column limit. `tidy-check` uses
 `compile_commands.json` and rejects missing translation
 units. `quality-negative-check` verifies that a formatting violation and a null
 dereference in a project header both fail their respective checks.
+Run `tidy-check` from a configuration with `BUILD_TESTING=ON` so test translation
+units have compile commands too.
 
 ## Dependencies
 
@@ -74,26 +218,34 @@ See [the dependency guide](../../third_party/README.md). The separate
 `deps-local` build installs dependencies into `.deps/install`.
 
 The initial durability qualification targets Linux x86-64 on a dedicated local
-ext4 volume. Successful builds and process-crash tests do not establish
-power-loss durability.
+ext4 volume. The development module and its tests do not qualify that environment.
 
 ## Validation scope
 
 | Check | What it establishes |
 | --- | --- |
-| Build and `glamdb.smoke` | The entry point compiles, starts, and exits successfully. |
-| Formatting, tidy, and negative controls | Configured C++ checks execute and reject deliberate violations. |
-| Unit and VFS fault suites | Canonical input, catalog transactions, bindings/outcomes and coordinator state transitions. Storage production uses a test double. |
-| `glamdb.process_recovery` | Separate-process reopen, interrupted operations, SQLite hot-journal recovery and exclusive ownership. |
-| `glamdb.real_sqlcatalog` | Real Iceberg create/property-update ordering, outer rollback, exact base and fresh-process load. Local FileIO is test-only. |
+| Default build and `glamdb.smoke` | The engine and store-management CLI build and the entry point exits successfully. |
+| I/O-only `unit` suite | Local I/O, receipts, directory/URI checks, SHA-256, copying, and injected failure behavior. |
+| Catalog/coordinator unit and VFS fault suites | Canonical input, SQLite transactions, bindings/outcomes and coordinator states with a storage test double. |
+| `glamdb.process_recovery` | Separate-process reopen, interrupted operations, hot-journal recovery and exclusive ownership. |
+| `glamdb.real_sqlcatalog` | Real Iceberg create/property-update ordering, outer rollback, exact base and fresh-process load with test FileIO. |
 | `glamdb.installed_consumer` | Installed CMake package and public facade work without private headers. |
+| `unit` suite, storage enabled | Adds FileIO, table profiles, real file writing/staging, publication/closure/recovery, and capacity tests. |
+| `tooling` suite | Docker runner profiles, isolation and failure propagation; optional GoogleTest, static core and install contents. |
+| Formatting, tidy, and negative controls | Configured C++ checks execute and reject deliberate violations. |
+| Installed dependency probe | Pinned dependencies build/install and their public APIs work from a relocated installed prefix. |
+| Storage pipeline test | Real Parquet/Avro/JSON append and fresh-process reachable-file recovery with a catalog test double. |
+| Future combined integration | Production backend wiring, real public append/read, and scanner contracts. |
 | Future environment qualification | Durability and supported limits for the specifically tested platform and storage configuration. |
 
-See [COORDINATOR.md](COORDINATOR.md) for native implemented behavior and current
-evidence. Independent fixture, receipt/model and network-client/browser suites
-run separately, as recorded in [WORKBENCH_VALIDATION.md](WORKBENCH_VALIDATION.md).
+Fault injection and a storage pipeline are implemented in the component suites.
+The combined production backend, scanner, load measurements, and environment/
+power-loss qualification remain deferred. See [COORDINATOR.md](COORDINATOR.md)
+and [the module handoff](STORAGE_MODULE.md) for their separate validation scope.
+Independent fixture, receipt/model and network-client/browser suites run
+separately, as recorded in [WORKBENCH_VALIDATION.md](WORKBENCH_VALIDATION.md).
 They do not qualify production file/scanner integration or physical durability.
-The [roadmap](../ROADMAP.md) defines the remaining evidence. Describe checks as
+The [roadmap](../ROADMAP.md) defines remaining evidence. Describe checks as
 designed, run with PASS/FAIL, or NOT RUN; a configured target alone is not a pass.
 Do not use proposed test labels or executable names as if they exist already.
 
@@ -108,3 +260,5 @@ fixture/seed, and measured results for reproducibility. Store raw generated
 output under ignored `artifacts/` and retain a reviewable summary or stable
 artifact reference with the change. Keep commands and this status description
 current as targets and suites are added.
+
+See [E0 validation](E0_VALIDATION.md) for the executed scaffold checks and scope.

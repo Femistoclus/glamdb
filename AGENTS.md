@@ -23,10 +23,13 @@ must remain usable from a standalone checkout.
 GlamDB is an open-source C++23 columnar key-value storage engine in early
 development. The checkout implements the SQLite catalog, synchronous write and
 recovery coordinator, canonical Arrow input, public C++ facade, outcome JSON,
-and store-management CLI. The production file producer, durable FileIO and
-scanner are pending; collection/data operations require that internal backend.
+and store-management CLI. Independent durable I/O and optional Arrow/Parquet/Iceberg
+storage primitives provide file production, staging, publication validation,
+recovery verification, and capacity checks. Connecting these primitives to the
+coordinator StorageBackend and implementing the scanner remain pending.
 See [the coordinator guide](docs/development/COORDINATOR.md) for the integration
-contract and tested boundaries. Full engine durability remains unqualified.
+contract and tested boundaries, and [the storage guide](docs/development/STORAGE_MODULE.md)
+for the file-layer contract. Full engine durability remains unqualified.
 
 Independent verification tools, a Python network SDK and a browser workbench
 are implemented. They integrate through a separate, explicitly disposable
@@ -117,15 +120,16 @@ Preserve these boundaries when adding or changing engine behavior:
 | Path | Use |
 | --- | --- |
 | `public/storage/` | Installed C++ types and synchronous engine facade. |
-| `core/` | Canonical input, catalog, coordinator, and internal storage-backend seam. |
+| `core/api/`, `core/catalog/`, `core/engine/` | Canonical input, catalog, coordinator, and internal storage-backend seam. |
+| `core/io/` | Independent local filesystem, attempts, receipts, durable files and copying (`glamdb_io`). |
+| `core/storage/` | Optional FileIO, Parquet writer, Iceberg staging, publication/recovery and capacity checks (`glamdb_storage`). |
 | `apps/glamdb/` | Store-management CLI and transport-only outcome serialization. |
 | `cmake/` | Build options, sanitizers, quality targets, and dependency recipes. |
 | `tests/` | Native unit/recovery/SqlCatalog/VFS/consumer suites, verification and actual SDK HTTP/HTTPS tests. |
-
 | `apps/mock_server/` | Disposable Python mock, real HTTP/Arrow, no warehouse/catalog access. |
 | `fixtures/`, `tools/verification/` | Literal canonical/metadata inputs, independent row oracle and evidence helpers. |
 | `sdk/python/`, `ui/` | Standalone Python HTTP SDK; HTML/CSS/ES-module pink workbench and browser/unit tests. |
-| `probes/`, `benchmarks/` | Reserved engine experiments and measurements. |
+| `probes/`, `benchmarks/` | Installed-dependency/compatibility probes and workload measurements. |
 | `scripts/` | Developer tooling, including quality checks. |
 | `third_party/` | Pinned upstream submodules and `lock.json`. |
 
@@ -180,6 +184,20 @@ the corresponding configure, build, and test presets. Core protocol tests use a
 test-only backend; the real SqlCatalog test verifies the catalog integration
 separately. Neither establishes durable user-file production or power-loss safety.
 
+For Linux tests on macOS, `./scripts/test-in-docker.sh asan-ubsan` builds only
+independent I/O with `GLAMDB_IO_ONLY=ON`, without Arrow/Iceberg/SQLite. The full
+build preserves the installed `glamdb::core` engine API. To include storage
+adapters, build the pinned prefix with `./scripts/build-deps-in-docker.sh`, then
+run `./scripts/test-storage-in-docker.sh asan-ubsan`. See
+[BUILDING](docs/development/BUILDING.md) for isolation and sanitizer compatibility.
+
+The coordinator supplies owned, immutable normalized batches and expected
+operation summaries, runs capacity preflight before binding an attempt, and
+confirms the outer catalog COMMIT. A publication guard's `GetCandidate()` is
+tentative until that confirmation. Scan callers retain a `ReadOnlyView()` so
+reads do not join the writer's attempt. Storage pipeline tests use an in-memory
+catalog; coordinator tests use a separate test backend.
+
 After configuring `local`, check project C++ sources and headers with:
 
 ```sh
@@ -210,6 +228,10 @@ cmake --build --preset deps-local --parallel 2
 ```
 
 ## Code and dependency conventions
+
+Follow [the C++ style guide](docs/development/CPP_STYLE_GUIDE.md) for naming,
+declarations, layout, and error handling. Keep `.clang-format` aligned with its
+mechanical rules; vendor and generated code are excluded.
 
 - Use C++23 with the checked-in `.clang-format`, `.clang-tidy`, and
   `.editorconfig` as the formatting and diagnostic authorities. Project compiler

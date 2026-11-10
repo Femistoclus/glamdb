@@ -31,6 +31,14 @@ if(NOT thrift_url)
     set(thrift_url "https://archive.apache.org/dist/thrift/${thrift_version}/thrift-${thrift_version}.tar.gz")
 endif()
 
+set(arrow_platform_args)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$"
+   AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
+   AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 19)
+    # Clang 18 crashes while compiling Arrow's ARM SVE bit-packing kernels.
+    list(APPEND arrow_platform_args -DARROW_RUNTIME_SIMD_LEVEL=NONE)
+endif()
+
 ExternalProject_Add(glamdb_arrow
     SOURCE_DIR "${PROJECT_SOURCE_DIR}/third_party/arrow/cpp"
     BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/arrow"
@@ -40,6 +48,7 @@ ExternalProject_Add(glamdb_arrow
     CONFIGURE_COMMAND "${CMAKE_COMMAND}" -E env "ARROW_THRIFT_URL=${thrift_url}"
         "${CMAKE_COMMAND}" -S <SOURCE_DIR> -B <BINARY_DIR> -G "${CMAKE_GENERATOR}"
         ${dependency_args}
+        ${arrow_platform_args}
         -DARROW_BUILD_SHARED=OFF
         -DARROW_BUILD_STATIC=ON
         -DARROW_BUILD_TESTS=OFF

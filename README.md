@@ -9,19 +9,23 @@ and snapshot reads; future network clients use that same core.
 The first engine milestone is an embedded, synchronous **append store** on
 Linux and local persistent storage, with one owning process and one writer.
 Append preserves duplicate keys. Key-value upserts and deletes follow after
-local durability qualification, with HTTP, SDK/UI, and S3 as separate extensions.
+local durability qualification, with production HTTP/client integration and S3
+as separate extensions.
 See the [architecture](docs/ARCHITECTURE.md) for semantics and the
 [roadmap](docs/ROADMAP.md) for scope and acceptance criteria.
 
 ## Current status
 
 The SQLite catalog, write/recovery coordinator, canonical Arrow input, public
-C++ facade, outcome JSON and store-management CLI are implemented. Persistent
-operation bindings and outcomes, atomic publication, uncertain-commit recovery,
-and the real Iceberg catalog seam have executable tests. The production durable
-file backend and scanner remain pending; there is no storage HTTP server yet.
-See the [coordinator guide](docs/development/COORDINATOR.md) for the supported
-boundary and validation limits. Full append-store durability is not qualified.
+C++ facade, outcome JSON and store-management CLI are implemented. Independent
+storage primitives implement durable local I/O, Parquet writing, Iceberg append
+staging, publication validation, reachable-file recovery, and capacity checks.
+Tests cover real files, injected failures and fresh-process recovery.
+
+Connecting the storage primitives to the coordinator backend and implementing
+the scanner remain pending. See the [coordinator guide](docs/development/COORDINATOR.md)
+and [storage guide](docs/development/STORAGE_MODULE.md) for supported boundaries.
+Power-loss and load qualification are deferred.
 
 Available now: independent golden fixtures, a typed SQL-NULL reference oracle,
 receipt/fault-evidence tools, a network Python SDK, and a configurable pink
@@ -66,8 +70,21 @@ cmake --build --preset local
 ctest --preset local
 ```
 
+On macOS, `./scripts/test-in-docker.sh asan-ubsan` tests independent I/O in Linux
+without the full dependency prefix. To include the engine and storage adapters:
+
+```sh
+./scripts/build-deps-in-docker.sh
+./scripts/test-storage-in-docker.sh asan-ubsan
+```
+
+The full build installs `glamdb::core` and public headers. Storage adapters are
+enabled with `GLAMDB_BUILD_STORAGE=ON`; `GLAMDB_IO_ONLY=ON` provides a separate
+lightweight build. See the build guide for Docker setup.
+
 - [Project structure](docs/PROJECT_STRUCTURE.md)
 - [Build and quality checks](docs/development/BUILDING.md)
+- [C++ style guide](docs/development/CPP_STYLE_GUIDE.md)
 - [Dependencies](third_party/README.md)
 - [Agent guide](AGENTS.md)
 - [Contributing](CONTRIBUTING.md)
