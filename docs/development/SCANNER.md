@@ -80,7 +80,8 @@ Not implemented: file/row-group pruning, compound predicates (`And`, `Or`,
 
 | Check | Status |
 | --- | --- |
-| `tests/unit/storage_mapping_test.cpp`, `tests/unit/scan_predicate_test.cpp` | 10/10 PASS, ad-hoc GCC 13.3 build against `.deps/install` Arrow 25; not the CMake preset. |
-| `-fsyntax-only` of backend/scanner/engine sources (GCC 13.3) | No diagnostics in project files; pinned Iceberg headers require GCC 14+/Clang 18, so this check is partial. |
-| `tests/vertical/engine_vertical_test.cpp` (CTest labels `vertical;scan`) | NOT RUN: Iceberg is not installed in the local dependency prefix. |
-| Full `ctest`, ASan/UBSan, `tidy-check`, installed consumer | NOT RUN. |
+| `cmake --preset local && cmake --build --preset local` (GCC 14.2.0, `GLAMDB_BUILD_STORAGE=ON`) | PASS |
+| `tests/unit/storage_mapping_test.cpp`, `tests/unit/scan_predicate_test.cpp` (`glamdb_unit`) | 10/10 PASS |
+| `tests/vertical/engine_vertical_test.cpp` (`glamdb_vertical`, CTest labels `vertical;scan`) | 10/10 PASS |
+| `ctest --preset local` (`unit`, `vertical`, `fault`, `integration`, `installed_consumer`, `tooling`, `smoke`) | 364/364 PASS (standalone `RecoveryChildProcess` helper skipped as expected; executed by its parent test) |
+| `cmake --build --preset local --target format-check` and `clang-tidy-18` on new/modified TUs | PASS (`format-check` 117/117 files; full-repo `tidy-check` and sanitizer presets not run in this session) |

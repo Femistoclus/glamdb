@@ -6,7 +6,8 @@ foreach(check IN ITEMS format format-check tidy-check quality-negative-check)
         list(APPEND quality_args --io-only)
     endif()
     if(check STREQUAL "tidy-check" AND NOT GLAMDB_BUILD_STORAGE)
-        list(APPEND quality_args --exclude-dir core/storage --exclude-dir tests/unit/storage)
+        list(APPEND quality_args --exclude-dir core/storage --exclude-dir tests/unit/storage
+            --exclude-dir core/backend --exclude-dir core/scan --exclude-dir tests/vertical)
     endif()
     add_custom_target(${check}
         COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/quality.py"

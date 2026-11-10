@@ -27,10 +27,9 @@ and store-management CLI. Independent durable I/O and Arrow/Parquet/Iceberg
 storage primitives provide file production, staging, publication validation,
 recovery verification, and capacity checks. `core/backend/` connects them to the
 coordinator StorageBackend and `core/scan/` implements a minimal `Engine::Scan`
-(fixed snapshot, one-comparison predicate, projection, limit; no pruning). That
-bridge and scanner are not yet built or tested against the pinned Iceberg
-dependency; see [the scanner guide](docs/development/SCANNER.md) for their
-contract and validation status, [the coordinator guide](docs/development/COORDINATOR.md)
+(fixed snapshot, one-comparison predicate, projection, limit; no pruning). See
+[the scanner guide](docs/development/SCANNER.md) for their contract and
+validation status, [the coordinator guide](docs/development/COORDINATOR.md)
 for the integration contract, and [the storage guide](docs/development/STORAGE_MODULE.md)
 for the file-layer contract. Full engine durability remains unqualified.
 
