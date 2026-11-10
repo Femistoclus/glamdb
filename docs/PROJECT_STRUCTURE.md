@@ -19,9 +19,11 @@ glamdb/
 ├── core/
 │   ├── CMakeLists.txt
 │   ├── api/
+│   ├── backend/
 │   ├── catalog/
 │   ├── engine/
 │   ├── io/
+│   ├── scan/
 │   └── storage/
 ├── docker/
 │   ├── dev/
@@ -39,6 +41,7 @@ glamdb/
 │   ├── tooling/
 │   ├── integration/
 │   ├── fault/
+│   ├── vertical/
 │   └── installed_consumer/
 ├── fixtures/
 ├── tools/verification/
@@ -63,10 +66,12 @@ glamdb/
 | Path | Purpose |
 | --- | --- |
 | `AGENTS.md` | Repository guidance for coding agents, maintained alongside implementation changes. |
-| `public/storage/` | Installed public engine API/request/outcome types, plus the independent storage schema DTO. |
+| `public/storage/` | Installed public engine API/request/outcome/scan types, plus the independent storage schema DTO. |
 | `core/api/`, `core/catalog/`, `core/engine/` | `glamdb_core` / `glamdb::core`: canonical input, SQLite catalog, coordinator, and public facade. |
+| `core/backend/` | Storage backend bridging the coordinator seam to `glamdb_storage` (built with `GLAMDB_BUILD_STORAGE`). |
+| `core/scan/` | Predicate evaluation (always built), snapshot planning and Parquet scan cursor (storage builds). |
 | `core/io/` | Independent `glamdb_io`: local filesystem, store directories/URIs, attempts, receipts, SHA-256, durable files and copying. |
-| `core/storage/` | Optional `glamdb_storage`: FileIO adapter, profiles, Parquet writer, Iceberg staging, publication, recovery and capacity. |
+| `core/storage/` | `glamdb_storage`: FileIO adapter, profiles, Parquet writer, Iceberg staging, publication, recovery and capacity. |
 | `docker/` | Linux development and dependency toolchains; builds mount product sources read-only. |
 | `apps/glamdb/` | Store-management CLI and transport-only outcome JSON. |
 | `cmake/` | Compiler options, sanitizers, quality targets, and dependency recipes. |
@@ -84,9 +89,10 @@ glamdb/
 | `docs/ROADMAP.md` | Implementation stages, prerequisites, and acceptance evidence. |
 | `third_party/` | Pinned upstream submodules and the direct dependency lock. |
 
-The tree contains the catalog/coordinator MVP and independent storage primitives.
-Connecting storage to the engine backend seam and implementing the scanner
-remain separate work. Client and verification code uses an explicit disposable
+The tree contains the catalog/coordinator MVP, independent storage primitives,
+and a storage backend plus minimal scanner connecting them
+([SCANNER.md](development/SCANNER.md)); the latter are not yet validated
+against the pinned Iceberg build. Client and verification code uses an explicit disposable
 mock seam. Read [the module handoff](development/STORAGE_MODULE.md) for storage
 APIs and tests, [ARCHITECTURE.md](ARCHITECTURE.md) for engine responsibilities,
 [ROADMAP.md](ROADMAP.md) for remaining acceptance evidence, and
@@ -109,9 +115,10 @@ files for every anticipated module. The intended responsibilities are:
 | Scanning | Fixed-view planning, conservative pruning, projection, and exact filtering. |
 | Runtime | Shared budgets, cancellation, resource leases, and store ownership. |
 
-The public facade and catalog/coordinator are implemented; the real storage
-backend still needs connecting through `core/engine/storage_backend.h`. Public
-scans remain pending. Installed public headers work without private headers.
+The public facade and catalog/coordinator are implemented. With
+`GLAMDB_BUILD_STORAGE` (default unless IO-only), `core/backend/` installs the real
+storage backend behind `core/engine/storage_backend.h` and `core/scan/` serves
+`Engine::Scan` without pruning or compound predicates. Installed public headers work without private headers.
 `GLAMDB_IO_ONLY=ON` builds independent I/O without the engine or CLI; the default
 full build preserves the installed `glamdb::core` package.
 Transport, SDK, and UI dependencies stay outside `public/storage/` and `core/`;

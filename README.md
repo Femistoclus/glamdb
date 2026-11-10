@@ -22,8 +22,10 @@ storage primitives implement durable local I/O, Parquet writing, Iceberg append
 staging, publication validation, reachable-file recovery, and capacity checks.
 Tests cover real files, injected failures and fresh-process recovery.
 
-Connecting the storage primitives to the coordinator backend and implementing
-the scanner remain pending. See the [coordinator guide](docs/development/COORDINATOR.md)
+A storage backend connecting these primitives to the coordinator and a minimal
+scanner (`Engine::Scan`) are implemented and tested through `glamdb_vertical`;
+see [SCANNER.md](docs/development/SCANNER.md).
+See the [coordinator guide](docs/development/COORDINATOR.md)
 and [storage guide](docs/development/STORAGE_MODULE.md) for supported boundaries.
 Power-loss and load qualification are deferred.
 

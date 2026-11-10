@@ -8,7 +8,7 @@ add_library(glamdb_io STATIC
     io/durable_copy.cpp
     io/write_latch.cpp
 )
-target_link_libraries(glamdb_io PRIVATE glamdb_build_options)
+target_link_libraries(glamdb_io PRIVATE "$<BUILD_INTERFACE:glamdb_build_options>")
 target_include_directories(glamdb_io PRIVATE "${PROJECT_SOURCE_DIR}")
 
 if(NOT GLAMDB_IO_ONLY)
@@ -17,7 +17,8 @@ if(NOT GLAMDB_IO_ONLY)
     find_package(Arrow 25 CONFIG REQUIRED GLOBAL)
     add_library(glamdb_core STATIC api/canonical.cpp api/codec.cpp api/arrow_input.cpp
         catalog/sqlite.cpp catalog/durable_sqlite_catalog.cpp
-        engine/store_lease.cpp engine/engine.cpp)
+        engine/storage_mapping.cpp engine/store_lease.cpp engine/engine.cpp
+        scan/predicate.cpp)
     add_library(glamdb::core ALIAS glamdb_core)
     target_link_libraries(glamdb_core PRIVATE "$<BUILD_INTERFACE:glamdb_build_options>" SQLite::SQLite3
         iceberg::iceberg_sql_catalog_static Arrow::arrow_static)
@@ -27,6 +28,17 @@ if(NOT GLAMDB_IO_ONLY)
         PRIVATE "${PROJECT_SOURCE_DIR}")
     target_compile_features(glamdb_core PUBLIC cxx_std_23)
     set_target_properties(glamdb_core PROPERTIES EXPORT_NAME core)
+    if(GLAMDB_BUILD_STORAGE)
+        # The production storage backend and scanner. Without them the public
+        # factories install no backend and report DEPENDENCY_UNAVAILABLE.
+        target_sources(glamdb_core PRIVATE backend/inert_catalog.cpp backend/local_storage_backend.cpp
+            backend/storage_errors.cpp
+            scan/scan_planner.cpp scan/scan_cursor.cpp)
+        target_compile_definitions(glamdb_core PRIVATE GLAMDB_HAS_STORAGE=1)
+        target_link_libraries(glamdb_core PRIVATE glamdb_storage)
+        set_target_properties(glamdb_io PROPERTIES EXPORT_NAME io)
+        install(TARGETS glamdb_io EXPORT GlamDBTargets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+    endif()
     install(TARGETS glamdb_core EXPORT GlamDBTargets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
     install(DIRECTORY "${PROJECT_SOURCE_DIR}/public/storage" DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
         FILES_MATCHING PATTERN "*.h")
