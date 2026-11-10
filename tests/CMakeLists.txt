@@ -82,12 +82,13 @@ if(NOT GLAMDB_IO_ONLY)
         set_tests_properties(glamdb.durable_storage_catalog PROPERTIES LABELS integration TIMEOUT 90)
     endif()
     add_executable(glamdb_public_consumer_compile installed_consumer/main.cpp)
-    target_link_libraries(glamdb_public_consumer_compile PRIVATE glamdb::core glamdb_build_options)
+    target_link_libraries(glamdb_public_consumer_compile PRIVATE glamdb::core Arrow::arrow_static glamdb_build_options)
     if(NOT GLAMDB_ENABLE_ASAN AND NOT GLAMDB_ENABLE_UBSAN)
         add_test(NAME glamdb.installed_consumer COMMAND "${CMAKE_COMMAND}"
             "-DENGINE_BINARY_DIR=${PROJECT_BINARY_DIR}"
             "-DTEST_BINARY_DIR=${PROJECT_BINARY_DIR}/installed-consumer"
             "-DTEST_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/installed_consumer"
+            "-DEXPECT_STORAGE=$<IF:$<BOOL:${GLAMDB_BUILD_STORAGE}>,ON,OFF>"
             "-DDEPENDENCY_PREFIX=${CMAKE_PREFIX_PATH}"
             "-DTEST_GENERATOR=${CMAKE_GENERATOR}"
             "-DTEST_CXX_FLAGS=${CMAKE_CXX_FLAGS}"

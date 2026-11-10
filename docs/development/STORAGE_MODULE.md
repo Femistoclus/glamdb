@@ -60,6 +60,9 @@ independent and is preserved on recovery, including when the wall clock moves.
 
 ## Read, recovery, and copy boundaries
 
+For checks with the production backend, catalog and scanner together, see
+[storage integration checks](STORAGE_INTEGRATION.md).
+
 Reads on the binding thread participate in its active attempt and I/O budget.
 Scan callers must retain an independent `ReadOnlyView()`; they must not reuse
 the writer's implicit binding. The adapter rejects writes through that view and

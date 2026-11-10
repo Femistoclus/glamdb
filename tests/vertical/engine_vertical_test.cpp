@@ -1,7 +1,13 @@
 #include "storage/engine.h"
 
+#include "core/api/canonical.h"
+#include "core/api/codec.h"
 #include "core/backend/local_storage_backend.h"
+#include "core/catalog/durable_sqlite_catalog.h"
 #include "core/engine/engine_factory.h"
+#include "core/io/durable_copy.h"
+#include "core/io/store_uri.h"
+#include "core/storage/base_state.h"
 #include "tests/support/temp_dir.h"
 
 #include <arrow/api.h>
@@ -9,14 +15,23 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <iterator>
 #include <optional>
+#include <spawn.h>
 #include <string>
+#include <string_view>
+#include <sys/wait.h>
 #include <thread>
+#include <tuple>
 #include <vector>
+
+extern char** environ;
 
 namespace glamdb {
 namespace {
@@ -26,6 +41,8 @@ using namespace std::chrono_literals;
 constexpr char FirstOperation[] = "00000000-0000-4000-8000-0000000000a1";
 constexpr char SecondOperation[] = "00000000-0000-4000-8000-0000000000a2";
 constexpr char ThirdOperation[] = "00000000-0000-4000-8000-0000000000a3";
+constexpr char OrphanData[] = "00000000-0000-4000-8000-0000000000a3-00000000-0000-7000-8000-0000000000a4-00000.parquet";
+constexpr char OrphanMetadata[] = "99999-00000000-0000-7000-8000-0000000000a4.metadata.json";
 
 const SchemaSpec Schema{{
     {"key", FieldType::String, false},
@@ -148,6 +165,71 @@ std::vector<std::string> Expected(std::initializer_list<const std::vector<TInput
     return Sorted(std::move(rows));
 }
 
+std::vector<TInputRow> VerticalRows(bool second)
+{
+    return second ? std::vector<TInputRow>(10, {"duplicate", 2, -1.5, false, 20})
+                  : std::vector<TInputRow>(1000, {"duplicate", 1, 0.5, true, 10});
+}
+
+std::vector<std::string> VerticalExpected(bool latest)
+{
+    std::vector<std::string> rows(1000, "duplicate|1|0.500000|true|ts:10");
+    if (latest) {
+        rows.insert(rows.end(), 10, "duplicate|2|-1.500000|false|ts:20");
+    }
+    return Sorted(std::move(rows));
+}
+
+std::vector<std::filesystem::path> FileInventory(const std::filesystem::path& root)
+{
+    std::vector<std::filesystem::path> files;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
+        if (entry.is_regular_file()) {
+            files.push_back(entry.path());
+        }
+    }
+    std::ranges::sort(files);
+    return files;
+}
+
+void ExpectFreshVerticalProcess(const std::filesystem::path& root, const std::filesystem::path& oracles)
+{
+#ifdef __linux__
+    std::vector<std::string> environment;
+    for (auto** entry = environ; *entry; ++entry) {
+        const std::string_view value(*entry);
+        if (!value.starts_with("GLAMDB_VERTICAL_") && !value.starts_with("GTEST_")) {
+            environment.emplace_back(value);
+        }
+    }
+    environment.push_back("GLAMDB_VERTICAL_ROOT=" + root.string());
+    environment.push_back("GLAMDB_VERTICAL_ORACLES=" + oracles.string());
+    std::vector<char*> variables;
+    variables.reserve(environment.size() + 1);
+    for (auto& value : environment) {
+        variables.push_back(value.data());
+    }
+    variables.push_back(nullptr);
+    std::string executable = "/proc/self/exe";
+    std::string filter = "--gtest_filter=EngineVerticalChildProcess.ReopensHistoryAndOriginalReceipts";
+    char* arguments[]{executable.data(), filter.data(), nullptr};
+    pid_t child = 0;
+    ASSERT_EQ(::posix_spawn(&child, executable.c_str(), nullptr, nullptr, arguments, variables.data()), 0);
+    int status = 0;
+    pid_t waited;
+    do {
+        waited = ::waitpid(child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    ASSERT_EQ(waited, child);
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 0);
+#else
+    static_cast<void>(root);
+    static_cast<void>(oracles);
+    GTEST_SKIP() << "Fresh-process recovery is checked on Linux.";
+#endif
+}
+
 class EngineVerticalTest : public ::testing::Test
 {
 protected:
@@ -238,6 +320,292 @@ protected:
         return files;
     }
 };
+
+class EngineVerticalChildProcess : public EngineVerticalTest
+{
+protected:
+    void SetUp() override
+    {
+        const auto* root = std::getenv("GLAMDB_VERTICAL_ROOT");
+        const auto* oracles = std::getenv("GLAMDB_VERTICAL_ORACLES");
+        if (!root && !oracles) {
+            GTEST_SKIP() << "Invoked by the public vertical test in a fresh process.";
+        }
+        ASSERT_NE(root, nullptr);
+        ASSERT_NE(oracles, nullptr);
+        Root_ = root;
+        auto opened = OpenExisting({Root_.string(), test::store_id});
+        ASSERT_TRUE(opened) << opened.error().code << ": " << opened.error().message;
+        Engine_ = std::move(*opened);
+    }
+};
+
+class TPreparedBaseTest
+    : public EngineVerticalTest
+    , public ::testing::WithParamInterface<std::tuple<bool, bool>>
+{ };
+
+TEST_P(TPreparedBaseTest, RejectsAuthorityChangesBeforePublishingThePreparedAppend)
+{
+    namespace NIO = NGlamDB::NIO;
+    namespace NStorage = NGlamDB::NStorage;
+    const auto [hasSnapshot, metadataOnly] = GetParam();
+    std::optional<AppendOutcome> winner;
+    if (hasSnapshot) {
+        const auto outcome = Append(FirstOperation, FirstRows);
+        ASSERT_EQ(outcome.disposition, CommitDisposition::Committed);
+        winner = outcome;
+    }
+
+    // The extra producer and SQL connection are disposable fault actors; all calls are sequential.
+    const auto info = Engine_->GetStoreInfo();
+    auto catalog = detail::DurableSqliteCatalogStore::Open(Root_ / "catalog.sqlite", info, {});
+    const auto backend = detail::TLocalStorageBackend::Open(Root_, info);
+    ASSERT_TRUE(backend) << backend.error().message;
+    const auto input = detail::NormalizeBatches(Schema, test::collection_id, {Batch({{"stale", 9, 1.0, true, 40}})});
+    ASSERT_TRUE(input) << input.error().message;
+    constexpr auto attemptID = "00000000-0000-7000-8000-0000000000a6";
+    const detail::BoundOperation binding{test::collection_id,
+        ThirdOperation,
+        input->payload_hash,
+        1,
+        catalog->Base(test::collection_id),
+        attemptID};
+    ASSERT_EQ(binding.base.current_snapshot_id.has_value(), hasSnapshot);
+    catalog->BindOperation(binding);
+    const auto beforePrepare = FileInventory(Root_ / "warehouse");
+    auto prepared = (*backend)->PrepareAppend(info,
+        binding,
+        catalog->Collection(test::collection_id),
+        *input,
+        std::chrono::steady_clock::now() + 30s);
+    ASSERT_TRUE(prepared) << prepared.error().message;
+    auto staged = std::move(*prepared);
+    ASSERT_NE(staged, nullptr);
+    const auto preparedReceipt = staged->Receipt();
+    EXPECT_EQ(preparedReceipt.parent_snapshot_id, binding.base.current_snapshot_id);
+    ASSERT_GT(FileInventory(Root_ / "warehouse").size(), beforePrepare.size());
+    const auto reader = (*backend)->ReadOnlyFileIO();
+    ASSERT_TRUE(reader) << reader.error().message;
+
+    if (metadataOnly) {
+        const auto dirs =
+            NIO::TStoreDirs::Open(std::make_shared<NIO::TPosixLocalFS>(), Root_, std::make_shared<NIO::TWriteLatch>());
+        ASSERT_TRUE(dirs);
+        const auto collectionDirs = dirs.Value()->OpenCollection(test::collection_id);
+        ASSERT_TRUE(collectionDirs);
+        const auto source = NIO::TStoreUri::Parse(binding.base.metadata_location, info.store_id);
+        ASSERT_TRUE(source);
+        constexpr auto target = "00099-00000000-0000-7000-8000-0000000000a7.metadata.json";
+        const auto copied = NIO::CopyDurableFile(
+            {dirs.Value()->Fs(), collectionDirs.Value().Metadata, std::string(source.Value().Leaf())},
+            {dirs.Value()->Fs(), collectionDirs.Value().Metadata, target, dirs.Value()->Latch()},
+            std::filesystem::file_size(Root_ / source.Value().RelativePath()));
+        ASSERT_TRUE(copied) << copied.Error().message();
+        auto replacement = binding.base.metadata_location;
+        replacement.replace(replacement.rfind('/') + 1, std::string::npos, target);
+        const auto verified = NStorage::VerifyReachable(*reader, replacement, info.store_id, test::collection_id);
+        ASSERT_TRUE(verified) << verified.error().message;
+        detail::Database actor;
+        actor.Open(Root_ / "catalog.sqlite", SQLITE_OPEN_READWRITE, {});
+        actor.Execute("PRAGMA synchronous=EXTRA");
+        actor.Execute("BEGIN IMMEDIATE");
+        actor.Execute("UPDATE iceberg_tables SET metadata_location=?,previous_metadata_location=? "
+                      "WHERE namespace='columnar' AND table_name='events' AND metadata_location=?",
+            {replacement, binding.base.metadata_location, binding.base.metadata_location});
+        ASSERT_EQ(actor.Changes(), 1);
+        actor.Execute("COMMIT");
+    } else {
+        const auto outcome = Append(SecondOperation, SecondRows);
+        ASSERT_EQ(outcome.disposition, CommitDisposition::Committed);
+        winner = outcome;
+    }
+
+    const auto winningBase = catalog->Base(test::collection_id);
+    ASSERT_NE(winningBase.metadata_location, binding.base.metadata_location);
+    if (metadataOnly) {
+        EXPECT_EQ(winningBase.current_snapshot_id, binding.base.current_snapshot_id);
+    } else {
+        EXPECT_NE(winningBase.current_snapshot_id, binding.base.current_snapshot_id);
+    }
+    const auto winningRoot = (*reader)->ReadFile(winningBase.metadata_location, std::nullopt);
+    ASSERT_TRUE(winningRoot) << winningRoot.error().message;
+    const auto inventory = FileInventory(Root_ / "warehouse");
+    int bodies = 0;
+    int guards = 0;
+    bool rejected = false;
+    try {
+        catalog->PublishAppend(
+            binding,
+            preparedReceipt,
+            [&](std::string_view location) {
+                ++guards;
+                return staged->VerifyClosure(location);
+            },
+            [&] {
+                ++bodies;
+                return staged->Publish(*catalog);
+            });
+    } catch (const detail::Failure& error) {
+        EXPECT_EQ(error.detail.code, "STALE_BASE");
+        EXPECT_FALSE(error.uncertain);
+        rejected = true;
+    }
+    ASSERT_TRUE(rejected);
+    EXPECT_EQ(bodies, 0);
+    EXPECT_EQ(guards, 0);
+    EXPECT_EQ(catalog->Base(test::collection_id), winningBase);
+    EXPECT_EQ(staged->Receipt(), preparedReceipt);
+    const auto retainedRoot = (*reader)->ReadFile(winningBase.metadata_location, std::nullopt);
+    ASSERT_TRUE(retainedRoot) << retainedRoot.error().message;
+    EXPECT_EQ(*retainedRoot, *winningRoot);
+    staged.reset();
+    EXPECT_EQ(FileInventory(Root_ / "warehouse"), inventory);
+    const auto pending = catalog->FindOperation(test::collection_id, ThirdOperation);
+    if (!pending.has_value()) {
+        FAIL() << "prepared operation disappeared";
+    }
+    EXPECT_EQ(pending->binding, binding);
+    EXPECT_EQ(pending->state, detail::OperationState::Bound);
+    EXPECT_FALSE(pending->outcome.has_value());
+    EXPECT_TRUE(pending->outcome_bytes.empty());
+    if (winner.has_value()) {
+        const auto encoded = detail::EncodeOutcome(*winner);
+        ASSERT_TRUE(encoded) << encoded.error().message;
+        const auto committed = catalog->FindOperation(test::collection_id, winner->operation_id);
+        if (!committed.has_value()) {
+            FAIL() << "winning operation disappeared";
+        }
+        EXPECT_EQ(committed->state, detail::OperationState::Committed);
+        EXPECT_EQ(committed->outcome_bytes, *encoded);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(ExactPreparedBase,
+    TPreparedBaseTest,
+    ::testing::Combine(::testing::Bool(), ::testing::Bool()),
+    [](const ::testing::TestParamInfo<std::tuple<bool, bool>>& info) {
+        return std::string(std::get<0>(info.param) ? "Snapshot" : "Empty") +
+            (std::get<1>(info.param) ? "MetadataOnly" : "Append");
+    });
+
+TEST_F(EngineVerticalChildProcess, ReopensHistoryAndOriginalReceipts)
+{
+    const std::filesystem::path oracles(std::getenv("GLAMDB_VERTICAL_ORACLES"));
+    std::vector<AppendOutcome> expected;
+    expected.reserve(2);
+    for (const auto* operation : {FirstOperation, SecondOperation}) {
+        std::ifstream input(oracles / operation, std::ios::binary);
+        ASSERT_TRUE(input.is_open());
+        const std::string bytes{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+        ASSERT_FALSE(input.bad());
+        const auto decoded = detail::DecodeOutcome(bytes);
+        ASSERT_TRUE(decoded) << decoded.error().message;
+        ASSERT_EQ(decoded->disposition, CommitDisposition::Committed);
+        ASSERT_TRUE(decoded->result.has_value());
+        expected.push_back(*decoded);
+        const auto actual = Engine_->FindAppendOutcome(test::collection_id, operation);
+        ASSERT_TRUE(actual);
+        const auto& actualOutcome = *actual;
+        if (!actualOutcome.has_value()) {
+            FAIL() << "actualOutcome must have a value";
+        }
+        const auto encoded = detail::EncodeOutcome(actualOutcome.value());
+        ASSERT_TRUE(encoded);
+        EXPECT_EQ(*encoded, bytes);
+    }
+    const auto& firstReceipt = expected[0].result;
+    const auto& secondReceipt = expected[1].result;
+    if (!firstReceipt.has_value()) {
+        FAIL() << "firstReceipt must have a value";
+    }
+    if (!secondReceipt.has_value()) {
+        FAIL() << "secondReceipt must have a value";
+    }
+    EXPECT_EQ(firstReceipt->rows_appended, 1000);
+    EXPECT_EQ(secondReceipt->rows_appended, 10);
+    const auto firstSnapshot = firstReceipt->snapshot_id;
+    const auto latestSnapshot = secondReceipt->snapshot_id;
+    EXPECT_EQ(Engine_->GetCollection(test::collection_id)->current_snapshot_id, latestSnapshot);
+    EXPECT_EQ(Read({}), VerticalExpected(true));
+    EXPECT_EQ(Read({.selector = SnapshotSelector::Id(firstSnapshot)}), VerticalExpected(false));
+    EXPECT_TRUE(Read({.selector = SnapshotSelector::InitialEmpty()}).empty());
+    const auto warehouse = Root_ / "warehouse";
+    EXPECT_TRUE(std::filesystem::is_regular_file(warehouse / test::collection_id / "data" / OrphanData));
+    EXPECT_TRUE(std::filesystem::is_regular_file(warehouse / test::collection_id / "metadata" / OrphanMetadata));
+    const auto beforeRetry = FileInventory(warehouse);
+    EXPECT_EQ(Append(FirstOperation, VerticalRows(false), {SnapshotPreconditionKind::Equals, firstSnapshot}),
+        expected[0]);
+    EXPECT_EQ(FileInventory(warehouse), beforeRetry);
+    EXPECT_EQ(Engine_->GetCollection(test::collection_id)->current_snapshot_id, latestSnapshot);
+}
+
+TEST_F(EngineVerticalTest, PublicHistoryAndReceiptsSurviveFreshProcessWithOrphans)
+{
+    auto initial = Open({});
+    ASSERT_NE(initial, nullptr);
+    EXPECT_EQ(initial->Info().selector_resolved, SnapshotSelector::InitialEmpty());
+    const auto warehouse = Root_ / "warehouse";
+    const auto beforeEmpty = FileInventory(warehouse);
+    const auto empty = Append(SecondOperation, {});
+    EXPECT_EQ(empty.disposition, CommitDisposition::DefinitelyNotCommitted);
+    const auto lookup = Engine_->FindAppendOutcome(test::collection_id, SecondOperation);
+    ASSERT_TRUE(lookup);
+    EXPECT_FALSE(lookup->has_value());
+    EXPECT_EQ(FileInventory(warehouse), beforeEmpty);
+    EXPECT_FALSE(Engine_->GetCollection(test::collection_id)->current_snapshot_id);
+
+    const auto first = Append(FirstOperation, VerticalRows(false));
+    ASSERT_EQ(first.disposition, CommitDisposition::Committed);
+    const auto& firstReceipt = first.result;
+    if (!firstReceipt.has_value()) {
+        FAIL() << "firstReceipt must have a value";
+    }
+    EXPECT_EQ(firstReceipt->rows_appended, 1000);
+    auto retained = Open({});
+    ASSERT_NE(retained, nullptr);
+    EXPECT_EQ(retained->Info().selector_resolved, SnapshotSelector::Id(firstReceipt->snapshot_id));
+    const auto second =
+        Append(SecondOperation, VerticalRows(true), {SnapshotPreconditionKind::Equals, firstReceipt->snapshot_id});
+    ASSERT_EQ(second.disposition, CommitDisposition::Committed);
+    const auto& secondReceipt = second.result;
+    if (!secondReceipt.has_value()) {
+        FAIL() << "secondReceipt must have a value";
+    }
+    EXPECT_EQ(secondReceipt->rows_appended, 10);
+    EXPECT_EQ(secondReceipt->parent_snapshot_id, firstReceipt->snapshot_id);
+    EXPECT_TRUE(Drain(*initial).empty());
+    EXPECT_EQ(initial->Info().selector_resolved, SnapshotSelector::InitialEmpty());
+    EXPECT_EQ(Sorted(Drain(*retained)), VerticalExpected(false));
+    initial.reset();
+    retained.reset();
+
+    const auto data = DataFiles();
+    ASSERT_EQ(data.size(), 2);
+    ASSERT_TRUE(std::filesystem::copy_file(data.front(), data.front().parent_path() / OrphanData));
+    const auto metadata = FileInventory(warehouse / test::collection_id / "metadata");
+    const auto initialRoot = std::ranges::find_if(metadata, [](const auto& path) {
+        return path.filename().string().starts_with("00000-");
+    });
+    ASSERT_NE(initialRoot, metadata.end());
+    ASSERT_TRUE(std::filesystem::copy_file(*initialRoot, initialRoot->parent_path() / OrphanMetadata));
+    EXPECT_EQ(Read({}), VerticalExpected(true));
+    EXPECT_EQ(Read({.selector = SnapshotSelector::Id(firstReceipt->snapshot_id)}), VerticalExpected(false));
+    EXPECT_TRUE(Read({.selector = SnapshotSelector::InitialEmpty()}).empty());
+
+    for (const auto* outcome : {&first, &second}) {
+        const auto bytes = detail::EncodeOutcome(*outcome);
+        ASSERT_TRUE(bytes);
+        std::ofstream output(Temporary_.path / outcome->operation_id, std::ios::binary);
+        ASSERT_TRUE(output.is_open());
+        output.write(bytes->data(), static_cast<std::streamsize>(bytes->size()));
+        output.close();
+        ASSERT_TRUE(output.good());
+    }
+    ASSERT_TRUE(Engine_->Shutdown(1000ms));
+    Engine_.reset();
+    ExpectFreshVerticalProcess(Root_, Temporary_.path);
+}
 
 TEST_F(EngineVerticalTest, CreatesAnEmptyCollectionRoot)
 {
@@ -416,8 +784,11 @@ TEST_F(EngineVerticalTest, CursorDetectedCorruptionClosesReadiness)
 
     const auto blocked = Append(SecondOperation, SecondRows);
     EXPECT_EQ(blocked.disposition, CommitDisposition::CommitUnknown);
-    ASSERT_TRUE(blocked.error);
-    EXPECT_EQ(blocked.error->code, "RECOVERY_REQUIRED");
+    const auto& blockedError = blocked.error;
+    if (!blockedError.has_value()) {
+        FAIL() << "blockedError must have a value";
+    }
+    EXPECT_EQ(blockedError->code, "RECOVERY_REQUIRED");
     Engine_.reset();
 }
 
@@ -497,9 +868,12 @@ TEST_F(EngineVerticalTest, PreBindingWriterRowLimitDoesNotConsumeOperationId)
 
     const auto rejected = Engine_->AppendDurable({WideCollection, FirstOperation, {}, {oversizedBatch}});
     EXPECT_EQ(rejected.disposition, CommitDisposition::DefinitelyNotCommitted);
-    ASSERT_TRUE(rejected.error);
-    EXPECT_EQ(rejected.error->code, "RESOURCE_EXHAUSTED");
-    EXPECT_EQ(rejected.error->retry_hint, RetryHint::FixInput);
+    const auto& rejectedError = rejected.error;
+    if (!rejectedError.has_value()) {
+        FAIL() << "rejectedError must have a value";
+    }
+    EXPECT_EQ(rejectedError->code, "RESOURCE_EXHAUSTED");
+    EXPECT_EQ(rejectedError->retry_hint, RetryHint::FixInput);
 
     const auto lookup = Engine_->FindAppendOutcome(WideCollection, FirstOperation);
     ASSERT_TRUE(lookup);
@@ -559,8 +933,11 @@ TEST_F(EngineVerticalTest, MultiCollectionStoreCapacityEnforcedAcrossCommitsAndR
 
     const auto second = engine->AppendDurable({SecondCollection, SecondOperation, {}, {Batch(SecondRows)}});
     EXPECT_EQ(second.disposition, CommitDisposition::DefinitelyNotCommitted);
-    ASSERT_TRUE(second.error);
-    EXPECT_EQ(second.error->code, "RESOURCE_EXHAUSTED");
+    const auto& secondError = second.error;
+    if (!secondError.has_value()) {
+        FAIL() << "secondError must have a value";
+    }
+    EXPECT_EQ(secondError->code, "RESOURCE_EXHAUSTED");
     const auto secondLookup = engine->FindAppendOutcome(SecondCollection, SecondOperation);
     ASSERT_TRUE(secondLookup);
     EXPECT_FALSE(secondLookup->has_value());
@@ -717,8 +1094,11 @@ TEST_F(EngineVerticalTest, ConcurrentCursorCorruptionAbortsPreparedAppendPublica
     barrierBackend->Release();
     const auto outcomeB = writerFuture.get();
     EXPECT_EQ(outcomeB.disposition, CommitDisposition::DefinitelyNotCommitted);
-    ASSERT_TRUE(outcomeB.error);
-    EXPECT_EQ(outcomeB.error->code, "RECOVERY_REQUIRED");
+    const auto& outcomeError = outcomeB.error;
+    if (!outcomeError.has_value()) {
+        FAIL() << "outcomeError must have a value";
+    }
+    EXPECT_EQ(outcomeError->code, "RECOVERY_REQUIRED");
 
     const auto blockedGet = engine->GetCollection(SecondCollection);
     ASSERT_FALSE(blockedGet);
@@ -729,8 +1109,11 @@ TEST_F(EngineVerticalTest, ConcurrentCursorCorruptionAbortsPreparedAppendPublica
     EXPECT_FALSE(engine->GetCollection(SecondCollection)->current_snapshot_id);
     const auto lookupB = engine->FindAppendOutcome(SecondCollection, SecondOperation);
     ASSERT_TRUE(lookupB);
-    ASSERT_TRUE(lookupB->has_value());
-    EXPECT_EQ((*lookupB)->disposition, CommitDisposition::DefinitelyNotCommitted);
+    const auto& storedOutcome = *lookupB;
+    if (!storedOutcome.has_value()) {
+        FAIL() << "storedOutcome must have a value";
+    }
+    EXPECT_EQ(storedOutcome->disposition, CommitDisposition::DefinitelyNotCommitted);
     ASSERT_TRUE(engine->Shutdown(1000ms));
 }
 

@@ -31,7 +31,9 @@ coordinator StorageBackend and `core/scan/` implements a minimal `Engine::Scan`
 [the scanner guide](docs/development/SCANNER.md) for their contract and
 validation status, [the coordinator guide](docs/development/COORDINATOR.md)
 for the integration contract, and [the storage guide](docs/development/STORAGE_MODULE.md)
-for the file-layer contract. Full engine durability remains unqualified.
+for the file-layer contract. See [storage integration checks](docs/development/STORAGE_INTEGRATION.md)
+for the connected interfaces, public-history/restart evidence and outstanding
+boundaries. Full engine durability remains unqualified.
 
 Independent verification tools, a Python network SDK and a browser workbench
 are implemented. They integrate through a separate, explicitly disposable

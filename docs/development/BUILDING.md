@@ -56,8 +56,11 @@ library and `GlamDBConfig.cmake`. Consumers use
 `find_package(GlamDB CONFIG REQUIRED)` with both GlamDB and dependency prefixes
 in `CMAKE_PREFIX_PATH`. `glamdb.installed_consumer` installs to a disposable
 prefix and builds/runs a public-header consumer without source-tree headers or
-HTTP/Python dependencies. It exercises create/open and missing-collection
-results. Scan/predicate acceptance awaits the scanner. The consumer test is
+HTTP/Python dependencies. With storage enabled it exercises collection creation,
+reopen, exact-name resolution, schema and public predicates, and checks fixed-view
+scan metadata before a zero-limit read. Storage-disabled builds retain the
+empty-store and missing-collection checks; the expected capability is explicit.
+See [storage integration checks](STORAGE_INTEGRATION.md) for results. The consumer test is
 omitted from sanitizer builds because instrumented static libraries require
 matching consumer flags.
 

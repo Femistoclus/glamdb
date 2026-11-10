@@ -1,3 +1,6 @@
+if(NOT EXPECT_STORAGE MATCHES "^(ON|OFF)$")
+    message(FATAL_ERROR "Installed consumer requires an explicit EXPECT_STORAGE=ON or OFF")
+endif()
 file(REMOVE_RECURSE "${TEST_BINARY_DIR}")
 file(MAKE_DIRECTORY "${TEST_BINARY_DIR}/work")
 execute_process(COMMAND "${CMAKE_COMMAND}" --install "${ENGINE_BINARY_DIR}"
@@ -19,6 +22,7 @@ if(NOT result EQUAL 0)
     message(FATAL_ERROR "Installed consumer build failed: ${result}")
 endif()
 execute_process(COMMAND "${TEST_BINARY_DIR}/build/consumer" "${TEST_BINARY_DIR}/work/store"
+    "${EXPECT_STORAGE}"
     RESULT_VARIABLE result)
 if(NOT result EQUAL 0)
     message(FATAL_ERROR "Installed consumer failed: ${result}")

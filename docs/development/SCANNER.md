@@ -81,6 +81,10 @@ Not implemented: file/row-group pruning, compound predicates (`And`, `Or`,
 
 ## Validation status
 
+The table records the initial implementation baseline. Subsequent ASan/UBSan
+history/restart, prepared-base and installed-package results are recorded in
+[storage integration checks](STORAGE_INTEGRATION.md).
+
 | Check | Status |
 | --- | --- |
 | `cmake --preset local && cmake --build --preset local` (GCC 14.2.0, `GLAMDB_BUILD_STORAGE=ON`) | PASS |
