@@ -57,6 +57,8 @@ canonical schema and exact properties returned by `MakeTableProfile`; caller
 property extensions and changes to that profile are rejected before publication.
 Snapshot-log timestamps refer to their snapshots. The root update timestamp is
 independent and is preserved on recovery, including when the wall clock moves.
+Staging, publication and recovery reject snapshot timestamps outside UTC years
+0001 through 9999 before callers convert milliseconds to microseconds.
 
 ## Read, recovery, and copy boundaries
 

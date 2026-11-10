@@ -49,6 +49,7 @@ iceberg::Status CheckNewSnapshot(const iceberg::TableMetadata& base,
     const std::unordered_map<std::string, std::string>& expectedSummary)
 {
     const auto& snapshot = *candidate.snapshots.back();
+    ICEBERG_RETURN_UNEXPECTED(CheckSnapshotTimestamp(snapshot));
     const auto parent = base.current_snapshot_id == iceberg::kInvalidSnapshotId ? std::optional<std::int64_t>{}
                                                                                 : base.current_snapshot_id;
     if (snapshot.snapshot_id == iceberg::kInvalidSnapshotId || snapshot.parent_snapshot_id != parent ||
@@ -105,6 +106,15 @@ iceberg::Status RestoreMainRef(const iceberg::TableMetadata& base, iceberg::Tabl
     return {};
 }
 
+}
+
+iceberg::Status CheckSnapshotTimestamp(const iceberg::Snapshot& snapshot)
+{
+    const auto milliseconds = snapshot.timestamp_ms.time_since_epoch().count();
+    if (milliseconds < -62135596800000LL || milliseconds > 253402300799999LL) {
+        return iceberg::ValidationFailed("Snapshot timestamp is outside UTC years 0001..9999.");
+    }
+    return {};
 }
 
 iceberg::Status
