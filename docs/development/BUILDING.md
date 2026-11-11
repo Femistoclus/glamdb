@@ -200,8 +200,9 @@ qualification test.
 
 ## Test CI
 
-`Native tests` runs six independent jobs: normal, ASan, UBSan, MSan, TSan,
-and standalone LSan. A failing profile does not cancel the others. Each enables
+`Native tests` runs four independent PR jobs: normal, ASan, UBSan, and TSan.
+Pushes to `main` and manual runs also include MSan and standalone LSan.
+A failing profile does not cancel the others. Each enables
 storage and `BUILD_TESTING`, builds all native test targets, and runs CTest without
 label/name filters. Installed-consumer tests remain included because the CI
 toolchain propagates instrumentation to consumer builds too.
@@ -230,17 +231,17 @@ conventions need no CI list entry. `bash scripts/check-workbench.sh` runs all th
 suites locally even if an earlier suite fails; an optional `python`, `node`, or
 `browser` argument selects one suite.
 
-Both workflows run on PRs, pushes to `main`, and manual dispatch. Native tests
-have no path filters: all six profiles run even for documentation-only changes.
-Each `Native / <profile>` job is a required check from GitHub Actions, alongside
+Native tests run on PRs, pushes to `main`, and manual dispatch without path
+filters. The four PR native profiles run even for documentation-only changes.
+Each PR `Native / <profile>` job is a required check from GitHub Actions, alongside
 `Workflow security` and `clang-format`. Ordinary merges and auto-merge wait for
-all eight checks to pass on an up-to-date branch. The maintainer PR-only bypass
+all six checks to pass on an up-to-date branch. The maintainer PR-only bypass
 still applies.
 
-Workbench checks skip changes limited to `docs/`, Markdown, issue templates,
-CODEOWNERS, and LICENSE. New code directories still trigger tests, and manual
-dispatch bypasses these filters. Do not require this filtered workflow as an
-unconditional branch-protection check.
+Workbench checks run only on pushes to `main` and manual dispatch. Pushes skip
+changes limited to `docs/`, Markdown, issue templates, CODEOWNERS, and LICENSE.
+New code directories still trigger tests, and manual dispatch bypasses these
+filters. Workbench, MSan, and LSan are not required PR checks.
 
 The main ruleset is tracked in [`.github/rulesets/main.json`](../../.github/rulesets/main.json).
 Merging that file does not update GitHub settings. A repository administrator

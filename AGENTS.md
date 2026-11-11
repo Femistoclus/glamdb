@@ -175,8 +175,9 @@ standard library with `std::expected` (GCC 14+ or Clang 18+ with a matching STL)
 Quality targets require LLVM major version 18 for both `clang-format` and
 `clang-tidy`.
 
-Native CI runs normal, ASan, UBSan, MSan, TSan, and LSan independently via
-`scripts/ci-native.sh`. MSan/TSan rebuild the dependency prefix and pinned
+Native CI runs normal, ASan, UBSan, and TSan on PRs via `scripts/ci-native.sh`.
+Pushes to `main` and manual runs also include MSan and LSan.
+MSan/TSan rebuild the dependency prefix and pinned
 libc++/libc++abi with instrumentation; other profiles use ordinary dependencies.
 MSan disables Arrow's custom allocators at build time and uses the system allocator.
 CTest discovers GoogleTest cases, and CMake discovers test `.cpp` files within
@@ -185,11 +186,12 @@ The normal profile also runs named `vertical`, `nostorage` (a separate
 `GLAMDB_BUILD_STORAGE=OFF` build) and `mock` contours.
 Python tests use repository-wide pytest discovery (excluding native tooling,
 vendor, and generated trees); Node and Playwright use their own discovery.
-All six native profiles are required checks and run on every PR, including
+All four PR native profiles are required checks and run on every PR, including
 documentation-only changes. The main ruleset is tracked in
 `.github/rulesets/main.json`; changes also need to be applied in GitHub.
 The ruleset also requires `Workflow security` and `clang-format`.
-Workbench checks still skip documentation-only changes. See
+Workbench checks run only on pushes to `main` and manual dispatch; pushes still
+skip documentation-only changes. See
 [test CI](docs/development/BUILDING.md#test-ci) for logs and reproduction.
 
 ```sh

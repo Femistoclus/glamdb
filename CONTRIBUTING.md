@@ -29,8 +29,8 @@ assigned when the invitation is accepted.
   CODEOWNERS changes.
 
 The repository ruleset enforces the required maintainer approval and the
-`Workflow security`, `clang-format`, `Native / normal`, `Native / asan`, `Native / ubsan`,
-`Native / msan`, `Native / tsan`, and `Native / lsan` checks from GitHub Actions.
+`Workflow security`, `clang-format`, `Native / normal`, `Native / asan`,
+`Native / ubsan`, and `Native / tsan` checks from GitHub Actions.
 Pending or failed required checks block ordinary merges and auto-merge.
 CODEOWNERS requests review but does not enforce the approval count on its own.
 
@@ -54,10 +54,11 @@ CLI, and tests using the pinned dependencies. Tidy runs two files concurrently
 with grouped diagnostics and per-file timings. Workflow security and formatting
 run on every pull request, including documentation changes, and pushes to `main`.
 Clang-tidy runs only on pushes to `main` and manual dispatch; it is skipped on PRs.
-The `Native tests` workflow runs independent normal, ASan, UBSan, MSan, TSan,
-and LSan jobs on every PR, including documentation-only changes.
-`Workbench checks` runs independent Python, Node, and browser jobs and skips
-documentation-only changes. See [test CI](docs/development/BUILDING.md#test-ci)
+The `Native tests` workflow runs normal, ASan, UBSan, and TSan jobs on every PR,
+including documentation-only changes. Pushes to `main` and manual runs also
+include MSan and LSan. `Workbench checks` runs Python, Node, and browser jobs
+only on pushes to `main` and manual dispatch, skipping documentation-only pushes.
+See [test CI](docs/development/BUILDING.md#test-ci)
 for discovery, sanitizer scope, and failure logs.
 External contributors' workflow runs require a maintainer to approve execution;
 approval to run CI does not approve the pull request for merging.

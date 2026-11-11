@@ -78,15 +78,7 @@
             "integration_id": 15368
           },
           {
-            "context": "Native / msan",
-            "integration_id": 15368
-          },
-          {
             "context": "Native / tsan",
-            "integration_id": 15368
-          },
-          {
-            "context": "Native / lsan",
             "integration_id": 15368
           }
         ]

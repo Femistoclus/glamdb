@@ -27,7 +27,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [normal, asan, ubsan, msan, tsan, lsan]
+        profile: >-
+          ${{ fromJSON(github.event_name == 'pull_request'
+            && '["normal", "asan", "ubsan", "tsan"]'
+            || '["normal", "asan", "ubsan", "msan", "tsan", "lsan"]') }}
     env:
       PROFILE: ${{ matrix.profile }}
     steps:
