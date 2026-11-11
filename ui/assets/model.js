@@ -186,6 +186,17 @@ export function prepareMutation(previous, body, idFactory = () => crypto.randomU
 export function supportsFeature(capabilities, feature) {
     return capabilities?.features?.[feature] ?? capabilities?.backend !== 'local';
 }
+// Pre-login storage notice from public /healthz; unknown or missing health makes no claim.
+export function storageNotice(health) {
+    if (health?.mock === true) return 'Mock data is disposable. No storage durability is claimed.';
+    if (
+        health?.mock === false &&
+        health.backend === 'local' &&
+        health.durability_validation === 'designed'
+    )
+        return 'Persistent local storage. Power-loss durability is not yet qualified.';
+    return 'Storage durability depends on the server you connect to.';
+}
 export function validateQueryCapabilities(capabilities, body) {
     if (body.projection?.length === 0 && !supportsFeature(capabilities, 'zero_column_projection'))
         throw new Error('Empty projection is not supported by this server');
