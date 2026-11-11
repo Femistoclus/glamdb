@@ -76,7 +76,7 @@ test('public create append precision filter history and JSON export', async ({ p
     await page.getByRole('button', { name: 'Create collection' }).click();
     await expect(page.getByRole('dialog')).not.toBeVisible();
     async function append(rows) {
-        await page.getByRole('button', { name: 'Append rows', exact: true }).click();
+        await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
         await page.getByLabel('Rows · JSON array').fill(JSON.stringify(rows));
         await page
             .getByRole('dialog')
@@ -161,7 +161,7 @@ test('public mobile branding and live style preview fit the viewport', async ({ 
 test('local admission rejection allows a smaller corrected append', async ({ page }) => {
     await open(page);
     await nav(page, 'Data studio');
-    await page.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
     const sample = {
         key: 'duplicate',
         event: 'demo',
@@ -179,7 +179,7 @@ test('local admission rejection allows a smaller corrected append', async ({ pag
         .click();
     await expect(page.getByText('Definitely not committed', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Close dialog' }).click();
-    await page.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
     await page.getByLabel('Rows · JSON array').fill(JSON.stringify([sample]));
     await page
         .getByRole('dialog')

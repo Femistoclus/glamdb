@@ -165,6 +165,40 @@ export class WorkbenchAPI {
             if (cleanup) await this.cancelScan(path, cleanup);
         }
     }
+    async countRows(path, body, { signal } = {}) {
+        let cursor = await this.openScan(path, body, signal);
+        let cleanup = cursor,
+            snapshot,
+            count = 0n;
+        const seen = new Set();
+        try {
+            do {
+                signal?.throwIfAborted();
+                if (cursor && seen.has(cursor)) throw new Error('Scan cursor repeated');
+                if (seen.size >= 100000)
+                    throw new Error('Count is too large for this browser session');
+                if (cursor) seen.add(cursor);
+                const page = await this.json(path, {
+                    method: 'POST',
+                    body: cursor ? { cursor } : body,
+                    signal,
+                });
+                if (!Array.isArray(page.rows)) throw new Error('Invalid scan rows');
+                if (snapshot !== undefined && page.snapshot_id !== snapshot)
+                    throw new Error('Scan view changed while counting');
+                snapshot = page.snapshot_id;
+                if (snapshot === undefined) throw new Error('Missing scan identity');
+                count += BigInt(page.rows.length);
+                cleanup = cursor ?? page.next_cursor ?? cleanup;
+                cursor = page.next_cursor;
+                if (cursor != null && (typeof cursor !== 'string' || !cursor))
+                    throw new Error('Invalid scan cursor');
+            } while (cursor != null);
+            return { rows: count.toString(), snapshot_id: snapshot };
+        } finally {
+            if (cleanup) await this.cancelScan(path, cleanup);
+        }
+    }
     async arrow(path, body, { signal } = {}) {
         const accept = 'application/vnd.apache.arrow.stream';
         const cursor = await this.openScan(path, body, signal, accept);

@@ -1603,3 +1603,122 @@ dialog::backdrop {
         scroll-behavior: auto !important;
     }
 }
+
+/* Runtime theme values keep the data editors compact without a rebuild. */
+.data-editors {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--size-editor-gap, 18px);
+    align-items: start;
+}
+.data-editors .panel {
+    min-width: 0;
+    margin-top: 0;
+}
+.data-editors .panel-body {
+    padding: var(--size-editor-padding, 18px);
+}
+.data-editors .panel-header {
+    padding: var(--size-editor-padding, 18px);
+}
+.data-editors .query-controls {
+    gap: var(--size-editor-control-gap, 12px);
+}
+.data-editors .query-footer {
+    flex-wrap: wrap;
+}
+.data-editors .button-row {
+    flex-wrap: wrap;
+}
+.write-rows {
+    display: grid;
+    gap: var(--size-editor-control-gap, 12px);
+    max-height: var(--size-editor-rows-max-height, 380px);
+    overflow: auto;
+}
+.write-row {
+    border: 0;
+    padding: 0;
+    min-width: 0;
+    margin: 0;
+}
+.write-row legend {
+    font-size: 11px;
+    color: var(--color-muted);
+    display: flex;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+.write-field {
+    margin-bottom: 10px;
+}
+.write-field > label {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    margin-bottom: 5px;
+}
+.field-type {
+    font-size: 10px;
+    font-weight: normal;
+    color: var(--color-muted);
+}
+.write-value {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.write-value > input,
+.write-value > select {
+    min-width: 0;
+    width: 100%;
+    flex: 1;
+}
+.null-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    white-space: nowrap;
+    color: var(--color-muted);
+}
+.null-toggle input {
+    margin: 0;
+}
+.write-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 12px;
+}
+.editor-json {
+    margin-top: 12px;
+    font-size: 11px;
+}
+.editor-json summary {
+    color: var(--color-muted);
+    cursor: pointer;
+}
+.editor-json .json-block {
+    max-height: 180px;
+    margin-top: 8px;
+}
+@media (max-width: 1100px) {
+    .data-editors {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+.row-count-notice {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+}
+[hidden] {
+    display: none !important;
+}

@@ -46,7 +46,11 @@
     "row_height": "48px",
     "logo_width": "196px",
     "login_logo_width": "300px",
-    "logo_mark_size": "32px"
+    "logo_mark_size": "32px",
+    "editor_gap": "18px",
+    "editor_padding": "18px",
+    "editor_control_gap": "12px",
+    "editor_rows_max_height": "380px"
   },
   "decoration": {
     "sparkles": true,
@@ -84,6 +88,10 @@
     "public_demo_notice": "Public demo · your data stays in this tab · reload to reset",
     "empty_title": "A fresh start looks good on you.",
     "empty_copy": "Create a collection, add a few rows, and make a little data magic.",
-    "footer": "A little sparkle. A lot of possibility."
+    "footer": "A little sparkle. A lot of possibility.",
+    "read_title": "Read rows",
+    "write_title": "Write rows",
+    "write_copy": "Fill the fields. JSON is created for you.",
+    "advanced_batch": "Batch editor"
   }
 }

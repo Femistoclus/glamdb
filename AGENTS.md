@@ -53,6 +53,13 @@ Collection routes are scoped by `/databases/{id}`; optional legacy
 separate, explicitly disposable in-memory mock remains a development profile. The architecture and
 invariants below describe the intended engine, not qualified guarantees.
 
+Data studio separates compact read and schema-driven write panels; the form
+generates typed JSON, while a batch JSON editor remains optional. Without native
+metadata APIs, Overview can count rows via a cancellable fixed-snapshot scan.
+Snapshots and Storage show only confirmed receipts from this session, clearly
+labelled as partial observations rather than complete history or file inventory.
+See the workbench guide for configurable editor sizing and validation.
+
 The same UI can publish as a static browser-only demo on GitHub Pages. It has
 no API token or shared backend: tab-local rows/operations disappear on reload.
 JSON export is available there; network SDK and Arrow IPC remain connected-server

@@ -39,6 +39,9 @@ export function resetConnection(state) {
         operations: [],
         mutation: null,
         creation: null,
+        writeDraft: null,
+        writeOperationId: null,
+        rowMeasurement: null,
     };
 }
 // Keep frozen write identities only within this authenticated connection.
@@ -71,6 +74,9 @@ export function selectView(state, collectionId, snapshotId = null) {
         selectedFile: null,
         lastQuery: null,
         page: 0,
+        writeDraft: null,
+        writeOperationId: null,
+        rowMeasurement: null,
         epoch: (state.epoch ?? 0) + 1,
     };
 }
@@ -110,7 +116,7 @@ function scalar(field, value, fromForm = false) {
             if (
                 typeof value === 'boolean' ||
                 (!fromForm && typeof value !== 'number') ||
-                value === ''
+                (typeof value === 'string' && value.trim() === '')
             )
                 throw new Error(`${field.name} must be a finite number`);
             const number = Number(value);
@@ -130,7 +136,7 @@ function scalar(field, value, fromForm = false) {
     }
 }
 
-export function wireRows(schema, rows) {
+export function wireRows(schema, rows, fromForm = false) {
     if (!Array.isArray(rows) || rows.length === 0) throw new Error('Append needs at least one row');
     if (rows.length > 10000) throw new Error('A batch can contain at most 10,000 rows');
     const fields = schema.fields;
@@ -142,9 +148,49 @@ export function wireRows(schema, rows) {
                 throw new Error(`Unknown column ${name}`);
         }
         return Object.fromEntries(
-            fields.map((field) => [field.name, scalar(field, row[field.name])]),
+            fields.map((field) => [field.name, scalar(field, row[field.name], fromForm)]),
         );
     });
+}
+
+export function formRows(schema, rows) {
+    return wireRows(schema, rows, true);
+}
+
+export function sessionSnapshots(operations, collectionId) {
+    const snapshots = new Map();
+    for (const operation of operations) {
+        if (
+            operation.collectionId !== collectionId ||
+            operation.outcome !== 'committed' ||
+            !operation.result?.snapshot_id
+        )
+            continue;
+        const result = operation.result;
+        snapshots.set(result.snapshot_id, {
+            snapshot_id: result.snapshot_id,
+            parent_snapshot_id: result.parent_snapshot_id ?? null,
+            rows_added: result.rows_appended,
+        });
+    }
+    return [...snapshots.values()];
+}
+
+export function sessionRowCount(operations, collectionId, snapshotId) {
+    const counts = new Map();
+    const decimal = (value) => (/^(?:0|[1-9]\d{0,18})$/.test(String(value)) ? BigInt(value) : null);
+    for (const op of operations) {
+        const result = op.result;
+        if (op.collectionId !== collectionId || op.outcome !== 'committed' || !result?.snapshot_id)
+            continue;
+        const added = decimal(result.rows_appended);
+        if (added === null) continue;
+        if (Object.hasOwn(result, 'parent_snapshot_id') && result.parent_snapshot_id === null)
+            counts.set(result.snapshot_id, added);
+        else if (counts.has(result.parent_snapshot_id))
+            counts.set(result.snapshot_id, counts.get(result.parent_snapshot_id) + added);
+    }
+    return counts.has(snapshotId) ? counts.get(snapshotId).toString() : null;
 }
 
 export function buildPredicate(clauses, join = 'and', negate = false, fields = []) {

@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 
 test.skip(!process.env.GLAMDB_NATIVE_SERVER, 'native server profile only');
-test('native create append scan and unsupported metadata views', async ({ page }) => {
+test('native typed write scan and metadata fallbacks', async ({ page }) => {
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
     await page.goto('/');
@@ -18,22 +18,32 @@ test('native create append scan and unsupported metadata views', async ({ page }
     await expect(page.getByRole('dialog')).not.toBeVisible();
     await expect(page.locator('.breadcrumb strong')).toHaveText('native_browser');
     await page.locator('nav').getByRole('button', { name: 'Data studio', exact: true }).click();
-    await page.getByRole('button', { name: 'Append rows', exact: true }).click();
-    const dialog = page.getByRole('dialog');
-    await dialog
-        .getByLabel('Rows · JSON array')
-        .fill('[{"key":"persisted-browser-row","label":"native","amount":"9223372036854775807"}]');
-    await dialog.getByRole('button', { name: 'Append rows', exact: true }).click();
-    await expect(dialog.getByText('Append committed', { exact: true })).toBeVisible();
-    await dialog.getByRole('button', { name: 'Close dialog' }).click();
+    const write = page.locator('#write-form');
+    await write.getByLabel('key row 1', { exact: true }).fill('persisted-browser-row');
+    await write.getByLabel('label row 1', { exact: true }).fill('native');
+    await write.getByLabel('amount row 1 NULL', { exact: true }).uncheck();
+    await write.getByLabel('amount row 1', { exact: true }).fill('9223372036854775807');
+    await write.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await expect(write.getByText('Append committed', { exact: true })).toBeVisible();
     await page.locator('#run-query').click();
     await expect(page.getByText('persisted-browser-row', { exact: true })).toBeVisible();
-    for (const name of ['Snapshots', 'Storage', 'Explain']) {
-        await page.locator('nav').getByRole('button', { name, exact: true }).click();
-        await expect(
-            page.getByText('This server does not yet expose this capability.'),
-        ).toBeVisible();
-    }
+    await page.locator('nav').getByRole('button', { name: 'Overview', exact: true }).click();
+    await page.getByRole('button', { name: 'Count rows', exact: true }).click();
+    await expect(page.locator('.metrics .metric').first().locator('strong')).toHaveText('1');
+    await expect(page.getByRole('button', { name: 'Count rows', exact: true })).toBeVisible();
+    await page.locator('nav').getByRole('button', { name: 'Snapshots', exact: true }).click();
+    await expect(
+        page.getByRole('heading', { name: 'Observed in this session', exact: true }),
+    ).toBeVisible();
+    await expect(
+        page.getByRole('table', { name: 'Snapshot history' }).locator('tbody tr'),
+    ).toHaveCount(1);
+    await page.locator('nav').getByRole('button', { name: 'Storage', exact: true }).click();
+    await expect(
+        page.getByRole('table', { name: 'Storage receipts' }).locator('tbody tr'),
+    ).toHaveCount(1);
+    await page.locator('nav').getByRole('button', { name: 'Explain', exact: true }).click();
+    await expect(page.getByText('This server does not yet expose this capability.')).toBeVisible();
     await page.getByRole('button', { name: 'Databases', exact: true }).click();
     const row = page.getByRole('row').filter({ hasText: 'browser_database' });
     await row.getByRole('button', { name: 'Close database' }).click();
@@ -171,7 +181,7 @@ test('unknown append survives database switching and reconciliation with its ori
             }),
         });
     });
-    await page.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
     const dialog = page.getByRole('dialog');
     await dialog
         .getByLabel('Rows · JSON array')

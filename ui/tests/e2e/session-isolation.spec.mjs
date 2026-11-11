@@ -319,7 +319,7 @@ test('an old operation error cannot show private text after disconnect', async (
     );
     await login(page);
     await nav(page, 'Data studio');
-    await page.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
     await page
         .getByRole('dialog')
         .getByRole('button', { name: 'Append rows', exact: true })

@@ -1,3 +1,4 @@
+import { writeEditor, readEditorRows, previewRows, lockWriteForm } from './editor.js';
 import { WorkbenchAPI } from './api.js';
 import { applyTheme, validateTheme, brandAsset } from './theme.js';
 import {
@@ -8,6 +9,9 @@ import {
     switchDatabase,
     buildPredicate,
     wireRows,
+    formRows,
+    sessionSnapshots,
+    sessionRowCount,
     prepareMutation,
     supportsFeature,
     storageNotice,
@@ -37,6 +41,7 @@ let state = resetConnection({
 let connectionController = null,
     viewController = null,
     queryController = null,
+    countController = null,
     queryGeneration = 0,
     databaseSelectionGeneration = 0,
     toastTimer = null,
@@ -74,6 +79,8 @@ function resetSession(database = undefined) {
     connectionController?.abort();
     viewController?.abort();
     queryController?.abort();
+    countController?.abort();
+    countController = null;
     connectionController = viewController = queryController = null;
     queryGeneration++;
     state = database === undefined ? resetConnection(state) : switchDatabase(state, database);
@@ -279,8 +286,18 @@ function chrome() {
     <footer class="page-footer"><span>GlamDB · <span data-brand="tagline">${e(state.theme.brand.tagline)}</span></span><span>Append mode · duplicate keys preserved ${icon('sparkle', 'decor-sparkle')}</span></footer></main></div></div>`;
     renderView();
 }
+function availableSnapshots() {
+    return supportsFeature(state.capabilities, 'snapshots')
+        ? state.snapshots
+        : sessionSnapshots(state.operations, state.collectionId);
+}
 function snapshotControl() {
-    return `<label class="snapshot-control">${icon('clock')}<span class="sr-only">Snapshot</span><select id="snapshot-selector" aria-label="Snapshot"><option value="latest" ${state.snapshotId === null ? 'selected' : ''}>${e(labels('latest'))}</option><option value="initial" ${state.snapshotId === 'initial' ? 'selected' : ''}>Initial empty view</option>${state.snapshots.map((s) => `<option value="${e(s.snapshot_id)}" ${state.snapshotId === s.snapshot_id ? 'selected' : ''}>Snapshot ${e(s.snapshot_id)}</option>`).join('')}</select></label>`;
+    return `<label class="snapshot-control">${icon('clock')}<span class="sr-only">Snapshot</span><select id="snapshot-selector" aria-label="Snapshot"><option value="latest" ${state.snapshotId === null ? 'selected' : ''}>${e(labels('latest'))}</option><option value="initial" ${state.snapshotId === 'initial' ? 'selected' : ''}>Initial empty view</option>${availableSnapshots()
+        .map(
+            (s) =>
+                `<option value="${e(s.snapshot_id)}" ${state.snapshotId === s.snapshot_id ? 'selected' : ''}>Snapshot ${e(s.snapshot_id)}</option>`,
+        )
+        .join('')}</select></label>`;
 }
 function heading(title, copy = '', snapshot = true) {
     return `<div class="view-heading"><div><p class="eyebrow" data-brand="eyebrow">${e(state.theme.brand.eyebrow)}</p><h1 id="view-title" tabindex="-1">${e(title)}</h1>${copy ? `<p>${e(copy)}</p>` : ''}</div>${snapshot && state.collectionId ? snapshotControl() : ''}</div>`;
@@ -290,9 +307,19 @@ function emptyView() {
 }
 function overview() {
     const s = state.stats ?? {};
+    const measured =
+        state.rowMeasurement?.snapshot_id === state.resolvedSnapshot
+            ? state.rowMeasurement.rows
+            : null;
+    const rows =
+        s.rows ??
+        measured ??
+        (state.resolvedSnapshot === 'initial'
+            ? '0'
+            : sessionRowCount(state.operations, state.collectionId, state.resolvedSnapshot));
     return `${heading(labels('overview_title'), labels('overview_copy'))}<section class="hero"><div class="hero-copy"><p class="eyebrow" data-label="hero_eyebrow">${e(labels('hero_eyebrow'))}</p><h2 data-label="hero_title">${e(labels('hero_title'))}</h2><p data-label="hero_copy">${e(labels('hero_copy'))}</p><button class="button primary" data-action="nav" data-tab="data"><span data-label="hero_button">${e(labels('hero_button'))}</span>${icon('arrow')}</button></div><div class="hero-art" aria-hidden="true"><div class="mini-card back"></div><div class="mini-card"><div class="mini-card-head">${icon('table')}${e(currentCollection()?.name ?? 'your_collection')}</div><div class="mini-card-grid">${Array.from({ length: 12 }, () => '<span></span>').join('')}</div></div>${icon('bow', 'hero-bow decor-bow')}${icon('sparkle', 'hero-star one decor-sparkle')}${icon('sparkle', 'hero-star two decor-sparkle')}${icon('kiss', 'hero-kiss decor-kiss')}<p class="hero-note" data-label="hero_note">${e(labels('hero_note'))}</p></div></section>
     <section class="metrics" aria-label="Collection statistics">${[
-        ['Rows', s.rows, 'table'],
+        ['Rows', rows, 'table'],
         ['Columns', fields().length, 'columns'],
         [
             'Snapshots',
@@ -312,6 +339,7 @@ function overview() {
                 `<div class="metric"><div class="metric-icon">${icon(symbol)}</div><div><strong>${number(value)}</strong><span>${label.toUpperCase()}</span></div></div>`,
         )
         .join('')}</section>
+    ${state.collectionId && !supportsFeature(state.capabilities, 'stats') ? `<div class="notice row-count-notice"><span>Rows refer to snapshot <code>${e(state.resolvedSnapshot)}</code>. Counting reads one column across the whole snapshot; it may take time.</span><button class="button small" data-action="${countController ? 'cancel-count' : 'count-rows'}">${countController ? 'Cancel count' : 'Count rows'}</button></div>` : ''}
     ${
         state.collectionId
             ? `<div class="panels"><section class="panel"><div class="panel-header"><div><h2>Inside your collection</h2><p>${e(currentCollection()?.name)} · fixed schema</p></div><button class="button small" data-action="nav" data-tab="schema">View schema${icon('arrow')}</button></div><div class="panel-body">${fields()
@@ -327,19 +355,21 @@ function overview() {
     }`;
 }
 function snapshotList(max = 100) {
-    if (!supportsFeature(state.capabilities, 'snapshots'))
-        return '<p class="muted small">Snapshot history is unavailable on this server.</p>';
-    return state.snapshots.length
-        ? state.snapshots
-              .slice()
-              .reverse()
-              .slice(0, max)
-              .map(
-                  (s) =>
-                      `<div class="snapshot-item"><span class="snapshot-marker"></span><div><strong>Append snapshot</strong><p><code>${e(s.snapshot_id)}</code></p></div>${badge(`+${countSnapshotRows(s)} rows`)}</div>`,
-              )
-              .join('')
-        : '<p class="muted small">No snapshot yet. Your initial view is empty.</p>';
+    const observed = !supportsFeature(state.capabilities, 'snapshots');
+    const snapshots = availableSnapshots();
+    return `${observed ? '<p class="muted small">Observed in this session. Complete history is not available.</p>' : ''}${
+        snapshots.length
+            ? snapshots
+                  .slice()
+                  .reverse()
+                  .slice(0, max)
+                  .map(
+                      (s) =>
+                          `<div class="snapshot-item"><span class="snapshot-marker"></span><div><strong>Append snapshot</strong><p><code>${e(s.snapshot_id)}</code></p></div>${badge(`+${countSnapshotRows(s)} rows`)}</div>`,
+                  )
+                  .join('')
+            : `<p class="muted small">${observed ? 'No committed appends observed in this session.' : 'No snapshot yet. Your initial view is empty.'}</p>`
+    }`;
 }
 function readQuery() {
     const form = $('#query-form');
@@ -369,16 +399,18 @@ function readQuery() {
     return body;
 }
 function dataView() {
+    const predicates = state.capabilities?.predicate_ops;
+    const composite = !predicates || predicates.includes('and') || predicates.includes('or');
     const columns = state.projection.length
         ? state.projection
         : fields().map((field) => field.name);
-    return `${heading(labels('data_title'), labels('data_copy'))}<section class="panel"><div class="panel-header"><div><h2>Make it your query</h2><p>Projection + typed filters. A fixed snapshot, every time.</p></div><button class="button small" data-action="append">${icon('plus')}<span data-label="append_rows">${e(labels('append_rows'))}</span></button></div><div class="panel-body"><form id="query-form" class="query-controls"><div><label>Columns to read</label><div class="column-choices" style="margin-top:9px">${fields()
+    return `${heading(labels('data_title'), labels('data_copy'))}<div class="data-editors"><section class="panel read-panel" aria-labelledby="read-title"><div class="panel-header"><div><h2 id="read-title" data-label="read_title">${e(labels('read_title', 'Read rows'))}</h2><p>Choose columns and optional filters.</p></div></div><div class="panel-body"><form id="query-form" class="query-controls"><div><label>Columns to read</label><div class="column-choices" style="margin-top:9px">${fields()
         .map(
             (field) =>
                 `<label class="column-check"><input type="checkbox" name="column" value="${e(field.name)}" ${columns.includes(field.name) ? 'checked' : ''}>${e(field.name)}</label>`,
         )
         .join('')}</div></div>
-    <div><div class="filter-toolbar"><label>Filter your rows</label><div class="button-row"><select name="join" aria-label="Combine conditions"><option value="and" ${state.join === 'and' ? 'selected' : ''}>Match all · AND</option><option value="or" ${state.join === 'or' ? 'selected' : ''}>Match any · OR</option></select><label class="small"><input type="checkbox" name="negate" ${state.negate ? 'checked' : ''}> Negate</label></div></div>
+    <div><div class="filter-toolbar"><label>Filter your rows</label><div class="button-row" ${composite ? '' : 'hidden'}><select name="join" aria-label="Combine conditions"><option value="and" ${state.join === 'and' ? 'selected' : ''}>Match all · AND</option><option value="or" ${state.join === 'or' ? 'selected' : ''}>Match any · OR</option></select><label class="small"><input type="checkbox" name="negate" ${state.negate ? 'checked' : ''}> Negate</label></div></div>
     ${state.clauses
         .map(
             (c, i) =>
@@ -398,6 +430,7 @@ function dataView() {
                     ['is_null', 'is NULL'],
                     ['is_not_null', 'is not NULL'],
                 ]
+                    .filter(([op]) => !predicates || predicates.includes(op))
                     .map(
                         ([op, label]) =>
                             `<option value="${op}" ${c.op === op ? 'selected' : ''}>${label}</option>`,
@@ -407,8 +440,40 @@ function dataView() {
                     )}</select><input name="value" aria-label="Filter value ${i + 1}" value="${e(c.value)}" placeholder="A value, in its original type"><button type="button" class="icon-button" data-action="remove-condition" data-index="${i}" aria-label="Remove condition ${i + 1}">${icon('close')}</button></div>`,
         )
         .join('')}
-    <button type="button" class="text-button" data-action="add-condition">+ Add a condition</button></div><div class="query-footer"><label>Result limit<input name="limit" type="number" min="0" max="1000" value="${state.limit}"></label><div class="button-row"><button type="button" class="button" data-action="explain-query" ${supportsFeature(state.capabilities, 'explain') ? '' : 'disabled title="Unavailable on this server"'}>${icon('sparkle')}Explain</button><button type="submit" class="button primary" id="run-query">${icon('arrow')}<span data-label="run_query">${e(labels('run_query'))}</span></button></div></div></form></div></section>
+    <button type="button" class="text-button" data-action="add-condition" ${!composite && state.clauses.length ? 'disabled title="This server supports one comparison per query"' : ''}>+ Add a condition</button></div><div class="query-footer"><label>Result limit<input name="limit" type="number" min="0" max="1000" value="${state.limit}"></label><div class="button-row"><button type="button" class="button" data-action="explain-query" ${supportsFeature(state.capabilities, 'explain') ? '' : 'disabled title="Unavailable on this server"'}>${icon('sparkle')}Explain</button><button type="submit" class="button primary" id="run-query">${icon('arrow')}<span data-label="run_query">${e(labels('run_query'))}</span></button></div></div><details class="editor-json"><summary>Query JSON</summary><pre id="query-json" class="json-block">${e(queryPreview())}</pre><button type="button" class="text-button" data-action="download-query-json">Download JSON</button></details></form></div></section>${writePanel()}</div>
     ${state.result ? resultTable() : `<div class="notice" style="margin-top:20px">Ready when you are. Your result will appear here, with its exact snapshot identity.</div>`}`;
+}
+function queryPreview() {
+    try {
+        const body = {
+            projection: state.projection.length ? state.projection : fields().map((f) => f.name),
+            predicate: buildPredicate(state.clauses, state.join, state.negate, fields()),
+            limit: state.limit,
+        };
+        if (state.snapshotId !== null) body.snapshot_id = state.snapshotId;
+        return JSON.stringify(body, null, 2);
+    } catch (error) {
+        return error.message;
+    }
+}
+function writePanel() {
+    const operation =
+        pendingForCollection(state.collectionId) ??
+        state.operations.find(
+            (op) =>
+                op.operationId === state.writeOperationId && op.collectionId === state.collectionId,
+        );
+    return writeEditor(
+        state.schema,
+        state.writeDraft,
+        operation,
+        state.collectionId,
+        state.theme.labels,
+    );
+}
+function draftWrite() {
+    const form = $('#write-form');
+    if (form) state.writeDraft = readEditorRows(form);
 }
 function resultTable() {
     const schema = state.result.schema?.fields ?? state.projection.map((name) => ({ name }));
@@ -418,6 +483,14 @@ function resultTable() {
 
 function renderView() {
     if (!$('#view')) return;
+    if (
+        state.collectionId &&
+        !state.schema &&
+        !['overview', 'style', 'operations'].includes(state.tab)
+    ) {
+        $('#view').innerHTML = '<p class="notice" role="status">Opening this snapshot…</p>';
+        return;
+    }
     if (!state.collectionId && !['overview', 'style'].includes(state.tab)) {
         $('#view').innerHTML = heading(labels(`nav_${state.tab}`), '', false) + emptyView();
         return;
@@ -449,9 +522,9 @@ function schemaView() {
         )}</tbody></table></div></section><div class="notice" style="margin-top:20px">Append mode preserves duplicate keys. A field called key does not imply uniqueness. Schema evolution is not enabled.</div>`;
 }
 function snapshotsView() {
-    if (!supportsFeature(state.capabilities, 'snapshots'))
-        return `${heading('Snapshot history', 'This server does not yet expose this capability.')}<div class="notice">Your data remains available in Data studio.</div>`;
-    return `${heading('Every version has a story.', 'Read an immutable view. Keep your latest data untouched.')}<section class="panel"><div class="panel-header"><h2>Snapshot history</h2>${badge(`${state.snapshots.length} retained`)}</div><div class="table-wrap"><table aria-label="Snapshot history"><thead><tr><th>Snapshot ID</th><th>Parent</th><th>Rows added</th><th></th></tr></thead><tbody>${state.snapshots
+    const observed = !supportsFeature(state.capabilities, 'snapshots');
+    const snapshots = availableSnapshots();
+    return `${heading('Every version has a story.', observed ? 'Observed in this session. Complete history requires server metadata support.' : 'Read an immutable view. Keep your latest data untouched.')}<section class="panel"><div class="panel-header"><h2>${observed ? 'Observed in this session' : 'Snapshot history'}</h2>${badge(`${snapshots.length} ${observed ? 'observed' : 'retained'}`)}</div><div class="table-wrap"><table aria-label="Snapshot history"><thead><tr><th>Snapshot ID</th><th>Parent</th><th>Rows added</th><th></th></tr></thead><tbody>${snapshots
         .slice()
         .reverse()
         .map(
@@ -460,11 +533,24 @@ function snapshotsView() {
         )
         .join(
             '',
-        )}</tbody></table></div>${!state.snapshots.length ? '<p class="result-empty">No append has been published yet.</p>' : ''}</section>`;
+        )}</tbody></table></div>${!snapshots.length ? `<p class="result-empty">${observed ? 'No committed appends observed in this session.' : 'No append has been published yet.'}</p>` : ''}</section>`;
 }
 function storageView() {
     if (!supportsFeature(state.capabilities, 'files'))
-        return `${heading('File inspection', 'This server does not yet expose this capability.')}<div class="notice">Your data remains available in Data studio.</div>`;
+        return `${heading('Storage receipts', 'Confirmed additions from this session. This is not a complete file inventory.')}<section class="panel"><div class="panel-header"><h2>Committed appends</h2></div><div class="table-wrap"><table aria-label="Storage receipts"><thead><tr><th>Snapshot</th><th>Rows added</th><th>Files added</th><th>Compressed bytes added</th></tr></thead><tbody>${state.operations
+            .filter(
+                (op) =>
+                    op.collectionId === state.collectionId &&
+                    op.outcome === 'committed' &&
+                    op.result,
+            )
+            .map(
+                (op) =>
+                    `<tr><td class="mono">${e(op.result.snapshot_id)}</td><td>${number(op.result.rows_appended)}</td><td>${number(op.result.data_files_added)}</td><td>${number(op.result.compressed_data_bytes_added)}</td></tr>`,
+            )
+            .join(
+                '',
+            )}</tbody></table></div></section><div class="notice">File paths, total storage size and row-group details require server metadata support. Unknown values remain unknown.</div>`;
     return `${heading('A place for every file.', 'File membership belongs to the selected snapshot.')}<div class="notice" style="margin-bottom:20px">${state.capabilities?.mock ? 'These are synthetic descriptors for the mock adapter. No physical Parquet files are written.' : 'Immutable files; metadata is available where supported.'}</div><section class="panel"><div class="panel-header"><h2>Data files</h2>${badge(`${state.files.length} files`)}</div><div class="table-wrap"><table aria-label="Data files"><thead><tr><th>File</th><th>Rows</th><th>Bytes</th><th></th></tr></thead><tbody>${state.files.map((f, i) => `<tr><td><strong>Data file ${i + 1}</strong><p class="muted small mono">${e(f.file_id)}</p></td><td>${number(f.record_count)}</td><td>${f.compressed_bytes === null ? 'Unknown' : number(f.compressed_bytes)}</td><td><button class="button small" data-action="file" data-id="${e(f.file_id)}">Inspect${icon('arrow')}</button></td></tr>`).join('')}</tbody></table></div>${!state.files.length ? '<p class="result-empty">No files in this view.</p>' : ''}</section><div class="notice" style="margin-top:20px">Compaction, expiration and garbage collection are unavailable in append v0. Optional index presence does not imply execution support.</div>`;
 }
 function explainView() {
@@ -551,6 +637,8 @@ async function refreshSelection() {
         chrome();
         return;
     }
+    countController?.abort();
+    countController = null;
     viewController?.abort();
     viewController = new AbortController();
     const signal = viewController.signal,
@@ -600,6 +688,8 @@ async function selectCollection(id, snapshot = null) {
             /* Retain edited drafts even if their predicate is not valid yet. */
         }
     }
+    countController?.abort();
+    countController = null;
     viewController?.abort();
     queryController?.abort();
     queryGeneration++;
@@ -628,6 +718,42 @@ async function refreshWorkspace() {
         : (collections[0]?.collection_id ?? null);
     if (id !== state.collectionId) await selectCollection(id);
     else await refreshSelection();
+}
+async function countRows() {
+    const api = state.api,
+        epoch = state.epoch,
+        id = state.collectionId,
+        snapshot = state.resolvedSnapshot;
+    const controller = new AbortController();
+    countController?.abort();
+    countController = controller;
+    const current = () =>
+        state.api === api &&
+        state.epoch === epoch &&
+        state.collectionId === id &&
+        state.resolvedSnapshot === snapshot;
+    const column =
+        fields().find((f) => ['bool', 'int64', 'float64'].includes(f.type)) ?? fields()[0];
+    renderView();
+    try {
+        const result = await api.countRows(
+            `/collections/${encodeURIComponent(id)}/scan`,
+            {
+                projection: [column.name],
+                snapshot_id: snapshot,
+            },
+            { signal: controller.signal },
+        );
+        if (!controller.signal.aborted && current()) {
+            const identity = result.snapshot_id ?? 'initial';
+            if (identity !== snapshot) throw new Error('Count returned a different snapshot');
+            state.rowMeasurement = { ...result, snapshot_id: identity };
+            toast(`${number(result.rows)} rows counted in the selected snapshot.`);
+        }
+    } finally {
+        if (countController === controller) countController = null;
+        if (current()) renderView();
+    }
 }
 async function runQuery() {
     const body = readQuery(),
@@ -848,7 +974,7 @@ function openAppend() {
     }
     const frozen = pendingForCollection(state.collectionId);
     showModal(
-        'A little more data.',
+        'JSON batch editor',
         `<p class="muted small">Append preserves every row, including duplicate keys. Int64 values should be quoted decimal strings.</p><form id="append-form"><label class="field">Rows · JSON array<textarea name="rows" rows="9" spellcheck="false" ${frozen ? 'readonly' : ''}>${e(JSON.stringify(frozen ? frozen.body.rows : [sampleRow()], null, 2))}</textarea></label><p class="small muted" style="margin-top:10px">${frozen ? 'This unresolved request is frozen. Retry keeps its original operation ID.' : 'Up to 10,000 rows per batch. Input is validated against this fixed schema.'}</p><div id="append-outcome" style="margin-top:12px"></div><p class="modal-error" id="modal-error" role="alert"></p><div class="modal-actions"><button type="button" class="button" data-action="close-modal">Close</button>${frozen ? '<button type="button" class="button" data-action="resolve-pending">Check outcome</button>' : ''}<button class="button primary" type="submit">${frozen ? 'Retry same operation' : 'Append rows'}${icon('arrow')}</button></div></form>`,
     );
     $('#append-form').dataset.collectionId = state.collectionId;
@@ -877,42 +1003,69 @@ function saveOutcome(operation, outcome) {
     return outcome;
 }
 function showAppendOutcome(operation, payload) {
-    const form = $('#append-form');
-    if (
-        !form ||
-        form.dataset.collectionId !== operation.collectionId ||
-        form.dataset.operationId !== operation.operationId
-    )
-        return;
-    const node = form.querySelector('#append-outcome');
-    const title =
-        payload.outcome === 'committed'
-            ? 'Append committed'
-            : payload.outcome === 'definitely_not_committed'
-              ? 'Definitely not committed'
-              : 'Outcome unresolved · keep this operation ID';
-    node.innerHTML = `<div class="op-outcome"><strong>${e(title)}</strong><code>${e(operation.operationId)}</code>${payload.result ? `<p>Snapshot ${e(payload.result.snapshot_id)}</p>` : ''}<p class="small muted">${e(payload.error?.message ?? (payload.recovery_required ? 'Recovery is required before a new mutation.' : ''))}</p></div>`;
-    if (operation.terminal) {
-        const button = form.querySelector('[type=submit]');
-        setBusy(button, false);
-        button.disabled = true;
-        button.textContent = operation.outcome === 'committed' ? 'Committed' : 'Not committed';
-        form.elements.rows.readOnly = true;
+    for (const form of document.querySelectorAll('#append-form, #write-form')) {
+        if (
+            form.dataset.collectionId !== operation.collectionId ||
+            form.dataset.operationId !== operation.operationId
+        )
+            continue;
+        const node = form.querySelector('#append-outcome, #write-outcome');
+        const title =
+            payload.outcome === 'committed'
+                ? 'Append committed'
+                : payload.outcome === 'definitely_not_committed'
+                  ? 'Definitely not committed'
+                  : 'Outcome unresolved · keep this operation ID';
+        node.innerHTML = `<div class="op-outcome"><strong>${e(title)}</strong><code>${e(operation.operationId)}</code>${payload.result ? `<p>Snapshot ${e(payload.result.snapshot_id)}</p>` : ''}<p class="small muted">${e(payload.error?.message ?? (payload.recovery_required ? 'Recovery is required before a new mutation.' : ''))}</p></div>`;
+        if (form.id === 'write-form') {
+            if (operation.terminal && !form.querySelector('[data-action="new-write"]'))
+                form.insertAdjacentHTML(
+                    'beforeend',
+                    '<button type="button" class="button small" data-action="new-write">New rows</button>',
+                );
+            else if (!operation.terminal) {
+                form.querySelector('[type=submit]').textContent = 'Retry same operation';
+                if (!form.querySelector('[data-action="resolve-operation"]'))
+                    form.insertAdjacentHTML(
+                        'beforeend',
+                        `<button type="button" class="button small" data-action="resolve-operation" data-id="${e(operation.operationId)}">Check outcome</button>`,
+                    );
+            }
+        }
+        if (operation.terminal) {
+            const button = form.querySelector('[type=submit]');
+            setBusy(button, false);
+            button.disabled = true;
+            button.textContent = operation.outcome === 'committed' ? 'Committed' : 'Not committed';
+            if (form.elements.rows) form.elements.rows.readOnly = true;
+            else lockWriteForm(form);
+        }
     }
 }
 async function appendForm(form) {
     const button = form.querySelector('[type=submit]');
     setBusy(button, true);
-    form.querySelector('#modal-error').textContent = '';
+    form.querySelector('#modal-error, #write-error').textContent = '';
     const api = state.api,
         collectionId = form.dataset.collectionId;
     let operation;
     try {
-        const rows = wireRows(state.schema, JSON.parse(form.elements.rows.value));
         const previous = pendingForCollection(collectionId);
+        const rows =
+            form.id === 'write-form' &&
+            previous &&
+            previous.operationId === form.dataset.operationId
+                ? previous.body.rows
+                : form.id === 'write-form'
+                  ? formRows(state.schema, readEditorRows(form))
+                  : wireRows(state.schema, JSON.parse(form.elements.rows.value));
         operation = prepareMutation(previous, { rows });
         operation.collectionId = collectionId;
         state.mutation = operation;
+        if (form.id === 'write-form') {
+            state.writeOperationId = operation.operationId;
+            lockWriteForm(form);
+        }
         form.dataset.operationId = operation.operationId;
         saveOutcome(operation, { outcome: 'in_flight' });
         const received = await api.json(`/collections/${encodeURIComponent(collectionId)}/append`, {
@@ -926,12 +1079,14 @@ async function appendForm(form) {
         if (payload.outcome === 'committed') {
             button.disabled = true;
             button.textContent = 'Committed';
-            form.elements.rows.readOnly = true;
+            if (form.elements.rows) form.elements.rows.readOnly = true;
+            else lockWriteForm(form);
             if (state.collectionId === collectionId) await refreshSelection();
             toast('Append committed. Every row added.');
         } else if (!operation.terminal) {
             button.textContent = 'Retry same operation';
-            form.elements.rows.readOnly = true;
+            if (form.elements.rows) form.elements.rows.readOnly = true;
+            else lockWriteForm(form);
         }
     } catch (error) {
         if (state.api === api && operation && !operation.terminal) {
@@ -940,7 +1095,8 @@ async function appendForm(form) {
             button.textContent = 'Retry same operation';
             form.elements.rows.readOnly = true;
         }
-        if (form.isConnected) form.querySelector('#modal-error').textContent = error.message;
+        if (form.isConnected)
+            form.querySelector('#modal-error, #write-error').textContent = error.message;
     } finally {
         if (!operation?.terminal) setBusy(button, false);
     }
@@ -1026,6 +1182,7 @@ document.addEventListener('submit', async (event) => {
             'query-form',
             'create-form',
             'append-form',
+            'write-form',
             'operation-lookup-form',
         ].includes(event.target.id)
     )
@@ -1062,7 +1219,7 @@ document.addEventListener('submit', async (event) => {
             }
         } else if (form.id === 'database-form') await createDatabase(form);
         else if (form.id === 'query-form') await runQuery();
-        else if (form.id === 'append-form') await appendForm(form);
+        else if (form.id === 'append-form' || form.id === 'write-form') await appendForm(form);
         else if (form.id === 'create-form') await createForm(form);
         else if (form.id === 'operation-lookup-form') {
             const epoch = state.epoch;
@@ -1105,7 +1262,27 @@ document.addEventListener('click', async (event) => {
         else if (action === 'create') openCreate();
         else if (action === 'close-modal') $('#modal').close();
         else if (action === 'append') openAppend();
-        else if (action === 'add-field') {
+        else if (action === 'count-rows') await countRows();
+        else if (action === 'cancel-count') countController?.abort();
+        else if (action === 'add-write-row' || action === 'remove-write-row') {
+            draftWrite();
+            if (action === 'add-write-row' && state.writeDraft.length < 100)
+                state.writeDraft.push({});
+            else if (action === 'remove-write-row' && state.writeDraft.length > 1)
+                state.writeDraft.splice(Number(target.dataset.index), 1);
+            try {
+                readQuery();
+            } catch {
+                /* Preserve drafts while editing. */
+            }
+            renderView();
+        } else if (action === 'new-write') {
+            state.writeOperationId = null;
+            state.writeDraft = null;
+            renderView();
+        } else if (action === 'download-query-json') {
+            download('query.json', JSON.stringify(readQuery(), null, 2), 'application/json');
+        } else if (action === 'add-field') {
             creationFields = readCreationFields();
             creationFields.push({ name: '', type: 'string', nullable: true });
             renderCreationFields();
@@ -1169,6 +1346,24 @@ document.addEventListener('click', async (event) => {
             );
     } catch (error) {
         if (state.api === api) report(error);
+    }
+});
+document.addEventListener('input', (event) => {
+    const form = event.target.closest('form');
+    if (form?.id === 'write-form') {
+        if (event.target.matches('[data-write-null]')) {
+            const field = event.target.closest('[data-field]');
+            field.querySelector('[data-write-value]').disabled = event.target.checked;
+        }
+        draftWrite();
+        $('#write-json').textContent = previewRows(state.schema, state.writeDraft);
+    } else if (form?.id === 'query-form') {
+        try {
+            readQuery();
+        } catch {
+            /* Validation appears on submit. */
+        }
+        $('#query-json').textContent = queryPreview();
     }
 });
 document.addEventListener('change', async (event) => {

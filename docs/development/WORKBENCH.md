@@ -37,16 +37,26 @@ isolation after their pinned build dependencies are present.
 
 - **Overview:** selected-view row count, column count, retained snapshots,
   file count, schema preview and history.
-- **Data studio:** select output columns, combine typed filters with AND/OR/NOT,
-  run a bounded preview, append a JSON array, and download a complete Arrow IPC
-  stream for the exact result snapshot. Key lookup is a filter scan.
+- **Data studio:** two compact panels separate reading from writing. Select
+  output columns and supported typed filters, then run a bounded preview.
+  Fill schema-driven fields in **Write rows**; **Add row** adds another record
+  and nullable fields have an explicit NULL switch. JSON is generated and
+  validated automatically, preserving int64 precision. **Batch editor** opens
+  the optional JSON array editor. **Query JSON** previews and downloads the
+  request assembled by the read controls. Arrow export retains the exact result
+  snapshot; key lookup is a filter scan.
 - **Schema:** fixed types, field IDs and nullability. There is no schema editor
   after collection creation.
 - **Snapshots:** explore retained historical views or the initial empty view.
   Selecting a view clears the previous result; results identify their own fixed
-  snapshot. Snapshot IDs are opaque, not row counts.
+  snapshot. Snapshot IDs are opaque, not row counts. Without the metadata
+  capability, show only confirmed append receipts observed in this session,
+  explicitly labelled as incomplete history.
 - **Storage:** inspect synthetic file/row-group descriptors. Unknown physical
   byte and I/O values stay unknown; no physical file exists in this mock.
+  On a connected server without file listing, show confirmed receipt additions
+  (snapshot, rows, files and compressed bytes where supplied), not a fabricated
+  file inventory or total storage size.
 - **Explain:** inspect the selected query plan separately from execution
   measurements. Page/Bloom/row-group pruning are explicitly unsupported here.
 - **Operations:** check collection-scoped append outcomes submitted in this tab.
@@ -62,6 +72,19 @@ only SQL TRUE survives a predicate. The browser caps previews at 1,000 rows and
 100 displayed rows per page. Append batches are capped at 10,000 rows plus
 decoded/body byte limits. This is append v0, without upsert, delete, compaction,
 jobs, S3, uniqueness or durable mock outcomes.
+
+The field editor accepts up to 100 rows; the optional JSON batch editor accepts
+up to 10,000, within server byte limits. Unknown writes freeze both editors
+around the same operation ID and payload until a terminal outcome is known.
+
+When native statistics are unavailable, **Count rows** in Overview reads one
+column of the selected snapshot through existing scan pages, discards each page
+and shows a total only after completion. This can be expensive; it runs only on
+request and can be cancelled. Collection, snapshot and connection changes cancel
+it too. A complete confirmed receipt chain from the initial empty view can also
+establish a count. Partial query previews never become collection totals.
+Session receipts vanish on disconnect/reload; they do not replace durable
+history or file metadata APIs.
 
 Credentials stay in process/tab memory, never localStorage, sessionStorage or
 URLs. Disconnect clears credentials, metadata, results, snapshot selection,
@@ -87,6 +110,10 @@ control/table heights, titles, main copy and navigation labels. Decoration has
 independent `bows`, `kisses`, `sparkles`, and `motion` switches. OS reduced-motion
 preferences override animation. Icons are local SVG, fonts are local/system;
 no analytics or third-party asset request is needed.
+
+The read/write layout uses `sizing.editor_gap`, `editor_padding`,
+`editor_control_gap`, and `editor_rows_max_height`. Its headings and batch-editor
+label are in `labels`, so spacing and copy can change without rebuilding.
 
 `brand.wordmark` and `brand.mark` select the supplied local PNGs under
 `assets/brand/`; remote URLs/traversal are rejected. `sizing.logo_width`,

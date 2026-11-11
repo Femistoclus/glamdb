@@ -52,7 +52,7 @@ async function createCollection(page, name) {
     await expect(page.locator('.breadcrumb strong')).toHaveText(name);
 }
 async function appendRows(page, rows) {
-    await page.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
     const dialog = page.getByRole('dialog');
     await dialog.getByLabel('Rows · JSON array').fill(JSON.stringify(rows));
     await dialog.getByRole('button', { name: 'Append rows', exact: true }).click();
@@ -214,7 +214,7 @@ test('unresolved append stays unresolved and retry keeps operation identity', as
             }),
         });
     });
-    await page.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
     const dialog = page.getByRole('dialog');
     await dialog.getByRole('button', { name: 'Append rows', exact: true }).click();
     await expect(dialog.getByText('Outcome unresolved · keep this operation ID')).toBeVisible();
@@ -262,7 +262,7 @@ test('late pending append response cannot decorate a different collection dialog
         await held;
         await route.fulfill({ response });
     });
-    await page.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
     await page
         .getByRole('dialog')
         .getByRole('button', { name: 'Append rows', exact: true })
@@ -270,7 +270,7 @@ test('late pending append response cannot decorate a different collection dialog
     await captured;
     await page.getByRole('button', { name: 'Close dialog' }).click();
     await page.locator('.collection-list button').filter({ hasText: 'pink_inventory' }).click();
-    await page.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
     release();
     await expect(page.locator('#toast')).toContainText(/Every row added|Append committed/);
     await expect(
@@ -310,7 +310,7 @@ test('pending append keeps its identity after an append in another collection', 
             }),
         });
     });
-    await page.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
     await page
         .getByRole('dialog')
         .getByRole('button', { name: 'Append rows', exact: true })
@@ -318,7 +318,7 @@ test('pending append keeps its identity after an append in another collection', 
     await expect(page.getByText('Outcome unresolved · keep this operation ID')).toBeVisible();
     await page.getByRole('button', { name: 'Close dialog' }).click();
     await page.locator('.collection-list button').filter({ hasText: 'pink_inventory' }).click();
-    await page.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
     await page
         .getByRole('dialog')
         .getByRole('button', { name: 'Append rows', exact: true })
@@ -328,7 +328,7 @@ test('pending append keeps its identity after an append in another collection', 
     ).toBeVisible();
     await page.getByRole('button', { name: 'Close dialog' }).click();
     await page.locator('.collection-list button').filter({ hasText: name }).click();
-    await page.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
     await expect(page.getByRole('dialog').getByLabel('Rows · JSON array')).toHaveAttribute(
         'readonly',
         '',
@@ -471,7 +471,7 @@ test('metadata refresh failure cannot erase a committed append receipt', async (
             }),
         });
     });
-    await page.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
     await page
         .getByRole('dialog')
         .getByRole('button', { name: 'Append rows', exact: true })
@@ -486,7 +486,7 @@ test('metadata refresh failure cannot erase a committed append receipt', async (
     await nav(page, 'Operations');
     await expect(page.locator('.operations-card strong')).toHaveText('committed');
     await nav(page, 'Data studio');
-    await page.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
     await expect(page.getByRole('dialog').getByLabel('Rows · JSON array')).not.toHaveAttribute(
         'readonly',
         '',
@@ -520,7 +520,7 @@ test('a terminal outcome survives an older unresolved status response', async ({
             }),
         });
     });
-    await page.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
     await page
         .getByRole('dialog')
         .getByRole('button', { name: 'Append rows', exact: true })
@@ -571,12 +571,12 @@ test('resolved append disables its old retry button before a new write', async (
             }),
         });
     });
-    await page.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
     const dialog = page.getByRole('dialog');
     await dialog.getByRole('button', { name: 'Append rows', exact: true }).click();
     await expect(dialog.getByText('Outcome unresolved · keep this operation ID')).toBeVisible();
     await dialog.getByRole('button', { name: 'Close dialog' }).click();
-    await page.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
     await dialog.getByRole('button', { name: 'Check outcome', exact: true }).click();
     await expect(dialog.getByText('Append committed', { exact: true })).toBeVisible();
     await expect(dialog.getByRole('button', { name: 'Committed', exact: true })).toBeDisabled();
