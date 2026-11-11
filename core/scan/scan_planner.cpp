@@ -268,7 +268,10 @@ ManifestFiles(const std::shared_ptr<iceberg::FileIO>& io, const TScanManifests& 
         std::vector<TScanFile> files;
         files.reserve(data->size());
         for (const auto& file : *data) {
-            files.push_back({file->file_path, file->file_size_in_bytes, file->record_count});
+            files.push_back({file->file_path,
+                file->file_size_in_bytes,
+                file->record_count,
+                NGlamDB::NStorage::EncodeScanMetrics(*file)});
         }
         return files;
     } catch (const std::bad_alloc& error) {

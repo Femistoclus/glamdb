@@ -78,7 +78,7 @@ iceberg::Result<TTableProfile> MakeTableProfile(const TSchemaSpec& spec)
             {{"commit.retry.num-retries", "0"},
                 {"write.metadata.delete-after-commit.enabled", "false"},
                 {"write.metadata.compression-codec", "none"},
-                {"write.metadata.metrics.default", "truncate(16)"}}};
+                {"write.metadata.metrics.default", "truncate(" + std::to_string(MetricsTruncateLength) + ")"}}};
         if (hasKey) {
             profile.Properties.emplace("write.metadata.metrics.column.key", "full");
         }

@@ -78,8 +78,9 @@ class NativeMetadataHTTP(NativeHTTP):
         self.assertEqual(scoped['store_id'], self.store_id)
         for feature in ('stats', 'snapshots', 'files', 'explain', 'metadata_pagination'):
             self.assertTrue(scoped['features'][feature], feature)
-        self.assertFalse(scoped['file_pruning'])
-        self.assertFalse(scoped['row_group_pruning'])
+        # Native scans prune files and row groups by verified statistics.
+        self.assertTrue(scoped['file_pruning'])
+        self.assertTrue(scoped['row_group_pruning'])
         for selector, count, files in [('initial', '0', '0'), (a['snapshot_id'], '2', '1'), ('latest', '3', '2')]:
             stats = self.api(path + '/stats?snapshot_id=' + selector)
             self.assertEqual(stats['rows'], count)
@@ -131,7 +132,7 @@ class NativeMetadataHTTP(NativeHTTP):
         self.assertEqual(explained['estimates']['rows_before_filter'], '2')
         self.assertIsNone(explained['estimates']['output_rows'])
         self.assertIsNone(explained['actual_io'])
-        self.assertFalse(explained['capabilities']['file_pruning'])
+        self.assertTrue(explained['capabilities']['file_pruning'])
         self.stop()
         self.start()
         self.assertEqual(self.api(path + '/snapshots')['items'], history)

@@ -69,7 +69,7 @@ size_t IndexCapacity(const NGlamDB::NStorage::TScanMembership& index)
     // Logical store URIs exceed string's inline storage. This counts retained
     // container/string capacity, excluding allocator rounding and control blocks.
     for (const auto& file : index.Files) {
-        bytes += file.Path.capacity() + 1;
+        bytes += file.Path.capacity() + 1 + file.Metrics.capacity() + 1;
     }
     return bytes;
 }

@@ -19,7 +19,14 @@ need a different representation and validation contract.
 
 `CheckManifest` records a descriptor only after the existing strict manifest
 entry/counter/path checks and Parquet length, row-count, schema and field-ID
-verification succeed. Recovery builds one index while verifying every retained
+verification succeed. Each descriptor also carries a compact encoding of
+the manifest entry's column metrics (`EncodeScanMetrics`: per field the null
+and NaN counts and the Iceberg-encoded lower/upper bounds; a field whose value
+count differs from the record count is omitted) for scan pruning, so pruning
+reads no metadata. It costs about 5 bytes plus 8 per count and 4 plus the
+bound bytes per bound per field (string bounds of non-key fields keep at most
+16 code points; the key keeps full bounds of at most 1 KiB each). The uncached
+planner encodes the same entry, so indexed and uncached descriptors stay equal. Recovery builds one index while verifying every retained
 transition. Publication copies the verified base index and checks only the new
 closure; that candidate remains tentative until the outer SQLite commit.
 
@@ -67,8 +74,8 @@ build/release/tests/glamdb_scan_index_bench 256 1000
 Each run creates a disposable native store with duplicate/NULL rows, compares
 indexed and uncached planning, counts metadata opens, then closes and reopens
 the engine. Reopen is cold with respect to engine state; the OS page cache is
-not flushed. `index_capacity_bytes` counts the index object and retained vector
-and path-string capacities, excluding allocator rounding, shared-pointer control
+not flushed. `index_capacity_bytes` counts the index object and retained vector,
+path-string and metrics-string capacities, excluding allocator rounding, shared-pointer control
 blocks, parsed roots/manifests, FileIO instrumentation and process RSS.
 
 These measurements use the initial implementation on official base `1f48601`.

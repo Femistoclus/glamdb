@@ -1,11 +1,12 @@
 // Data read cost of warm native scans over a 64-field collection: a full scan,
 // a 2-of-64-field projection and a predicate that matches nothing (c1 is always
-// within -1000..1000). Prints one JSON line per case with the mean wall time
+// within -1000..1000), the last with pruning and without it. Prints one JSON line per case with the mean wall time
 // and the cursor profile (data files opened, data bytes read, rows decoded).
 //   glamdb_scan_data_reads_bench [files=100] [rows=1000] [repeats=10]
 
 #include "core/backend/local_storage_backend.h"
 #include "core/engine/engine_factory.h"
+#include "core/scan/scan_pruning.h"
 #include "tests/support/temp_dir.h"
 
 #include <arrow/api.h>
@@ -99,7 +100,8 @@ try {
     test::TempDir temporary;
     const auto root = temporary.path / "store";
     const detail::BackendFactory factory =
-        [](const std::filesystem::path& path, const StoreInfo& info) -> Result<std::shared_ptr<detail::StorageBackend>> {
+        [](const std::filesystem::path& path,
+            const StoreInfo& info) -> Result<std::shared_ptr<detail::StorageBackend>> {
         auto opened = detail::TLocalStorageBackend::Open(path, info);
         if (!opened) {
             return std::unexpected(opened.error());
@@ -128,6 +130,7 @@ try {
         const char* Name;
         ScanRequest Request;
         int64_t Rows;
+        bool Pruning = true;
     };
     const int64_t total = int64_t{files} * rowsPerFile;
     const std::vector<TCase> cases{
@@ -138,8 +141,13 @@ try {
         {"predicate_c1_gt_5000",
             {.collection_id = test::collection_id, .predicate = Predicate::Compare("c1", CompareOp::Gt, int64_t{5000})},
             0},
+        {"predicate_c1_gt_5000_unpruned",
+            {.collection_id = test::collection_id, .predicate = Predicate::Compare("c1", CompareOp::Gt, int64_t{5000})},
+            0,
+            false},
     };
     for (const auto& item : cases) {
+        detail::SetScanPruning(item.Pruning);
         ScanProfile profile;
         const auto run = [&] {
             auto cursor = Take(engine->Scan(item.Request));
@@ -162,6 +170,7 @@ try {
                   << ",\"data_bytes_read\":" << profile.data_bytes_read.value.value_or(-1)
                   << ",\"rows_decoded\":" << profile.rows_decoded.value.value_or(-1) << "}\n";
     }
+    detail::SetScanPruning(true);
     Require(engine->Shutdown(std::chrono::seconds(10)).has_value(), "shutdown failed");
     return 0;
 } catch (const std::exception& error) {

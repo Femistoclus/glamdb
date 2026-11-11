@@ -204,6 +204,37 @@ joins a writer attempt or holds a SQLite read transaction.
   non-projected filter columns) and limited. Batches have at most `batch_rows`
   rows and the exact `Info().output_schema`. `limit = 0` and empty views return
   `nullptr` from the first `Next()`.
+- Pruning (`core/scan/scan_pruning.h`) skips a data file when its manifest
+  metrics, and a row group when its Parquet column-chunk statistics, prove
+  that the predicate's root is not `TRUE` for any of their rows; the exact
+  predicate still filters every row that is read, so results (including
+  their order and `limit`) are identical with pruning on and off. File
+  metrics come from the verified scan index: each descriptor carries a
+  compact encoding of its manifest entry's null/NaN counts and bounds
+  (`EncodeScanMetrics`, built by the same strict closure verification; see
+  [the scan index](SCAN_INDEX.md)); the uncached planner encodes the same
+  entry, so no metadata is read to prune. Leaves:
+  comparisons and `In` are excluded by lower/upper bounds or an all-`NULL`
+  column (`<>` only when both bounds equal the literal), `CompareNull` always,
+  `IsNull` by a zero and `IsNotNull` by a full null count; `And` prunes when
+  any child does, `Or` only when every child does, and a `Not` subtree is
+  never reasoned about (it may be `TRUE`). Missing, malformed or inconsistent
+  statistics prune nothing. Manifest string upper bounds of at least 16 code
+  points (`MetricsTruncateLength`, the table profile's `truncate(16)`) may be
+  truncated and are ignored; lower bounds are prefixes and remain valid.
+  Float bounds are used only when the manifest records a zero NaN count for
+  that field (also for its row groups; Parquet min/max omit NaN), and NaN or
+  infinite bounds are ignored. Parquet bounds are used only when exact and in
+  the expected sort order (unsigned bytes for strings). A file whose row
+  groups are all excluded costs only its footer reads. Pruned files and row
+  groups are not read or validated, like any unread column or page; the
+  footers of every retained file are still verified on open and `Reconcile`.
+  `ScanProfile::data_files_pruned`/`row_groups_pruned` (and the internal
+  `TScanReadStats`, which also counts row groups read) count pruning
+  separately from limit and cancellation stops; `data_files_read` counts opened
+  files only. `SetScanPruning(false)` is a process-wide switch for
+  comparison runs and tests; capabilities and explain report
+  `file_pruning`/`row_group_pruning`.
 - The cursor and returned Arrow backing buffers retain the engine (including
   the store lock), read-only FileIO and owned Arrow allocator/accounting pool
   until the last batch, extracted array/buffer, slice or C Data export is
@@ -215,7 +246,7 @@ joins a writer attempt or holds a SQLite read transaction.
   `Info()` remains valid. Detected corruption during `Next()`
   closes engine readiness. Read failures are errors, never EOS.
 
-Not implemented: file/row-group pruning, page CRC verification and qualification-scale attempt-volume/capacity measurements.
+Not implemented: page-index and Bloom-filter pruning, page CRC verification and qualification-scale attempt-volume/capacity measurements.
 The [process resource owner](SHARED_RESOURCES.md) now supplies scan working
 reservations, separately charged output descriptors, tracked Arrow allocation capacity and leases retained through
 slices and nonempty C Data exports. Zero-column slices retain their output schema lease.

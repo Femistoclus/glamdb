@@ -7,6 +7,7 @@
 #include "core/scan/data_file_source.h"
 #include "core/scan/predicate.h"
 #include "core/scan/scan_planner.h"
+#include "core/scan/scan_pruning.h"
 #include "core/storage/format_verifier.h"
 #include "core/storage/table_profile.h"
 
@@ -16,6 +17,8 @@
 
 #include <arrow/api.h>
 #include <iceberg/file_io.h>
+#include <iceberg/manifest/manifest_entry.h>
+#include <iceberg/schema.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/file_reader.h>
 #include <parquet/metadata.h>
@@ -270,7 +273,8 @@ public:
         std::vector<size_t> outputFields,
         std::vector<size_t> readFields,
         int64_t batchRows,
-        std::optional<int64_t> limit)
+        std::optional<int64_t> limit,
+        bool prune)
         : PlanningMemory_(std::move(planningMemory))
         , CursorMemory_(Take(context.Resources->Reserve(ResourceClass::Metadata, 16ULL << 20)))
         , SelectionMemory_(Take(context.Resources->Reserve(ResourceClass::Data, 1ULL << 20)))
@@ -288,6 +292,7 @@ public:
         , OutputFields_(std::move(outputFields))
         , ReadFields_(std::move(readFields))
         , BatchRows_(batchRows)
+        , Prune_(prune)
         , Remaining_(limit)
     { }
 
@@ -352,8 +357,8 @@ public:
             .rows_limited = {RowsLimited_, MetricKind::Measured},
             .limit_stops = {LimitStopped_ ? 1 : 0, MetricKind::Measured},
             .cancellation_stops = {CancellationStopped_ ? 1 : 0, MetricKind::Measured},
-            .data_files_pruned = {0, MetricKind::Measured},
-            .row_groups_pruned = {0, MetricKind::Measured},
+            .data_files_pruned = {ReadStats_.FilesPruned, MetricKind::Measured},
+            .row_groups_pruned = {ReadStats_.RowGroupsPruned, MetricKind::Measured},
             .arrow_bytes = {Pool_->bytes_allocated(), MetricKind::Measured},
             .peak_arrow_bytes = {Pool_->max_memory(), MetricKind::Measured},
             .output_metadata_bytes = {OutputUsage_->Bytes.load(), MetricKind::Measured},
@@ -404,6 +409,8 @@ private:
     const std::vector<size_t> OutputFields_;
     const std::vector<size_t> ReadFields_;
     const int64_t BatchRows_;
+    // Skip files and row groups whose statistics exclude every match.
+    const bool Prune_;
 
     mutable std::mutex Mutex_;
     ScanState State_ = ScanState::Open;
@@ -462,28 +469,40 @@ private:
         while (!Remaining_ || *Remaining_ > 0) {
             CheckActive();
             if (!BatchReader_) {
-                if (Plan_.Index && NextIndexedFile_ < Plan_.FileCount) {
-                    PendingFiles_.push_back(Plan_.Index->Files[Plan_.FileCount - ++NextIndexedFile_]);
-                }
-                while (PendingFiles_.empty() && NextManifest_ < Plan_.Manifests.size()) {
+                bool opened = false;
+                while (!opened) {
+                    if (Plan_.Index && PendingFiles_.empty() && NextIndexedFile_ < Plan_.FileCount) {
+                        PendingFiles_.push_back(Plan_.Index->Files[Plan_.FileCount - ++NextIndexedFile_]);
+                    }
+                    while (PendingFiles_.empty() && NextManifest_ < Plan_.Manifests.size()) {
+                        CheckActive();
+                        auto memory = Take(Context_.Resources->Reserve(ResourceClass::Metadata, 256ULL << 20));
+                        auto files = Take(ManifestFiles(Context_.FileIO, Plan_, NextManifest_++));
+                        ++ManifestsRead_;
+                        CheckActive();
+                        PendingMemory_ = std::move(memory);
+                        PendingFiles_.insert(PendingFiles_.end(),
+                            std::make_move_iterator(files.begin()),
+                            std::make_move_iterator(files.end()));
+                    }
+                    if (PendingFiles_.empty()) {
+                        break;
+                    }
                     CheckActive();
-                    auto memory = Take(Context_.Resources->Reserve(ResourceClass::Metadata, 256ULL << 20));
-                    auto files = Take(ManifestFiles(Context_.FileIO, Plan_, NextManifest_++));
-                    ++ManifestsRead_;
-                    CheckActive();
-                    PendingMemory_ = std::move(memory);
-                    PendingFiles_.insert(PendingFiles_.end(),
-                        std::make_move_iterator(files.begin()),
-                        std::make_move_iterator(files.end()));
+                    const auto file = std::move(PendingFiles_.front());
+                    PendingFiles_.pop_front();
+                    if (Prune_ && !FileMayMatch(file)) {
+                        ++ReadStats_.FilesPruned;
+                    } else {
+                        opened = OpenFile(file);
+                    }
+                    // The manifest's descriptors are consumed (opened or pruned).
+                    if (PendingFiles_.empty()) {
+                        PendingMemory_.reset();
+                    }
                 }
-                if (PendingFiles_.empty()) {
+                if (!opened) {
                     break;
-                }
-                const auto file = std::move(PendingFiles_.front());
-                PendingFiles_.pop_front();
-                OpenFile(file);
-                if (PendingFiles_.empty()) {
-                    PendingMemory_.reset();
                 }
             }
             std::shared_ptr<arrow::RecordBatch> batch;
@@ -562,7 +581,53 @@ private:
         }
     }
 
-    void OpenFile(const TScanFile& file)
+    // Manifest metrics of the predicate's fields, from the verified descriptor.
+    bool FileMayMatch(const TScanFile& file) const
+    {
+        std::vector<TFieldStats> stats;
+        stats.reserve(Predicate_.ReferencedFields.size());
+        for (const auto field : Predicate_.ReferencedFields) {
+            const auto metrics =
+                NGlamDB::NStorage::FindScanFieldMetrics(file.Metrics, FileSchema_->fields()[field].field_id());
+            stats.push_back(FileFieldStats(metrics ? &*metrics : nullptr,
+                file.RecordCount,
+                Context_.Collection.schema.fields[field].type,
+                NGlamDB::NStorage::MetricsTruncateLength));
+        }
+        return MayMatch(Predicate_, stats);
+    }
+
+    // Row groups of a verified footer whose statistics may match.
+    std::vector<int> SelectRowGroups(const parquet::FileMetaData& footer, const TScanFile& file)
+    {
+        std::vector<int> groups;
+        groups.reserve(static_cast<size_t>(footer.num_row_groups()));
+        std::vector<TFieldStats> stats(Predicate_.ReferencedFields.size());
+        for (int group = 0; group < footer.num_row_groups(); ++group) {
+            if (Prune_) {
+                const auto metadata = footer.RowGroup(group);
+                for (size_t index = 0; index < stats.size(); ++index) {
+                    const auto field = Predicate_.ReferencedFields[index];
+                    const auto metrics =
+                        NGlamDB::NStorage::FindScanFieldMetrics(file.Metrics, FileSchema_->fields()[field].field_id());
+                    const bool withoutNaN = metrics && metrics->NanCount == 0;
+                    stats[index] = RowGroupFieldStats(*metadata,
+                        static_cast<int>(field),
+                        Context_.Collection.schema.fields[field].type,
+                        withoutNaN);
+                }
+                if (!MayMatch(Predicate_, stats)) {
+                    ++ReadStats_.RowGroupsPruned;
+                    continue;
+                }
+            }
+            groups.push_back(group);
+        }
+        return groups;
+    }
+
+    // Returns false when statistics exclude every row group: only the footer was read.
+    bool OpenFile(const TScanFile& file)
     {
         // Reserve before the footer verifier materializes the footer bytes and
         // metadata, with the shared scan budget's data-file rule (twice the
@@ -596,6 +661,15 @@ private:
             "verify Parquet file");
         ++DataFilesRead_;
         CheckActive();
+        std::vector<int> rowGroups;
+        DecodeData("read Parquet row group statistics", [&] {
+            rowGroups = SelectRowGroups(*footer, file);
+        });
+        ReadStats_.RowGroupsRead += static_cast<int64_t>(rowGroups.size());
+        if (rowGroups.empty()) {
+            CloseFile();
+            return false;
+        }
         DecodeData("open Parquet file", [&] {
             parquet::ArrowReaderProperties properties;
             // Synchronous reads, one column chunk at a time, on this thread.
@@ -608,8 +682,6 @@ private:
                               properties),
                     "CORRUPTION",
                     "open Parquet file");
-            std::vector<int> rowGroups(static_cast<size_t>(reader->num_row_groups()));
-            std::iota(rowGroups.begin(), rowGroups.end(), 0);
             std::vector<int> columns;
             columns.reserve(ReadFields_.size());
             for (const auto field : ReadFields_) {
@@ -619,6 +691,7 @@ private:
                 TakeArrow(reader->GetRecordBatchReader(rowGroups, columns), "CORRUPTION", "open Parquet batches");
             FileReader_ = std::move(reader);
         });
+        return true;
     }
 
     std::shared_ptr<arrow::Array> Column(const arrow::RecordBatch& batch, size_t field) const
@@ -747,6 +820,7 @@ Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanReq
                 BoundedDiagnostic("collection schema profile: " + profile.error().message),
                 RetryHint::OperatorAction});
         }
+        const bool prune = ScanPruningEnabled() && !predicate.IsAlwaysTrue();
         auto plan =
             Take(context.VerifiedState ? PlanVerifiedScan(*context.VerifiedState, context.Base, request.selector)
                                        : PlanManifests(context.FileIO, context.Base, request.selector));
@@ -763,7 +837,8 @@ Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanReq
             std::move(outputFields),
             std::move(readFields),
             request.batch_rows,
-            request.limit);
+            request.limit,
+            prune);
     } catch (const Failure& error) {
         return std::unexpected(error.detail);
     } catch (const std::bad_alloc& error) {

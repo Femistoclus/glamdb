@@ -211,7 +211,9 @@ TEST_F(ScanSessionsTest, ServiceShutdownCancelsSlowReadsWithoutWaiting)
     TRequest request{"POST",
         std::string("/collections/") + test::collection_id + "/scan/open",
         {{"authorization", "Bearer secret"}, {"content-type", "application/json"}},
-        R"({"predicate":{"op":"eq","field":"key","value":"absent"}})"};
+        // Matches no row, but statistics cannot prove it (NOT is never used to
+        // prune), so the scan has to read a data file.
+        R"({"predicate":{"op":"not","arg":{"op":"is_not_null","field":"key"}}})"};
     const auto opened = routes.Handle(request);
     ASSERT_EQ(opened.Status, 200);
     const auto token = TJson::parse(opened.Body).at("cursor");

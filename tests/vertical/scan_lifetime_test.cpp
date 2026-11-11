@@ -269,7 +269,9 @@ TEST_P(TScanLifetimeTest, StopDuringDataReadDiscardsTheBatch)
 
 TEST_P(TScanLifetimeTest, StopDuringDataReadDiscardsEos)
 {
-    StopDuringRead(".parquet", Predicate::Compare("key", CompareOp::Eq, std::string("absent")));
+    // Matches no row, but statistics cannot prove it (NOT is never used to
+    // prune), so the scan must open the data file before reaching EOS.
+    StopDuringRead(".parquet", Predicate::Not(Predicate::IsNotNull("key")));
 }
 
 TEST_P(TScanLifetimeTest, StopBeforeIndexedReadDoesNotOpenData)

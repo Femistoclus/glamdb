@@ -50,6 +50,12 @@ Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanReq
 // their byte total.
 struct TScanReadStats
 {
+    // Files skipped by manifest metrics and row groups skipped by Parquet
+    // statistics of opened files; never files left unread by a limit or
+    // cancellation. RowGroupsRead counts row groups selected for decoding.
+    int64_t FilesPruned = 0;
+    int64_t RowGroupsPruned = 0;
+    int64_t RowGroupsRead = 0;
     int64_t ReadCalls = 0;
     // The largest single read, and the most read bytes held at once by the
     // decoder of one file.

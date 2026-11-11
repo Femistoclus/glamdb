@@ -101,12 +101,15 @@ TEST_F(NativeMetadata, ExplainsValidatedScansWithoutInventingPruningOrSelectivit
     EXPECT_EQ(explanation->candidates.rows.value, 3);
     EXPECT_EQ(explanation->candidates.data_files.value, 1);
     EXPECT_FALSE(explanation->estimated_output_rows.value);
-    EXPECT_FALSE(explanation->file_pruning);
-    EXPECT_FALSE(explanation->row_group_pruning);
+    // A filtered scan may skip files and row groups by their statistics.
+    EXPECT_TRUE(explanation->file_pruning);
+    EXPECT_TRUE(explanation->row_group_pruning);
     const auto unfiltered = Engine_->ExplainScan({.collection_id = test::collection_id, .limit = 1});
     ASSERT_TRUE(unfiltered);
     EXPECT_EQ(unfiltered->estimated_output_rows.value, 1);
     EXPECT_EQ(unfiltered->estimated_output_rows.kind, MetricKind::Estimate);
+    EXPECT_FALSE(unfiltered->file_pruning);
+    EXPECT_FALSE(unfiltered->row_group_pruning);
     const auto fixed = explanation->info.selector_resolved;
     Append(SecondOperation, SecondRows);
     EXPECT_EQ(explanation->info.selector_resolved, fixed);
@@ -204,8 +207,8 @@ TEST_F(NativeMetadata, ReportsCapabilitiesAndRejectsMetadataAfterShutdown)
     EXPECT_TRUE(capabilities.append);
     EXPECT_TRUE(capabilities.scan);
     EXPECT_TRUE(capabilities.metadata);
-    EXPECT_FALSE(capabilities.file_pruning);
-    EXPECT_FALSE(capabilities.row_group_pruning);
+    EXPECT_TRUE(capabilities.file_pruning);
+    EXPECT_TRUE(capabilities.row_group_pruning);
     EXPECT_FALSE(capabilities.durability_qualified);
     ASSERT_TRUE(Engine_->Shutdown(std::chrono::milliseconds(1000)));
     const auto result = Engine_->GetStatistics(test::collection_id);

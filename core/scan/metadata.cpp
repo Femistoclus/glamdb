@@ -4,6 +4,7 @@
 #include "core/api/canonical.h"
 #include "core/scan/predicate.h"
 #include "core/scan/scan_planner.h"
+#include "core/scan/scan_pruning.h"
 
 #include <iceberg/snapshot.h>
 #include <iceberg/table_metadata.h>
@@ -144,6 +145,9 @@ ScanExplanation ExplainScan(const TScanContext& context, const ScanRequest& requ
             result.read_fields.push_back(field.name);
         }
     }
+    // The cursor may skip candidates whose metadata excludes every match.
+    result.file_pruning = ScanPruningEnabled() && request.predicate.kind() != Predicate::Kind::True;
+    result.row_group_pruning = result.file_pruning;
     result.candidates = ReadStatistics(context, result.info.selector_resolved);
     const auto rows = result.candidates.rows.value;
     if (rows && (request.predicate.kind() == Predicate::Kind::True || request.limit == 0 || *rows == 0)) {

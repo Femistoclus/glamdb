@@ -6,6 +6,7 @@
 #include "core/engine/storage_mapping.h"
 #include "core/scan/scan_cursor.h"
 #include "core/scan/scan_planner.h"
+#include "core/scan/scan_pruning.h"
 #include "core/storage/format_registry.h"
 #include "core/storage/table_profile.h"
 #include "storage/resources.h"
@@ -802,6 +803,11 @@ TEST_F(ScanMockTest, CorruptNonProjectedFilterColumnIsDetectedDespiteShortCircui
 
     // 2. Any predicate referencing "at" must read and ValidateColumn("at") before evaluation,
     // even when another branch of And/Or would short-circuit or the leaf is CompareNull.
+    // Pruning is off here: it may skip the whole file without reading "at" (below).
+    detail::SetScanPruning(false);
+    const std::shared_ptr<void> restorePruning(nullptr, [](void*) {
+        detail::SetScanPruning(true);
+    });
     const std::vector<Predicate> predicates{
         Predicate::And({
             Predicate::Compare("key", CompareOp::Eq, std::string("never")),
@@ -827,6 +833,21 @@ TEST_F(ScanMockTest, CorruptNonProjectedFilterColumnIsDetectedDespiteShortCircui
         EXPECT_EQ(next.error().code, "CORRUPTION") << next.error().message;
         ASSERT_EQ(reported.size(), 1U);
         EXPECT_EQ(reported.front().code, "CORRUPTION");
+    }
+
+    // 3. With pruning, a predicate that statistics prove FALSE or UNKNOWN for every
+    // row skips the file or its row group: the corrupt column is never decoded, as
+    // with any unread page.
+    detail::SetScanPruning(true);
+    for (const size_t i : {size_t{0}, size_t{2}}) {
+        SCOPED_TRACE(i);
+        const auto cursor = Open({.projection = std::vector<std::string>{"key"}, .predicate = predicates[i]});
+        ASSERT_NE(cursor, nullptr);
+        EXPECT_TRUE(Drain(*cursor).empty());
+        EXPECT_EQ(cursor->Profile().rows_decoded.value, 0);
+        const auto stats = detail::GetScanReadStats(*cursor);
+        EXPECT_EQ(stats->FilesPruned + stats->RowGroupsPruned, 1);
+        EXPECT_EQ(stats->RowGroupsRead, 0);
     }
 }
 

@@ -167,9 +167,9 @@ void CheckViews(glamdb::Engine& engine, int64_t snapshotA, int64_t snapshotB)
     Check(count == 2, "zero-column scan preserves duplicate matches");
     const auto capabilities = engine.GetCapabilities();
     Check(capabilities.backend == glamdb::BackendKind::LocalStorage && capabilities.metadata && capabilities.scan &&
-            capabilities.append && !capabilities.file_pruning && !capabilities.row_group_pruning &&
+            capabilities.append && capabilities.file_pruning && capabilities.row_group_pruning &&
             !capabilities.durability_qualified,
-        "native capabilities do not claim pruning or qualified durability");
+        "native capabilities claim pruning but not qualified durability");
     const auto history = Take(engine.ListSnapshots(CollectionId), "snapshot history");
     Check(history.snapshots.size() == 2 && history.snapshots[0].snapshot_id == snapshotA &&
             history.snapshots[1].snapshot_id == snapshotB && history.snapshots[1].parent_snapshot_id == snapshotA,

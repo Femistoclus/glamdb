@@ -65,7 +65,12 @@ public:
     Health GetHealth() const override;
     EngineCapabilities GetCapabilities() const override
     {
-        return {.backend = BackendKind::LocalStorage, .append = true, .scan = true, .metadata = true};
+        return {.backend = BackendKind::LocalStorage,
+            .append = true,
+            .scan = true,
+            .metadata = true,
+            .file_pruning = true,
+            .row_group_pruning = true};
     }
 
     Result<std::unique_ptr<StagedCreate>>

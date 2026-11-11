@@ -116,8 +116,9 @@ Every `Metric` contains an optional integer and a `MetricKind`:
 - `Unavailable`: null. Logical/uncompressed size, elapsed time and nontrivial
   predicate selectivity remain unavailable; unknown does not mean zero.
 
-Explain lists all candidate files before execution. File and row-group pruning
-are unsupported and explicitly false. A small limit may stop execution early;
+Explain lists all candidate files before execution. Local storage reports
+file and row-group pruning as capabilities; explain reports them as true for a
+filtered scan while pruning is enabled. Candidates are not reduced by pruning. A small limit may stop execution early;
 this is not pruning. Projection includes predicate fields in physical reads.
 The scanner reads the Parquet magic and footer, then only the column chunks of
 projected and filtered fields.
