@@ -53,7 +53,11 @@ the original volume. Validate the identity and path components, keep access
 inside the owned root, and reject path traversal and symlink escapes.
 
 New data and metadata use unique names and exclusive creation. A published file
-is immutable; overwrite and automatic cleanup are disabled in the initial
+is immutable; overwrite is disabled. The only file the engine removes is a
+metadata root superseded by a confirmed append: the current root carries the
+whole retained history, so recovery and scans never read an older root, and a
+scan that already resolved the old root keeps it until its planning finishes.
+Other automatic cleanup, including orphan removal, is outside the initial
 engine. Store ownership spans creation, recovery, writes, cursors, retained
 buffers, and maintenance, including concurrent opens in the same process.
 

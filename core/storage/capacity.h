@@ -48,5 +48,7 @@ NIO::TResult<TStorageUsage> ReplaceUsage(const TStorageUsage& total, const TUsag
 std::error_code
 CheckDiskReserve(const NIO::TSpaceInfo& space, std::uint64_t warehouseBytes, const TStorageLimits& limits);
 std::error_code CheckWriteCapacity(const NIO::TStoreDirs& directories, const TStorageLimits& limits = {});
+// Measures the warehouse tree, including orphan files.
+NIO::TResult<std::uint64_t> MeasureWarehouse(const NIO::TStoreDirs& directories, const TStorageLimits& limits = {});
 
 }

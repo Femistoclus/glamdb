@@ -72,12 +72,17 @@ std::error_code CheckWriteCapacity(const NIO::TStoreDirs& directories, const TSt
     if (const auto error = directories.CheckIdentity()) {
         return error;
     }
-    const auto bytes = directories.Fs()->MeasureTree(directories.Warehouse(), limits.WarehouseBytes);
+    const auto bytes = MeasureWarehouse(directories, limits);
     if (!bytes) {
         return bytes.Error();
     }
     const auto space = directories.Fs()->StatFs(directories.Root());
     return space ? CheckDiskReserve(space.Value(), bytes.Value(), limits) : space.Error();
+}
+
+NIO::TResult<std::uint64_t> MeasureWarehouse(const NIO::TStoreDirs& directories, const TStorageLimits& limits)
+{
+    return directories.Fs()->MeasureTree(directories.Warehouse(), limits.WarehouseBytes);
 }
 
 }

@@ -14,7 +14,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <map>
 #include <mutex>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include <arrow/type.h>
 
@@ -155,6 +160,10 @@ struct Engine::Impl
     size_t owned_input_bytes = 0;
     std::vector<CollectionInfo> collections;
     std::vector<CollectionView> confirmed_views;
+    // Roots that scans resolved from confirmed_views and are still reading,
+    // and superseded roots waiting for those readers (all under state_mutex).
+    std::map<std::string, std::size_t, std::less<>> root_readers;
+    std::vector<BaseIdentity> retired_roots;
     std::optional<BoundOperation> active;
     std::optional<RecoveryContext> recovery;
     std::optional<AppendOutcome> pending_failure;
@@ -353,6 +362,45 @@ struct Engine::Impl
         return *it;
     }
 
+    // After a committed append replaced `superseded` in confirmed_views: remove
+    // its root now, or when the last scan that resolved it has finished planning.
+    void RetireRoot(const BaseIdentity& superseded)
+    {
+        {
+            std::lock_guard lock(state_mutex);
+            if (root_readers.contains(superseded.metadata_location)) {
+                retired_roots.push_back(superseded);
+                return;
+            }
+        }
+        if (backend) {
+            backend->RetireRoot(superseded);
+        }
+    }
+
+    void ReleaseRoot(const std::string& location)
+    {
+        std::vector<BaseIdentity> ready_to_remove;
+        {
+            std::lock_guard lock(state_mutex);
+            const auto reader = root_readers.find(location);
+            if (reader == root_readers.end() || --reader->second != 0) {
+                return;
+            }
+            root_readers.erase(reader);
+            const auto retired = std::ranges::partition(retired_roots, [&](const auto& item) {
+                return item.metadata_location != location;
+            });
+            ready_to_remove.assign(retired.begin(), retired.end());
+            retired_roots.erase(retired.begin(), retired.end());
+        }
+        if (backend) {
+            for (const auto& superseded : ready_to_remove) {
+                backend->RetireRoot(superseded);
+            }
+        }
+    }
+
     void RefreshCache()
     {
         auto current = catalog->Collections();
@@ -395,6 +443,37 @@ struct Engine::Impl
                 if (!verified) {
                     throw Failure(verified.error());
                 }
+            }
+        } catch (...) {
+            if (backend) {
+                backend->InvalidateCache();
+            }
+            std::lock_guard lock(state_mutex);
+            ready = false;
+            ++health_generation;
+            throw;
+        }
+    }
+
+    void VerifyCommittedRetry(const AppendOutcome& outcome)
+    {
+        try {
+            if (!outcome.result) {
+                throw Failure({"CORRUPTION", "committed operation has no receipt", RetryHint::OperatorAction});
+            }
+            const auto& result = *outcome.result;
+            const auto& collection_id = result.collection_id;
+            const CollectionView view{catalog->Collection(collection_id), catalog->Base(collection_id)};
+            std::vector<OperationRecord> operations;
+            for (auto& record : catalog->Operations()) {
+                if (record.binding.collection_id == collection_id) {
+                    operations.push_back(std::move(record));
+                }
+            }
+            Require(backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage recovery validator is not installed");
+            const auto verified = backend->VerifyCommittedAppend(info, view, operations, result);
+            if (!verified) {
+                throw Failure(verified.error());
             }
         } catch (...) {
             if (backend) {
@@ -909,7 +988,11 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
                 "operation ID is permanently bound to different content");
             if (previous->outcome) {
                 try {
-                    impl->VerifyStorage();
+                    // A failed outcome references no storage; a committed one
+                    // re-checks only its own collection and snapshot.
+                    if (previous->outcome->disposition == CommitDisposition::Committed) {
+                        impl->VerifyCommittedRetry(*previous->outcome);
+                    }
                 } catch (const Failure& error) {
                     return impl->Unknown(Context(previous->binding, error.detail, true),
                         CommitPhase::Reconciling,
@@ -1048,6 +1131,12 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
             std::lock_guard state_lock(impl->state_mutex);
             impl->active.reset();
         }
+        // New scans now resolve the new root; the exact prepared base is superseded.
+        if (context.candidate_metadata_location &&
+            *context.candidate_metadata_location != binding->base.metadata_location)
+        {
+            impl->RetireRoot(binding->base);
+        }
         return committed;
     } catch (const Failure& error) {
         impl->CloseOnCorruption(error.detail);
@@ -1121,6 +1210,14 @@ Result<std::optional<AppendOutcome>> Engine::FindAppendOutcome(std::string_view 
 Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) const
 {
     const auto impl = impl_;
+    // The root this scan resolved; held until planning has read it, so a
+    // concurrent append does not remove it underneath the scan.
+    std::optional<std::string> leased_root;
+    const auto release_root = [&] {
+        if (leased_root) {
+            impl->ReleaseRoot(*std::exchange(leased_root, std::nullopt));
+        }
+    };
     try {
         Require(ValidUuid(request.collection_id), "INVALID_ARGUMENT", "scan requires a canonical collection UUID");
 #if GLAMDB_HAS_STORAGE
@@ -1136,6 +1233,8 @@ Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) con
             });
             Require(view != impl->confirmed_views.end(), "CORRUPTION", "confirmed collection view is missing");
             context.Base = view->base;
+            ++impl->root_readers[context.Base.metadata_location];
+            leased_root = context.Base.metadata_location;
         }
         Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
         context.FileIO = Take(impl->backend->ReadOnlyFileIO());
@@ -1145,6 +1244,8 @@ Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) con
             impl->CloseOnCorruption(error);
         };
         auto cursor = OpenScan(std::move(context), request);
+        // Planning has read the root; the cursor needs only files that are never removed.
+        release_root();
         if (!cursor) {
             impl->CloseOnCorruption(cursor.error());
         }
@@ -1153,9 +1254,11 @@ Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) con
         throw Failure({"DEPENDENCY_UNAVAILABLE", "storage scanner is not built", RetryHint::OperatorAction});
 #endif
     } catch (const Failure& error) {
+        release_root();
         impl->CloseOnCorruption(error.detail);
         return std::unexpected(error.detail);
     } catch (const std::exception& error) {
+        release_root();
         return std::unexpected(ExceptionError(error));
     }
 }

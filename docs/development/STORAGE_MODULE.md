@@ -22,7 +22,11 @@ from `VerifyReachable` or a previously confirmed publication.
 1. Run `CheckWriteCapacity` before binding a new operation. It checks the root
    identity, measures the warehouse including orphan files, and reserves space
    for the next attempt, journal, and filesystem headroom. The catalog owner
-   supplies aggregate storage usage separately to the publication guard.
+   supplies aggregate storage usage separately to the publication guard. The
+   backend walks the warehouse once per append: `PrepareAppend` reuses the
+   admission measurement (binding writes only the catalog) and rechecks the
+   root identity and free space. The walk runs on a private descriptor, not
+   under the shared warehouse handle that concurrent scans open files through.
 2. The coordinator owns operation identity, canonical hashing, durable binding,
    and input normalization. Pass owned, immutable, normalized Arrow batches to
    `WriteDataFile`; their buffers must remain unchanged until it returns. The

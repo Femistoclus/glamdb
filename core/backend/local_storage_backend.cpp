@@ -8,6 +8,7 @@
 #include "core/io/io_attempt.h"
 #include "core/io/local_fs.h"
 #include "core/io/store_dirs.h"
+#include "core/io/store_uri.h"
 #include "core/io/write_latch.h"
 #include "core/storage/append_stager.h"
 #include "core/storage/base_state.h"
@@ -31,8 +32,10 @@
 #include <charconv>
 #include <format>
 #include <limits>
+#include <optional>
 #include <set>
 #include <unordered_map>
+#include <utility>
 
 namespace glamdb::detail {
 namespace {
@@ -476,7 +479,7 @@ Result<std::unique_ptr<StagedCreate>> TLocalStorageBackend::PrepareCreate(const 
         CheckStore(store);
         CheckWriteLatch(*Dirs_);
         auto profile = MakeProfile(request.schema, "INVALID_ARGUMENT");
-        CheckIO(NStorage::CheckWriteCapacity(*Dirs_, Options_.Storage), EStoragePath::Preflight, "storage preflight");
+        CheckIO(CheckWriteCapacity(false, false), EStoragePath::Preflight, "storage preflight");
         const auto minUsage =
             TakeUsage(NStorage::ReplaceUsage(ComputeStoreUsage(), {.Previous = {}, .Next = {.RootBytes = 1}}),
                 "RESOURCE_EXHAUSTED",
@@ -541,7 +544,7 @@ Status TLocalStorageBackend::CheckAppendAdmissible(const StoreInfo& store,
             "base does not match the collection");
         (void)MakeProfile(collection.schema, "INVALID_ARGUMENT");
         CheckWriterInput(collection.schema, input, Options_.Writer);
-        CheckIO(NStorage::CheckWriteCapacity(*Dirs_, Options_.Storage), EStoragePath::Preflight, "storage preflight");
+        CheckIO(CheckWriteCapacity(true, false), EStoragePath::Preflight, "storage preflight");
         // Every append writes a strictly larger root with one more snapshot,
         // data file, manifest and manifest list. The pinned Iceberg builder
         // never records a previous metadata location for these commits, so the
@@ -589,7 +592,7 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
         CheckWriterInput(collection.schema, input, Options_.Writer);
         const auto base = ResolveBase(binding.base);
         CheckDeadline(deadline);
-        CheckIO(NStorage::CheckWriteCapacity(*Dirs_, Options_.Storage), EStoragePath::Preflight, "storage preflight");
+        CheckIO(CheckWriteCapacity(false, true), EStoragePath::Preflight, "storage preflight");
 
         auto attempt = TakeIO(NIO::TIOAttempt::Make({Store_.store_id,
                                                         binding.collection_id,
@@ -706,6 +709,38 @@ void TLocalStorageBackend::InvalidateCache()
     std::lock_guard lock(Mutex_);
     VerifiedGeneration_ = false;
     Collections_.clear();
+    AdmittedWarehouseBytes_.reset();
+}
+
+std::error_code TLocalStorageBackend::CheckWriteCapacity(bool remember, bool reuse)
+{
+    std::optional<std::uint64_t> bytes;
+    {
+        std::lock_guard lock(Mutex_);
+        bytes = std::exchange(AdmittedWarehouseBytes_, std::nullopt);
+    }
+    if (const auto error = Dirs_->CheckIdentity()) {
+        return error;
+    }
+    if (!reuse || !bytes) {
+        const auto measured = NStorage::MeasureWarehouse(*Dirs_, Options_.Storage);
+        if (!measured) {
+            return measured.Error();
+        }
+        bytes = measured.Value();
+    }
+    const auto space = Dirs_->Fs()->StatFs(Dirs_->Root());
+    if (!space) {
+        return space.Error();
+    }
+    if (const auto error = NStorage::CheckDiskReserve(space.Value(), *bytes, Options_.Storage)) {
+        return error;
+    }
+    if (remember) {
+        std::lock_guard lock(Mutex_);
+        AdmittedWarehouseBytes_ = bytes;
+    }
+    return {};
 }
 
 Status TLocalStorageBackend::VerifyRetained(const StoreInfo& store,
@@ -723,8 +758,8 @@ Status TLocalStorageBackend::VerifyRetained(const StoreInfo& store,
                     view.base.current_snapshot_id == view.info.current_snapshot_id,
                 "CORRUPTION",
                 "collection view identity is inconsistent");
-            // Always the full reachable closure: an idempotent retry must not
-            // return a committed outcome over missing or corrupt files.
+            // The full reachable closure on open and Reconcile. Idempotent
+            // retries use VerifyCommittedAppend for their own snapshot.
             auto state = VerifyCollection(view.base);
             CheckSchema(*state->Metadata, view.info.schema);
             CheckHistory(*state->Metadata, view.info.collection_id, operations);
@@ -744,6 +779,66 @@ Status TLocalStorageBackend::VerifyRetained(const StoreInfo& store,
         std::lock_guard lock(Mutex_);
         Collections_ = std::move(verified);
         VerifiedGeneration_ = true;
+        return {};
+    });
+}
+
+void TLocalStorageBackend::RetireRoot(const BaseIdentity& superseded)
+{
+    const auto& location = superseded.metadata_location;
+    const auto uri = NIO::TStoreUri::Parse(location, Store_.store_id);
+    if (superseded.store_id != Store_.store_id || !uri || uri.Value().Kind() != NIO::EFileKind::Metadata ||
+        uri.Value().CollectionId() != superseded.collection_id)
+    {
+        return;
+    }
+    {
+        // Never remove the confirmed or a tentative root of this collection.
+        std::lock_guard lock(Mutex_);
+        const auto state = Collections_.find(superseded.collection_id);
+        if (state == Collections_.end() || !state->second.Confirmed ||
+            state->second.Confirmed->MetadataLocation == location ||
+            (state->second.Tentative && state->second.Tentative->MetadataLocation == location))
+        {
+            return;
+        }
+    }
+    // Best effort: a root that cannot be removed stays as an orphan file.
+    [[maybe_unused]] const auto error = Dirs_->RemoveMetadataFile(uri.Value());
+}
+
+Status TLocalStorageBackend::VerifyCommittedAppend(const StoreInfo& store,
+    const CollectionView& collection,
+    std::span<const OperationRecord>,
+    const AppendResult& receipt)
+{
+    return Guarded<Status>([&]() -> Status {
+        CheckStore(store);
+        const auto& base = collection.base;
+        Require(base.collection_id == collection.info.collection_id && base.table_uuid == collection.info.table_uuid &&
+                base.current_snapshot_id == collection.info.current_snapshot_id &&
+                receipt.collection_id == collection.info.collection_id,
+            "CORRUPTION",
+            "collection view identity is inconsistent");
+        const std::shared_ptr<iceberg::FileIO> view =
+            TakeIceberg(FileIO_->ReadOnlyView(), "IO_ERROR", "open read-only FileIO");
+        // A retry must not return a committed outcome over missing or corrupt
+        // files: check the receipt's own snapshot closure in the current root.
+        const auto state = TakeRetained(NStorage::VerifyRetainedSnapshot(view,
+                                            base.metadata_location,
+                                            Store_.store_id,
+                                            base.collection_id,
+                                            receipt.snapshot_id,
+                                            Options_.Storage),
+            "verify committed snapshot");
+        CheckIdentity(state, base);
+        CheckSchema(*state.Metadata, collection.info.schema);
+        const auto snapshot = TakeRetained(state.Metadata->SnapshotById(receipt.snapshot_id), "committed snapshot");
+        const auto operation = snapshot->summary.find(std::string(OperationKey));
+        Require(operation != snapshot->summary.end() && operation->second == receipt.operation_id,
+            "CORRUPTION",
+            "retained snapshot has another operation identity");
+        CheckReceipt(*snapshot, receipt);
         return {};
     });
 }

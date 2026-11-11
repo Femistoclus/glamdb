@@ -114,7 +114,9 @@ Preserve these boundaries when adding or changing engine behavior:
   published state can be reopened within the same limits. Capacity exhaustion
   produces backpressure before publication, not partial success or hidden
   deletion of history. Orphan files consume capacity; automatic cleanup is
-  outside the initial scope. Detected corruption closes readiness; leave SQLite
+  outside the initial scope. The only exception is a metadata root superseded
+  by a confirmed append (the current root retains the whole history); it is
+  removed once no scan is still resolving it. Detected corruption closes readiness; leave SQLite
   journal recovery to SQLite rather than deleting or truncating its journal.
 
 ## Repository navigation

@@ -179,6 +179,66 @@ iceberg::Status CheckRecoveryProfile(const iceberg::TableMetadata& metadata)
     return CheckCreateMetadata(metadata, TTableProfile{schema, metadata.properties.configs()}, metadata.location);
 }
 
+iceberg::Result<TBaseState> ReadRecoveryRoot(const std::shared_ptr<iceberg::FileIO>& fileIO,
+    const std::string& rootLocation,
+    const std::string& storeID,
+    const std::string& collectionID,
+    const TStorageLimits& limits)
+{
+    const auto root = NIO::TStoreUri::Parse(rootLocation, storeID);
+    if (!fileIO || !root || root.Value().CollectionId() != collectionID ||
+        root.Value().Kind() != NIO::EFileKind::Metadata || limits.RootBytes > INT64_MAX)
+    {
+        return iceberg::InvalidArgument("Invalid recovery root.");
+    }
+    ICEBERG_ASSIGN_OR_RAISE(auto input, fileIO->NewInputFile(rootLocation));
+    ICEBERG_ASSIGN_OR_RAISE(auto rootBytes, input->Size());
+    ICEBERG_ASSIGN_OR_RAISE(auto metadata,
+        ReadTableMetadata(*fileIO, rootLocation, std::nullopt, static_cast<std::int64_t>(limits.RootBytes)));
+    const auto location = "store://" + storeID + "/warehouse/" + collectionID;
+    if (metadata->location != location || metadata->format_version != 2 ||
+        metadata->snapshots.size() != metadata->snapshot_log.size() ||
+        metadata->metadata_log.size() > limits.MetadataLogEntries)
+    {
+        return iceberg::ValidationFailed("Unsupported recovery metadata.");
+    }
+    TBaseState state{rootLocation, std::shared_ptr<iceberg::TableMetadata>(std::move(metadata)), {}, {}};
+    state.Usage.RootBytes = static_cast<std::uint64_t>(rootBytes);
+    state.Usage.Snapshots = state.Metadata->snapshots.size();
+    state.Usage.SnapshotLogEntries = state.Metadata->snapshot_log.size();
+    if (CheckStorageCapacity(state.Usage, limits)) {
+        return iceberg::ValidationFailed("Recovery metadata exceeds storage capacity.");
+    }
+    return state;
+}
+
+// The root without history: the profile every retained transition starts from.
+iceberg::Result<std::shared_ptr<iceberg::TableMetadata>> EmptyHistoryView(const iceberg::TableMetadata& original)
+{
+    auto view = std::make_shared<iceberg::TableMetadata>(original);
+    view->snapshots.clear();
+    view->snapshot_log.clear();
+    view->refs.clear();
+    view->current_snapshot_id = iceberg::kInvalidSnapshotId;
+    view->last_sequence_number = 0;
+    ICEBERG_RETURN_UNEXPECTED(CheckRecoveryProfile(*view));
+    return view;
+}
+
+std::shared_ptr<iceberg::TableMetadata> AppendToView(const iceberg::TableMetadata& view,
+    const std::shared_ptr<iceberg::Snapshot>& snapshot,
+    const iceberg::SnapshotLogEntry& log)
+{
+    auto next = std::make_shared<iceberg::TableMetadata>(view);
+    next->snapshots.push_back(snapshot);
+    next->snapshot_log.push_back(log);
+    next->current_snapshot_id = snapshot->snapshot_id;
+    next->last_sequence_number = snapshot->sequence_number;
+    next->refs["main"] = std::make_shared<iceberg::SnapshotRef>(
+        iceberg::SnapshotRef{.snapshot_id = snapshot->snapshot_id, .retention = iceberg::SnapshotRef::Branch{}});
+    return next;
+}
+
 iceberg::Result<TBaseState> CheckAppendClosureImpl(const std::shared_ptr<iceberg::FileIO>& fileIO,
     TBaseState candidate,
     const std::vector<iceberg::ManifestFile>& previousManifests,
@@ -272,6 +332,55 @@ iceberg::Result<TBaseState> CheckAppendClosure(const std::shared_ptr<iceberg::Fi
     return CheckAppendClosureImpl(fileIO, std::move(candidate), previousManifests, attempt, limits, nullptr);
 }
 
+iceberg::Result<TBaseState> VerifyRetainedSnapshot(const std::shared_ptr<iceberg::FileIO>& fileIO,
+    const std::string& rootLocation,
+    const std::string& storeID,
+    const std::string& collectionID,
+    std::int64_t snapshotID,
+    const TStorageLimits& limits)
+{
+    return CatchIcebergExceptions([&]() -> iceberg::Result<TBaseState> {
+        ICEBERG_ASSIGN_OR_RAISE(auto state, ReadRecoveryRoot(fileIO, rootLocation, storeID, collectionID, limits));
+        const auto& snapshots = state.Metadata->snapshots;
+        const auto found = std::ranges::find_if(snapshots, [&](const auto& snapshot) {
+            return snapshot && snapshot->snapshot_id == snapshotID;
+        });
+        if (found == snapshots.end()) {
+            return iceberg::ValidationFailed("Committed snapshot is not retained.");
+        }
+        const auto index = static_cast<std::size_t>(found - snapshots.begin());
+        ICEBERG_ASSIGN_OR_RAISE(auto view, EmptyHistoryView(*state.Metadata));
+        std::vector<iceberg::ManifestFile> previous;
+        if (index > 0) {
+            const auto& parent = snapshots[index - 1];
+            if (!parent) {
+                return iceberg::ValidationFailed("Invalid retained snapshot history.");
+            }
+            const auto table = NIO::TStoreUri::ParseTable(state.Metadata->location, storeID);
+            if (!table) {
+                return iceberg::ValidationFailed("Invalid table location.");
+            }
+            ICEBERG_RETURN_UNEXPECTED(CheckPath(parent->manifest_list, table.Value(), NIO::EFileKind::ManifestList));
+            RegisterStorageFormats();
+            ICEBERG_RETURN_UNEXPECTED(CheckAvro(*fileIO,
+                parent->manifest_list,
+                -1,
+                NIO::EFileKind::ManifestList,
+                limits.ManifestListBytes,
+                limits.Store.Manifests,
+                nullptr));
+            ICEBERG_ASSIGN_OR_RAISE(auto reader, iceberg::ManifestListReader::Make(parent->manifest_list, fileIO));
+            ICEBERG_ASSIGN_OR_RAISE(previous, reader->Files());
+            view = AppendToView(*view, parent, state.Metadata->snapshot_log[index - 1]);
+        }
+        auto next = AppendToView(*view, *found, state.Metadata->snapshot_log[index]);
+        ICEBERG_RETURN_UNEXPECTED(CheckAppendMetadata(*view, *next, {}));
+        TBaseState candidate{rootLocation, next, {}, {}};
+        ICEBERG_RETURN_UNEXPECTED(CheckAppendClosureImpl(fileIO, std::move(candidate), previous, {}, limits, nullptr));
+        return state;
+    });
+}
+
 iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileIO>& fileIO,
     const std::string& rootLocation,
     const std::string& storeID,
@@ -279,38 +388,9 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
     const TStorageLimits& limits)
 {
     return CatchIcebergExceptions([&]() -> iceberg::Result<TBaseState> {
-        const auto root = NIO::TStoreUri::Parse(rootLocation, storeID);
-        if (!fileIO || !root || root.Value().CollectionId() != collectionID ||
-            root.Value().Kind() != NIO::EFileKind::Metadata || limits.RootBytes > INT64_MAX)
-        {
-            return iceberg::InvalidArgument("Invalid recovery root.");
-        }
-        ICEBERG_ASSIGN_OR_RAISE(auto input, fileIO->NewInputFile(rootLocation));
-        ICEBERG_ASSIGN_OR_RAISE(auto rootBytes, input->Size());
-        ICEBERG_ASSIGN_OR_RAISE(auto metadata,
-            ReadTableMetadata(*fileIO, rootLocation, std::nullopt, static_cast<std::int64_t>(limits.RootBytes)));
-        const auto location = "store://" + storeID + "/warehouse/" + collectionID;
-        if (metadata->location != location || metadata->format_version != 2 ||
-            metadata->snapshots.size() != metadata->snapshot_log.size() ||
-            metadata->metadata_log.size() > limits.MetadataLogEntries)
-        {
-            return iceberg::ValidationFailed("Unsupported recovery metadata.");
-        }
-        TBaseState state{rootLocation, std::shared_ptr<iceberg::TableMetadata>(std::move(metadata)), {}, {}};
-        state.Usage.RootBytes = static_cast<std::uint64_t>(rootBytes);
-        state.Usage.Snapshots = state.Metadata->snapshots.size();
-        state.Usage.SnapshotLogEntries = state.Metadata->snapshot_log.size();
-        if (CheckStorageCapacity(state.Usage, limits)) {
-            return iceberg::ValidationFailed("Recovery metadata exceeds storage capacity.");
-        }
+        ICEBERG_ASSIGN_OR_RAISE(auto state, ReadRecoveryRoot(fileIO, rootLocation, storeID, collectionID, limits));
         const auto original = state.Metadata;
-        auto view = std::make_shared<iceberg::TableMetadata>(*original);
-        view->snapshots.clear();
-        view->snapshot_log.clear();
-        view->refs.clear();
-        view->current_snapshot_id = iceberg::kInvalidSnapshotId;
-        view->last_sequence_number = 0;
-        ICEBERG_RETURN_UNEXPECTED(CheckRecoveryProfile(*view));
+        ICEBERG_ASSIGN_OR_RAISE(auto view, EmptyHistoryView(*original));
         ICEBERG_ASSIGN_OR_RAISE(auto visited, TRecoveryVisited::Make());
         std::unordered_set<std::int64_t> snapshotIDs;
         snapshotIDs.reserve(original->snapshots.size());
@@ -324,14 +404,7 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
             if (!inserted) {
                 return iceberg::ValidationFailed("Invalid retained snapshot history.");
             }
-            auto next = std::make_shared<iceberg::TableMetadata>(*view);
-            next->snapshots.push_back(snapshot);
-            next->snapshot_log.push_back(original->snapshot_log[index]);
-            next->current_snapshot_id = snapshot->snapshot_id;
-            next->last_sequence_number = snapshot->sequence_number;
-            next->refs["main"] =
-                std::make_shared<iceberg::SnapshotRef>(iceberg::SnapshotRef{.snapshot_id = snapshot->snapshot_id,
-                    .retention = iceberg::SnapshotRef::Branch{}});
+            auto next = AppendToView(*view, snapshot, original->snapshot_log[index]);
             ICEBERG_RETURN_UNEXPECTED(CheckAppendMetadata(*view, *next, {}));
             auto candidate = state;
             candidate.Metadata = next;
