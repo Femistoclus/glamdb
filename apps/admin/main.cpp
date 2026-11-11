@@ -7,7 +7,7 @@
 
 int main(int argc, char** argv)
 try {
-    CLI::App app{"GlamDB catalog MVP"};
+    CLI::App app{"GlamDB offline store administration"};
     app.require_subcommand(1);
     std::string root;
     std::string id;
@@ -42,7 +42,15 @@ try {
         std::cerr << closed.error().code << ": " << closed.error().message << '\n';
         return 1;
     }
+    std::cout.flush();
+    if (!std::cout) {
+        std::cerr << "output failed; store operation may have completed\n";
+        return 1;
+    }
     return 0;
+} catch (const std::exception& error) {
+    std::cerr << error.what() << '\n';
+    return 1;
 } catch (...) {
     return 100;
 }

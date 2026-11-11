@@ -1,0 +1,366 @@
+{
+  "version": "v0",
+  "collection_id": "00000000-0000-0000-0000-000000000101",
+  "operation_id": "00000000-0000-0000-0000-000000000102",
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/healthz",
+      "core": "process liveness",
+      "status": 200,
+      "response_fields": {
+        "status": "string",
+        "backend": "string",
+        "mock": "boolean"
+      },
+      "response_schema": "health"
+    },
+    {
+      "method": "GET",
+      "path": "/workbench/config",
+      "core": "static runtime theme",
+      "status": 200,
+      "response_fields": {
+        "version": "integer"
+      },
+      "response_schema": "theme"
+    },
+    {
+      "method": "GET",
+      "path": "/capabilities",
+      "core": "transport capability inventory",
+      "status": 200,
+      "response_fields": {
+        "api_version": "string",
+        "features": "object",
+        "predicate_ops": "array",
+        "limits": "object"
+      },
+      "response_schema": "capabilities"
+    },
+    {
+      "method": "GET",
+      "path": "/databases",
+      "core": "Service registry",
+      "status": 200,
+      "response_fields": {
+        "items": "array",
+        "next_cursor": "null"
+      },
+      "response_schema": "databases"
+    },
+    {
+      "method": "POST",
+      "path": "/databases",
+      "core": "CreateStore / OpenExisting",
+      "status": 200,
+      "response_fields": {
+        "database_id": "string",
+        "name": "string",
+        "state": "string"
+      },
+      "response_schema": "database",
+      "request": {
+        "name": "test_database"
+      },
+      "request_schema": "databaseCreate"
+    },
+    {
+      "method": "GET",
+      "path": "/databases/{database_id}",
+      "core": "GetStoreInfo / service registry",
+      "status": 200,
+      "response_fields": {
+        "database_id": "string",
+        "name": "string",
+        "state": "string"
+      },
+      "response_schema": "database"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/discard",
+      "core": "Service registry: refuse to discard initialized stores",
+      "status": 412,
+      "request": {},
+      "request_schema": "empty",
+      "response_fields": {
+        "error": "object"
+      },
+      "response_schema": "error"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections",
+      "core": "Engine::CreateCollection",
+      "status": 200,
+      "response_fields": {
+        "collection_id": "string",
+        "schema": "object",
+        "current_snapshot_id": "null|string"
+      },
+      "request": {
+        "collection_id": "00000000-0000-0000-0000-000000000101",
+        "name": "contract_fixture",
+        "schema": {
+          "fields": [
+            {
+              "name": "key",
+              "type": "string",
+              "nullable": false
+            }
+          ]
+        }
+      },
+      "response_schema": "createOutcome",
+      "request_schema": "create"
+    },
+    {
+      "method": "GET",
+      "path": "/databases/{database_id}/collections",
+      "core": "Engine::ListCollections",
+      "status": 200,
+      "response_fields": {
+        "items": "array",
+        "next_cursor": "null"
+      },
+      "response_schema": "collections"
+    },
+    {
+      "method": "GET",
+      "path": "/databases/{database_id}/collections:resolve?name=contract_fixture",
+      "core": "Engine::ResolveCollection",
+      "status": 200,
+      "response_fields": {
+        "collection_id": "string",
+        "schema": "object"
+      },
+      "response_schema": "collection"
+    },
+    {
+      "method": "GET",
+      "path": "/databases/{database_id}/collections/{collection_id}",
+      "core": "Engine::GetCollection",
+      "status": 200,
+      "response_fields": {
+        "collection_id": "string",
+        "schema": "object",
+        "current_snapshot_id": "null|string"
+      },
+      "response_schema": "collection"
+    },
+    {
+      "method": "GET",
+      "path": "/databases/{database_id}/collections/{collection_id}/schema",
+      "core": "Engine::GetCollection / Schema",
+      "status": 200,
+      "response_fields": {
+        "fields": "array"
+      },
+      "response_schema": "schema"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections/{collection_id}/append",
+      "core": "Engine::AppendDurable",
+      "status": 200,
+      "response_fields": {
+        "outcome": "string",
+        "phase": "string",
+        "operation_id": "string",
+        "result": "object"
+      },
+      "request": {
+        "operation_id": "00000000-0000-0000-0000-000000000102",
+        "rows": [
+          {
+            "key": "fixture"
+          }
+        ]
+      },
+      "response_schema": "appendOutcome",
+      "request_schema": "append"
+    },
+    {
+      "method": "GET",
+      "path": "/databases/{database_id}/collections/{collection_id}/operations/{operation_id}",
+      "core": "Engine::FindAppendOutcome",
+      "status": 200,
+      "response_fields": {
+        "outcome": "string",
+        "phase": "string",
+        "result": "object"
+      },
+      "response_schema": "appendOutcome"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections/{collection_id}/scan/open",
+      "core": "Engine::Scan (fixed-view cursor)",
+      "status": 200,
+      "request": {},
+      "request_schema": "scan",
+      "response_schema": "scanOpened",
+      "response_fields": {
+        "cursor": "string",
+        "schema": "object",
+        "snapshot_id": "string",
+        "identity": "object"
+      },
+      "capture": {
+        "scan_cursor": "cursor"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections/{collection_id}/scan",
+      "core": "ScanCursor::Next (replayable page)",
+      "status": 200,
+      "request": {
+        "cursor": "{scan_cursor}"
+      },
+      "request_schema": "scanContinue",
+      "response_schema": "scanResult",
+      "response_fields": {
+        "rows": "array",
+        "next_cursor": "null"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections/{collection_id}/scan/cancel",
+      "core": "ScanCursor::Cancel",
+      "status": 200,
+      "request": {
+        "cursor": "{scan_cursor}"
+      },
+      "request_schema": "scanContinue",
+      "response_schema": "scanCancelled",
+      "response_fields": {
+        "cancelled": "boolean"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections/{collection_id}/scan",
+      "core": "Engine::Scan",
+      "status": 200,
+      "response_fields": {
+        "schema": "object",
+        "snapshot_id": "string",
+        "rows": "array",
+        "identity": "object",
+        "profile": "object"
+      },
+      "request": {},
+      "response_schema": "scanResult",
+      "request_schema": "scan"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections/{collection_id}/scan",
+      "core": "Engine::Scan + Arrow IPC",
+      "status": 200,
+      "response_fields": {
+        "binary": "arrow-stream"
+      },
+      "request": {},
+      "accept": "application/vnd.apache.arrow.stream",
+      "request_schema": "scan"
+    },
+    {
+      "method": "GET",
+      "path": "/databases/{database_id}/collections/{collection_id}/stats",
+      "core": "proposed Engine::Stats",
+      "status": 501,
+      "response_fields": {
+        "error": "object"
+      },
+      "response_schema": "error"
+    },
+    {
+      "method": "GET",
+      "path": "/databases/{database_id}/collections/{collection_id}/snapshots",
+      "core": "proposed Engine::ListSnapshots",
+      "status": 501,
+      "response_fields": {
+        "error": "object"
+      },
+      "response_schema": "error"
+    },
+    {
+      "method": "GET",
+      "path": "/databases/{database_id}/collections/{collection_id}/files",
+      "core": "proposed Engine::ListFiles",
+      "status": 501,
+      "response_fields": {
+        "error": "object"
+      },
+      "response_schema": "error"
+    },
+    {
+      "method": "GET",
+      "path": "/databases/{database_id}/collections/{collection_id}/files/example",
+      "core": "proposed Engine::FileDetails",
+      "status": 501,
+      "response_fields": {
+        "error": "object"
+      },
+      "response_schema": "error"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections/{collection_id}/explain",
+      "core": "proposed Engine::Explain",
+      "status": 501,
+      "response_fields": {
+        "error": "object"
+      },
+      "request": {},
+      "response_schema": "error",
+      "request_schema": "scan"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/reconcile",
+      "core": "Engine::Reconcile",
+      "status": 200,
+      "response_fields": {
+        "database_id": "string",
+        "name": "string",
+        "state": "string"
+      },
+      "response_schema": "database",
+      "request": {},
+      "request_schema": "empty"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/close",
+      "core": "Engine::Shutdown",
+      "status": 200,
+      "response_fields": {
+        "database_id": "string",
+        "name": "string",
+        "state": "string"
+      },
+      "response_schema": "database",
+      "request": {},
+      "request_schema": "empty"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/open",
+      "core": "OpenExisting",
+      "status": 200,
+      "response_fields": {
+        "database_id": "string",
+        "name": "string",
+        "state": "string"
+      },
+      "response_schema": "database",
+      "request": {},
+      "request_schema": "databaseOpen"
+    }
+  ]
+}

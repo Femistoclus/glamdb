@@ -18,6 +18,12 @@ class CiNativeRunnerTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         (self.root / "scripts").mkdir()
         (self.root / "bin").mkdir()
+        # Command-plan tests do not need real SDK dependencies; dedicated native
+        # prerequisite tests exercise import failures with a real interpreter.
+        python = self.root / ".venv/bin/python"
+        python.parent.mkdir(parents=True)
+        python.write_text("#!/bin/sh\nexit 0\n")
+        python.chmod(0o755)
         self.runner = self.root / "scripts/ci-native.sh"
         if (ROOT / "scripts/ci-native.sh").exists():
             shutil.copyfile(ROOT / "scripts/ci-native.sh", self.runner)
@@ -47,7 +53,9 @@ class CiNativeRunnerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         commands = [json.loads(line) for line in log.read_text().splitlines()]
         # The normal profile also configures and builds the engine without storage.
-        self.assertEqual(len(commands), 4)
+        self.assertEqual(len(commands), 6)
+        self.assertEqual(commands[0][1:3], ["-S", "apps/cli"])
+        commands = commands[2:]
         self.assertIn("-DGLAMDB_BUILD_STORAGE=ON", commands[0])
         self.assertIn("-DGLAMDB_BUILD_IO_PROBE=ON", commands[0])
         self.assertEqual(commands[1][:2], ["cmake", "--build"])

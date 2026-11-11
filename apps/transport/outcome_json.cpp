@@ -1,4 +1,5 @@
-#include "apps/glamdb/outcome_json.h"
+#include "apps/transport/outcome_json.h"
+#include "apps/transport/errors.h"
 
 #include "core/api/binary.h"
 #include "core/api/canonical.h"
@@ -160,27 +161,7 @@ std::string Receipt(const AppendResult& result)
 
 int ErrorStatus(const ErrorDetail& error)
 {
-    if (error.code == "INVALID_ARGUMENT") {
-        return 400;
-    }
-    if (error.code == "OPERATION_CONFLICT" || error.code == "ALREADY_EXISTS" || error.code == "SCHEMA_MISMATCH" ||
-        error.code == "STALE_BASE")
-    {
-        return 409;
-    }
-    if (error.code == "PRECONDITION_FAILED") {
-        return 412;
-    }
-    if (error.code == "RESOURCE_EXHAUSTED" || error.code == "CAPACITY_EXCEEDED") {
-        return 429;
-    }
-    if (error.code == "COLLECTION_NOT_FOUND" || error.code == "NOT_FOUND") {
-        return 404;
-    }
-    if (error.code == "RECOVERY_REQUIRED" || error.code == "DEPENDENCY_UNAVAILABLE") {
-        return 503;
-    }
-    return 500;
+    return NTransport::ErrorPolicy(error.code).Status;
 }
 
 std::string Collection(const CollectionInfo& collection)

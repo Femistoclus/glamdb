@@ -41,6 +41,24 @@ export function resetConnection(state) {
         creation: null,
     };
 }
+// Keep frozen write identities only within this authenticated connection.
+// A disconnect still uses resetConnection and discards every database draft.
+export function switchDatabase(state, database) {
+    const drafts = new Map(state.databaseDrafts ?? []);
+    if (state.database) {
+        drafts.set(state.database.database_id, {
+            operations: state.operations,
+            mutation: state.mutation,
+            creation: state.creation,
+        });
+    }
+    return {
+        ...resetConnection(state),
+        databaseDrafts: drafts,
+        database,
+        ...(drafts.get(database?.database_id) ?? {}),
+    };
+}
 export function selectView(state, collectionId, snapshotId = null) {
     return {
         ...state,
@@ -163,4 +181,21 @@ export function prepareMutation(previous, body, idFactory = () => crypto.randomU
         return previous;
     }
     return { operationId: idFactory(), fingerprint, body: structuredClone(body), terminal: false };
+}
+
+export function supportsFeature(capabilities, feature) {
+    return capabilities?.features?.[feature] ?? capabilities?.backend !== 'local';
+}
+export function validateQueryCapabilities(capabilities, body) {
+    if (body.projection?.length === 0 && !supportsFeature(capabilities, 'zero_column_projection'))
+        throw new Error('Empty projection is not supported by this server');
+    const supported = capabilities?.predicate_ops;
+    const visit = (predicate) => {
+        if (!predicate) return;
+        if (supported && !supported.includes(predicate.op))
+            throw new Error(`Predicate ${predicate.op} is not supported by this server`);
+        predicate.args?.forEach(visit);
+        if (predicate.arg) visit(predicate.arg);
+    };
+    visit(body.predicate);
 }

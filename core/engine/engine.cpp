@@ -744,6 +744,17 @@ Result<std::shared_ptr<const arrow::Schema>> Engine::Schema(std::string_view id)
     return MakeArrowSchema(collection->schema);
 }
 
+Result<SchemaSpec> Engine::SchemaForAppend(std::string_view id) const
+{
+    try {
+        const auto impl = impl_;
+        std::lock_guard lock(impl->state_mutex);
+        return impl->CachedCollection(id).schema;
+    } catch (const Failure& error) {
+        return std::unexpected(error.detail);
+    }
+}
+
 CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
 {
     const auto impl = impl_;

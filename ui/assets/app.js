@@ -5,9 +5,12 @@ import {
     displayValue,
     selectView,
     resetConnection,
+    switchDatabase,
     buildPredicate,
     wireRows,
     prepareMutation,
+    supportsFeature,
+    validateQueryCapabilities,
 } from './model.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -34,11 +37,12 @@ let connectionController = null,
     viewController = null,
     queryController = null,
     queryGeneration = 0,
+    databaseSelectionGeneration = 0,
     toastTimer = null,
     themeStamp = '',
     configTimer = null;
 const labels = (name, fallback = name) => state.theme?.labels?.[name] ?? fallback;
-const collectionPath = () => `/v0/collections/${encodeURIComponent(state.collectionId)}`;
+const collectionPath = () => `/collections/${encodeURIComponent(state.collectionId)}`;
 const viewQuery = () =>
     state.snapshotId === null ? '' : `?snapshot_id=${encodeURIComponent(state.snapshotId)}`;
 const currentCollection = () =>
@@ -63,13 +67,14 @@ function toast(message) {
 function report(error) {
     if (error.name !== 'AbortError') toast(error.message ?? 'Something went wrong');
 }
-function resetSession() {
+function resetSession(database = undefined) {
+    databaseSelectionGeneration++;
     connectionController?.abort();
     viewController?.abort();
     queryController?.abort();
     connectionController = viewController = queryController = null;
     queryGeneration++;
-    state = resetConnection(state);
+    state = database === undefined ? resetConnection(state) : switchDatabase(state, database);
     creationFields = [];
     $('#modal').close();
     $('#modal').replaceChildren();
@@ -153,17 +158,111 @@ function login() {
     <p class="login-error" id="login-error" role="alert"></p><p class="login-footnote">Local demo? Use the token from your GLAMDB_TOKEN environment.<br>Mock data is disposable. No storage durability is claimed.</p></div></section></main>`;
 }
 
+async function databaseWorkspace(database = null) {
+    const { base, token } = state;
+    resetSession(database);
+    state.base = base;
+    state.token = token;
+    state.database = database;
+    state.managed = true;
+    const api = new WorkbenchAPI(
+        database
+            ? `${base.replace(/\/$/, '')}/databases/${encodeURIComponent(database.database_id)}`
+            : base,
+        token,
+    );
+    state.api = api;
+    const controller = new AbortController();
+    connectionController = controller;
+    // Remove the previous database's controls before awaiting the new session.
+    $('#app').innerHTML = '<main class="main"><p role="status">Loading workspace…</p></main>';
+    try {
+        const capabilities = await api.json('/capabilities', { signal: controller.signal });
+        if (state.api !== api || controller.signal.aborted) return;
+        state.capabilities = capabilities;
+        if (database) await refreshWorkspace();
+        else await databaseList();
+    } catch (error) {
+        if (state.api !== api) return;
+        if (database) await databaseWorkspace();
+        else {
+            resetSession();
+            login();
+        }
+        report(error);
+    }
+}
+async function databaseList() {
+    const api = state.api,
+        signal = connectionController.signal;
+    const result = await api.json('/databases', { signal });
+    if (state.api !== api || signal.aborted) return;
+    $('#app').innerHTML =
+        `<header class="topbar">${brand()}<div class="top-actions"><button class="text-button" data-action="databases">Refresh databases</button><button class="text-button" data-action="disconnect">Disconnect</button></div></header>
+    <main id="main-content" class="main">${heading('Your databases', 'Create a database or open an existing workspace.', false)}
+    <section class="panel"><div class="panel-body"><form id="database-form" class="button-row"><label class="field">Database name<input name="name" required maxlength="128" autocomplete="off"></label><button class="button primary" type="submit">Create database</button></form></div></section>
+    <section class="panel"><div class="table-wrap"><table aria-label="Databases"><thead><tr><th>Database</th><th>State</th><th>Actions</th></tr></thead><tbody>${result.items.map((db) => `<tr><td><strong>${e(db.name)}</strong><p class="small mono">${e(db.database_id)}</p>${db.error ? `<p role="alert">${e(db.error.message)}</p>` : ''}</td><td>${e(db.state)}</td><td><div class="button-row"><button class="button small" data-action="database-use" data-id="${e(db.database_id)}" ${['open', 'closed'].includes(db.state) ? '' : 'disabled'}>${db.state === 'open' ? 'Use database' : 'Open database'}</button><button class="button small" data-action="database-close" data-id="${e(db.database_id)}" ${['open', 'error'].includes(db.state) || (db.state === 'closing' && db.error) ? '' : 'disabled'}>Close database</button><button class="button small" data-action="database-reconcile" data-id="${e(db.database_id)}" ${['open', 'error'].includes(db.state) ? '' : 'disabled'}>Reconcile</button></div></td></tr>`).join('')}</tbody></table></div>${result.items.length ? '' : '<p class="result-empty">No databases yet. Create your first database above.</p>'}</section></main>`;
+}
+async function databaseAction(target) {
+    const api = state.api,
+        signal = connectionController.signal;
+    const action = target.dataset.action.replace('database-', '');
+    const selection = action === 'use' ? ++databaseSelectionGeneration : null;
+    const current = () =>
+        state.api === api &&
+        !signal.aborted &&
+        (selection === null || selection === databaseSelectionGeneration);
+    setBusy(target, true);
+    try {
+        const db =
+            action === 'use'
+                ? await api.selectDatabase(target.dataset.id, signal)
+                : await api.json(`/databases/${encodeURIComponent(target.dataset.id)}/${action}`, {
+                      method: 'POST',
+                      body: {},
+                      signal,
+                  });
+        if (!current()) return;
+        if (action === 'use') await databaseWorkspace(db);
+        else await databaseList();
+    } catch (error) {
+        if (!current()) return;
+        await databaseList();
+        report(error);
+    } finally {
+        setBusy(target, false);
+    }
+}
+async function createDatabase(form) {
+    const api = state.api,
+        signal = connectionController.signal;
+    const button = form.querySelector('button');
+    const selection = ++databaseSelectionGeneration;
+    setBusy(button, true);
+    try {
+        const db = await api.json('/databases', {
+            method: 'POST',
+            body: { name: form.elements.name.value },
+            signal,
+        });
+        if (state.api === api && !signal.aborted && selection === databaseSelectionGeneration)
+            await databaseWorkspace(db);
+    } finally {
+        setBusy(button, false);
+    }
+}
+
 function chrome() {
     $('#app').innerHTML =
         `<div class="shell"><aside class="sidebar" id="sidebar" aria-label="Workspace navigation">${brand()}
     <p class="brand-tagline" data-brand="tagline">${e(state.theme.brand.tagline)}</p><div class="workspace-tag"><span class="status-dot"></span>
-    <div><strong>My workspace</strong><small>${e(new URL(state.base).host)} · ${state.capabilities?.mock ? 'MOCK' : 'CONNECTED'}</small></div></div>
+    <div><strong>${e(state.database?.name ?? 'My workspace')}</strong><small>${e(new URL(state.base).host)} · ${state.capabilities?.mock ? 'MOCK' : 'CONNECTED'}</small></div></div>
     <nav class="nav">${nav.map(([key, symbol]) => `<button data-action="nav" data-tab="${key}" class="${state.tab === key ? 'active' : ''}" ${state.tab === key ? 'aria-current="page"' : ''}>${icon(symbol)}<span data-label="nav_${key}">${e(labels(`nav_${key}`))}</span></button>`).join('')}</nav>
     <div class="collection-heading"><span data-label="collections">${e(labels('collections'))}</span><button class="icon-button" data-action="create" aria-label="New collection">${icon('plus')}</button></div>
     <div class="collection-list">${state.collections.map((item) => `<button data-action="select-collection" data-id="${e(item.collection_id)}" class="${state.collectionId === item.collection_id ? 'selected' : ''}">${icon('table')}<span>${e(item.name)}</span></button>`).join('')}</div>
     <div class="sidebar-footer">${icon('kiss', 'decor-kiss')}<p data-label="footer">${e(labels('footer'))}</p></div></aside>
     <div class="workspace"><header class="topbar"><div class="breadcrumb"><button class="icon-button menu-toggle" data-action="menu" aria-label="Toggle navigation">${icon('menu')}</button><span>Workspace</span>${icon('chevron')}<strong>${e(currentCollection()?.name ?? 'Your collections')}</strong></div>
-    <div class="top-actions"><button class="text-button docs-button" data-action="about">Quick guide</button><button class="icon-button" data-action="refresh" aria-label="Refresh workspace">${icon('refresh')}</button><button class="text-button" data-action="disconnect">${publicDemo ? 'Reset demo' : 'Disconnect'}</button><span class="avatar" aria-label="Workspace avatar">${state.theme.brand.mark ? `<img data-brand-logo="mark" class="brand-mark" src="${e(brandAsset(state.theme, 'mark'))}" alt="">` : 'G'}</span></div></header>
+    <div class="top-actions">${state.managed ? '<button class="text-button" data-action="databases">Databases</button>' : ''}<button class="text-button docs-button" data-action="about">Quick guide</button><button class="icon-button" data-action="refresh" aria-label="Refresh workspace">${icon('refresh')}</button><button class="text-button" data-action="disconnect">${publicDemo ? 'Reset demo' : 'Disconnect'}</button><span class="avatar" aria-label="Workspace avatar">${state.theme.brand.mark ? `<img data-brand-logo="mark" class="brand-mark" src="${e(brandAsset(state.theme, 'mark'))}" alt="">` : 'G'}</span></div></header>
     <main id="main-content" class="main">${state.capabilities?.mock ? `<div class="mock-banner">${icon('sparkle')}<span data-label="${publicDemo ? 'public_demo_notice' : 'mock_notice'}">${e(labels(publicDemo ? 'public_demo_notice' : 'mock_notice'))}</span></div>` : ''}<div id="view"></div>
     <footer class="page-footer"><span>GlamDB · <span data-brand="tagline">${e(state.theme.brand.tagline)}</span></span><span>Append mode · duplicate keys preserved ${icon('sparkle', 'decor-sparkle')}</span></footer></main></div></div>`;
     renderView();
@@ -183,8 +282,18 @@ function overview() {
     <section class="metrics" aria-label="Collection statistics">${[
         ['Rows', s.rows, 'table'],
         ['Columns', fields().length, 'columns'],
-        ['Snapshots', s.retained_snapshots ?? state.snapshots.length, 'clock'],
-        ['Data files', s.data_files ?? state.files.length, 'database'],
+        [
+            'Snapshots',
+            s.retained_snapshots ??
+                (supportsFeature(state.capabilities, 'snapshots') ? state.snapshots.length : null),
+            'clock',
+        ],
+        [
+            'Data files',
+            s.data_files ??
+                (supportsFeature(state.capabilities, 'files') ? state.files.length : null),
+            'database',
+        ],
     ]
         .map(
             ([label, value, symbol]) =>
@@ -206,6 +315,8 @@ function overview() {
     }`;
 }
 function snapshotList(max = 100) {
+    if (!supportsFeature(state.capabilities, 'snapshots'))
+        return '<p class="muted small">Snapshot history is unavailable on this server.</p>';
     return state.snapshots.length
         ? state.snapshots
               .slice()
@@ -242,6 +353,7 @@ function readQuery() {
         limit: state.limit,
     };
     if (state.snapshotId !== null) body.snapshot_id = state.snapshotId;
+    validateQueryCapabilities(state.capabilities, body);
     return body;
 }
 function dataView() {
@@ -283,13 +395,13 @@ function dataView() {
                     )}</select><input name="value" aria-label="Filter value ${i + 1}" value="${e(c.value)}" placeholder="A value, in its original type"><button type="button" class="icon-button" data-action="remove-condition" data-index="${i}" aria-label="Remove condition ${i + 1}">${icon('close')}</button></div>`,
         )
         .join('')}
-    <button type="button" class="text-button" data-action="add-condition">+ Add a condition</button></div><div class="query-footer"><label>Result limit<input name="limit" type="number" min="0" max="1000" value="${state.limit}"></label><div class="button-row"><button type="button" class="button" data-action="explain-query">${icon('sparkle')}Explain</button><button type="submit" class="button primary" id="run-query">${icon('arrow')}<span data-label="run_query">${e(labels('run_query'))}</span></button></div></div></form></div></section>
+    <button type="button" class="text-button" data-action="add-condition">+ Add a condition</button></div><div class="query-footer"><label>Result limit<input name="limit" type="number" min="0" max="1000" value="${state.limit}"></label><div class="button-row"><button type="button" class="button" data-action="explain-query" ${supportsFeature(state.capabilities, 'explain') ? '' : 'disabled title="Unavailable on this server"'}>${icon('sparkle')}Explain</button><button type="submit" class="button primary" id="run-query">${icon('arrow')}<span data-label="run_query">${e(labels('run_query'))}</span></button></div></div></form></div></section>
     ${state.result ? resultTable() : `<div class="notice" style="margin-top:20px">Ready when you are. Your result will appear here, with its exact snapshot identity.</div>`}`;
 }
 function resultTable() {
     const schema = state.result.schema?.fields ?? state.projection.map((name) => ({ name }));
     const page = state.rows.slice(state.page * 100, (state.page + 1) * 100);
-    return `<section class="panel results-panel"><div class="panel-header"><div><h2>Your results</h2><p>${number(state.rows.length)} rows · snapshot <code>${e(state.result.snapshot_id ?? 'initial empty')}</code></p></div><button class="button small" data-action="${publicDemo ? 'export-json' : 'export-arrow'}">${icon('download')}${publicDemo ? 'JSON' : 'Arrow'}</button></div><div class="table-wrap"><table aria-label="Query results"><thead><tr>${schema.map((f) => `<th>${e(f.name)}</th>`).join('')}</tr></thead><tbody>${page.map((row) => `<tr>${schema.map((f) => `<td title="${e(displayValue(row[f.name]))}">${row[f.name] === null ? '<span class="null">NULL</span>' : e(displayValue(row[f.name]))}</td>`).join('')}</tr>`).join('')}</tbody></table>${!page.length ? '<p class="result-empty">No rows match this query. The result schema is still available.</p>' : ''}</div><div class="table-footer"><span>${page.length ? state.page * 100 + 1 : 0}–${state.page * 100 + page.length} of ${number(state.rows.length)} · bounded preview</span><div class="button-row"><button class="button small" data-action="previous-page" ${state.page === 0 ? 'disabled' : ''}>Previous</button><button class="button small" data-action="next-page" ${(state.page + 1) * 100 >= state.rows.length ? 'disabled' : ''}>Next</button></div></div></section>`;
+    return `<section class="panel results-panel"><div class="panel-header"><div><h2>Your results</h2><p>${number(state.rows.length)} rows${state.result.next_cursor ? ' · partial preview; reduce the limit or use the SDK for all rows' : ''} · snapshot <code>${e(state.result.snapshot_id ?? 'initial empty')}</code></p></div><button class="button small" data-action="${publicDemo ? 'export-json' : 'export-arrow'}">${icon('download')}${publicDemo ? 'JSON' : 'Arrow'}</button></div><div class="table-wrap"><table aria-label="Query results"><thead><tr>${schema.map((f) => `<th>${e(f.name)}</th>`).join('')}</tr></thead><tbody>${page.map((row) => `<tr>${schema.map((f) => `<td title="${e(displayValue(row[f.name]))}">${row[f.name] === null ? '<span class="null">NULL</span>' : e(displayValue(row[f.name]))}</td>`).join('')}</tr>`).join('')}</tbody></table>${!page.length ? '<p class="result-empty">No rows match this query. The result schema is still available.</p>' : ''}</div><div class="table-footer"><span>${page.length ? state.page * 100 + 1 : 0}–${state.page * 100 + page.length} of ${number(state.rows.length)} · bounded preview</span><div class="button-row"><button class="button small" data-action="previous-page" ${state.page === 0 ? 'disabled' : ''}>Previous</button><button class="button small" data-action="next-page" ${(state.page + 1) * 100 >= state.rows.length ? 'disabled' : ''}>Next</button></div></div></section>`;
 }
 
 function renderView() {
@@ -325,6 +437,8 @@ function schemaView() {
         )}</tbody></table></div></section><div class="notice" style="margin-top:20px">Append mode preserves duplicate keys. A field called key does not imply uniqueness. Schema evolution is not enabled.</div>`;
 }
 function snapshotsView() {
+    if (!supportsFeature(state.capabilities, 'snapshots'))
+        return `${heading('Snapshot history', 'This server does not yet expose this capability.')}<div class="notice">Your data remains available in Data studio.</div>`;
     return `${heading('Every version has a story.', 'Read an immutable view. Keep your latest data untouched.')}<section class="panel"><div class="panel-header"><h2>Snapshot history</h2>${badge(`${state.snapshots.length} retained`)}</div><div class="table-wrap"><table aria-label="Snapshot history"><thead><tr><th>Snapshot ID</th><th>Parent</th><th>Rows added</th><th></th></tr></thead><tbody>${state.snapshots
         .slice()
         .reverse()
@@ -337,9 +451,13 @@ function snapshotsView() {
         )}</tbody></table></div>${!state.snapshots.length ? '<p class="result-empty">No append has been published yet.</p>' : ''}</section>`;
 }
 function storageView() {
+    if (!supportsFeature(state.capabilities, 'files'))
+        return `${heading('File inspection', 'This server does not yet expose this capability.')}<div class="notice">Your data remains available in Data studio.</div>`;
     return `${heading('A place for every file.', 'File membership belongs to the selected snapshot.')}<div class="notice" style="margin-bottom:20px">${state.capabilities?.mock ? 'These are synthetic descriptors for the mock adapter. No physical Parquet files are written.' : 'Immutable files; metadata is available where supported.'}</div><section class="panel"><div class="panel-header"><h2>Data files</h2>${badge(`${state.files.length} files`)}</div><div class="table-wrap"><table aria-label="Data files"><thead><tr><th>File</th><th>Rows</th><th>Bytes</th><th></th></tr></thead><tbody>${state.files.map((f, i) => `<tr><td><strong>Data file ${i + 1}</strong><p class="muted small mono">${e(f.file_id)}</p></td><td>${number(f.record_count)}</td><td>${f.compressed_bytes === null ? 'Unknown' : number(f.compressed_bytes)}</td><td><button class="button small" data-action="file" data-id="${e(f.file_id)}">Inspect${icon('arrow')}</button></td></tr>`).join('')}</tbody></table></div>${!state.files.length ? '<p class="result-empty">No files in this view.</p>' : ''}</section><div class="notice" style="margin-top:20px">Compaction, expiration and garbage collection are unavailable in append v0. Optional index presence does not imply execution support.</div>`;
 }
 function explainView() {
+    if (!supportsFeature(state.capabilities, 'explain'))
+        return `${heading('Query plans', 'This server does not yet expose this capability.')}<div class="notice">Your data remains available in Data studio.</div>`;
     return `${heading('A peek behind the query.', 'Plan estimates and executed measurements stay separate.')}<section class="panel"><div class="panel-header"><h2>Query plan</h2><button class="button small" data-action="explain-current">${icon('refresh')}Refresh plan</button></div><div class="panel-body">${
         state.plan
             ? `<div class="button-row" style="margin-bottom:18px">${badge('Fixed snapshot', 'pink')}${badge(state.capabilities?.mock ? 'Reference mock scan' : 'Native scan')}${badge('Page/Bloom execution unsupported')}</div>${[
@@ -356,11 +474,11 @@ function explainView() {
                       '',
                   )}<details style="margin-top:18px"><summary class="small">Inspect complete plan</summary><pre class="json-block">${json(state.plan)}</pre></details>`
             : '<p class="muted small">Build a query in Data studio, then choose Explain. You can also inspect the current all-column query.</p>'
-    }</div></section>${state.result?.profile ? `<section class="panel"><div class="panel-header"><h2>Execution profile</h2>${badge('Mock measurements')}</div><div class="panel-body"><pre class="json-block">${json(state.result.profile)}</pre><p class="muted small">A mock reference scan does not demonstrate native pruning, device IO or durability.</p></div></section>` : ''}`;
+    }</div></section>${state.result?.profile ? `<section class="panel"><div class="panel-header"><h2>Execution profile</h2>${badge(state.capabilities?.mock ? 'Mock measurements' : 'Native scan')}</div><div class="panel-body"><pre class="json-block">${json(state.result.profile)}</pre><p class="muted small">Returned row counts describe this scan. They do not establish pruning performance or power-loss durability.</p></div></section>` : ''}`;
 }
 function operationsView() {
     const ops = state.operations.filter((op) => op.collectionId === state.collectionId);
-    return `${heading('Keep your operations close.', 'An unknown outcome is unresolved. A timeout is not a rollback.')}<section class="panel"><div class="panel-header"><h2>This session's appends</h2>${badge('Synchronous API')}</div>${
+    return `${heading('Keep your operations close.', 'An unknown outcome is unresolved. A timeout is not a rollback.')}${state.managed ? '<p><button class="button" data-action="reconcile-workspace">Reconcile database</button></p>' : ''}<section class="panel"><div class="panel-header"><h2>This session's appends</h2>${badge('Synchronous API')}</div>${
         ops.length
             ? ops
                   .slice()
@@ -371,7 +489,7 @@ function operationsView() {
                   )
                   .join('')
             : '<p class="result-empty">No appends submitted in this browser session. Server outcomes are queried by operation ID.</p>'
-    }</section>`;
+    }</section><section class="panel"><div class="panel-body"><form id="operation-lookup-form" class="button-row"><label class="field">Operation ID<input name="operation" required autocomplete="off" placeholder="Original operation UUID"></label><button class="button" type="submit" ${state.collectionId ? '' : 'disabled'}>Look up operation</button></form><p class="small muted">Look up an original ID in this collection. This does not submit or retry a write.</p></div></section>`;
 }
 function styleView() {
     const c = state.theme;
@@ -429,16 +547,22 @@ async function refreshSelection() {
         id = state.collectionId;
     const current = () =>
         !signal.aborted && api === state.api && epoch === state.epoch && id === state.collectionId;
-    const info = await api.json(`/v0/collections/${encodeURIComponent(id)}`, { signal });
+    const info = await api.json(`/collections/${encodeURIComponent(id)}`, { signal });
     if (!current()) return;
     const selected =
         state.snapshotId === null ? (info.current_snapshot_id ?? 'initial') : state.snapshotId;
     const suffix = `?snapshot_id=${encodeURIComponent(selected)}`;
     const [schema, stats, snapshots, filesResult] = await Promise.all([
-        api.json(`/v0/collections/${encodeURIComponent(id)}/schema`, { signal }),
-        api.json(`/v0/collections/${encodeURIComponent(id)}/stats${suffix}`, { signal }),
-        allPages(`/v0/collections/${encodeURIComponent(id)}/snapshots`, signal, api),
-        allPages(`/v0/collections/${encodeURIComponent(id)}/files${suffix}`, signal, api),
+        api.json(`/collections/${encodeURIComponent(id)}/schema`, { signal }),
+        supportsFeature(state.capabilities, 'stats')
+            ? api.json(`/collections/${encodeURIComponent(id)}/stats${suffix}`, { signal })
+            : null,
+        supportsFeature(state.capabilities, 'snapshots')
+            ? allPages(`/collections/${encodeURIComponent(id)}/snapshots`, signal, api)
+            : [],
+        supportsFeature(state.capabilities, 'files')
+            ? allPages(`/collections/${encodeURIComponent(id)}/files${suffix}`, signal, api)
+            : [],
     ]);
     if (!current()) return;
     state.collection = info;
@@ -484,7 +608,7 @@ async function refreshWorkspace() {
     const api = state.api,
         epoch = state.epoch,
         signal = connectionController?.signal;
-    const collections = await allPages('/v0/collections', signal, api);
+    const collections = await allPages('/collections', signal, api);
     if (api !== state.api || epoch !== state.epoch || signal?.aborted) return;
     state.collections = collections;
     const id = collections.some((c) => c.collection_id === state.collectionId)
@@ -503,11 +627,15 @@ async function runQuery() {
     const button = $('#run-query');
     setBusy(button, true);
     try {
-        const result = await state.api.json(`${collectionPath()}/scan`, {
-            method: 'POST',
-            body,
-            signal: controller.signal,
-        });
+        const result = await (state.api.scanPreview ?? state.api.json).call(
+            state.api,
+            `${collectionPath()}/scan`,
+            {
+                method: 'POST',
+                body,
+                signal: controller.signal,
+            },
+        );
         if (epoch !== state.epoch || generation !== queryGeneration) return;
         state.result = result;
         state.rows = result.rows ?? [];
@@ -515,7 +643,7 @@ async function runQuery() {
         state.lastQuery = { ...body, snapshot_id: result.snapshot_id ?? 'initial' };
         renderView();
         toast(
-            `${state.rows.length} rows. Fixed snapshot ${result.snapshot_id ?? 'initial empty'}.`,
+            `${state.rows.length} rows${result.next_cursor ? ' (partial preview)' : ''}. Fixed snapshot ${result.snapshot_id ?? 'initial empty'}.`,
         );
     } finally {
         if (queryController === controller) queryController = null;
@@ -523,6 +651,8 @@ async function runQuery() {
     }
 }
 async function explainQuery(fromForm) {
+    if (!supportsFeature(state.capabilities, 'explain'))
+        throw new Error('Explain is unavailable on this server');
     const epoch = state.epoch;
     const body = fromForm
         ? readQuery()
@@ -633,7 +763,7 @@ async function createForm(form) {
         let created;
         try {
             created = verifyCreated(
-                await api.json('/v0/collections', { method: 'POST', body: draft.body }),
+                await api.json('/collections', { method: 'POST', body: draft.body }),
                 draft.body,
             );
         } catch (error) {
@@ -648,7 +778,7 @@ async function createForm(form) {
             try {
                 created = verifyCreated(
                     await api.json(
-                        `/v0/collections:resolve?name=${encodeURIComponent(draft.body.name)}`,
+                        `/collections:resolve?name=${encodeURIComponent(draft.body.name)}`,
                     ),
                     draft.body,
                 );
@@ -660,7 +790,7 @@ async function createForm(form) {
         }
         if (state.api !== api) return;
         if (state.creation === draft) state.creation = null;
-        const collections = await allPages('/v0/collections', connectionController?.signal, api);
+        const collections = await allPages('/collections', connectionController?.signal, api);
         if (state.api !== api) return;
         state.collections = collections;
         if (form.isConnected && epoch === state.epoch) {
@@ -773,14 +903,11 @@ async function appendForm(form) {
         state.mutation = operation;
         form.dataset.operationId = operation.operationId;
         saveOutcome(operation, { outcome: 'in_flight' });
-        const received = await api.json(
-            `/v0/collections/${encodeURIComponent(collectionId)}/append`,
-            {
-                method: 'POST',
-                body: { ...operation.body, operation_id: operation.operationId },
-                allowOutcome: true,
-            },
-        );
+        const received = await api.json(`/collections/${encodeURIComponent(collectionId)}/append`, {
+            method: 'POST',
+            body: { ...operation.body, operation_id: operation.operationId },
+            allowOutcome: true,
+        });
         if (state.api !== api) return;
         const payload = saveOutcome(operation, received);
         showAppendOutcome(operation, payload);
@@ -810,7 +937,7 @@ async function resolveOperation(id) {
     const api = state.api;
     try {
         const received = await api.json(
-            `/v0/collections/${encodeURIComponent(operation.collectionId)}/operations/${encodeURIComponent(id)}`,
+            `/collections/${encodeURIComponent(operation.collectionId)}/operations/${encodeURIComponent(id)}`,
             { allowOutcome: true, signal: connectionController?.signal },
         );
         if (state.api !== api) return;
@@ -852,7 +979,7 @@ async function inspectFile(id) {
         !controller?.signal.aborted;
     try {
         const data = await api.json(
-            `/v0/collections/${encodeURIComponent(collectionId)}/files/${encodeURIComponent(id)}?snapshot_id=${encodeURIComponent(selector)}`,
+            `/collections/${encodeURIComponent(collectionId)}/files/${encodeURIComponent(id)}?snapshot_id=${encodeURIComponent(selector)}`,
             { signal: controller?.signal },
         );
         if (!current()) return;
@@ -878,7 +1005,16 @@ function navigate(tab) {
 }
 
 document.addEventListener('submit', async (event) => {
-    if (!['connect-form', 'query-form', 'create-form', 'append-form'].includes(event.target.id))
+    if (
+        ![
+            'connect-form',
+            'database-form',
+            'query-form',
+            'create-form',
+            'append-form',
+            'operation-lookup-form',
+        ].includes(event.target.id)
+    )
         return;
     event.preventDefault();
     const form = event.target,
@@ -895,12 +1031,13 @@ document.addEventListener('submit', async (event) => {
                 state.token = form.elements.token.value;
                 const api = new WorkbenchAPI(state.base, state.token);
                 state.api = api;
-                const capabilities = await api.json('/v0/capabilities', {
+                const capabilities = await api.json('/capabilities', {
                     signal: controller.signal,
                 });
                 if (state.api !== api || controller.signal.aborted) return;
                 state.capabilities = capabilities;
-                await refreshWorkspace();
+                if (capabilities.features?.database_management) await databaseWorkspace();
+                else await refreshWorkspace();
             } catch (error) {
                 if (connectionController !== controller) return;
                 resetSession();
@@ -909,9 +1046,19 @@ document.addEventListener('submit', async (event) => {
             } finally {
                 setBusy(button, false);
             }
-        } else if (form.id === 'query-form') await runQuery();
+        } else if (form.id === 'database-form') await createDatabase(form);
+        else if (form.id === 'query-form') await runQuery();
         else if (form.id === 'append-form') await appendForm(form);
         else if (form.id === 'create-form') await createForm(form);
+        else if (form.id === 'operation-lookup-form') {
+            const epoch = state.epoch;
+            const outcome = await api.json(
+                `${collectionPath()}/operations/${encodeURIComponent(form.elements.operation.value.trim())}`,
+                { allowOutcome: true, signal: connectionController?.signal },
+            );
+            if (state.api === api && state.epoch === epoch && form.isConnected)
+                showModal('Operation outcome', `<pre class="json-block">${json(outcome)}</pre>`);
+        }
     } catch (error) {
         if (state.api === api) report(error);
     }
@@ -922,7 +1069,13 @@ document.addEventListener('click', async (event) => {
     const action = target.dataset.action,
         api = state.api;
     try {
-        if (action === 'nav') navigate(target.dataset.tab);
+        if (action === 'databases') await databaseWorkspace();
+        else if (action.startsWith('database-')) await databaseAction(target);
+        else if (action === 'reconcile-workspace') {
+            await api.json('/reconcile', { method: 'POST', body: {} });
+            if (state.api === api)
+                toast('Database reconciled. Check the original operation outcome.');
+        } else if (action === 'nav') navigate(target.dataset.tab);
         else if (action === 'menu') $('#sidebar').classList.toggle('open');
         else if (action === 'disconnect') {
             if (publicDemo) {
@@ -998,7 +1151,7 @@ document.addEventListener('click', async (event) => {
         } else if (action === 'about')
             showModal(
                 'A pretty powerful workbench.',
-                `<div class="metadata-list"><p>Browse collections, append typed rows, filter your data and explore immutable snapshots.</p><div class="notice">${publicDemo ? 'This public demo runs in your browser. Your rows stay in this tab; Reset demo or reload restores the samples. JSON export is available here. Connect to a server separately for the network SDK and Arrow IPC.' : 'This workspace uses a disposable mock backend because the real C++ engine is not implemented yet. HTTP and Arrow transport are real; mock results do not qualify storage durability.'}</div><p class="small muted">Theme: edit <code>ui/config/theme.json</code>. Changes reload automatically. No token is saved in browser storage.</p></div>`,
+                `<div class="metadata-list"><p>Browse collections, append typed rows, filter your data and explore immutable snapshots.</p><div class="notice">${publicDemo ? 'This public demo runs in your browser. Your rows stay in this tab; Reset demo or reload restores the samples. JSON export is available here. Connect to a server separately for the network SDK and Arrow IPC.' : 'Connected servers report their backend and supported capabilities. Native writes use the C++ engine; mock results are disposable. Physical power-loss durability remains unqualified.'}</div><p class="small muted">Theme: edit <code>ui/config/theme.json</code>. Changes reload automatically. No token is saved in browser storage.</p></div>`,
             );
     } catch (error) {
         if (state.api === api) report(error);
@@ -1042,7 +1195,7 @@ async function bootstrap() {
             ]);
             if (!response.ok) throw new Error('Demo data is unavailable');
             state.api = new BrowserDemoAPI(await response.json());
-            state.capabilities = await state.api.json('/v0/capabilities');
+            state.capabilities = await state.api.json('/capabilities');
             await refreshWorkspace();
         } else login();
         configTimer = setInterval(() => loadTheme(), 2000);

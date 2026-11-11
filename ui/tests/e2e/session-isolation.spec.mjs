@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 
 const token = process.env.GLAMDB_E2E_TOKEN ?? 'e2e-only-local-token';
+const apiRoute = (url) => /^\/(?:collections(?:[/:]|$)|capabilities$)/.test(url.pathname);
 let errors = [];
 test.beforeEach(async ({ page }) => {
     errors = [];
@@ -20,7 +21,7 @@ async function nav(page, name) {
 test('reconnect uses a new session without previous rows snapshot or query', async ({ page }) => {
     let secondSession = false;
     const secondRequests = [];
-    await page.route('**/v0/**', async (route) => {
+    await page.route(apiRoute, async (route) => {
         if (!secondSession) {
             await route.continue();
             return;
@@ -30,7 +31,7 @@ test('reconnect uses a new session without previous rows snapshot or query', asy
         const response = await route.fetch({
             headers: { ...route.request().headers(), authorization: `Bearer ${token}` },
         });
-        if (new URL(route.request().url()).pathname === '/v0/collections') {
+        if (new URL(route.request().url()).pathname === '/collections') {
             const body = await response.json();
             body.items = body.items.filter((c) => c.name === 'pink_inventory');
             body.next_cursor = null;
@@ -92,7 +93,7 @@ for (const change of ['collection', 'snapshot', 'connection']) {
         let release, seen;
         const held = new Promise((resolve) => (release = resolve)),
             captured = new Promise((resolve) => (seen = resolve));
-        await page.route('**/v0/collections/*/files/*?*', async (route) => {
+        await page.route('**/collections/*/files/*?*', async (route) => {
             const response = await route.fetch();
             seen();
             await held;
@@ -140,9 +141,9 @@ test('a late post-create listing cannot restore the previous session', async ({ 
         seen;
     const held = new Promise((resolve) => (release = resolve));
     const captured = new Promise((resolve) => (seen = resolve));
-    await page.route('**/v0/**', async (route) => {
+    await page.route(apiRoute, async (route) => {
         const request = route.request();
-        const collectionList = new URL(request.url()).pathname === '/v0/collections';
+        const collectionList = new URL(request.url()).pathname === '/collections';
         if (collectionList && request.method() === 'POST') {
             created = true;
             await route.fulfill({ json: request.postDataJSON() });
@@ -174,7 +175,7 @@ test('a late post-create listing cannot restore the previous session', async ({ 
             try {
                 return await original.call(this, path, options);
             } finally {
-                if (this.token === oldToken && path.startsWith('/v0/collections?'))
+                if (this.token === oldToken && path.startsWith('/collections?'))
                     window.oldListFinished++;
             }
         };
@@ -208,7 +209,7 @@ test('a late create rejection cannot clear the next session pending identity', a
         seen;
     const held = new Promise((resolve) => (release = resolve));
     const captured = new Promise((resolve) => (seen = resolve));
-    await page.route('**/v0/collections', async (route) => {
+    await page.route('**/collections', async (route) => {
         if (route.request().method() !== 'POST') {
             await route.continue();
             return;
@@ -285,7 +286,7 @@ test('disconnect cancels the previous session Arrow export without a download', 
     let release, seen;
     const held = new Promise((resolve) => (release = resolve));
     const captured = new Promise((resolve) => (seen = resolve));
-    await page.route('**/v0/collections/*/scan', async (route) => {
+    await page.route('**/collections/*/scan', async (route) => {
         const response = await route.fetch();
         seen();
         await held;
@@ -310,7 +311,7 @@ test('disconnect cancels the previous session Arrow export without a download', 
 });
 
 test('an old operation error cannot show private text after disconnect', async ({ page }) => {
-    await page.route('**/v0/collections/*/append', (route) =>
+    await page.route('**/collections/*/append', (route) =>
         route.fulfill({
             status: 503,
             json: { outcome: 'commit_unknown', recovery_required: true },
@@ -341,7 +342,7 @@ test('an old operation error cannot show private text after disconnect', async (
     let release, seen;
     const held = new Promise((resolve) => (release = resolve));
     const captured = new Promise((resolve) => (seen = resolve));
-    await page.route('**/v0/collections/*/operations/*', async (route) => {
+    await page.route('**/collections/*/operations/*', async (route) => {
         seen();
         await held;
         try {

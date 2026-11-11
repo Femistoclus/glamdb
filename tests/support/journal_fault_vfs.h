@@ -1,6 +1,9 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <sqlite3.h>
 #include <string>
 
@@ -17,6 +20,9 @@ public:
     JournalFaultVfs& operator=(const JournalFaultVfs&) = delete;
     void Arm(int journal_delete_number, bool after_unlink);
     void Disarm();
+    void PauseBeforeDelete(int journal_delete_number);
+    bool WaitUntilPaused(std::chrono::milliseconds timeout);
+    void Release();
     const std::string& Name() const
     {
         return name_;
@@ -27,8 +33,15 @@ private:
     sqlite3_vfs* parent_ = nullptr;
     sqlite3_vfs vfs_{};
     std::string name_;
-    std::atomic<int> remaining_{0};
+    // Arm/Disarm and delete selection share one snapshot; the VFS callback
+    // never reads a new fault's unlink mode with an older fault's countdown.
+    std::mutex control_mutex_;
+    int remaining_ = 0;
     bool after_unlink_ = false;
+    int pause_remaining_ = 0;
+    std::condition_variable pause_changed_;
+    bool paused_ = false;
+    bool released_ = true;
 };
 
 } // namespace glamdb::test

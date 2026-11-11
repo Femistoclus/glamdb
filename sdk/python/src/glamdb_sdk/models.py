@@ -65,3 +65,7 @@ class ScanResult:
     profile: Mapping[str, Any]
     identity: Mapping[str, Any]
     raw: Mapping[str, Any]
+
+    @property
+    def next_cursor(self) -> str | None:
+        return self.raw.get("next_cursor")

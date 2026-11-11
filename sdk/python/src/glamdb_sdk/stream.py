@@ -140,6 +140,7 @@ class ScanStream:
         self._reader = None
         self._source = None
         self._closed = False
+        self._failure = None
         self.integrity = "not_complete"
         self.checksum_verified = False
         self.schema: pa.Schema
@@ -222,6 +223,12 @@ class ScanStream:
                 if maximum is not None and maximum > (1024 if field.name == "key" else 1024**2):
                     raise ProtocolError("Arrow string exceeds UTF-8 value byte limit")
 
+    def __del__(self):
+        try:
+            self.close()
+        except BaseException:
+            pass
+
     @property
     def closed(self) -> bool:
         return self._closed
@@ -245,6 +252,8 @@ class ScanStream:
         return self
 
     def __next__(self) -> pa.RecordBatch:
+        if self._failure is not None:
+            raise self._failure
         if self._closed:
             raise StopIteration
         try:
@@ -264,12 +273,14 @@ class ScanStream:
             raise
         except BaseException as exc:
             failure = self._source.failure
-            self._close_preserving_error()
             if failure is not None:
-                raise failure
-            if isinstance(exc, (pa.ArrowException, OSError)):
-                raise IntegrityError("could not decode complete Arrow IPC batch", collection_id=self._budget.collection_id) from exc
-            raise
+                self._failure = failure
+            elif isinstance(exc, (pa.ArrowException, OSError)):
+                self._failure = IntegrityError("could not decode complete Arrow IPC batch", collection_id=self._budget.collection_id)
+            else:
+                self._failure = exc
+            self._close_preserving_error()
+            raise self._failure
 
     def _close_preserving_error(self) -> None:
         try:
@@ -294,3 +305,100 @@ class ScanStream:
         self._on_close(self)
         if first_error is not None:
             raise first_error
+
+
+class PagedScanStream:
+    """Drain independently verified IPC pages without joining their byte streams."""
+
+    def __init__(self, first, next_page, cancel, on_close):
+        self._page = first
+        self._next_page = next_page
+        self._cancel = cancel
+        self._on_close = on_close
+        self._closed = False
+        self._failure = None
+        self._bytes = 0
+        self._verified = True
+        self.schema = first.schema
+        self.snapshot_id = first.snapshot_id
+        self.integrity = 'not_complete'
+        self.checksum_verified = False
+        self._cursor = first._response.headers.get('x-glamdb-next-cursor')
+
+    def __del__(self):
+        try:
+            self.close()
+        except BaseException:
+            pass
+
+    @property
+    def closed(self):
+        return self._closed
+
+    @property
+    def bytes_read(self):
+        return self._bytes + self._page.bytes_read
+
+    def __enter__(self):
+        if self.closed:
+            raise ProtocolError('Arrow stream is already closed')
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._failure is not None:
+            raise self._failure
+        if self.closed:
+            raise StopIteration
+        try:
+            while True:
+                try:
+                    return next(self._page)
+                except StopIteration:
+                    self._verified = self._verified and self._page.integrity == 'verified'
+                    if self._cursor is None:
+                        self.integrity = 'verified' if self._verified else 'complete'
+                        self.checksum_verified = self._verified
+                        self.close()
+                        raise
+                    following = self._next_page(self._cursor)
+                    try:
+                        if (not following.schema.equals(self.schema, check_metadata=True)
+                                or following.snapshot_id != self.snapshot_id):
+                            raise ProtocolError('Arrow scan view changed between pages')
+                        cursor = following._response.headers.get('x-glamdb-next-cursor')
+                        if cursor == self._cursor:
+                            raise ProtocolError('Arrow scan cursor did not advance')
+                    except BaseException:
+                        following.close()
+                        raise
+                    self._bytes += self._page.bytes_read
+                    self._page = following
+                    self._cursor = cursor
+        except StopIteration:
+            raise
+        except BaseException as exc:
+            self._failure = exc
+            try:
+                self.close()
+            except BaseException:
+                pass
+            raise
+
+    def close(self):
+        if self.closed:
+            return
+        self._closed = True
+        try:
+            self._page.close()
+        finally:
+            try:
+                if self._cursor is not None:
+                    self._cancel(self._cursor)
+            finally:
+                self._on_close(self)

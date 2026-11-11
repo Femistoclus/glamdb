@@ -46,13 +46,13 @@ def client(ui):
 
 
 def create(client, cid=CID, name="exact Name"):
-    response = client.post("/v0/collections", json={"collection_id": cid, "name": name, "schema": SCHEMA})
+    response = client.post("/collections", json={"collection_id": cid, "name": name, "schema": SCHEMA})
     assert response.status_code in (200, 201), response.text
     return response.json()
 
 
 def append(client, rows=ROWS, operation_id=OP1, **extra):
-    return client.post(f"/v0/collections/{CID}/append", json={"operation_id": operation_id, "rows": rows, **extra})
+    return client.post(f"/collections/{CID}/append", json={"operation_id": operation_id, "rows": rows, **extra})
 
 
 def test_public_health_and_auth_are_explicitly_mock(ui):
@@ -60,9 +60,9 @@ def test_public_health_and_auth_are_explicitly_mock(ui):
         assert client.get("/health").json() == {
             "status": "ok", "backend": "mock", "mock": True, "durability_validation": "designed"
         }
-        assert client.get("/v0/capabilities").status_code == 401
-        assert client.get("/v0/capabilities", headers={"Authorization": "Bearer wrong"}).status_code == 403
-        capabilities = client.get("/v0/capabilities", headers=AUTH).json()
+        assert client.get("/capabilities").status_code == 401
+        assert client.get("/capabilities", headers={"Authorization": "Bearer wrong"}).status_code == 403
+        capabilities = client.get("/capabilities", headers=AUTH).json()
         assert capabilities["mock"] is True
         assert capabilities["key_unique"] is False
         for feature in ("cow", "compaction", "async_admission", "page_pruning", "bloom_pruning"):
@@ -76,11 +76,11 @@ def test_create_exact_resolve_schema_and_idempotency(client):
     assert info["mode"] == "append"
     UUID(info["table_uuid"])
     assert create(client) == info
-    assert client.get("/v0/collections:resolve", params={"name": "exact Name"}).json() == info
-    assert client.get("/v0/collections:resolve", params={"name": "exact name"}).status_code == 404
-    schema = client.get(f"/v0/collections/{CID}/schema").json()
+    assert client.get("/collections:resolve", params={"name": "exact Name"}).json() == info
+    assert client.get("/collections:resolve", params={"name": "exact name"}).status_code == 404
+    schema = client.get(f"/collections/{CID}/schema").json()
     assert [field["field_id"] for field in schema["fields"]] == [1, 2, 3]
-    assert client.post("/v0/collections", json={"collection_id": OTHER, "name": "exact Name", "schema": SCHEMA}).status_code == 409
+    assert client.post("/collections", json={"collection_id": OTHER, "name": "exact Name", "schema": SCHEMA}).status_code == 409
 
 
 def test_append_preserves_duplicates_and_original_outcome_before_new_precondition(client):
@@ -93,12 +93,12 @@ def test_append_preserves_duplicates_and_original_outcome_before_new_preconditio
     assert later.status_code == 200
     assert append(client, expected_snapshot="999999").json() == original.json()
     assert append(client, [{"key": "different"}]).status_code == 409
-    assert client.get(f"/v0/collections/{CID}/operations/{OP1}").json() == original.json()
-    current = client.post(f"/v0/collections/{CID}/scan", json={}).json()
+    assert client.get(f"/collections/{CID}/operations/{OP1}").json() == original.json()
+    current = client.post(f"/collections/{CID}/scan", json={}).json()
     assert [row["key"] for row in current["rows"]] == ["duplicate", "duplicate", "later"]
-    old = client.post(f"/v0/collections/{CID}/scan", json={"snapshot_id": snapshot}).json()
+    old = client.post(f"/collections/{CID}/scan", json={"snapshot_id": snapshot}).json()
     assert [row["key"] for row in old["rows"]] == ["duplicate", "duplicate"]
-    initial = client.post(f"/v0/collections/{CID}/scan", json={"snapshot_id": None}).json()
+    initial = client.post(f"/collections/{CID}/scan", json={"snapshot_id": None}).json()
     assert initial["rows"] == []
     assert initial["snapshot_id"] is None
 
@@ -111,13 +111,13 @@ def test_precondition_failure_is_an_immutable_registered_outcome(client):
     assert failed.json()["outcome"] == "definitely_not_committed"
     assert failed.json()["error"]["code"] == "SNAPSHOT_CONFLICT"
     assert append(client, [{"key": "later"}], OP2).json() == failed.json()
-    assert client.get(f"/v0/collections/{CID}/operations/{OP2}").json() == failed.json()
+    assert client.get(f"/collections/{CID}/operations/{OP2}").json() == failed.json()
 
 
 def test_json_scan_projection_null_logic_and_lossless_types(client):
     create(client)
     append(client)
-    response = client.post(f"/v0/collections/{CID}/scan", json={
+    response = client.post(f"/collections/{CID}/scan", json={
         "projection": ["at", "n"], "predicate": {"op": "not", "arg": {"op": "eq", "field": "n", "value": "0"}}
     })
     assert response.status_code == 200
@@ -127,7 +127,7 @@ def test_json_scan_projection_null_logic_and_lossless_types(client):
     assert result["profile"]["rows_returned"] == 1
     assert result["profile"]["compressed_bytes_read"] is None
     assert result["profile"]["mock"] is True
-    invalid = client.post(f"/v0/collections/{CID}/scan", json={"predicate": {"op": "eq", "field": "missing", "value": 2}})
+    invalid = client.post(f"/collections/{CID}/scan", json={"predicate": {"op": "eq", "field": "missing", "value": 2}})
     assert invalid.status_code == 422
     assert "error" in invalid.json()
 
@@ -135,7 +135,7 @@ def test_json_scan_projection_null_logic_and_lossless_types(client):
 def test_arrow_is_real_ipc_with_lossless_int64_timestamp_and_integrity_headers(client):
     create(client)
     append(client)
-    response = client.post(f"/v0/collections/{CID}/scan", headers={"Accept": "application/vnd.apache.arrow.stream"}, json={})
+    response = client.post(f"/collections/{CID}/scan", headers={"Accept": "application/vnd.apache.arrow.stream"}, json={})
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/vnd.apache.arrow.stream"
     assert int(response.headers["content-length"]) == len(response.content)
@@ -150,20 +150,20 @@ def test_arrow_is_real_ipc_with_lossless_int64_timestamp_and_integrity_headers(c
 def test_metadata_is_accurate_and_never_invents_parquet_io(client):
     create(client)
     append(client)
-    stats = client.get(f"/v0/collections/{CID}/stats").json()
+    stats = client.get(f"/collections/{CID}/stats").json()
     assert stats["rows"] == 2
     assert stats["data_files"] == 1
     assert stats["compressed_data_bytes"] is None
     assert stats["mock"] is True
-    files = client.get(f"/v0/collections/{CID}/files").json()
+    files = client.get(f"/collections/{CID}/files").json()
     assert len(files["items"]) == 1
     file = files["items"][0]
     assert file["record_count"] == 2
     assert file["synthetic"] is True
     assert file["path"].startswith("mock://")
-    details = client.get(f"/v0/collections/{CID}/files/{file['file_id']}").json()
+    details = client.get(f"/collections/{CID}/files/{file['file_id']}").json()
     assert details["row_groups"][0]["record_count"] == 2
-    explain = client.post(f"/v0/collections/{CID}/explain", json={"projection": ["key"]}).json()
+    explain = client.post(f"/collections/{CID}/explain", json={"projection": ["key"]}).json()
     assert explain["output_columns"] == ["key"]
     assert explain["actual_io"] is None
     assert explain["estimates"]["rows_before_filter"] == 2
@@ -172,18 +172,18 @@ def test_metadata_is_accurate_and_never_invents_parquet_io(client):
 def test_signed_collection_pages_freeze_membership_and_bind_parameters(client):
     create(client)
     create(client, OTHER, "second")
-    first = client.get("/v0/collections", params={"page_size": 1}).json()
+    first = client.get("/collections", params={"page_size": 1}).json()
     assert [item["collection_id"] for item in first["items"]] == [CID]
     cursor = first["next_cursor"]
     create(client, "33333333-3333-4333-8333-333333333333", "third")
-    second = client.get("/v0/collections", params={"page_size": 1, "cursor": cursor}).json()
+    second = client.get("/collections", params={"page_size": 1, "cursor": cursor}).json()
     assert [item["collection_id"] for item in second["items"]] == [OTHER]
     assert second["next_cursor"] is None
-    assert client.get("/v0/collections", params={"page_size": 1, "cursor": cursor}).json() == second
-    mismatch = client.get("/v0/collections", params={"page_size": 2, "cursor": cursor})
+    assert client.get("/collections", params={"page_size": 1, "cursor": cursor}).json() == second
+    mismatch = client.get("/collections", params={"page_size": 2, "cursor": cursor})
     assert mismatch.status_code == 400
     assert mismatch.json()["error"]["code"] == "CURSOR_MISMATCH"
-    assert client.get("/v0/collections", params={"cursor": cursor[:-2] + "zz"}).status_code == 400
+    assert client.get("/collections", params={"cursor": cursor[:-2] + "zz"}).status_code == 400
 
 
 def test_runtime_theme_reload_rejects_unsafe_values_and_confines_static_paths(client, ui):
@@ -205,7 +205,7 @@ def test_runtime_theme_reload_rejects_unsafe_values_and_confines_static_paths(cl
 
 def test_streamed_body_limit_cannot_be_bypassed_without_content_length(ui):
     with TestClient(create_app(token="test-secret", ui_dir=ui, max_body_bytes=128)) as client:
-        response = client.post("/v0/collections", headers={**AUTH, "Content-Type": "application/json"}, content=iter([b"{" + b" " * 150, b"}"]))
+        response = client.post("/collections", headers={**AUTH, "Content-Type": "application/json"}, content=iter([b"{" + b" " * 150, b"}"]))
         assert response.status_code == 413
         assert response.json()["error"]["code"] == "RESOURCE_EXHAUSTED"
 
@@ -214,14 +214,14 @@ def test_development_unknown_holds_writer_and_can_be_explicitly_resolved(ui):
     with TestClient(create_app(token="test-secret", ui_dir=ui, enable_development_faults=True)) as client:
         client.headers.update(AUTH)
         create(client)
-        response = client.post(f"/v0/collections/{CID}/append", headers={"X-GlamDB-Mock-Scenario": "commit_unknown"}, json={"operation_id": OP1, "rows": ROWS})
+        response = client.post(f"/collections/{CID}/append", headers={"X-GlamDB-Mock-Scenario": "commit_unknown"}, json={"operation_id": OP1, "rows": ROWS})
         assert response.status_code == 503
         assert response.json()["outcome"] == "commit_unknown"
         assert response.json()["recovery_required"] is True
-        assert client.get(f"/v0/collections/{CID}/operations/{OP1}").status_code == 503
+        assert client.get(f"/collections/{CID}/operations/{OP1}").status_code == 503
         assert append(client, [{"key": "blocked"}], OP2).status_code == 503
-        assert client.post(f"/v0/collections/{CID}/scan", json={}).json()["rows"] == []
-        resolved = client.post(f"/v0/development/collections/{CID}/operations/{OP1}:resolve", json={"outcome": "committed"})
+        assert client.post(f"/collections/{CID}/scan", json={}).json()["rows"] == []
+        resolved = client.post(f"/development/collections/{CID}/operations/{OP1}:resolve", json={"outcome": "committed"})
         assert resolved.status_code == 200
         assert resolved.json()["outcome"] == "committed"
         assert append(client).json() == resolved.json()
@@ -229,9 +229,9 @@ def test_development_unknown_holds_writer_and_can_be_explicitly_resolved(ui):
 
 def test_disabled_fault_scenarios_never_apply_writes(client):
     create(client)
-    response = client.post(f"/v0/collections/{CID}/append", headers={"X-GlamDB-Mock-Scenario": "commit_unknown"}, json={"operation_id": OP1, "rows": ROWS})
+    response = client.post(f"/collections/{CID}/append", headers={"X-GlamDB-Mock-Scenario": "commit_unknown"}, json={"operation_id": OP1, "rows": ROWS})
     assert response.status_code == 403
-    assert client.get(f"/v0/collections/{CID}/stats").json()["rows"] == 0
+    assert client.get(f"/collections/{CID}/stats").json()["rows"] == 0
 
 
 def test_missing_token_and_nonloopback_require_explicit_configuration(ui):
@@ -243,23 +243,23 @@ def test_file_and_history_cursor_remain_on_original_view(client):
     create(client)
     append(client)
     append(client, [{"key": "second"}], OP2)
-    page = client.get(f"/v0/collections/{CID}/files", params={"page_size": 1}).json()
-    history = client.get(f"/v0/collections/{CID}/snapshots", params={"page_size": 1}).json()
+    page = client.get(f"/collections/{CID}/files", params={"page_size": 1}).json()
+    history = client.get(f"/collections/{CID}/snapshots", params={"page_size": 1}).json()
     append(client, [{"key": "third"}], OP3)
-    next_page = client.get(f"/v0/collections/{CID}/files", params={"page_size": 1, "cursor": page["next_cursor"]}).json()
+    next_page = client.get(f"/collections/{CID}/files", params={"page_size": 1, "cursor": page["next_cursor"]}).json()
     assert [item["snapshot_id"] for item in next_page["items"]] == ["2"]
     assert next_page["next_cursor"] is None
     assert next_page["identity"]["snapshot_id"] == "2"
-    next_history = client.get(f"/v0/collections/{CID}/snapshots", params={"page_size": 1, "cursor": history["next_cursor"]}).json()
+    next_history = client.get(f"/collections/{CID}/snapshots", params={"page_size": 1, "cursor": history["next_cursor"]}).json()
     assert [item["snapshot_id"] for item in next_history["items"]] == ["2"]
     assert next_history["next_cursor"] is None
     create(client, OTHER, "other")
-    foreign = client.get(f"/v0/collections/{OTHER}/files", params={"page_size": 1, "cursor": page["next_cursor"]})
+    foreign = client.get(f"/collections/{OTHER}/files", params={"page_size": 1, "cursor": page["next_cursor"]})
     assert foreign.status_code == 400
     assert foreign.json()["error"]["code"] == "CURSOR_MISMATCH"
-    mismatch = client.get(f"/v0/collections/{CID}/files", params={"page_size": 1, "snapshot_id": "1", "cursor": page["next_cursor"]})
+    mismatch = client.get(f"/collections/{CID}/files", params={"page_size": 1, "snapshot_id": "1", "cursor": page["next_cursor"]})
     assert mismatch.json()["error"]["code"] == "CURSOR_MISMATCH"
-    missing_selector = client.get(f"/v0/collections/{CID}/files", params={"page_size": 1, "snapshot_id": "999999", "cursor": page["next_cursor"]})
+    missing_selector = client.get(f"/collections/{CID}/files", params={"page_size": 1, "snapshot_id": "999999", "cursor": page["next_cursor"]})
     assert missing_selector.status_code == 400
     assert missing_selector.json()["error"]["code"] == "CURSOR_MISMATCH"
 
@@ -270,12 +270,12 @@ def test_cursor_ttl_and_restart_reject_prior_tokens(ui):
         client.headers.update(AUTH)
         create(client)
         create(client, OTHER, "second")
-        cursor = client.get("/v0/collections", params={"page_size": 1}).json()["next_cursor"]
+        cursor = client.get("/collections", params={"page_size": 1}).json()["next_cursor"]
         clock[0] = 1901.0
-        expired = client.get("/v0/collections", params={"page_size": 1, "cursor": cursor})
+        expired = client.get("/collections", params={"page_size": 1, "cursor": cursor})
         assert expired.json()["error"]["code"] == "CURSOR_EXPIRED"
     with TestClient(create_app(token="test-secret", ui_dir=ui)) as restarted:
-        expired = restarted.get("/v0/collections", headers=AUTH, params={"page_size": 1, "cursor": cursor})
+        expired = restarted.get("/collections", headers=AUTH, params={"page_size": 1, "cursor": cursor})
         assert expired.json()["error"]["code"] == "CURSOR_EXPIRED"
 
 
@@ -283,14 +283,14 @@ def test_lost_response_resolves_original_committed_receipt_without_reappending(u
     with TestClient(create_app(token="test-secret", ui_dir=ui, enable_development_faults=True)) as client:
         client.headers.update(AUTH)
         create(client)
-        response = client.post(f"/v0/collections/{CID}/append", headers={"X-GlamDB-Mock-Scenario": "lost_response"}, json={"operation_id": OP1, "rows": ROWS})
+        response = client.post(f"/collections/{CID}/append", headers={"X-GlamDB-Mock-Scenario": "lost_response"}, json={"operation_id": OP1, "rows": ROWS})
         assert response.status_code == 503
         assert response.json()["outcome"] == "commit_unknown"
-        found = client.get(f"/v0/collections/{CID}/operations/{OP1}")
+        found = client.get(f"/collections/{CID}/operations/{OP1}")
         assert found.status_code == 200
         assert found.json()["outcome"] == "committed"
         assert append(client).json() == found.json()
-        assert client.get(f"/v0/collections/{CID}/stats").json()["rows"] == 2
+        assert client.get(f"/collections/{CID}/stats").json()["rows"] == 2
 
 
 def test_invalid_input_does_not_bind_id_and_unknown_absence_is_not_404(ui):
@@ -298,12 +298,12 @@ def test_invalid_input_does_not_bind_id_and_unknown_absence_is_not_404(ui):
         client.headers.update(AUTH)
         create(client)
         assert append(client, []).status_code == 422
-        assert client.get(f"/v0/collections/{CID}/operations/{OP1}").status_code == 404
-        response = client.post(f"/v0/collections/{CID}/append", headers={"X-GlamDB-Mock-Scenario": "commit_unknown"}, json={"operation_id": OP1, "rows": ROWS})
+        assert client.get(f"/collections/{CID}/operations/{OP1}").status_code == 404
+        response = client.post(f"/collections/{CID}/append", headers={"X-GlamDB-Mock-Scenario": "commit_unknown"}, json={"operation_id": OP1, "rows": ROWS})
         assert response.status_code == 503
-        assert client.get(f"/v0/collections/{CID}/operations/{OP2}").status_code == 503
+        assert client.get(f"/collections/{CID}/operations/{OP2}").status_code == 503
         assert append(client, [{"key": "different"}]).status_code == 409
-        failed = client.post(f"/v0/development/collections/{CID}/operations/{OP1}:resolve", json={"outcome": "definitely_not_committed"})
+        failed = client.post(f"/development/collections/{CID}/operations/{OP1}:resolve", json={"outcome": "definitely_not_committed"})
         assert failed.status_code == 503
         assert failed.json()["outcome"] == "definitely_not_committed"
         assert append(client).json() == failed.json()
@@ -318,26 +318,26 @@ def test_invalid_input_does_not_bind_id_and_unknown_absence_is_not_404(ui):
 ])
 def test_invalid_scans_reject_even_with_empty_data(client, body):
     create(client)
-    response = client.post(f"/v0/collections/{CID}/scan", json=body)
+    response = client.post(f"/collections/{CID}/scan", json=body)
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "INVALID_ARGUMENT"
 
 
 def test_empty_zero_limit_and_zero_projection_have_real_arrow_schema(client):
     create(client)
-    empty = client.post(f"/v0/collections/{CID}/scan", headers={"Accept": "application/vnd.apache.arrow.stream"}, json={})
+    empty = client.post(f"/collections/{CID}/scan", headers={"Accept": "application/vnd.apache.arrow.stream"}, json={})
     assert empty.headers["x-glamdb-snapshot-id"] == "initial"
     table = pa.ipc.open_stream(empty.content).read_all()
     assert table.num_rows == 0
     assert table.column_names == ["key", "n", "at"]
     append(client)
-    zero = client.post(f"/v0/collections/{CID}/scan", json={"limit": 0}).json()
+    zero = client.post(f"/collections/{CID}/scan", json={"limit": 0}).json()
     assert zero["rows"] == []
     assert zero["snapshot_id"] == "1"
-    projected = client.post(f"/v0/collections/{CID}/scan", json={"projection": []}).json()
+    projected = client.post(f"/collections/{CID}/scan", json={"projection": []}).json()
     assert projected["rows"] == [{}, {}]
     assert projected["schema"]["fields"] == []
-    arrow = client.post(f"/v0/collections/{CID}/scan", headers={"Accept": "application/vnd.apache.arrow.stream"}, json={"projection": []})
+    arrow = client.post(f"/collections/{CID}/scan", headers={"Accept": "application/vnd.apache.arrow.stream"}, json={"projection": []})
     table = pa.ipc.open_stream(arrow.content).read_all()
     assert table.num_rows == 2
     assert table.num_columns == 0
@@ -351,9 +351,9 @@ def test_state_and_response_limits_reject_before_publication(ui):
         limited = append(client, [{"key": "third"}], OP2)
         assert limited.status_code == 429
         assert limited.json()["outcome"] == "definitely_not_committed"
-        assert client.get(f"/v0/collections/{CID}/stats").json()["rows"] == 2
-        assert client.post(f"/v0/collections/{CID}/scan", json={}).status_code == 413
-        assert client.post(f"/v0/collections/{CID}/scan", headers={"Accept": "application/vnd.apache.arrow.stream"}, json={}).status_code == 413
+        assert client.get(f"/collections/{CID}/stats").json()["rows"] == 2
+        assert client.post(f"/collections/{CID}/scan", json={}).status_code == 413
+        assert client.post(f"/collections/{CID}/scan", headers={"Accept": "application/vnd.apache.arrow.stream"}, json={}).status_code == 413
 
 
 @pytest.mark.parametrize("section,key,value", [
@@ -392,14 +392,14 @@ def test_asset_symlink_cannot_escape_ui(client, ui):
 def test_seed_uses_append_semantics_and_disposable_state(ui):
     with TestClient(create_app(token="test-secret", ui_dir=ui, seed_demo=True)) as client:
         client.headers.update(AUTH)
-        collections = client.get("/v0/collections").json()["items"]
+        collections = client.get("/collections").json()["items"]
         assert [item["name"] for item in collections] == ["dreamhouse_events", "pink_inventory"]
         cid = collections[0]["collection_id"]
-        rows = client.post(f"/v0/collections/{cid}/scan", json={}).json()["rows"]
+        rows = client.post(f"/collections/{cid}/scan", json={}).json()["rows"]
         assert [row["key"] for row in rows] == ["dream-001", "dream-002", "dream-001", "dream-004"]
-        assert len(client.get(f"/v0/collections/{cid}/snapshots").json()["items"]) == 2
+        assert len(client.get(f"/collections/{cid}/snapshots").json()["items"]) == 2
     with TestClient(create_app(token="test-secret", ui_dir=ui)) as fresh:
-        assert fresh.get("/v0/collections", headers=AUTH).json()["items"] == []
+        assert fresh.get("/collections", headers=AUTH).json()["items"] == []
 
 
 def test_retained_state_budget_rejects_new_input_and_preserves_original_receipts(ui):
@@ -413,7 +413,7 @@ def test_retained_state_budget_rejects_new_input_and_preserves_original_receipts
         assert response.json()["outcome"] == "definitely_not_committed"
         assert response.json()["error"]["code"] == "RESOURCE_EXHAUSTED"
         assert append(client, [{"key": "first"}]).json() == original.json()
-        assert client.get(f"/v0/collections/{CID}/stats").json()["rows"] == 1
+        assert client.get(f"/collections/{CID}/stats").json()["rows"] == 1
 
 
 def test_cursor_ttl_is_not_extended_by_advancing_a_page(ui):
@@ -423,11 +423,11 @@ def test_cursor_ttl_is_not_extended_by_advancing_a_page(ui):
         create(client)
         create(client, OTHER, "second")
         create(client, "33333333-3333-4333-8333-333333333333", "third")
-        first = client.get("/v0/collections", params={"page_size": 1}).json()
+        first = client.get("/collections", params={"page_size": 1}).json()
         clock[0] = 1899.0
-        second = client.get("/v0/collections", params={"page_size": 1, "cursor": first["next_cursor"]}).json()
+        second = client.get("/collections", params={"page_size": 1, "cursor": first["next_cursor"]}).json()
         clock[0] = 1901.0
-        expired = client.get("/v0/collections", params={"page_size": 1, "cursor": second["next_cursor"]})
+        expired = client.get("/collections", params={"page_size": 1, "cursor": second["next_cursor"]})
         assert expired.status_code == 400
         assert expired.json()["error"]["code"] == "CURSOR_EXPIRED"
 
@@ -435,13 +435,13 @@ def test_cursor_ttl_is_not_extended_by_advancing_a_page(ui):
 def test_bearer_token_does_not_let_the_caller_forge_cursor_membership(client):
     create(client)
     create(client, OTHER, "second")
-    cursor = client.get("/v0/collections", params={"page_size": 1}).json()["next_cursor"]
+    cursor = client.get("/collections", params={"page_size": 1}).json()["next_cursor"]
     encoded, _signature = cursor.split(".")
     payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
     payload["position"] = 0
     forged = base64.urlsafe_b64encode(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).rstrip(b"=")
     public_derivation = hmac.digest(b"test-secret", b"glamdb-disposable-mock-cursor-v1", "sha256")
     signature = base64.urlsafe_b64encode(hmac.digest(public_derivation, forged, "sha256")).rstrip(b"=")
-    response = client.get("/v0/collections", params={"page_size": 1, "cursor": (forged + b"." + signature).decode()})
+    response = client.get("/collections", params={"page_size": 1, "cursor": (forged + b"." + signature).decode()})
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "INVALID_ARGUMENT"

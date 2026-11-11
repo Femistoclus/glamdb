@@ -12,6 +12,7 @@ cd "$root"
 build="$root/build/ci-$profile"
 prefix="$root/.deps/ci-$profile/install"
 logs="$root/artifacts/native-$profile"
+python="${GLAMDB_NATIVE_PYTHON:-$root/.venv/bin/python}"
 mkdir -p "$logs"
 exec > >(tee "$logs/$stage.log") 2>&1
 trap 'result=$?; if (( result != 0 )); then echo "FAILED: $profile/$stage (exit $result); see the command output above."; fi' EXIT
@@ -90,8 +91,20 @@ case "$stage" in
     cmake --build "$build-deps" --parallel 2
     ;;
   build)
+    client_override=()
+    if [[ $profile == normal || $profile == msan ]]; then
+      # System OpenSSL is not MSan-instrumented. Exercise TLS through an ordinary
+      # standalone client while keeping the MSan server and core instrumented.
+      cmake -S apps/cli -B "$build-client" -G Ninja \
+        -DCMAKE_CXX_COMPILER=clang++-18 -DCMAKE_BUILD_TYPE=Debug
+      cmake --build "$build-client" --parallel 2
+      if [[ $profile == msan ]]; then
+        client_override=("-DGLAMDB_TEST_CLI_EXECUTABLE=$build-client/glamdb-cli")
+      fi
+    fi
     cmake --preset local -B "$build" "${configure[@]}" \
       -DGLAMDB_BUILD_STORAGE=ON -DGLAMDB_BUILD_IO_PROBE=ON -DGLAMDB_IO_ONLY=OFF -DBUILD_TESTING=ON \
+      -DGLAMDB_BUILD_ADMIN=ON "-DPython3_EXECUTABLE=$python" "${client_override[@]}" \
       -DCMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE=PRE_TEST
     cmake --build "$build" --parallel 2
     if [[ $profile == normal ]]; then
@@ -99,11 +112,16 @@ case "$stage" in
       # backend; coordinator tests use the fake storage double.
       cmake --preset local -B "$build-nostorage" "${configure[@]}" \
         -DGLAMDB_BUILD_STORAGE=OFF -DGLAMDB_IO_ONLY=OFF -DBUILD_TESTING=ON \
+        -DGLAMDB_BUILD_ADMIN=ON "-DPython3_EXECUTABLE=$python" \
         -DCMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE=PRE_TEST
       cmake --build "$build-nostorage" --parallel 2
     fi
     ;;
   test)
+    # Missing dependencies must fail before CTest can silently omit SDK coverage.
+    "$python" -c 'import glamdb_sdk, httpx, pyarrow, jsonschema'
+    export GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1
+    export GLAMDB_E2E_PYTHON="$python"
     result=0
     run_tests() {
       local directory=$1 name=$2

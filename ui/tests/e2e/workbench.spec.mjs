@@ -199,7 +199,7 @@ test('unresolved append stays unresolved and retry keeps operation identity', as
     await createCollection(page, `unknown_${Date.now()}`);
     let firstId;
     let attempts = 0;
-    await page.route('**/v0/collections/*/append', async (route) => {
+    await page.route('**/collections/*/append', async (route) => {
         attempts++;
         const body = route.request().postDataJSON();
         if (attempts === 1) firstId = body.operation_id;
@@ -229,7 +229,7 @@ test('lost create response resolves exact original identity instead of creating 
     await login(page);
     let posts = 0;
     let originalId;
-    await page.route('**/v0/collections', async (route) => {
+    await page.route('**/collections', async (route) => {
         if (route.request().method() !== 'POST') {
             await route.continue();
             return;
@@ -255,7 +255,7 @@ test('late pending append response cannot decorate a different collection dialog
     let release, seen;
     const held = new Promise((resolve) => (release = resolve));
     const captured = new Promise((resolve) => (seen = resolve));
-    await page.route('**/v0/collections/*/append', async (route) => {
+    await page.route('**/collections/*/append', async (route) => {
         const response = await route.fetch();
         seen();
         await held;
@@ -289,7 +289,7 @@ test('pending append keeps its identity after an append in another collection', 
     await createCollection(page, name);
     let pendingId, pendingPath;
     let attempts = 0;
-    await page.route('**/v0/collections/*/append', async (route) => {
+    await page.route('**/collections/*/append', async (route) => {
         if (!pendingPath) pendingPath = new URL(route.request().url()).pathname;
         if (new URL(route.request().url()).pathname !== pendingPath) {
             await route.continue();
@@ -346,7 +346,7 @@ test('late scan cannot replace a newer query in the same collection', async ({ p
     let scans = 0;
     const held = new Promise((resolve) => (release = resolve)),
         captured = new Promise((resolve) => (seen = resolve));
-    await page.route('**/v0/collections/*/scan', async (route) => {
+    await page.route('**/collections/*/scan', async (route) => {
         scans++;
         if (scans !== 1) {
             await route.continue();
@@ -416,7 +416,7 @@ test('mismatched create resolution keeps original UUID and frozen payload', asyn
     await login(page);
     let id;
     let attempts = 0;
-    await page.route('**/v0/collections', async (route) => {
+    await page.route('**/collections', async (route) => {
         if (route.request().method() !== 'POST') {
             await route.continue();
             return;
@@ -427,7 +427,7 @@ test('mismatched create resolution keeps original UUID and frozen payload', asyn
         else expect(body.collection_id).toBe(id);
         await route.abort('failed');
     });
-    await page.route('**/v0/collections:resolve?*', (route) =>
+    await page.route('**/collections:resolve?*', (route) =>
         route.fulfill({
             contentType: 'application/json',
             body: JSON.stringify({
@@ -452,12 +452,12 @@ test('metadata refresh failure cannot erase a committed append receipt', async (
     await login(page);
     await nav(page, 'Data studio');
     let appended = false;
-    await page.route('**/v0/collections/*/append', async (route) => {
+    await page.route('**/collections/*/append', async (route) => {
         const response = await route.fetch();
         appended = true;
         await route.fulfill({ response });
     });
-    await page.route('**/v0/collections/*/stats?*', async (route) => {
+    await page.route('**/collections/*/stats?*', async (route) => {
         if (!appended) {
             await route.continue();
             return;
@@ -507,7 +507,7 @@ test('duplicate create is a terminal rejection and allows a corrected name', asy
 test('a terminal outcome survives an older unresolved status response', async ({ page }) => {
     await login(page);
     await nav(page, 'Data studio');
-    await page.route('**/v0/collections/*/append', async (route) => {
+    await page.route('**/collections/*/append', async (route) => {
         await route.fetch();
         await route.fulfill({
             status: 503,
@@ -531,7 +531,7 @@ test('a terminal outcome survives an older unresolved status response', async ({
     let checks = 0;
     const held = new Promise((resolve) => (release = resolve)),
         captured = new Promise((resolve) => (seen = resolve));
-    await page.route('**/v0/collections/*/operations/*', async (route) => {
+    await page.route('**/collections/*/operations/*', async (route) => {
         checks++;
         if (checks !== 1) {
             await route.continue();
@@ -557,7 +557,7 @@ test('resolved append disables its old retry button before a new write', async (
     await login(page);
     await nav(page, 'Data studio');
     let posts = 0;
-    await page.route('**/v0/collections/*/append', async (route) => {
+    await page.route('**/collections/*/append', async (route) => {
         posts++;
         await route.fetch();
         await route.fulfill({

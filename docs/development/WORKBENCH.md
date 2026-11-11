@@ -1,10 +1,10 @@
 # Workbench: run, use, configure, and test
 
-The implemented participant-four slice contains independent verification tools,
-a standalone Python network SDK, and a browser workbench. A **disposable mock**
-supplies the missing production-file/scanner/HTTP dependencies. It does not write Parquet or an
-Iceberg/SQLite catalog. All mock data and operation outcomes vanish on restart.
-Real storage integration and qualification remain open.
+The browser workbench and Python SDK can connect to the [native HTTP server](HTTP_SERVER.md)
+for persistent create/append/scan operations. Native capabilities identify
+metadata and explain operations that remain unavailable. The **disposable mock**
+is a separate development profile: it writes no Parquet or catalog, and all its
+data and outcomes vanish on restart. Storage power-loss qualification remains open.
 
 For token-free access by external visitors, use the separately packaged
 [public browser demo](PUBLIC_DEMO.md). That mode keeps data in each page and

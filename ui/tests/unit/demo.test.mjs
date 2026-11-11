@@ -13,19 +13,19 @@ const schema = {
 };
 async function fresh() {
     const api = new BrowserDemoAPI();
-    await api.json('/v0/collections', {
+    await api.json('/collections', {
         method: 'POST',
         body: { collection_id: cid, name: 'test', schema },
     });
     return api;
 }
 const append = (api, rows, id = op, extra = {}) =>
-    api.json(`/v0/collections/${cid}/append`, {
+    api.json(`/collections/${cid}/append`, {
         method: 'POST',
         body: { operation_id: id, rows, ...extra },
     });
 const scan = (api, body = {}) =>
-    api.json(`/v0/collections/${cid}/scan`, {
+    api.json(`/collections/${cid}/scan`, {
         method: 'POST',
         body: { projection: ['key', 'n', 'at'], ...body },
     });
@@ -33,8 +33,8 @@ const scan = (api, body = {}) =>
 test('public demo has isolated state and honest capabilities', async () => {
     const api = await fresh(),
         other = new BrowserDemoAPI();
-    assert.equal((await other.json('/v0/collections')).items.length, 0);
-    const caps = await api.json('/v0/capabilities');
+    assert.equal((await other.json('/collections')).items.length, 0);
+    const caps = await api.json('/capabilities');
     assert.equal(caps.browser_demo, true);
     assert.equal(caps.durable, false);
     assert.equal(caps.arrow_ipc, false);
@@ -73,15 +73,15 @@ test('initial, historical, zero-limit and fixed pagination remain stable', async
     const empty = await scan(api, { limit: 0 });
     assert.equal(empty.rows.length, 0);
     assert.equal(empty.schema.fields.length, 3);
-    const page = await api.json(`/v0/collections/${cid}/snapshots?page_size=1`);
+    const page = await api.json(`/collections/${cid}/snapshots?page_size=1`);
     await append(api, [{ key: 'c', n: '3', at: null }], crypto.randomUUID());
     const next = await api.json(
-        `/v0/collections/${cid}/snapshots?page_size=1&cursor=${page.next_cursor}`,
+        `/collections/${cid}/snapshots?page_size=1&cursor=${page.next_cursor}`,
     );
     assert.equal(next.items.length, 1);
     assert.equal(next.next_cursor, null);
     await assert.rejects(
-        () => api.json(`/v0/collections/${cid}/snapshots?page_size=2&cursor=${page.next_cursor}`),
+        () => api.json(`/collections/${cid}/snapshots?page_size=2&cursor=${page.next_cursor}`),
         (e) => e.status === 400,
     );
 });
@@ -136,7 +136,7 @@ test('definite failure is retained, invalid schema and collection conflicts reje
     assert.equal(failed.outcome, 'definitely_not_committed');
     await assert.rejects(
         () =>
-            api.json('/v0/collections', {
+            api.json('/collections', {
                 method: 'POST',
                 body: { collection_id: crypto.randomUUID(), name: 'test', schema },
             }),
@@ -144,7 +144,7 @@ test('definite failure is retained, invalid schema and collection conflicts reje
     );
     await assert.rejects(
         () =>
-            api.json('/v0/collections', {
+            api.json('/collections', {
                 method: 'POST',
                 body: {
                     collection_id: crypto.randomUUID(),
@@ -157,7 +157,7 @@ test('definite failure is retained, invalid schema and collection conflicts reje
 });
 test('resource admission does not partially change a view', async () => {
     const api = new BrowserDemoAPI([], { maxRows: 1 });
-    await api.json('/v0/collections', {
+    await api.json('/collections', {
         method: 'POST',
         body: { collection_id: cid, name: 'test', schema },
     });
@@ -165,12 +165,12 @@ test('resource admission does not partially change a view', async () => {
     const rejectedId = crypto.randomUUID();
     const rejection = await append(api, [{ key: 'b', n: '2', at: null }], rejectedId);
     assert.equal(rejection.outcome, 'definitely_not_committed');
-    assert.deepEqual(await api.json(`/v0/collections/${cid}/operations/${rejectedId}`), rejection);
+    assert.deepEqual(await api.json(`/collections/${cid}/operations/${rejectedId}`), rejection);
     assert.equal((await scan(api)).rows.length, 1);
 });
 test('estimated byte capacity keeps reads and original retries usable', async () => {
     const api = new BrowserDemoAPI([], { maxBytes: 20000 });
-    await api.json('/v0/collections', {
+    await api.json('/collections', {
         method: 'POST',
         body: { collection_id: cid, name: 'test', schema },
     });

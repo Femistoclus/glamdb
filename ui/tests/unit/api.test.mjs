@@ -44,7 +44,7 @@ test('token is a header, never part of URL, and HTTP errors preserve code', asyn
         },
     );
     await assert.rejects(
-        client.json('/v0/collections/x'),
+        client.json('/collections/x'),
         (error) => error instanceof APIError && error.code === 'NO_SUCH_COLLECTION',
     );
     assert.equal(received.options.headers.Authorization, 'Bearer private-token');
@@ -59,7 +59,7 @@ test('unknown outcome remains unresolved even with HTTP503', async () => {
                 status: 503,
             }),
     );
-    const result = await client.json('/v0/collections/a/append', {
+    const result = await client.json('/collections/a/append', {
         method: 'POST',
         body: { rows: [] },
         allowOutcome: true,
@@ -74,13 +74,13 @@ test('oversized and malformed responses are errors, never empty success', async 
         async () => new Response('x'.repeat(32)),
         8,
     );
-    await assert.rejects(large.json('/v0/capabilities'), /too large/i);
+    await assert.rejects(large.json('/capabilities'), /too large/i);
     const invalid = new WorkbenchAPI(
         'http://localhost',
         'token',
         async () => new Response('not-json'),
     );
-    await assert.rejects(invalid.json('/v0/capabilities'), /JSON/);
+    await assert.rejects(invalid.json('/capabilities'), /JSON/);
 });
 test('credentials in base URL and insecure nonlocal HTTP are rejected', () => {
     assert.throws(() => new WorkbenchAPI('https://user:password@example.com', 't'));
@@ -100,7 +100,7 @@ for (const [encoding, compress] of [
             { body, headers: { 'Content-Encoding': encoding } },
             async (base) => {
                 const client = new WorkbenchAPI(base, 'token');
-                assert.deepEqual(await client.json('/v0/collections'), payload);
+                assert.deepEqual(await client.json('/collections'), payload);
             },
         );
     });
@@ -114,7 +114,7 @@ for (const [encoding, compress] of [
             async (base) => {
                 const client = new WorkbenchAPI(base, 'token');
                 assert.deepEqual(
-                    await client.json('/v0/collections/a/append', {
+                    await client.json('/collections/a/append', {
                         method: 'POST',
                         body: { rows: [] },
                         allowOutcome: true,
@@ -131,7 +131,7 @@ test('real Fetch enforces the decoded byte limit on compressed responses', async
     assert.ok(body.byteLength < 64);
     await withHTTPResponse({ body, headers: { 'Content-Encoding': 'gzip' } }, async (base) => {
         const client = new WorkbenchAPI(base, 'token', globalThis.fetch.bind(globalThis), 64);
-        await assert.rejects(client.json('/v0/capabilities'), /too large/i);
+        await assert.rejects(client.json('/capabilities'), /too large/i);
     });
 });
 
@@ -146,7 +146,7 @@ test('real Fetch accepts compressed overhead beyond the decoded byte allowance',
             globalThis.fetch.bind(globalThis),
             decoded.byteLength,
         );
-        assert.deepEqual(await client.json('/v0/capabilities'), { ok: true });
+        assert.deepEqual(await client.json('/capabilities'), { ok: true });
     });
 });
 
@@ -163,7 +163,7 @@ test('uncompressed responses still reject a mismatched Content-Length', async ()
                     },
                 }),
         );
-        await assert.rejects(client.json('/v0/capabilities'), /interrupted/i);
+        await assert.rejects(client.json('/capabilities'), /interrupted/i);
     }
 });
 
@@ -172,7 +172,7 @@ test('real Fetch rejects a truncated uncompressed response', async () => {
         { body: Buffer.from('{"ok":true}'), headers: { 'Content-Length': '12' } },
         async (base) => {
             const client = new WorkbenchAPI(base, 'token');
-            await assert.rejects(client.json('/v0/capabilities'), /interrupted|terminated/i);
+            await assert.rejects(client.json('/capabilities'), /interrupted|terminated/i);
         },
     );
 });
@@ -181,7 +181,7 @@ test('Arrow downloads forward cancellation to the real HTTP request', async () =
     await withHTTPResponse({ body: Buffer.from('arrow') }, async (base) => {
         const client = new WorkbenchAPI(base, 'token');
         await assert.rejects(
-            client.arrow('/v0/collections/a/scan', {}, { signal: AbortSignal.abort() }),
+            client.arrow('/collections/a/scan', {}, { signal: AbortSignal.abort() }),
             { name: 'AbortError' },
         );
     });

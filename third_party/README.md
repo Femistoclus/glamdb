@@ -6,6 +6,8 @@
 | Iceberg C++ | 0.4.0 | `iceberg-cpp/` submodule. |
 | GoogleTest | 1.17.0 | `googletest/` submodule; built with project tests. |
 | CLI11 | 2.7.2 | `cli11/` submodule; header-only CLI parser. |
+| Asio | 1.36.0 | `asio/` submodule; standalone application networking. |
+| nlohmann/json | 3.12.0 | `json/` submodule; application JSON codec. |
 | SQLite | 3.54.1 | Official amalgamation archive. |
 
 Exact commits, URLs, and SQLite checksums are recorded in [lock.json](lock.json).

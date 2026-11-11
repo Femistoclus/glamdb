@@ -1,8 +1,10 @@
 import { defineConfig } from '@playwright/test';
 
+const python = process.env.GLAMDB_E2E_PYTHON ?? '../.venv/bin/python';
 const port = process.env.GLAMDB_E2E_PORT ?? '8766';
 export default defineConfig({
     testDir: './tests/e2e',
+    testMatch: process.env.GLAMDB_NATIVE_SERVER ? 'native.spec.mjs' : '**/*.spec.mjs',
     timeout: 30000,
     expect: { timeout: 7000 },
     fullyParallel: false,
@@ -24,13 +26,15 @@ export default defineConfig({
     },
     webServer: [
         {
-            command: '../.venv/bin/python tests/e2e/start-server.py',
+            command: process.env.GLAMDB_NATIVE_SERVER
+                ? `${python} tests/e2e/start-native.py`
+                : `${python} tests/e2e/start-server.py`,
             url: `http://127.0.0.1:${port}/healthz`,
             timeout: 30000,
             reuseExistingServer: false,
         },
         {
-            command: '../.venv/bin/python tests/e2e/start-static.py',
+            command: `${python} tests/e2e/start-static.py`,
             url: `http://127.0.0.1:${process.env.GLAMDB_STATIC_PORT ?? '8768'}/glamdb/`,
             timeout: 30000,
             reuseExistingServer: false,

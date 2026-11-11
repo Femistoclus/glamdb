@@ -346,7 +346,7 @@ Result<NormalizedInput> Normalize(const SchemaSpec& schema, std::string_view col
                 EncodeCell(out, schema.fields[i], normalized[i]);
                 Require(out.bytes.size() - before <= 2ULL * 1024 * 1024 &&
                         out.bytes.size() - header_size <= 16ULL * 1024 * 1024,
-                    "RESOURCE_EXHAUSTED",
+                    "INPUT_TOO_LARGE",
                     "append exceeds decoded input limit");
             }
             result.rows.push_back(std::move(normalized));

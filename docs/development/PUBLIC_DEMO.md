@@ -16,7 +16,7 @@ Every page instance owns an isolated bounded BrowserDemoAPI simulation. Visitors
 can create fixed-schema collections, append duplicate rows, build typed filters,
 read initial/historical snapshots, inspect synthetic metadata and export their
 result as JSON. Reset demo or reload recreates the two sample collections.
-There is no localStorage/sessionStorage persistence and no /v0/ network request;
+There is no localStorage/sessionStorage persistence and no API network request;
 data is not sent to the project owner's machine or another visitor.
 
 This is a product demo. It is not a network database endpoint, durable storage,

@@ -10,3 +10,9 @@
 [submodule "third_party/cli11"]
 	path = third_party/cli11
 	url = https://github.com/CLIUtils/CLI11.git
+[submodule "third_party/asio"]
+	path = third_party/asio
+	url = https://github.com/chriskohlhoff/asio.git
+[submodule "third_party/json"]
+	path = third_party/json
+	url = https://github.com/nlohmann/json.git

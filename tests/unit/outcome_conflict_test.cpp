@@ -2,7 +2,7 @@
 // the wire. It must not carry a terminal outcome for the original operation,
 // which may be committed or still unknown.
 
-#include "apps/glamdb/outcome_json.h"
+#include "apps/transport/outcome_json.h"
 
 #include "core/api/codec.h"
 #include "tests/support/temp_dir.h"

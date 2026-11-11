@@ -69,5 +69,13 @@ class AuthenticationError(HTTPError):
     pass
 
 
+class OutcomeUnknownError(HTTPError):
+    """A server write failed to return an authoritative outcome.
+
+    Preserve collection/operation identity and reconcile or look up the original
+    request. This exception does not authorize a retry under a new identity.
+    """
+
+
 class IntegrityError(ProtocolError):
     """The complete Arrow body failed framing, byte count, or digest checks."""

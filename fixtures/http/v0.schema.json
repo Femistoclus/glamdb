@@ -1,0 +1,1107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GlamDB native HTTP v0 wire types",
+  "$defs": {
+    "int64": {
+      "type": "string",
+      "pattern": "^-?[0-9]+$",
+      "description": "Signed 64-bit decimal; semantic range checked by the server."
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "field": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "string",
+            "bool",
+            "int64",
+            "float64",
+            "timestamp_us_utc"
+          ]
+        },
+        "nullable": {
+          "type": "boolean"
+        },
+        "field_id": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    "schema": {
+      "type": "object",
+      "properties": {
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/field"
+          },
+          "minItems": 1,
+          "maxItems": 256
+        }
+      },
+      "required": [
+        "fields"
+      ],
+      "additionalProperties": false
+    },
+    "create": {
+      "type": "object",
+      "properties": {
+        "collection_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "name": {
+          "type": "string"
+        },
+        "schema": {
+          "$ref": "#/$defs/schema"
+        },
+        "mode": {
+          "const": "append"
+        }
+      },
+      "required": [
+        "collection_id",
+        "name",
+        "schema"
+      ],
+      "additionalProperties": false
+    },
+    "cell": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "row": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/cell"
+      }
+    },
+    "append": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/row"
+          },
+          "minItems": 1,
+          "maxItems": 10000
+        },
+        "expected_snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operation_id",
+        "rows"
+      ],
+      "additionalProperties": false
+    },
+    "predicate": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "true"
+            }
+          },
+          "required": [
+            "op"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "enum": [
+                "eq",
+                "ne",
+                "lt",
+                "le",
+                "gt",
+                "ge"
+              ]
+            },
+            "field": {
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/cell"
+            }
+          },
+          "required": [
+            "op",
+            "field",
+            "value"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "scan": {
+      "type": "object",
+      "properties": {
+        "projection": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "uniqueItems": true
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "predicate": {
+          "$ref": "#/$defs/predicate"
+        },
+        "snapshot_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "const": "initial"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "batch_rows": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "errorDetail": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retry_hint": {
+          "enum": [
+            "SameIdAfterReconcile",
+            "NewOperationId",
+            "FixInput",
+            "OperatorAction"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retry_hint"
+      ],
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/errorDetail"
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "additionalProperties": false
+    },
+    "identity": {
+      "type": "object",
+      "properties": {
+        "store_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "collection_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "table_uuid": {
+          "$ref": "#/$defs/uuid"
+        },
+        "metadata_location": {
+          "type": "string"
+        },
+        "current_snapshot_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_id": {
+          "type": "integer"
+        },
+        "spec_id": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "store_id",
+        "collection_id",
+        "table_uuid",
+        "metadata_location",
+        "current_snapshot_id",
+        "schema_id",
+        "spec_id"
+      ],
+      "additionalProperties": false
+    },
+    "collection": {
+      "type": "object",
+      "properties": {
+        "collection_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "name": {
+          "type": "string"
+        },
+        "table_uuid": {
+          "$ref": "#/$defs/uuid"
+        },
+        "schema": {
+          "$ref": "#/$defs/schema"
+        },
+        "mode": {
+          "const": "append"
+        },
+        "creation_sequence": {
+          "$ref": "#/$defs/int64"
+        },
+        "current_snapshot_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "collection_id",
+        "name",
+        "table_uuid",
+        "schema",
+        "mode",
+        "creation_sequence",
+        "current_snapshot_id"
+      ],
+      "additionalProperties": false
+    },
+    "collections": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/collection"
+          }
+        },
+        "next_cursor": {
+          "type": "null"
+        }
+      },
+      "required": [
+        "items",
+        "next_cursor"
+      ],
+      "additionalProperties": false
+    },
+    "receipt": {
+      "type": "object",
+      "properties": {
+        "collection_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "hash_version": {
+          "const": 1
+        },
+        "snapshot_id": {
+          "$ref": "#/$defs/int64"
+        },
+        "parent_snapshot_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rows_appended": {
+          "$ref": "#/$defs/int64"
+        },
+        "data_files_added": {
+          "$ref": "#/$defs/int64"
+        },
+        "compressed_data_bytes_added": {
+          "$ref": "#/$defs/int64"
+        },
+        "snapshot_created_at_us": {
+          "$ref": "#/$defs/int64"
+        },
+        "durability_profile": {
+          "type": "string"
+        },
+        "receipt_version": {
+          "const": 1
+        }
+      },
+      "required": [
+        "collection_id",
+        "operation_id",
+        "payload_hash",
+        "hash_version",
+        "snapshot_id",
+        "parent_snapshot_id",
+        "rows_appended",
+        "data_files_added",
+        "compressed_data_bytes_added",
+        "snapshot_created_at_us",
+        "durability_profile",
+        "receipt_version"
+      ],
+      "additionalProperties": false
+    },
+    "recovery": {
+      "type": "object",
+      "properties": {
+        "store_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "collection_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload_hash": {
+          "type": "string"
+        },
+        "hash_version": {
+          "type": "integer"
+        },
+        "base": {
+          "$ref": "#/$defs/identity"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "candidate_snapshot_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidate_metadata_location": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "first_error": {
+          "$ref": "#/$defs/errorDetail"
+        },
+        "publication_started": {
+          "type": "boolean"
+        },
+        "lookup_blocked": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "store_id",
+        "collection_id",
+        "operation_id",
+        "payload_hash",
+        "hash_version",
+        "base",
+        "attempt_id",
+        "candidate_snapshot_id",
+        "candidate_metadata_location",
+        "first_error",
+        "publication_started",
+        "lookup_blocked"
+      ],
+      "additionalProperties": false
+    },
+    "phase": {
+      "enum": [
+        "validation",
+        "binding",
+        "data",
+        "metadata",
+        "catalog_transaction",
+        "catalog_commit",
+        "recording_failure",
+        "reconciling",
+        "complete"
+      ]
+    },
+    "appendOutcome": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "outcome": {
+              "const": "committed"
+            },
+            "phase": {
+              "const": "complete"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "result": {
+              "$ref": "#/$defs/receipt"
+            }
+          },
+          "required": [
+            "outcome",
+            "phase",
+            "operation_id",
+            "result"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "outcome": {
+              "const": "definitely_not_committed"
+            },
+            "phase": {
+              "enum": [
+                "validation",
+                "binding",
+                "data",
+                "metadata",
+                "catalog_transaction",
+                "catalog_commit",
+                "recording_failure",
+                "reconciling"
+              ]
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "error": {
+              "$ref": "#/$defs/errorDetail"
+            }
+          },
+          "required": [
+            "outcome",
+            "phase",
+            "operation_id",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "outcome": {
+              "const": "commit_unknown"
+            },
+            "phase": {
+              "enum": [
+                "binding",
+                "catalog_transaction",
+                "catalog_commit",
+                "recording_failure",
+                "reconciling"
+              ]
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "error": {
+              "$ref": "#/$defs/errorDetail"
+            },
+            "recovery_required": {
+              "const": true
+            },
+            "recovery": {
+              "$ref": "#/$defs/recovery"
+            }
+          },
+          "required": [
+            "outcome",
+            "phase",
+            "operation_id",
+            "recovery_required",
+            "recovery",
+            "error"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "createRecovery": {
+      "type": "object",
+      "properties": {
+        "store_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "collection_id": {
+          "type": "string"
+        },
+        "exact_name": {
+          "type": "string"
+        },
+        "schema_hash": {
+          "type": "string"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "candidate_table_uuid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidate_metadata_location": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "publication_started": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "store_id",
+        "collection_id",
+        "exact_name",
+        "schema_hash",
+        "attempt_id",
+        "candidate_table_uuid",
+        "candidate_metadata_location",
+        "publication_started"
+      ],
+      "additionalProperties": false
+    },
+    "createOutcome": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/collection"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "outcome": {
+              "const": "definitely_not_committed"
+            },
+            "phase": {
+              "enum": [
+                "validation",
+                "binding",
+                "data",
+                "metadata",
+                "catalog_transaction",
+                "catalog_commit",
+                "recording_failure",
+                "reconciling"
+              ]
+            },
+            "error": {
+              "$ref": "#/$defs/errorDetail"
+            }
+          },
+          "required": [
+            "outcome",
+            "phase",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "outcome": {
+              "const": "commit_unknown"
+            },
+            "phase": {
+              "enum": [
+                "binding",
+                "catalog_transaction",
+                "catalog_commit",
+                "recording_failure",
+                "reconciling"
+              ]
+            },
+            "error": {
+              "$ref": "#/$defs/errorDetail"
+            },
+            "recovery_required": {
+              "const": true
+            },
+            "recovery": {
+              "$ref": "#/$defs/createRecovery"
+            }
+          },
+          "required": [
+            "outcome",
+            "phase",
+            "error",
+            "recovery_required",
+            "recovery"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "scanResult": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "$ref": "#/$defs/schema"
+        },
+        "snapshot_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/row"
+          }
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "profile": {
+          "type": "object",
+          "properties": {
+            "rows_returned": {
+              "$ref": "#/$defs/int64"
+            }
+          },
+          "required": [
+            "rows_returned"
+          ],
+          "additionalProperties": false
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/scanCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "snapshot_id",
+        "rows",
+        "identity",
+        "profile",
+        "next_cursor"
+      ],
+      "additionalProperties": false
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "api_version": {
+          "const": "v0"
+        },
+        "backend": {
+          "const": "local"
+        },
+        "mock": {
+          "const": false
+        },
+        "durability_validation": {
+          "const": "designed"
+        },
+        "collection_modes": {
+          "type": "array",
+          "items": {
+            "const": "append"
+          }
+        },
+        "features": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "predicate_ops": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer"
+          }
+        }
+      },
+      "required": [
+        "api_version",
+        "backend",
+        "mock",
+        "durability_validation",
+        "collection_modes",
+        "features",
+        "predicate_ops",
+        "limits"
+      ],
+      "additionalProperties": false
+    },
+    "health": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "const": "live"
+        },
+        "backend": {
+          "const": "local"
+        },
+        "mock": {
+          "const": false
+        },
+        "durability_validation": {
+          "const": "designed"
+        }
+      },
+      "required": [
+        "status",
+        "backend",
+        "mock",
+        "durability_validation"
+      ],
+      "additionalProperties": false
+    },
+    "theme": {
+      "type": "object",
+      "required": [
+        "version",
+        "brand",
+        "colors"
+      ]
+    },
+    "empty": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "databaseCreate": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "database_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "limits": {
+          "$ref": "#/$defs/limits"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "database": {
+      "type": "object",
+      "properties": {
+        "database_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "name": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "open",
+            "closed",
+            "closing",
+            "opening",
+            "reconciling",
+            "error"
+          ]
+        },
+        "error": {
+          "type": "object"
+        },
+        "store": {
+          "type": "object",
+          "properties": {
+            "store_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "profile_id": {
+              "type": "string"
+            },
+            "format_version": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "store_id",
+            "profile_id",
+            "format_version"
+          ],
+          "additionalProperties": false
+        },
+        "limits": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/limits"
+            },
+            {
+              "required": [
+                "max_operations",
+                "max_collections",
+                "max_catalog_bytes",
+                "max_pending_calls",
+                "max_owned_input_bytes",
+                "writer_wait_ms",
+                "append_deadline_ms"
+              ]
+            }
+          ]
+        }
+      },
+      "required": [
+        "database_id",
+        "name",
+        "state",
+        "limits"
+      ],
+      "additionalProperties": false
+    },
+    "databases": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/database"
+          },
+          "maxItems": 64
+        },
+        "next_cursor": {
+          "type": "null"
+        }
+      },
+      "required": [
+        "items",
+        "next_cursor"
+      ],
+      "additionalProperties": false
+    },
+    "scanCursor": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "scanContinue": {
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/scanCursor"
+        }
+      },
+      "required": [
+        "cursor"
+      ],
+      "additionalProperties": false
+    },
+    "scanOpened": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "$ref": "#/$defs/schema"
+        },
+        "snapshot_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "cursor": {
+          "$ref": "#/$defs/scanCursor"
+        }
+      },
+      "required": [
+        "cursor",
+        "schema",
+        "snapshot_id",
+        "identity"
+      ],
+      "additionalProperties": false
+    },
+    "scanCancelled": {
+      "type": "object",
+      "properties": {
+        "cancelled": {
+          "const": true
+        }
+      },
+      "required": [
+        "cancelled"
+      ],
+      "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "max_operations": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "max_collections": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "max_catalog_bytes": {
+          "type": "integer",
+          "minimum": 65536,
+          "maximum": 268435456
+        },
+        "max_pending_calls": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "max_owned_input_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 134217728
+        },
+        "writer_wait_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5000
+        },
+        "append_deadline_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60000
+        }
+      },
+      "additionalProperties": false
+    },
+    "databaseOpen": {
+      "type": "object",
+      "properties": {
+        "limits": {
+          "$ref": "#/$defs/limits"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

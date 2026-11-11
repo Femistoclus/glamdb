@@ -1,9 +1,9 @@
 # GlamDB Python network SDK
 
-This package talks only to the public `/v0` HTTP endpoints. It does not import
+This package talks only to the public HTTP endpoints. It does not import
 the C++ core, a Python storage writer, the development mock, or verification
-tools. The repository currently supplies a disposable mock HTTP adapter; passing
-SDK tests against it does not establish storage durability.
+tools. The native server manages databases; a disposable mock adapter is also
+available. Passing SDK tests does not establish storage durability.
 
 Install from this directory with `python -m pip install .`. Dependencies are
 HTTPX 0.28 and PyArrow 25; Python 3.10 or later is required. For local development,
@@ -22,7 +22,12 @@ schema = Schema([
     Field("at", "timestamp_us_utc", True),
 ])
 
-with Client("http://127.0.0.1:8765", token="your-development-token") as client:
+with Client("http://127.0.0.1:8080", token="your-token") as admin:
+    database = admin.create_database("analytics")  # same name reuses the same ID
+    print(admin.list_databases().items)
+
+with Client("http://127.0.0.1:8080", token="your-token",
+            database_id=database["database_id"]) as client:
     created = client.create_collection("example", schema, collection_id=collection_id)
     if created.outcome != "committed":
         raise RuntimeError(created.raw)
@@ -42,6 +47,13 @@ with Client("http://127.0.0.1:8765", token="your-development-token") as client:
             print(batch.to_pylist())
     print(stream.snapshot_id, stream.integrity, stream.checksum_verified)
 ```
+
+`get_database`, `open_database`, `close_database` and `reconcile_database` accept
+a database UUID. `database_id=` scopes collection requests and capabilities while
+management calls remain at the server root. Keep a separate client per database:
+schema caches and open streams belong to that client's selection. Omitting the
+argument preserves legacy single-store/mock behavior. Database creation never
+accepts a local filesystem path; after a lost response repeat the same name/UUID.
 
 Append preserves duplicates, including duplicate `key` values. There is no
 upsert, delete, compaction, or asynchronous job API here. Inspect
@@ -70,7 +82,11 @@ fabricated failed write outcome.
 `TransportError`, `DeadlineExceeded`, `ProtocolError`, `AuthenticationError`
 and `HTTPError` are separate from those outcomes. A lost response or malformed
 write response does not prove that publication failed. Exceptions retain the
-caller operation and collection IDs when applicable. The SDK does not add
+caller operation and collection IDs when applicable. A server/gateway 5xx write
+response without an authoritative outcome raises `OutcomeUnknownError` (an
+`HTTPError` subclass); preserve the original IDs and reconcile or look up that
+operation before deciding whether to retry. Database and route 404 errors never
+mean an append operation is absent. The SDK does not add
 credentials to error messages, and redirects are disabled.
 
 Keep the original operation UUID, schema and input payload across a disconnect
@@ -81,7 +97,7 @@ detached copy. After restarting, prepare the same payload with the same IDs.
 
 `client.find_append_outcome(collection_id, operation_id)` returns the original
 terminal outcome, an `OperationInProgress`, `commit_unknown`, or `None` for an
-authoritative `NOT_FOUND`. A recovery-pending HTTP error remains an error;
+authoritative `OPERATION_NOT_FOUND`. A recovery-pending HTTP error remains an error;
 it is not absence. Do not change the ID just because a response was lost or an
 outcome is unknown. A terminal failed outcome may request a *new, explicit*
 operation ID for a corrected attempt. A retry whose content conflicts with the
@@ -139,10 +155,24 @@ parameters, selector and page size; do not resolve latest again between pages.
 ## Streaming and transport ownership
 
 Always use `with client.scan_batches(...) as stream:` or call `stream.close()`.
-Breaking a loop whose iterator is retained does not immediately release it.
+The client tracks iterators weakly; dropping an iterator releases its cursor via
+a nonthrowing finalizer. Explicit close remains preferable because garbage
+collection timing varies. Breaking a loop whose iterator is retained does not
+immediately release it.
 Exiting the context or closing the client closes every reader and HTTP
 response, including on a consumer exception. Already returned Arrow batches
-remain usable after those owners close.
+remain usable after those owners close. Iteration failures remain sticky: another
+`next()` raises the original failure, and integrity never becomes complete.
+
+`scan_json`, `scan_batches` and `scan_pages` use `/scan/open` before fetching a
+page, so retries and cleanup use the same known cursor even if the first page
+response is lost. JSON and Arrow convenience scans support legacy single-response
+adapters only when the open route explicitly returns `ROUTE_NOT_FOUND`; other
+404 errors and transport failures never restart the scan. The development mock
+remains a single-response adapter and does not emulate native cursor sessions.
+Use `with client.scan_pages(collection_id) as pages:` to consume JSON pages
+incrementally; early close cancels the continuation and keeps integrity
+`not_complete`.
 
 The response reader accepts bounded reads and keeps only a small network chunk
 plus the current Arrow read; it never materializes the complete HTTP body.
@@ -182,9 +212,11 @@ passed incrementally: 42 codec tests; 81 codec/client/predicate/request tests;
 copying, canonical output scalars, identity on schema-fetch timeout, and closing
 all streams after a close error. Receipt-validation regressions first exposed
 39 failures for invalid hashes, versions and receipt fields before the fix.
-The current suite has 172 passing tests.
-Transport doubles represent the unimplemented server boundary; codec, HTTP
-client logic, canonical hash and PyArrow IPC encoding/decoding are real. The
+The current SDK unit suite has 263 tests, including cursor abandonment, sticky
+iteration failures, first-page replay, distinct operation absence and uncertain
+5xx write failures. Transport doubles isolate the HTTP boundary; codec, HTTP
+client logic, canonical hash and PyArrow IPC encoding/decoding are real. Native
+HTTP and browser suites separately exercise the C++ server. The
 canonical append hash is independently checked against fixed single-type and
 all-type golden vectors.
 Repository-level actual HTTP integration is maintained separately from these
@@ -204,3 +236,35 @@ retaining the caller operation ID. Those tests require localhost socket access
 and an OpenSSL CLI. Temporary server processes and test keys are confined to
 test directories and reaped on exit. This verifies the network boundary, not
 C++ storage or power-loss durability.
+
+Native scans use fixed-view pages. `scan_json()` collects every page into one
+result (caller memory grows with the full result); `scan_batches()` drains
+independently checksummed Arrow pages as batches and checks the schema and
+snapshot remain unchanged. Both retain compatibility with single-response
+servers. Their first request starts a new scan, so a lost initial response must
+be reported rather than silently restarting against a newer snapshot.
+
+For bounded JSON consumption with safe first-page retry, use the native
+`scan_pages()` API. It opens a fixed view before consuming rows and retries a
+lost cursor-page response once using the same token. No write is retried:
+
+```python
+with client.scan_pages(collection_id, projection=["key", "value"]) as pages:
+    for page in pages:
+        consume(page.rows)
+```
+
+Closing the iterator or client cancels an unfinished scan. `cancel_scan(id,
+opaque_cursor)` is also available for explicitly managed tokens. Native tokens
+are database-, collection-, and representation-scoped; only the most recently
+consumed page can be replayed. Inactive sessions expire after 60 seconds and
+restart/close/reconcile invalidates tokens. An expired token fails explicitly;
+it never restarts a scan. A failed page is an error, never a successful end of
+stream. The server permits eight concurrent live sessions, so close unused
+iterators promptly. Completed replay caches may be evicted to admit new scans.
+
+Managed `create_database(name, limits={"max_collections": 2})` accepts partial
+engine limits. `open_database(database_id, limits={"max_collections": 3})` changes
+them for a closed database. Omit `limits` to preserve the stored configuration;
+responses include all normalized limits. See the [native server contract](../../docs/development/HTTP_SERVER.md)
+for ranges, retry semantics and persistence.

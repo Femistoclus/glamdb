@@ -57,6 +57,8 @@ def connection(body=None, *, headers=None, tracked=None, **kwargs):
             else:
                 response_headers[key] = value
     def handler(request):
+        if request.url.path.endswith('/scan/open'):
+            return httpx.Response(404, json={'error': {'code': 'ROUTE_NOT_FOUND', 'message': 'legacy adapter'}})
         assert request.headers["accept"] == MIME
         assert request.headers["accept-encoding"] == "identity"
         return httpx.Response(200, headers=response_headers, stream=tracked)
@@ -262,6 +264,8 @@ def test_client_close_attempts_every_stream_even_if_one_close_fails():
             self.closed = True
             raise RuntimeError("close failed")
     def handler(request):
+        if request.url.path.endswith('/scan/open'):
+            return httpx.Response(404, json={'error': {'code': 'ROUTE_NOT_FOUND', 'message': 'legacy adapter'}})
         body = CloseFailure(raw)
         bodies.append(body)
         return httpx.Response(200, headers={"content-type": MIME, "X-GlamDB-Snapshot-Id": "initial"}, stream=body)

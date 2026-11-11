@@ -201,7 +201,7 @@ def test_real_http_unknown_blocks_absence_and_new_writes_until_explicit_mock_res
         with pytest.raises(HTTPError) as blocked:
             client.append(cid, [{"key": "blocked"}], operation_id=uuid4(), schema=SCHEMA)
         assert blocked.value.detail.code == "RECOVERY_REQUIRED"
-        resolution = httpx.post(f"{server.url}/v0/development/collections/{cid}/operations/{operation}:resolve",
+        resolution = httpx.post(f"{server.url}/development/collections/{cid}/operations/{operation}:resolve",
                                 headers={"Authorization": f"Bearer {TOKEN}"}, json={"outcome": "committed"}, timeout=5)
         assert resolution.status_code == 200
         original = client.find_append_outcome(cid, operation)

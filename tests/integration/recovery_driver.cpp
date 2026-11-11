@@ -1,4 +1,4 @@
-#include "apps/glamdb/outcome_json.h"
+#include "apps/transport/outcome_json.h"
 #include "core/engine/engine_factory.h"
 #include "tests/support/arrow_batch.h"
 #include "tests/support/checked.h"

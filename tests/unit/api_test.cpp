@@ -90,6 +90,21 @@ TEST(Canonical, SchemaAndInputLimitsFailBeforeCopy)
         std::vector<Row>(10001, Row{std::string("k")})));
 }
 
+TEST(Canonical, DecodedRowAndBatchLimitsAreDeterministicInputErrors)
+{
+    const SchemaSpec schema{
+        {{"a", FieldType::String, false}, {"b", FieldType::String, false}, {"c", FieldType::String, false}}};
+    for (const auto& [count, length] : {std::pair{1U, 800000U}, std::pair{9U, 700000U}}) {
+        const auto text = std::string(length, 'x');
+        const auto result = detail::NormalizeRows(schema,
+            "00112233-4455-6677-8899-aabbccddeeff",
+            std::vector<Row>(count, Row{text, text, text}));
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().code, "INPUT_TOO_LARGE");
+        EXPECT_EQ(result.error().retry_hint, RetryHint::FixInput);
+    }
+}
+
 TEST(OutcomeCodec, RetainsOriginalFailureAndRejectsUnknownFormats)
 {
     const AppendOutcome failed{"00000000-0000-0000-0000-000000000003",

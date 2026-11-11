@@ -162,7 +162,8 @@ def create_app(*, token, ui_dir, theme_file=None, seed_demo=False, enable_develo
 
     @app.middleware("http")
     async def authenticate(request, call_next):
-        if request.url.path == "/v0" or request.url.path.startswith("/v0/"):
+        if (request.url.path in ("/capabilities", "/collections", "/collections:resolve")
+                or request.url.path.startswith(("/collections/", "/development/"))):
             auth = request.headers.get("authorization", "")
             scheme, separator, supplied = auth.partition(" ")
             if not separator or scheme.lower() != "bearer" or not supplied:
@@ -198,25 +199,25 @@ def create_app(*, token, ui_dir, theme_file=None, seed_demo=False, enable_develo
 
     @app.exception_handler(HTTPException)
     async def http_error(_request, error):
-        return _error(error.status_code, "NOT_FOUND" if error.status_code == 404 else "INVALID_ARGUMENT", "resource does not exist" if error.status_code == 404 else "HTTP request is not supported")
+        return _error(error.status_code, "ROUTE_NOT_FOUND" if error.status_code == 404 else "INVALID_ARGUMENT", "resource does not exist" if error.status_code == 404 else "HTTP request is not supported")
 
     @app.get("/health")
     @app.get("/healthz")
     async def health():
         return _json({"status": "ok", **MOCK})
 
-    @app.get("/v0/capabilities")
+    @app.get("/capabilities")
     async def capabilities():
         return _json({**CAPABILITIES, "development_faults": bool(enable_development_faults), "limits": {"request_body_bytes": max_body_bytes, "response_bytes": max_response_bytes, "rows": max_rows, "estimated_retained_state_bytes": max_state_bytes}})
 
-    @app.post("/v0/collections")
+    @app.post("/collections")
     async def create_collection(request: Request):
         body = await _body(request, max_body_bytes)
         with store.lock:
             result, created = store.create(body)
         return _json(result, 201 if created else 200)
 
-    @app.get("/v0/collections")
+    @app.get("/collections")
     async def collections(request: Request):
         params = _page_params(request)
         with store.lock:
@@ -224,7 +225,7 @@ def create_app(*, token, ui_dir, theme_file=None, seed_demo=False, enable_develo
                                 params=params, watermark=len(store.collections), cursor=request.query_params.get("cursor"))
         return _json(result)
 
-    @app.get("/v0/collections:resolve")
+    @app.get("/collections:resolve")
     async def resolve_collection(request: Request):
         if set(request.query_params) != {"name"} or len(request.query_params.getlist("name")) != 1:
             raise MockError(422, "INVALID_ARGUMENT", "one exact name is required")
@@ -234,17 +235,17 @@ def create_app(*, token, ui_dir, theme_file=None, seed_demo=False, enable_develo
                     return _json(item.info())
         raise MockError(404, "NOT_FOUND", "exact collection name does not exist")
 
-    @app.get("/v0/collections/{collection_id}")
+    @app.get("/collections/{collection_id}")
     async def collection_info(collection_id: str):
         with store.lock:
             return _json(store.collection(collection_id).info())
 
-    @app.get("/v0/collections/{collection_id}/schema")
+    @app.get("/collections/{collection_id}/schema")
     async def schema(collection_id: str):
         with store.lock:
             return _json(store.collection(collection_id).schema)
 
-    @app.get("/v0/collections/{collection_id}/stats")
+    @app.get("/collections/{collection_id}/stats")
     async def stats(collection_id: str, request: Request):
         if set(request.query_params) - {"snapshot_id"}:
             raise MockError(422, "INVALID_ARGUMENT", "unknown stats parameter")
@@ -256,7 +257,7 @@ def create_app(*, token, ui_dir, theme_file=None, seed_demo=False, enable_develo
                           "compressed_data_bytes": None, "retained_snapshots": len(item.snapshots), "root_metadata_bytes": None,
                           "byte_measurement": "unavailable_no_physical_files", "synthetic": True, **MOCK})
 
-    @app.get("/v0/collections/{collection_id}/snapshots")
+    @app.get("/collections/{collection_id}/snapshots")
     async def snapshots(collection_id: str, request: Request):
         params = _page_params(request, allow_snapshot=True)
         with store.lock:
@@ -269,7 +270,7 @@ def create_app(*, token, ui_dir, theme_file=None, seed_demo=False, enable_develo
             return _json(store.page(items, kind="snapshots", collection_id=item.collection_id, params=params,
                                    identity=store.identity(item, snapshot), cursor=cursor))
 
-    @app.get("/v0/collections/{collection_id}/files")
+    @app.get("/collections/{collection_id}/files")
     async def files(collection_id: str, request: Request):
         params = _page_params(request, allow_snapshot=True)
         with store.lock:
@@ -281,7 +282,7 @@ def create_app(*, token, ui_dir, theme_file=None, seed_demo=False, enable_develo
             return _json(store.page(_files(store, item, snapshot), kind="files", collection_id=item.collection_id, params=params,
                                    identity=store.identity(item, snapshot), cursor=cursor))
 
-    @app.get("/v0/collections/{collection_id}/files/{file_id}")
+    @app.get("/collections/{collection_id}/files/{file_id}")
     async def file_details(collection_id: str, file_id: str, request: Request):
         if set(request.query_params) - {"snapshot_id"}:
             raise MockError(422, "INVALID_ARGUMENT", "unknown file parameter")
@@ -297,7 +298,7 @@ def create_app(*, token, ui_dir, theme_file=None, seed_demo=False, enable_develo
                                   "execution_capabilities": {"page_pruning": False, "bloom_pruning": False}})
         raise MockError(404, "NOT_FOUND", "file is not a member of the selected view")
 
-    @app.post("/v0/collections/{collection_id}/append")
+    @app.post("/collections/{collection_id}/append")
     async def append(collection_id: str, request: Request):
         body = await _body(request, max_body_bytes)
         scenario = request.headers.get("x-glamdb-mock-scenario")
@@ -310,7 +311,7 @@ def create_app(*, token, ui_dir, theme_file=None, seed_demo=False, enable_develo
             result, status = store.append(store.collection(collection_id), body, scenario)
         return _json(result, status)
 
-    @app.get("/v0/collections/{collection_id}/operations/{operation_id}")
+    @app.get("/collections/{collection_id}/operations/{operation_id}")
     async def operation(collection_id: str, operation_id: str):
         operation_id = uuid_value(operation_id, "operation_id")
         with store.lock:
@@ -320,9 +321,9 @@ def create_app(*, token, ui_dir, theme_file=None, seed_demo=False, enable_develo
                 return _json(existing.response, existing.status)
             if item.pending_operation:
                 raise MockError(503, "RECOVERY_REQUIRED", "operation absence is not authoritative during mock recovery", "resolve_original_operation")
-        raise MockError(404, "NOT_FOUND", "operation does not exist")
+        raise MockError(404, "OPERATION_NOT_FOUND", "operation does not exist")
 
-    @app.post("/v0/development/collections/{collection_id}/operations/{operation_id}:resolve")
+    @app.post("/development/collections/{collection_id}/operations/{operation_id}:resolve")
     async def development_resolve(collection_id: str, operation_id: str, request: Request):
         if not enable_development_faults:
             raise MockError(404, "NOT_FOUND", "development fault scenarios are disabled")
@@ -333,7 +334,7 @@ def create_app(*, token, ui_dir, theme_file=None, seed_demo=False, enable_develo
             result, status = store.resolve(store.collection(collection_id), operation_id, body["outcome"])
         return _json(result, status)
 
-    @app.post("/v0/collections/{collection_id}/scan")
+    @app.post("/collections/{collection_id}/scan")
     async def scan(collection_id: str, request: Request):
         body = await _body(request, max_body_bytes)
         with store.lock:
@@ -358,7 +359,7 @@ def create_app(*, token, ui_dir, theme_file=None, seed_demo=False, enable_develo
             raise MockError(413, "RESOURCE_EXHAUSTED", "mock JSON result exceeds configured response limit")
         return response
 
-    @app.post("/v0/collections/{collection_id}/explain")
+    @app.post("/collections/{collection_id}/explain")
     async def explain(collection_id: str, request: Request):
         body = await _body(request, max_body_bytes)
         with store.lock:

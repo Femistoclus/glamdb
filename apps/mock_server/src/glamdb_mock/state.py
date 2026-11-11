@@ -16,6 +16,7 @@ from glamdb_verify import append_hash, canonical_append, normalize_rows, normali
 
 MOCK = {"backend": "mock", "mock": True, "durability_validation": "designed"}
 CAPABILITIES = {
+    "scan_pagination": False,
     **MOCK, "mode": "append", "key_unique": False, "cow": False,
     "deletes": False, "compaction": False, "async_admission": False,
     "page_pruning": False, "bloom_pruning": False, "file_pruning": False,
@@ -252,7 +253,7 @@ class MockStore:
         operation_id = uuid_value(operation_id, "operation_id")
         operation = collection.operations.get(operation_id)
         if operation is None:
-            raise MockError(404, "NOT_FOUND", "operation does not exist")
+            raise MockError(404, "OPERATION_NOT_FOUND", "operation does not exist")
         if operation.response.get("outcome") != "commit_unknown":
             return copy.deepcopy(operation.response), operation.status
         if outcome == "committed":

@@ -2,7 +2,9 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import shutil
 import tempfile
 import subprocess
 import sys
@@ -150,6 +152,94 @@ class ParallelTidyTest(unittest.TestCase):
             self.assertIn("checked bad.cpp", output.getvalue())
             self.assertIn("bad.cpp: analyzer diagnostic", output.getvalue())
             self.assertNotIn("checks did not overlap", output.getvalue())
+
+
+@unittest.skipUnless(shutil.which("cmake"), "CMake is required")
+class OptionalAdminQualityTest(unittest.TestCase):
+    def test_configured_tidy_checks_admin_only_when_enabled(self):
+        with tempfile.TemporaryDirectory(prefix="optional-admin-quality-") as temporary:
+            root = Path(temporary)
+            (root / "scripts").mkdir()
+            shutil.copyfile(ROOT / "scripts/quality.py", root / "scripts/quality.py")
+            for name in ("core/main.cpp", "apps/admin/main.cpp"):
+                source = root / name
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("int main() { return 0; }\n")
+            (root / "CMakeLists.txt").write_text(textwrap.dedent(f"""\
+                cmake_minimum_required(VERSION 3.28)
+                project(OptionalAdminQuality LANGUAGES CXX)
+                set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+                option(GLAMDB_BUILD_ADMIN "Offline administration" OFF)
+                set(GLAMDB_BUILD_STORAGE ON)
+                include("{ROOT / 'cmake/Quality.cmake'}")
+                add_executable(core core/main.cpp)
+                if(GLAMDB_BUILD_ADMIN)
+                    add_executable(admin apps/admin/main.cpp)
+                endif()
+                """))
+            executable = root / "tidy"
+            executable.write_text(f"#!{sys.executable}\n" + textwrap.dedent("""\
+                from pathlib import Path
+                import sys
+                if '--version' in sys.argv:
+                    print('clang-tidy version 18.0.0')
+                else:
+                    Path(sys.argv[1]).with_suffix('.checked').touch()
+                """))
+            executable.chmod(0o755)
+            for enabled in (False, True):
+                with self.subTest(admin=enabled):
+                    build = root / ("enabled" if enabled else "disabled")
+                    configured = subprocess.run(["cmake", "-S", str(root), "-B", str(build),
+                        "-DGLAMDB_BUILD_ADMIN=" + ("ON" if enabled else "OFF")],
+                        text=True, capture_output=True)
+                    self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+                    checked = subprocess.run(["cmake", "--build", str(build), "--target", "tidy-check"],
+                        env=dict(os.environ, GLAMDB_CLANG_TIDY=str(executable)), text=True, capture_output=True)
+                    self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+                    self.assertTrue((root / "core/main.checked").exists())
+                    self.assertEqual((root / "apps/admin/main.checked").exists(), enabled)
+
+
+@unittest.skipUnless(shutil.which("clang-tidy-18"), "LLVM 18 is required")
+class VendorAnalyzerExceptionTest(unittest.TestCase):
+    def test_vendor_exception_keeps_other_checks_and_other_translation_units(self):
+        with tempfile.TemporaryDirectory(prefix="vendor-analyzer-") as temporary:
+            root = Path(temporary)
+            shutil.copyfile(ROOT / ".clang-tidy", root / ".clang-tidy")
+            client = root / "apps/client/http.cpp"
+            core = root / "core/main.cpp"
+            vendor = root / "third_party/resolver.h"
+            for source in (client, core, vendor):
+                source.parent.mkdir(parents=True, exist_ok=True)
+            # Same intentional destructor cleanup pattern as pinned Asio 1.36.
+            virtual_cleanup = ('struct Resolver { virtual ~Resolver() { shutdown(); } '
+                               'virtual void shutdown() {} };\n')
+            vendor.write_text(virtual_cleanup)
+            client.write_text('#include "third_party/resolver.h"\nint main() { Resolver resolver; }\n')
+            core.write_text('int main() { return 0; }\n')
+            (root / "compile_commands.json").write_text(json.dumps([
+                {"directory": str(root), "file": str(source), "arguments": [
+                    "clang++", "-std=c++23", "-I" + str(root), "-c", str(source)]}
+                for source in (client, core)
+            ]))
+            output = io.StringIO()
+            with patch.object(quality, "ROOT", root), \
+                    contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                try:
+                    quality.tidy_sources(root)
+                except RuntimeError:
+                    self.fail(output.getvalue())
+                # An unrelated memory defect in this same client remains fatal.
+                client.write_text('int main() { int* pointer = nullptr; return *pointer; }\n')
+                with self.assertRaises(RuntimeError):
+                    quality.tidy_sources(root)
+                self.assertIn("clang-analyzer-core.NullDereference", output.getvalue())
+                client.write_text('int main() { return 0; }\n')
+                core.write_text(virtual_cleanup + 'int main() { Resolver resolver; }\n')
+                with self.assertRaises(RuntimeError):
+                    quality.tidy_sources(root)
+                self.assertIn("clang-analyzer-optin.cplusplus.VirtualCall", output.getvalue())
 
 
 if __name__ == "__main__":

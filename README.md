@@ -4,12 +4,12 @@ An open-source C++23 columnar key-value storage engine in early development.
 
 GlamDB combines Arrow batches, immutable Parquet files, Iceberg snapshots, and a
 persistent SQLite catalog. The C++ core owns writes, commit ordering, recovery,
-and snapshot reads; future network clients use that same core.
+and snapshot reads; the native HTTP server and clients use that same core.
 
 The first engine milestone is an embedded, synchronous **append store** on
 Linux and local persistent storage, with one owning process and one writer.
 Append preserves duplicate keys. Key-value upserts and deletes follow after
-local durability qualification, with production HTTP/client integration and S3
+local durability qualification, with further network capabilities and S3
 as separate extensions.
 See the [architecture](docs/ARCHITECTURE.md) for semantics and the
 [roadmap](docs/ROADMAP.md) for scope and acceptance criteria.
@@ -17,7 +17,7 @@ See the [architecture](docs/ARCHITECTURE.md) for semantics and the
 ## Current status
 
 The SQLite catalog, write/recovery coordinator, canonical Arrow input, public
-C++ facade, outcome JSON and store-management CLI are implemented. Independent
+C++ facade, outcome JSON and network CLI are implemented. Independent
 storage primitives implement durable local I/O, Parquet writing, Iceberg append
 staging, publication validation, reachable-file recovery, and capacity checks.
 Tests cover real files, injected failures and fresh-process recovery.
@@ -31,8 +31,11 @@ Power-loss and load qualification are deferred.
 
 Available now: independent golden fixtures, a typed SQL-NULL reference oracle,
 receipt/fault-evidence tools, a network Python SDK, and a configurable pink
-browser workbench. A separate **disposable in-memory mock** supplies missing
-engine/HTTP interfaces. Its HTTP/Arrow transport is real; its data files,
+browser workbench. The [native HTTP server](docs/development/HTTP_SERVER.md)
+connects them to persistent storage and serves the same UI. It supports typed
+create/append/scan operations, JSON and Arrow, with explicit capabilities for
+unavailable metadata/explain APIs. A separate **disposable in-memory mock**
+remains available for development. Its data files,
 snapshots and commits are synthetic and disappear on restart.
 
 The workbench also has a **public browser demo** requiring no token or Python
@@ -44,7 +47,11 @@ favicon; artwork paths and sizes remain runtime theme settings.
 
 **[Open the public demo](https://nnrpi.github.io/glamdb/)** — anyone can try it.
 
-Launch the workbench (Python 3.13 and Node 22+):
+For persistent data, start `glamdb --data-dir /absolute/data/path` with
+`GLAMDB_TOKEN` set, then create and manage databases in the workbench or API.
+No offline initialization is required. Follow the
+[native server quickstart](docs/development/HTTP_SERVER.md).
+Launch the disposable mock workbench (Python 3.13 and Node 22+):
 
 ```sh
 bash scripts/bootstrap-workbench.sh

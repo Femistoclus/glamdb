@@ -121,7 +121,7 @@ closure. Catalog checks alone cannot establish these storage properties.
 
 ## SDK/UI compatibility
 
-Outcome JSON in `apps/glamdb/outcome_json.*` keeps transport dependencies outside
+Outcome JSON in `apps/transport/outcome_json.*` keeps transport dependencies outside
 the public API. All int64 quantities are decimal strings; version numbers are
 integers. Append replies carry complete receipt/recovery fields. Unknown is
 HTTP 503 with `SameIdAfterReconcile`. Create success is a direct collection

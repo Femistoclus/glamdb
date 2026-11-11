@@ -38,12 +38,35 @@ JournalFaultVfs::~JournalFaultVfs()
 
 void JournalFaultVfs::Arm(int journal_delete_number, bool after_unlink)
 {
+    std::lock_guard lock(control_mutex_);
     after_unlink_ = after_unlink;
     remaining_ = journal_delete_number;
 }
 void JournalFaultVfs::Disarm()
 {
+    std::lock_guard lock(control_mutex_);
     remaining_ = 0;
+}
+
+void JournalFaultVfs::PauseBeforeDelete(int journal_delete_number)
+{
+    std::lock_guard lock(control_mutex_);
+    paused_ = false;
+    released_ = false;
+    pause_remaining_ = journal_delete_number;
+}
+bool JournalFaultVfs::WaitUntilPaused(std::chrono::milliseconds timeout)
+{
+    std::unique_lock lock(control_mutex_);
+    return pause_changed_.wait_for(lock, timeout, [&] {
+        return paused_;
+    });
+}
+void JournalFaultVfs::Release()
+{
+    std::lock_guard lock(control_mutex_);
+    released_ = true;
+    pause_changed_.notify_all();
 }
 
 int JournalFaultVfs::Delete(sqlite3_vfs* vfs, const char* path, int sync_directory)
@@ -58,8 +81,29 @@ int JournalFaultVfs::Delete(sqlite3_vfs* vfs, const char* path, int sync_directo
         owner = found->second;
     }
     const bool journal = path != nullptr && std::string_view(path).ends_with("-journal");
-    const bool fail = journal && owner->remaining_.load() > 0 && owner->remaining_.fetch_sub(1) == 1;
-    if (fail && !owner->after_unlink_) {
+    bool fail = false, after_unlink = false;
+    if (journal) {
+        std::unique_lock lock(owner->control_mutex_);
+        const bool pause = owner->pause_remaining_ == 1;
+        if (owner->pause_remaining_ > 0) {
+            --owner->pause_remaining_;
+        }
+        if (pause) {
+            owner->paused_ = true;
+            owner->pause_changed_.notify_all();
+            // Waiting releases the control mutex so a test can arm/disarm
+            // this deletion before releasing it.
+            owner->pause_changed_.wait(lock, [&] {
+                return owner->released_;
+            });
+        }
+        fail = owner->remaining_ == 1;
+        if (owner->remaining_ > 0) {
+            --owner->remaining_;
+        }
+        after_unlink = owner->after_unlink_;
+    }
+    if (fail && !after_unlink) {
         return SQLITE_IOERR_DELETE;
     }
     const auto result = owner->parent_->xDelete(owner->parent_, path, sync_directory);

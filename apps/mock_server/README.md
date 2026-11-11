@@ -32,7 +32,7 @@ including symlink checks.
 `create_app(token=..., ui_dir=..., theme_file=None, seed_demo=False)` is importable
 for ASGI integration. Optional development configuration includes
 `enable_development_faults`, `max_body_bytes`, `max_response_bytes`, `max_rows`, `max_state_bytes`,
-`clock`, and `cursor_ttl`. Health is public; every `/v0/` API requires a bearer
+`clock`, and `cursor_ttl`. Health is public; every API endpoint requires a bearer
 token. No token is placed in URLs or response data.
 
 ## Adapter behavior
@@ -88,7 +88,7 @@ On append, `X-GlamDB-Mock-Scenario` accepts:
   the original committed receipt through operation lookup or an identical retry.
 
 An unknown scenario can be resolved only in enabled development mode with
-`POST /v0/development/collections/{id}/operations/{operation_id}:resolve` and
+`POST /development/collections/{id}/operations/{operation_id}:resolve` and
 `{"outcome":"committed"}` or `{"outcome":"definitely_not_committed"}`.
 This route also requires authentication. The outcome then remains immutable.
 An absent operation is 404 only when no unresolved mock operation blocks

@@ -1,11 +1,11 @@
 # Provisional workbench HTTP contract
 
-This is extension-N development transport over `glamdb_mock`, version `/v0`.
+This is extension-N development transport over `glamdb_mock`, contract v0, with unprefixed HTTP routes.
 It is not the public C++ API or a qualified production service. The mock owns
 no store/warehouse/catalog path; all data is process-local and disposable.
 Every production write must eventually route through the C++ authority.
 
-All `/v0` requests need `Authorization: Bearer TOKEN`. JSON writes need
+All API requests need `Authorization: Bearer TOKEN`. JSON writes need
 `Content-Type: application/json`. Errors use
 `{"error":{"code":"...","message":"...","retry_hint":"..."}}`.
 Health and read-only workbench config/static assets are public. API responses
@@ -16,31 +16,31 @@ applicable; terminal mock receipts carry `durable=false`.
 
 - `GET /healthz`: explicit mock health, never production storage readiness.
 - `GET /workbench/config`: validated, uncached runtime theme JSON.
-- `GET /v0/capabilities`: append mode, unavailable extensions, limits and
+- `GET /capabilities`: append mode, unavailable extensions, limits and
   development-fault flag.
-- `GET /v0/collections`: collection page.
-- `POST /v0/collections`: caller `collection_id` UUID, exact `name`,
+- `GET /collections`: collection page.
+- `POST /collections`: caller `collection_id` UUID, exact `name`,
   `schema:{fields:[{name,type,nullable}]}`, optional `mode:"append"`. Returns
   collection info/schema with assigned stable field IDs. Same UUID/name/schema
   returns the same identity; a conflicting UUID or name returns 409.
-- `GET /v0/collections:resolve?name=EXACT_NAME`: exact-name lookup. A lost create
+- `GET /collections:resolve?name=EXACT_NAME`: exact-name lookup. A lost create
   is resolved only after original UUID and exact schema verification.
-- `GET /v0/collections/{id}` and `/schema`: collection identity/schema.
-- `GET /v0/collections/{id}/stats?snapshot_id=SELECTOR`: actual mock row count,
+- `GET /collections/{id}` and `/schema`: collection identity/schema.
+- `GET /collections/{id}/stats?snapshot_id=SELECTOR`: actual mock row count,
   retained snapshot/file counts; unknown physical byte metrics remain null.
-- `GET /v0/collections/{id}/snapshots`: retained snapshot page.
-- `GET /v0/collections/{id}/files?snapshot_id=SELECTOR`: file page belonging to
+- `GET /collections/{id}/snapshots`: retained snapshot page.
+- `GET /collections/{id}/files?snapshot_id=SELECTOR`: file page belonging to
   the fixed view. `/files/{file_id}?snapshot_id=SELECTOR` adds synthetic details.
-- `POST /v0/collections/{id}/append`: caller `operation_id` UUID, nonempty
+- `POST /collections/{id}/append`: caller `operation_id` UUID, nonempty
   `rows`, optional `expected_snapshot`.
-- `GET /v0/collections/{id}/operations/{operation_id}`: original outcome or
+- `GET /collections/{id}/operations/{operation_id}`: original outcome or
   unresolved state; 404 only for authoritative absence. Recovery barriers are
   errors, not absence.
-- `POST /v0/collections/{id}/scan`: `projection`, `predicate`, optional
+- `POST /collections/{id}/scan`: `projection`, `predicate`, optional
   `snapshot_id`/`limit`. Default JSON response has `schema`, `snapshot_id`,
   `rows`, `identity`, and `profile`. `Accept: application/vnd.apache.arrow.stream`
   selects actual Arrow IPC stream bytes instead.
-- `POST /v0/collections/{id}/explain`: same query shape, conservative mock plan;
+- `POST /collections/{id}/explain`: same query shape, conservative mock plan;
   estimates stay separate from actual executed counters.
 
 Collection info contains `collection_id`, `name`, `table_uuid`, fixed `schema`,

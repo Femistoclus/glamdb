@@ -1,13 +1,12 @@
 # Architecture
 
 This document describes the intended engine and its correctness boundaries.
-The current checkout implements the catalog and coordinator; the production
-durable file backend and scanner are pending. See the
+The current checkout implements the catalog, coordinator, production file
+backend and fixed-view scanner. A native HTTP adapter exposes their public API. See the
 [coordinator guide](development/COORDINATOR.md) for tested behavior and the
-[roadmap](ROADMAP.md) for acceptance gates. The implemented SDK, workbench and
-independent verification tools use a disposable mock seam, described in the
-[adapter contract](development/HTTP_MOCK_CONTRACT.md); they do not qualify native
-storage integration. See the [build guide](development/BUILDING.md) and
+[roadmap](ROADMAP.md) for acceptance gates. The SDK and workbench can use the [native HTTP server](development/HTTP_SERVER.md)
+or the separate [disposable mock](development/HTTP_MOCK_CONTRACT.md). Neither
+client integration nor mock tests qualify physical storage durability. See the [build guide](development/BUILDING.md) and
 [workbench guide](development/WORKBENCH.md) for runnable commands.
 
 ## Model and scope
@@ -15,7 +14,7 @@ storage integration. See the [build guide](development/BUILDING.md) and
 GlamDB is an embedded C++23 engine. Arrow represents typed batches in memory,
 Parquet holds immutable data, Iceberg v2 defines tables and snapshots, and SQLite
 publishes the authoritative metadata location. The core coordinates writes and
-recovery and exposes snapshot scans. Future HTTP, SDK, and UI layers use this
+recovery and exposes snapshot scans. HTTP, SDK, and UI layers use this
 same authority rather than maintaining their own storage writers.
 
 | Term | Meaning |

@@ -15,7 +15,12 @@ test.beforeEach(async ({ page }) => {
         if (message.type() === 'error') errors.push(message.text());
     });
     page.on('request', (request) => {
-        if (/\/v0\//.test(new URL(request.url()).pathname)) apiRequests.push(request.url());
+        if (
+            /^\/(?:collections(?:[/:]|$)|capabilities(?:\/|$))/.test(
+                new URL(request.url()).pathname,
+            )
+        )
+            apiRequests.push(request.url());
     });
 });
 test.afterEach(() => {

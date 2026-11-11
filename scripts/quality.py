@@ -23,6 +23,15 @@ IO_SOURCE_DIRS = ("core/io", "core/storage", "tests/unit/io", "tests/unit/storag
 IO_SOURCE_FILES = {"public/storage/schema.h", "tests/unit/core_test.cpp",
                    "tests/support/fault_fs.h", "tests/support/fault_fs.cpp",
                    "tests/support/durability_trace.h", "tests/support/durability_trace.cpp"}
+# LLVM 18 follows resolver construction into pinned Asio 1.36 (231cb29b),
+# resolver_thread_pool.ipp:65. Its destructor intentionally invokes its own
+# idempotent shutdown() to stop/join threads. The analyzer reports this vendor
+# cleanup despite our header filter because the path begins in client code.
+# Limit this exception to that translation unit and optional checker; retain
+# every other client check and VirtualCall in all other project units.
+TIDY_DISABLED_CHECKS = {
+    "apps/client/http.cpp": ("clang-analyzer-optin.cplusplus.VirtualCall",),
+}
 
 
 def llvm_tool(name):
@@ -96,10 +105,12 @@ def tidy_sources(build_dir, excluded_dirs=(), io_only=False, jobs=2):
         raise RuntimeError("Missing compile commands for: " + ", ".join(missing))
     def check(path):
         started = time.monotonic()
+        disabled = TIDY_DISABLED_CHECKS.get(path.relative_to(ROOT).as_posix(), ())
+        check_args = ["--checks=" + ",".join("-" + name for name in disabled)] if disabled else []
         result = subprocess.run(
             [executable, str(path), "-p", str(build_dir),
              "--config-file=" + str(ROOT / ".clang-tidy"),
-             "--header-filter=" + header_filter(ROOT), "--warnings-as-errors=*"],
+             "--header-filter=" + header_filter(ROOT), "--warnings-as-errors=*", *check_args],
             text=True, capture_output=True,
         )
         return path, result, time.monotonic() - started

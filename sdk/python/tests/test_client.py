@@ -32,7 +32,13 @@ def committed(snapshot="4", operation=OP, payload_hash=A_HASH):
 
 
 def client_with(handler, **kwargs):
-    return Client("https://example.test", "secret-value", transport=httpx.MockTransport(handler), **kwargs)
+    def legacy_handler(request):
+        # These codec/receipt tests model the older single-response adapter.
+        # Open/page/cancel wire behavior is tested in test_scan_pages.py.
+        if request.url.path.endswith('/scan/open'):
+            return reply({'error': {'code': 'ROUTE_NOT_FOUND', 'message': 'legacy adapter'}}, 404)
+        return handler(request)
+    return Client("https://example.test", "secret-value", transport=httpx.MockTransport(legacy_handler), **kwargs)
 
 
 def test_public_reads_use_bearer_auth_exact_routes_and_preserve_cursor_parameters():
@@ -45,7 +51,7 @@ def test_public_reads_use_bearer_auth_exact_routes_and_preserve_cursor_parameter
             return reply({"mode": "append", "mock": True})
         if request.url.path.endswith("schema"):
             return reply(SCHEMA.to_dict())
-        if request.url.path.endswith(("snapshots", "files")) or request.url.path == "/v0/collections":
+        if request.url.path.endswith(("snapshots", "files")) or request.url.path == "/collections":
             return reply({"items": [{"id": "retained"}], "next_cursor": "opaque +/="})
         return reply({"collection_id": CID, "name": "exact name", "schema": SCHEMA.to_dict()})
     with client_with(handler) as client:
@@ -59,15 +65,15 @@ def test_public_reads_use_bearer_auth_exact_routes_and_preserve_cursor_parameter
         client.files(CID, page_size=7, cursor="opaque +/=", snapshot_id="4")
         client.file(CID, "file-1", snapshot_id="4")
     assert seen == [
-        ("GET", "/v0/capabilities", {}),
-        ("GET", "/v0/collections", {"page_size": "7", "cursor": "opaque +/="}),
-        ("GET", "/v0/collections:resolve", {"name": "exact name"}),
-        ("GET", f"/v0/collections/{CID}", {}),
-        ("GET", f"/v0/collections/{CID}/schema", {}),
-        ("GET", f"/v0/collections/{CID}/stats", {"snapshot_id": "initial"}),
-        ("GET", f"/v0/collections/{CID}/snapshots", {"page_size": "7", "cursor": "opaque +/=", "snapshot_id": "4"}),
-        ("GET", f"/v0/collections/{CID}/files", {"page_size": "7", "cursor": "opaque +/=", "snapshot_id": "4"}),
-        ("GET", f"/v0/collections/{CID}/files/file-1", {"snapshot_id": "4"}),
+        ("GET", "/capabilities", {}),
+        ("GET", "/collections", {"page_size": "7", "cursor": "opaque +/="}),
+        ("GET", "/collections:resolve", {"name": "exact name"}),
+        ("GET", f"/collections/{CID}", {}),
+        ("GET", f"/collections/{CID}/schema", {}),
+        ("GET", f"/collections/{CID}/stats", {"snapshot_id": "initial"}),
+        ("GET", f"/collections/{CID}/snapshots", {"page_size": "7", "cursor": "opaque +/=", "snapshot_id": "4"}),
+        ("GET", f"/collections/{CID}/files", {"page_size": "7", "cursor": "opaque +/=", "snapshot_id": "4"}),
+        ("GET", f"/collections/{CID}/files/file-1", {"snapshot_id": "4"}),
     ]
 
 
@@ -127,7 +133,7 @@ def test_unknown_and_original_terminal_failure_are_returned_without_raising_or_r
 
 def test_find_distinguishes_in_progress_absence_and_original_committed_receipt():
     replies = [reply({"state": "in_progress", "operation_id": OP}),
-               reply({"error": {"code": "NOT_FOUND", "message": "absent"}}, 404), reply(committed("1"))]
+               reply({"error": {"code": "OPERATION_NOT_FOUND", "message": "absent"}}, 404), reply(committed("1"))]
     with client_with(lambda request: replies.pop(0)) as client:
         assert client.find_append_outcome(CID, OP).state == "in_progress"
         assert client.find_append_outcome(CID, OP) is None
@@ -416,3 +422,61 @@ def test_committed_receipt_requires_shared_core_fields(field):
     with client_with(lambda request: reply(body)) as client:
         with pytest.raises(ProtocolError):
             client.find_append_outcome(CID, OP)
+
+
+def test_database_selection_keeps_management_at_server_root():
+    seen = []
+    def handler(request):
+        seen.append((request.method, request.url.path))
+        if request.url.path.endswith('/collections:resolve'):
+            assert request.url.params['name'] == 'exact'
+            return reply({'collection_id': CID})
+        if request.url.path == '/databases' and request.method == 'GET':
+            return reply({'items': [], 'next_cursor': None})
+        if request.url.path.endswith('/schema'):
+            return reply(SCHEMA.to_dict())
+        return reply({'database_id': OP, 'state': 'open', 'name': 'a'})
+    with Client('https://example.test', 'token', database_id=OP, transport=httpx.MockTransport(handler)) as client:
+        client.create_database('a', database_id=OP)
+        client.list_databases()
+        client.get_database(OP)
+        client.close_database(OP)
+        client.open_database(OP)
+        client.reconcile_database(OP)
+        client.capabilities()
+        client.resolve_collection('exact')
+        client.get_schema(CID)
+    assert seen == [('POST', '/databases'), ('GET', '/databases'), ('GET', f'/databases/{OP}'),
+                    ('POST', f'/databases/{OP}/close'), ('POST', f'/databases/{OP}/open'),
+                    ('POST', f'/databases/{OP}/reconcile'), ('GET', f'/databases/{OP}/capabilities'),
+                    ('GET', f'/databases/{OP}/collections:resolve'), ('GET', f'/databases/{OP}/collections/{CID}/schema')]
+
+
+def test_database_mutations_do_not_retry_on_transport_failure():
+    seen = []
+    def handler(request):
+        seen.append(request.content)
+        raise httpx.ReadError('lost response', request=request)
+    with client_with(handler) as client:
+        with pytest.raises(TransportError):
+            client.create_database('a', database_id=OP)
+    assert len(seen) == 1
+    assert json.loads(seen[0]) == {'name': 'a', 'database_id': OP}
+    with pytest.raises(ValidationError):
+        Client('https://example.test', 'token', database_id='../escape')
+
+
+def test_database_limits_preserve_partial_and_omitted_configuration():
+    seen = []
+    def handler(request):
+        seen.append((request.url.path, json.loads(request.content)))
+        return reply({'database_id': OP, 'state': 'open', 'name': 'a'})
+    with client_with(handler) as client:
+        client.create_database('a', limits={'max_collections': 2, 'writer_wait_ms': 0})
+        client.create_database('a')
+        client.open_database(OP, limits={'max_collections': 3})
+        client.open_database(OP)
+    assert seen == [('/databases', {'name': 'a', 'limits': {'max_collections': 2, 'writer_wait_ms': 0}}),
+                    ('/databases', {'name': 'a'}),
+                    (f'/databases/{OP}/open', {'limits': {'max_collections': 3}}),
+                    (f'/databases/{OP}/open', {})]

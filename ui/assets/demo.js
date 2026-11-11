@@ -444,7 +444,7 @@ export class BrowserDemoAPI {
         if (url.origin !== 'https://browser-demo.invalid')
             fail(400, 'Demo requests stay in this page');
         const path = url.pathname;
-        if (path === '/v0/capabilities')
+        if (path === '/capabilities')
             return {
                 ...mock,
                 browser_demo: true,
@@ -457,21 +457,21 @@ export class BrowserDemoAPI {
                 compaction: false,
                 async_admission: false,
             };
-        if (path === '/v0/collections') {
+        if (path === '/collections') {
             if (method === 'POST') return this.info(this.create(body));
             return this.page(
                 [...this.collections.values()].map((c) => this.info(c)),
                 url,
             );
         }
-        if (path === '/v0/collections:resolve') {
+        if (path === '/collections:resolve') {
             const c = [...this.collections.values()].find(
                 (c) => c.name === url.searchParams.get('name'),
             );
             if (!c) fail(404, 'Exact collection name does not exist');
             return this.info(c);
         }
-        const route = /^\/v0\/collections\/([^/]+)(?:\/(.*))?$/.exec(path);
+        const route = /^\/collections\/([^/]+)(?:\/(.*))?$/.exec(path);
         const c = route && this.collections.get(decodeURIComponent(route[1]));
         if (!c) fail(404, 'Collection does not exist');
         const action = route[2];

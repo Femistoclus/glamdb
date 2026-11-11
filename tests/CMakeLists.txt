@@ -25,7 +25,7 @@ add_test(NAME glamdb.tooling
 set_tests_properties(glamdb.tooling PROPERTIES LABELS "tooling" TIMEOUT 240)
 
 if(NOT GLAMDB_IO_ONLY)
-    add_test(NAME glamdb.smoke COMMAND glamdb)
+    add_test(NAME glamdb.smoke COMMAND glamdb_cli)
     set_tests_properties(glamdb.smoke PROPERTIES LABELS "smoke" TIMEOUT 10)
 
     file(GLOB_RECURSE unit_test_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/unit/*.cpp")
@@ -63,8 +63,10 @@ if(NOT GLAMDB_IO_ONLY)
         SQLite::SQLite3 iceberg::iceberg_sql_catalog_static Arrow::arrow_static)
     gtest_discover_tests(glamdb_fault TEST_PREFIX glamdb.fault. PROPERTIES LABELS fault TIMEOUT 30)
 
-    add_test(NAME glamdb.cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/integration/cli_test.py" "$<TARGET_FILE:glamdb>")
-    set_tests_properties(glamdb.cli PROPERTIES LABELS integration TIMEOUT 30)
+    if(TARGET glamdb_admin)
+        add_test(NAME glamdb.admin COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/integration/cli_test.py" "$<TARGET_FILE:glamdb_admin>")
+        set_tests_properties(glamdb.admin PROPERTIES LABELS integration TIMEOUT 30)
+    endif()
     add_executable(glamdb_recovery_driver integration/recovery_driver.cpp support/fake_storage.cpp)
     target_include_directories(glamdb_recovery_driver PRIVATE "${PROJECT_SOURCE_DIR}")
     target_link_libraries(glamdb_recovery_driver PRIVATE glamdb_json glamdb_build_options SQLite::SQLite3
@@ -110,4 +112,62 @@ if(NOT GLAMDB_IO_ONLY)
             -P "${CMAKE_CURRENT_SOURCE_DIR}/installed_consumer/run.cmake")
         set_tests_properties(glamdb.installed_consumer PROPERTIES LABELS installed TIMEOUT 120)
     endif()
+endif()
+
+if(TARGET glamdb_server)
+    set(GLAMDB_TEST_CLI_EXECUTABLE "" CACHE FILEPATH "Optional external CLI for server integration tests")
+    set(glamdb_test_cli "$<TARGET_FILE:glamdb_cli>")
+    if(GLAMDB_TEST_CLI_EXECUTABLE)
+        set(glamdb_test_cli "${GLAMDB_TEST_CLI_EXECUTABLE}")
+    endif()
+    add_test(NAME glamdb.native_http COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/server/native_http_test.py"
+        "$<TARGET_FILE:glamdb_server>" "${glamdb_test_cli}" "${PROJECT_SOURCE_DIR}/ui")
+    add_test(NAME glamdb.http_review COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/server/http_review_test.py"
+        "$<TARGET_FILE:glamdb_server>" "${glamdb_test_cli}" "${PROJECT_SOURCE_DIR}/ui")
+    set_tests_properties(glamdb.http_review PROPERTIES LABELS "integration;http" TIMEOUT 120)
+    add_test(NAME glamdb.database_limits COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/server/database_limits_test.py" "$<TARGET_FILE:glamdb_server>")
+    set_tests_properties(glamdb.database_limits PROPERTIES LABELS "integration;http" TIMEOUT 120)
+    set_tests_properties(glamdb.native_http PROPERTIES LABELS "integration;http" TIMEOUT 120)
+    add_test(NAME glamdb.cli_network COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/client/cli_network_test.py"
+        "${glamdb_test_cli}" "$<TARGET_FILE:glamdb_server>")
+    set_tests_properties(glamdb.cli_network PROPERTIES LABELS "integration;http;cli" TIMEOUT 90)
+    add_test(NAME glamdb.scan_http COMMAND "${CMAKE_COMMAND}" -E env
+        "PYTHONPATH=${PROJECT_SOURCE_DIR}/sdk/python/src"
+        "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/server/scan_http_test.py"
+        "$<TARGET_FILE:glamdb_server>" "${glamdb_test_cli}" "${PROJECT_SOURCE_DIR}/ui")
+    set_tests_properties(glamdb.scan_http PROPERTIES LABELS "integration;http;scan" TIMEOUT 420)
+endif()
+if(TARGET glamdb_transport)
+    add_executable(glamdb_transport_test server/transport_test.cpp)
+    target_link_libraries(glamdb_transport_test PRIVATE glamdb_transport glamdb_build_options GTest::gtest_main)
+    gtest_discover_tests(glamdb_transport_test TEST_PREFIX glamdb.transport.
+        PROPERTIES LABELS "unit;http" TIMEOUT 120)
+endif()
+
+if(TARGET glamdb_routes)
+    add_executable(glamdb_native_fault_driver server/native_fault_driver.cpp
+        "${PROJECT_SOURCE_DIR}/apps/server/server.cpp" support/journal_fault_vfs.cpp)
+    target_link_libraries(glamdb_native_fault_driver PRIVATE glamdb_routes glamdb_build_options
+        SQLite::SQLite3 iceberg::iceberg_sql_catalog_static)
+    add_test(NAME glamdb.native_http_fault COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/server/native_fault_test.py" "$<TARGET_FILE:glamdb_native_fault_driver>")
+    set_tests_properties(glamdb.native_http_fault PROPERTIES LABELS "integration;http;fault" TIMEOUT 180)
+    add_executable(glamdb_routes_test server/routes_test.cpp server/scan_sessions_test.cpp server/databases_test.cpp server/database_limits_test.cpp support/fake_storage.cpp support/journal_fault_vfs.cpp)
+    target_link_libraries(glamdb_routes_test PRIVATE glamdb_routes glamdb_build_options GTest::gtest_main
+        SQLite::SQLite3 iceberg::iceberg_sql_catalog_static)
+    gtest_discover_tests(glamdb_routes_test TEST_PREFIX glamdb.routes.
+        PROPERTIES LABELS "unit;http;fault" TIMEOUT 120)
+endif()
+if(TARGET glamdb_routes)
+    add_executable(glamdb_http_lifecycle_driver server/lifecycle_driver.cpp
+        "${PROJECT_SOURCE_DIR}/apps/server/server.cpp" support/fake_storage.cpp)
+    target_link_libraries(glamdb_http_lifecycle_driver PRIVATE glamdb_routes glamdb_build_options
+        SQLite::SQLite3 iceberg::iceberg_sql_catalog_static)
+    add_test(NAME glamdb.http_lifecycle COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/server/lifecycle_test.py" "$<TARGET_FILE:glamdb_http_lifecycle_driver>")
+    set_tests_properties(glamdb.http_lifecycle PROPERTIES LABELS "integration;http;fault" TIMEOUT 30)
 endif()

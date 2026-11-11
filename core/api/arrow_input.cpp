@@ -119,7 +119,7 @@ Shape Inspect(const SchemaSpec& schema, const std::vector<std::shared_ptr<arrow:
             }
             shape.decoded_bytes += bytes;
             Require(bytes <= 2ULL * 1024 * 1024 && shape.decoded_bytes <= 16ULL * 1024 * 1024,
-                "RESOURCE_EXHAUSTED",
+                "INPUT_TOO_LARGE",
                 "Arrow input exceeds decoded byte limit");
         }
     }
