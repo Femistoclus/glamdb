@@ -288,7 +288,13 @@ collection and representation; stale or missing tokens return 404, never restart
 queries. Each database has eight sessions within a server limit of 64. Idle sessions expire
 after 60 seconds (checked every second); replay does not refresh that deadline. All
 sessions expire after five minutes. Retained response bodies have a shared 128 MiB
-budget; completed replay caches may be evicted to admit new scans. A failed page invalidates its session. Close, reconciliation
+budget; completed replay caches may be evicted to admit new scans. Before advancing
+a page, the server reserves a full 16 MiB response in addition to its previous
+replay body. Replay-capacity refusal returns 429 before consuming rows and preserves
+the cursor and its previous replay; cancel unused scans and retry the same token.
+Successful encoding replaces that reservation with the actual retained body size.
+Other page failures invalidate the session. These are replay reservations, not a
+bound on decode buffers or outgoing copies. Close, reconciliation
 and shutdown release sessions after admitted calls drain. Cancellation releases
 between page calls; it does not interrupt an active filesystem read.
 
@@ -328,7 +334,10 @@ Collections accept `page_size` 1..1000; insufficient size or any cursor returns
 Standalone Asio provides asynchronous sockets, timers and signals. Four data workers
 admit at most two concurrent calls per database. Two lifecycle workers and two
 control/static workers keep database descriptors and outcome lookup independent of
-long data calls; health and global capabilities run on the I/O thread. Core retains
+long data calls. Outcome lookup uses nonblocking catalog admission: publication
+contention returns 503 `OPERATION_IN_PROGRESS`, never authoritative absence or an
+append disposition. Retry the original lookup after publication finishes. Health
+and global capabilities run on the I/O thread. Core retains
 its single serialized writer. Overload returns 503 with `Retry-After: 1` within the
 bounded response capacity. There are at most 64 header readers (32 per peer), 16
 admitted request bodies and 96 total connections, including overload responses;

@@ -483,8 +483,8 @@ struct TScans::TImpl
             response = {200, std::move(body)};
         }
         Require(response.Body.size() <= MaxResponseBytes, "scan response exceeds response byte limit");
-        Charge(session, response.Body.size());
         session->Replay = response;
+        Charge(session, session->Replay.Body.size());
         CheckActive(*session);
         session->ReplayToken = token;
         session->NextToken = next;
@@ -566,6 +566,24 @@ TResponse TScans::Open(const std::shared_ptr<Engine>& engine,
                     {"identity", EncodeIdentity(session->Info.identity)}}
                     .dump()};
         }
+    } catch (...) {
+        Impl_->Release(session);
+        throw;
+    }
+    // Reserve before cursor I/O or row consumption. Keep the previous replay
+    // charged while its replacement is encoded; a refused existing cursor
+    // must retain both tokens and the exact previous response.
+    try {
+        if (token != session->ReplayToken) {
+            Impl_->Charge(session, session->Replay.Body.size() + MaxResponseBytes);
+        }
+    } catch (...) {
+        if (!body.contains("cursor")) {
+            Impl_->Release(session);
+        }
+        throw;
+    }
+    try {
         return Impl_->Page(session, token);
     } catch (...) {
         Impl_->Release(session);

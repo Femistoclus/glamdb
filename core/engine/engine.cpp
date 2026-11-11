@@ -1347,7 +1347,9 @@ Result<std::optional<AppendOutcome>> Engine::FindAppendOutcome(std::string_view 
                 "OPERATION_IN_PROGRESS",
                 "registered append is still executing");
         }
-        const auto record = impl->catalog->FindOperation(collection_id, operation_id);
+        // Publication owns the catalog lock through durable file work. Outcome
+        // lookup must leave the service's control workers available meanwhile.
+        const auto record = impl->catalog->TryFindOperation(collection_id, operation_id);
         {
             std::lock_guard lock(impl->state_mutex);
             impl->CheckReady();

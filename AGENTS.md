@@ -46,6 +46,9 @@ stores identities, persisted engine limits and open intent; collection/data writ
 Scans use bounded fixed-view pages with per-database quotas, finite replay retention,
 expiry and explicit cancellation. Separate HTTP data, lifecycle and control workers
 keep healthy databases and descriptors available during long operations.
+Outcome lookup refuses catalog contention without blocking control workers.
+Scan pages reserve replay capacity before consumption; admission refusal preserves
+the existing cursor and its last replay. Other page failures invalidate it.
 The network CLI also builds independently with OpenSSL; optional offline commands
 are in `apps/admin` and never required for server initialization.
 Collection routes are scoped by `/databases/{id}`; optional legacy

@@ -312,6 +312,43 @@ TEST_F(CoordinatorTest, BusyTentativeCatalogCannotLeakAnOutcomeOrExtendTheWriter
     EXPECT_EQ(engine->AppendDurable(Request()), original);
 }
 
+TEST_F(CoordinatorTest, OutcomeLookupDoesNotWaitForAnotherPublication)
+{
+    const auto original = engine->AppendDurable(Request());
+    ASSERT_EQ(original.disposition, CommitDisposition::Committed);
+    std::promise<void> entered, release;
+    auto released = release.get_future().share();
+    backend->on_pointer = [&] {
+        entered.set_value();
+        released.wait();
+    };
+    auto write = std::async(std::launch::async, [&] {
+        return engine->AppendDurable(Request("00000000-0000-0000-0000-000000000006"));
+    });
+    entered.get_future().wait();
+    auto retained = std::async(std::launch::async, [&] {
+        return engine->FindAppendOutcome(test::collection_id, test::operation_id);
+    });
+    auto absent = std::async(std::launch::async, [&] {
+        return engine->FindAppendOutcome(test::collection_id, "00000000-0000-0000-0000-000000000007");
+    });
+    const auto retainedReady = retained.wait_for(std::chrono::seconds(1));
+    const auto absentReady = absent.wait_for(std::chrono::seconds(1));
+    release.set_value(); // Unblock before assertions or future destruction.
+    const auto retainedResult = retained.get();
+    const auto absentResult = absent.get();
+    EXPECT_EQ(write.get().disposition, CommitDisposition::Committed);
+    backend->on_pointer = {};
+    EXPECT_EQ(retainedReady, std::future_status::ready);
+    EXPECT_EQ(absentReady, std::future_status::ready);
+    ASSERT_FALSE(retainedResult);
+    EXPECT_EQ(retainedResult.error().code, "OPERATION_IN_PROGRESS");
+    ASSERT_FALSE(absentResult);
+    EXPECT_EQ(absentResult.error().code, "OPERATION_IN_PROGRESS");
+    EXPECT_EQ(test::Present(engine->FindAppendOutcome(test::collection_id, test::operation_id).value()), original);
+    EXPECT_FALSE(engine->FindAppendOutcome(test::collection_id, "00000000-0000-0000-0000-000000000007")->has_value());
+}
+
 TEST_F(CoordinatorTest, BusyCreateRetryCannotTurnAnExistingCollectionIntoDefiniteFailure)
 {
     engine.reset();

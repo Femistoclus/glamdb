@@ -1,4 +1,5 @@
 #include "apps/server/scans.h"
+#include "tests/support/checked.h"
 #include "tests/vertical/vertical_support.h"
 
 #include <condition_variable>
@@ -21,7 +22,7 @@ public:
     std::mutex Mutex;
     std::condition_variable Changed;
     bool Armed = false;
-    bool Entered = false;
+    size_t Entered = 0;
     bool Released = false;
     void Release()
     {
@@ -50,7 +51,7 @@ public:
         {
             std::unique_lock lock(Mutex);
             if (Armed && name.ends_with(".parquet")) {
-                Entered = true;
+                ++Entered;
                 Changed.notify_all();
                 Changed.wait(lock, [&] {
                     return Released;
@@ -215,38 +216,123 @@ TEST_F(ScanSessionsTest, GlobalQuotaIsBoundedAndCancellationRestoresAdmission)
     scans.Clear();
     EXPECT_FALSE(Open(scans).empty());
 }
-TEST_F(ScanSessionsTest, RetainedReplayBytesAreBoundedAndCancellationFreesBudget)
+TEST_F(ScanSessionsTest, ConcurrentPagesReserveReplayCapacityBeforeReading)
+{
+    TScans scans;
+    std::vector<std::string> tokens;
+    tokens.reserve(8);
+    for (int index = 0; index < 8; ++index) {
+        tokens.push_back(Open(scans));
+    }
+    const auto waiting = Open(scans, "b");
+    {
+        std::lock_guard lock(Fs->Mutex);
+        Fs->Armed = true;
+    }
+    std::vector<std::future<TResponse>> pages;
+    pages.reserve(tokens.size());
+    for (size_t index = 0; index < tokens.size(); ++index) {
+        pages.push_back(std::async(std::launch::async, [&, index] {
+            return scans.Open(Db, "a", test::collection_id, {{"cursor", tokens[index]}}, false, false);
+        }));
+    }
+    bool entered;
+    {
+        std::unique_lock lock(Fs->Mutex);
+        entered = Fs->Changed.wait_for(lock, 5s, [&] {
+            return Fs->Entered == 8;
+        });
+    }
+    auto refused = std::async(std::launch::async, [&] {
+        try {
+            scans.Open(Db, "b", test::collection_id, {{"cursor", waiting}}, false, false);
+            return std::string("advanced");
+        } catch (const TFailure& error) {
+            return error.Detail.code;
+        }
+    });
+    const auto ready = refused.wait_for(1s);
+    Fs->Release();
+    EXPECT_TRUE(entered);
+    EXPECT_EQ(ready, std::future_status::ready);
+    EXPECT_EQ(refused.get(), "RESOURCE_EXHAUSTED");
+    for (auto& page : pages) {
+        EXPECT_EQ(page.get().Status, 200);
+    }
+    EXPECT_EQ(scans.Open(Db, "b", test::collection_id, {{"cursor", waiting}}, false, false).Status, 200);
+}
+class ReplayAdmissionTest
+    : public ScanSessionsTest
+    , public ::testing::WithParamInterface<bool>
+{ };
+TEST_P(ReplayAdmissionTest, RefusalPreservesCursorAndLastReplay)
 {
     const std::string collection = "00000000-0000-4000-8000-0000000000c3";
     SchemaSpec schema{{{"key", FieldType::String, false}}};
-    TJson row{{"key", "same"}};
+    TJson row{{"key", "first"}};
     for (int column = 0; column < 9; ++column) {
         const auto name = "s" + std::to_string(column);
         schema.fields.push_back({name, FieldType::String, true});
         row[name] = std::string(175000, '\x01');
     }
     ASSERT_EQ(Db->CreateCollection({collection, "large", schema}).disposition, CommitDisposition::Committed);
+    auto second = row;
+    second["key"] = "second";
     const auto append =
-        Db->AppendDurable({collection, SecondOperation, {}, {ParseRows(schema, TJson::array({row, row}))}});
+        Db->AppendDurable({collection, SecondOperation, {}, {ParseRows(schema, TJson::array({row, second}))}});
     ASSERT_EQ(append.disposition, CommitDisposition::Committed);
     TScans scans(5min, 5min);
-    std::vector<std::pair<std::string, std::string>> tokens;
-    for (int index = 0; index < 14; ++index) {
-        const auto database = index < 8 ? "a" : "b";
-        const auto response = scans.Open(Db, database, collection, TJson::object(), false, false);
-        ASSERT_GT(response.Body.size(), 9000000);
-        tokens.emplace_back(database, TJson::parse(response.Body).at("next_cursor").get<std::string>());
+    auto token = Open(scans, "victim", collection);
+    std::string replayToken, replayBody;
+    if (GetParam()) {
+        replayToken = token;
+        replayBody = scans.Open(Db, "victim", collection, {{"cursor", token}}, false, false).Body;
+        token = TJson::parse(replayBody).at("next_cursor");
     }
-    try {
-        scans.Open(Db, "b", collection, TJson::object(), false, false);
-        FAIL() << "retained replay byte budget was not enforced";
-    } catch (const TFailure& error) {
-        EXPECT_EQ(error.Detail.code, "RESOURCE_EXHAUSTED");
-        EXPECT_EQ(error.Detail.retry_hint, RetryHint::SameIdAfterReconcile);
+    std::vector<std::pair<std::string, std::string>> tokens;
+    bool full = false;
+    for (int index = 0; index < 32; ++index) {
+        const auto database = std::to_string(index / 8);
+        try {
+            const auto response = scans.Open(Db, database, collection, TJson::object(), false, false);
+            ASSERT_GT(response.Body.size(), 9000000);
+            tokens.emplace_back(database, TJson::parse(response.Body).at("next_cursor").get<std::string>());
+        } catch (const TFailure& error) {
+            EXPECT_EQ(error.Detail.code, "RESOURCE_EXHAUSTED");
+            full = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(full) << "retained replay byte budget was not enforced";
+    ASSERT_FALSE(tokens.empty());
+    for (int retry = 0; retry < 2; ++retry) {
+        try {
+            scans.Open(Db, "victim", collection, {{"cursor", token}}, false, false);
+            FAIL() << "page advanced without replay capacity";
+        } catch (const TFailure& error) {
+            EXPECT_EQ(error.Detail.code, "RESOURCE_EXHAUSTED");
+            EXPECT_EQ(error.Detail.retry_hint, RetryHint::SameIdAfterReconcile);
+        }
+        if (!replayToken.empty()) {
+            EXPECT_EQ(scans.Open(Db, "victim", collection, {{"cursor", replayToken}}, false, false).Body, replayBody);
+        }
     }
     scans.Cancel(tokens.front().first, collection, {{"cursor", tokens.front().second}});
-    EXPECT_EQ(scans.Open(Db, "b", collection, TJson::object(), false, false).Status, 200);
+    // A later append must not enter the refused cursor's already fixed view.
+    ASSERT_EQ(Db->AppendDurable({collection, ThirdOperation, {}, {ParseRows(schema, TJson::array({row}))}}).disposition,
+        CommitDisposition::Committed);
+    const auto resumed = scans.Open(Db, "victim", collection, {{"cursor", token}}, false, false);
+    const auto page = TJson::parse(resumed.Body);
+    ASSERT_EQ(page.at("rows").size(), 1);
+    EXPECT_EQ(page.at("rows").at(0), GetParam() ? second : row);
+    EXPECT_EQ(page.at("snapshot_id"), std::to_string(test::Present(append.result).snapshot_id));
+    EXPECT_EQ(page.at("next_cursor").is_null(), GetParam());
+    EXPECT_EQ(scans.Open(Db, "victim", collection, {{"cursor", token}}, false, false).Body, resumed.Body);
+    scans.Clear();
+    const auto reopened = Open(scans, "victim", collection);
+    EXPECT_EQ(scans.Open(Db, "victim", collection, {{"cursor", reopened}}, false, false).Status, 200);
 }
+INSTANTIATE_TEST_SUITE_P(FirstAndNextPage, ReplayAdmissionTest, ::testing::Bool());
 TEST(ScanRowsJson, BatchEncodingPreservesTypesAndBudgetedSlices)
 {
     auto batch = Batch({{"a\n\"", -4, 2.5, true, -1}, {"same", {}, {}, {}, {}}, {"same", {}, {}, {}, {}}});
