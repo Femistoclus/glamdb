@@ -75,7 +75,11 @@ Shut down and reopen the store to write again.
 
 Storage failures map to engine codes as follows. Read paths only use locations
 taken from committed metadata, so malformed or missing persisted state there
-is corruption. Every `CORRUPTION` closes readiness.
+is corruption; environmental read failures (I/O errors, descriptor or memory
+exhaustion) keep their own codes and do not close readiness. Manifest lists
+and manifests are read whole through the FileIO before Avro decoding, so a
+read error cannot surface as a truncated, apparently malformed file. Every
+`CORRUPTION` closes readiness.
 
 | Source | Condition | Engine code |
 | --- | --- | --- |
@@ -84,7 +88,9 @@ is corruption. Every `CORRUPTION` closes readiness.
 | `file_too_large` | reading a committed file / write budget | `CORRUPTION` / `RESOURCE_EXHAUSTED` |
 | `no_space_on_device`, `value_too_large`, `not_enough_memory` | any | `RESOURCE_EXHAUSTED` |
 | write latch, `io_error`, `read_only_file_system`, `permission_denied`, other | any | `IO_ERROR` |
+| Iceberg `kIOError` without a prefix | read paths | `IO_ERROR` |
 | Iceberg `kInvalid`, `kInvalidArgument`, `kNotFound`, `kValidationFailed`, `kDecompressError`, `kUnknownError`, `kInvalidManifest(List)`, `kInvalidSchema`, `kJsonParseError`; decoder exceptions | read paths | `CORRUPTION` |
+| `std::bad_alloc`, Arrow `OutOfMemory`, message prefix `RESOURCE: ` (including a full recovery workspace) | any | `RESOURCE_EXHAUSTED` |
 | message prefix `CORRUPTION: ` | any | `CORRUPTION` |
 | message prefix `CAPACITY: ` | write paths / read paths | `RESOURCE_EXHAUSTED` / `CORRUPTION` |
 

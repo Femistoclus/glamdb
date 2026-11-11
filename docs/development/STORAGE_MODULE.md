@@ -62,8 +62,10 @@ Staging, publication and recovery reject snapshot timestamps outside UTC years
 
 Failures that the engine must classify carry stable message prefixes from
 `core/storage/iceberg_error_boundary.h`: `CORRUPTION: ` marks a violated storage
-invariant and `CAPACITY: ` a configured storage or file limit (candidate store
-usage, candidate root size, append accumulators and the Parquet file limit).
+invariant, `CAPACITY: ` a configured storage or file limit (candidate store
+usage, candidate root size, append accumulators and the Parquet file limit) and
+`RESOURCE: ` memory or recovery-workspace exhaustion (`not_enough_memory` from
+the FileIO, `std::bad_alloc` caught at the Iceberg boundary, a full workspace).
 The durable FileIO reports store-layout violations as `kInvalid` with the
 corruption prefix: a symlink (ELOOP with `O_NOFOLLOW`), a non-directory or
 cross-device entry, and, when opening an existing file, a non-regular file or

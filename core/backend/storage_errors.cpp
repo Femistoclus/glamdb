@@ -68,15 +68,21 @@ StorageError(const iceberg::Error& error, EStoragePath path, std::string_view co
 {
     const std::string_view message(error.message);
     std::string_view code = fallback;
+    const bool capacity = message.starts_with(NGlamDB::NStorage::CapacityPrefix);
+    const bool resource = message.starts_with(NGlamDB::NStorage::ResourcePrefix);
     if (message.starts_with(NGlamDB::NStorage::CorruptionPrefix)) {
         code = "CORRUPTION";
-    } else if (path == EStoragePath::Read) {
-        // Retained state that no longer fits its limits cannot be served
-        // either: it fails closed like any other invariant violation.
-        if (IsPersistedDecodeKind(error.kind) || message.starts_with(NGlamDB::NStorage::CapacityPrefix)) {
+    } else if (path == EStoragePath::Read && !resource) {
+        // An I/O error reports the environment (EIO, EMFILE, EACCES, ...),
+        // not persisted state: it must not close readiness. Retained state
+        // that no longer fits its limits cannot be served either: it fails
+        // closed like any other invariant violation.
+        if (error.kind == iceberg::ErrorKind::kIOError) {
+            code = "IO_ERROR";
+        } else if (IsPersistedDecodeKind(error.kind) || capacity) {
             code = "CORRUPTION";
         }
-    } else if (message.starts_with(NGlamDB::NStorage::CapacityPrefix)) {
+    } else if (capacity || resource) {
         code = "RESOURCE_EXHAUSTED";
     }
     return {std::string(code), BoundedDiagnostic(std::string(context) + ": " + error.message), HintFor(code)};
