@@ -3,7 +3,10 @@
 #include "storage/types.h"
 
 #include <array>
+#include <bit>
+#include <cstring>
 #include <string_view>
+#include <type_traits>
 
 namespace glamdb::detail {
 
@@ -28,6 +31,52 @@ private:
     std::array<uint32_t, 8>
         hash_{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
     std::array<char, 64> block_{};
+    size_t used_ = 0;
+    uint64_t bytes_ = 0;
+};
+
+// Streams canonical bytes into SHA-256 through a fixed buffer: the digest is
+// the hash of exactly the bytes Encoder would have produced, without
+// materializing them or updating the hash once per tiny field.
+class CanonicalHasher
+{
+public:
+    template <class T>
+    void Number(T value)
+    {
+        using U = std::make_unsigned_t<T>;
+        if (sizeof(T) > buffer_.size() - used_) {
+            Flush();
+        }
+        // Little-endian, as Encoder::Number; a local cursor because char
+        // stores may alias the members.
+        auto* out = buffer_.data() + used_;
+        if constexpr (std::endian::native == std::endian::little) {
+            std::memcpy(out, &value, sizeof(T));
+        } else {
+            auto bits = static_cast<uint64_t>(std::bit_cast<U>(value));
+            for (size_t i = 0; i < sizeof(T); ++i) {
+                out[i] = static_cast<char>(bits & 255);
+                bits >>= 8;
+            }
+        }
+        used_ += sizeof(T);
+        bytes_ += sizeof(T);
+    }
+    void Bytes(std::string_view bytes);
+    // Same encoding and size check as Encoder::Text.
+    void Text(std::string_view text);
+    // Canonical bytes passed so far.
+    uint64_t Size() const
+    {
+        return bytes_;
+    }
+    std::string Digest();
+
+private:
+    void Flush();
+    Sha256State hash_;
+    std::array<char, 4096> buffer_{};
     size_t used_ = 0;
     uint64_t bytes_ = 0;
 };

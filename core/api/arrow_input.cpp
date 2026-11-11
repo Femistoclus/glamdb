@@ -182,12 +182,10 @@ Result<std::string> FingerprintBatches(const SchemaSpec& schema,
         if (!header) {
             throw Failure(header.error());
         }
-        Sha256State hash;
-        hash.Update(*header);
+        CanonicalHasher hash;
+        hash.Bytes(*header);
         const auto number = [&hash]<class T>(T value) {
-            Encoder encoded;
-            encoded.Number(value);
-            hash.Update(encoded.bytes);
+            hash.Number(value);
         };
         for (const auto& batch : batches) {
             const auto arrays = Arrays(*batch, MapFields(schema, *batch, true));
@@ -204,7 +202,7 @@ Result<std::string> FingerprintBatches(const SchemaSpec& schema,
                             const auto value = static_cast<const arrow::StringArray&>(array).GetView(row);
                             Require(ValidUtf8(value), "INVALID_ARGUMENT", "invalid UTF-8 string");
                             number(static_cast<uint32_t>(value.size()));
-                            hash.Update(value);
+                            hash.Bytes(value);
                             break;
                         }
                         case FieldType::Bool:

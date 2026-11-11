@@ -22,10 +22,16 @@ struct Failure : std::runtime_error
     { }
 };
 
+[[noreturn, gnu::cold, gnu::noinline]] inline void RequireFailed(std::string_view code, std::string_view message)
+{
+    throw Failure({std::string(code), std::string(message), RetryHint::OperatorAction});
+}
+
+// The throwing path stays out of line so that per-cell checks inline cheaply.
 inline void Require(bool condition, std::string_view code, std::string_view message)
 {
-    if (!condition) {
-        throw Failure({std::string(code), std::string(message), RetryHint::OperatorAction});
+    if (!condition) [[unlikely]] {
+        RequireFailed(code, message);
     }
 }
 

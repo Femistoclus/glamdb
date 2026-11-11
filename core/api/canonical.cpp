@@ -52,7 +52,7 @@ void ValidateSchema(const SchemaSpec& schema)
     }
 }
 
-void EncodeCell(Encoder& encoder, const FieldSpec& field, Cell& cell)
+void EncodeCell(CanonicalHasher& encoder, const FieldSpec& field, Cell& cell)
 {
     if (std::holds_alternative<std::monostate>(cell)) {
         Require(field.nullable, "INVALID_ARGUMENT", "NULL in required field");
@@ -217,6 +217,39 @@ std::string Sha256State::Digest() const
     return result;
 }
 
+void CanonicalHasher::Flush()
+{
+    hash_.Update(std::string_view(buffer_.data(), used_));
+    used_ = 0;
+}
+
+void CanonicalHasher::Bytes(std::string_view bytes)
+{
+    bytes_ += bytes.size();
+    if (bytes.size() > buffer_.size() - used_) {
+        Flush();
+        if (bytes.size() >= buffer_.size()) {
+            hash_.Update(bytes);
+            return;
+        }
+    }
+    std::copy_n(bytes.data(), bytes.size(), buffer_.data() + used_);
+    used_ += bytes.size();
+}
+
+void CanonicalHasher::Text(std::string_view text)
+{
+    Require(text.size() <= 16ULL * 1024 * 1024, "RESOURCE_EXHAUSTED", "encoded string too large");
+    Number(static_cast<uint32_t>(text.size()));
+    Bytes(text);
+}
+
+std::string CanonicalHasher::Digest()
+{
+    Flush();
+    return hash_.Digest();
+}
+
 std::string Sha256(std::string_view input)
 {
     Sha256State hash;
@@ -322,9 +355,9 @@ Result<NormalizedInput> Normalize(const SchemaSpec& schema, std::string_view col
         if (!header) {
             throw Failure(header.error());
         }
-        Encoder out;
-        out.bytes = *header;
-        const auto header_size = out.bytes.size();
+        CanonicalHasher out;
+        out.Bytes(*header);
+        const auto header_size = out.Size();
         NormalizedInput result;
         result.rows.reserve(rows.size());
         for (auto& row : rows) {
@@ -341,18 +374,17 @@ Result<NormalizedInput> Normalize(const SchemaSpec& schema, std::string_view col
             } else {
                 normalized = std::move(row);
             }
-            const auto before = out.bytes.size();
+            const auto before = out.Size();
             for (size_t i = 0; i < normalized.size(); ++i) {
                 EncodeCell(out, schema.fields[i], normalized[i]);
-                Require(out.bytes.size() - before <= 2ULL * 1024 * 1024 &&
-                        out.bytes.size() - header_size <= 16ULL * 1024 * 1024,
+                Require(out.Size() - before <= 2ULL * 1024 * 1024 && out.Size() - header_size <= 16ULL * 1024 * 1024,
                     "INPUT_TOO_LARGE",
                     "append exceeds decoded input limit");
             }
             result.rows.push_back(std::move(normalized));
         }
-        result.decoded_bytes = out.bytes.size() - header_size;
-        result.payload_hash = Sha256(out.bytes);
+        result.decoded_bytes = out.Size() - header_size;
+        result.payload_hash = out.Digest();
         return result;
     } catch (const Failure& error) {
         auto detail = error.detail;
