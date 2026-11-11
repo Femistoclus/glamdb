@@ -17,7 +17,12 @@ docker build --tag glamdb-dev:clang18 - < "$root/docker/dev/Dockerfile"
 docker build --tag glamdb-deps:clang18 - < "$root/docker/deps/Dockerfile"
 exec docker run --rm --name glamdb-deps-build --volume "$root:/src:ro" \
     --volume "${GLAMDB_DEPS_VOLUME:-glamdb-deps-clang18}:/deps" \
-    --env CMAKE_BUILD_PARALLEL_LEVEL=2 --workdir /src glamdb-deps:clang18 sh -eu -c '
+    --env CMAKE_BUILD_PARALLEL_LEVEL=2 --env GLAMDB_DEPS_CLEAN="${GLAMDB_DEPS_CLEAN:-0}" \
+    --workdir /src glamdb-deps:clang18 sh -eu -c '
+        # A changed dependency recipe can invalidate the incremental build tree.
+        if [ "$GLAMDB_DEPS_CLEAN" = 1 ]; then
+            rm -rf /deps/build /deps/install
+        fi
         for dependency in arrow iceberg-cpp googletest; do
             git config --global --add safe.directory "/src/third_party/$dependency"
         done

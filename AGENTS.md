@@ -273,6 +273,9 @@ build preserves the installed `glamdb::core` engine API. To include storage
 adapters, build the pinned prefix with `./scripts/build-deps-in-docker.sh`, then
 run `./scripts/test-storage-in-docker.sh asan-ubsan`. See
 [BUILDING](docs/development/BUILDING.md) for isolation and sanitizer compatibility.
+`scripts/glamdb-local.sh up|down|status|logs|cli` builds and runs a local server
+(native on Linux, Docker elsewhere) configured by `GLAMDB_PORT`, `GLAMDB_TOKEN` and
+`GLAMDB_DATA`; it rebuilds the dependency prefix when its recipe fingerprint changes.
 
 The coordinator supplies owned, immutable normalized batches and expected
 operation summaries, runs capacity preflight before binding an attempt, and

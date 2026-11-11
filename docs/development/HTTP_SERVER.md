@@ -10,6 +10,8 @@ export GLAMDB_TOKEN='replace-with-a-random-secret'
 ./build/local/apps/server/glamdb --data-dir /tmp/my-glamdb --ui-root "$PWD/ui"
 ```
 
+`scripts/glamdb-local.sh up` performs these steps (natively on Linux, in Docker
+elsewhere) and runs the server in the background; see the README.
 Open [the workbench](http://127.0.0.1:8080), enter the token, create a database,
 then create collections, append rows and query them. The database screen also
 opens, closes and reconciles databases. Restart with the same data directory. No mock
