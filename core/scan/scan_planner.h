@@ -10,6 +10,7 @@
 #include <vector>
 
 namespace iceberg {
+struct DataFile;
 class FileIO;
 class PartitionSpec;
 class Schema;
@@ -54,6 +55,9 @@ PlanManifests(const std::shared_ptr<iceberg::FileIO>& io, const BaseIdentity& ba
 // The live data files of one planned manifest.
 Result<std::vector<TScanFile>>
 ManifestFiles(const std::shared_ptr<iceberg::FileIO>& io, const TScanManifests& plan, size_t index);
+
+Result<std::vector<std::shared_ptr<iceberg::DataFile>>>
+ReadManifestDataFiles(const std::shared_ptr<iceberg::FileIO>& io, const TScanManifests& plan, size_t index);
 
 // PlanManifests followed by every manifest's files.
 Result<TScanPlan>

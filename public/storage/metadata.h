@@ -46,6 +46,70 @@ struct CollectionStatistics
     Metric logical_bytes{};
 };
 
+struct TFileFieldMetrics
+{
+    int32_t FieldID = 0;
+    std::optional<int64_t> CompressedBytes{};
+    std::optional<int64_t> ValueCount{};
+    std::optional<int64_t> NullCount{};
+    std::optional<int64_t> NanCount{};
+    // Iceberg single-value binary encoding; string bounds may be truncated.
+    std::optional<std::vector<uint8_t>> LowerBound{};
+    std::optional<std::vector<uint8_t>> UpperBound{};
+    bool operator==(const TFileFieldMetrics&) const = default;
+};
+
+struct TDataFileMetadata
+{
+    std::string FileID{};
+    std::string Format = "parquet";
+    int64_t RecordCount = 0;
+    int64_t CompressedBytes = 0;
+    std::vector<TFileFieldMetrics> FieldMetrics{};
+    bool operator==(const TDataFileMetadata&) const = default;
+};
+
+struct TFileListing
+{
+    BaseIdentity Identity{};
+    SnapshotSelector SelectorResolved{};
+    std::vector<TDataFileMetadata> Files{};
+};
+
+struct TColumnChunkMetadata
+{
+    int32_t FieldID = 0;
+    int64_t ValueCount = 0;
+    int64_t CompressedBytes = 0;
+    int64_t UncompressedBytes = 0;
+    int64_t DataPageOffset = 0;
+    std::optional<int64_t> DictionaryPageOffset{};
+    std::string Compression{};
+    std::optional<int64_t> NullCount{};
+    // Parquet plain encoding, independent of the manifest's Iceberg bounds.
+    std::optional<std::vector<uint8_t>> LowerBound{};
+    std::optional<std::vector<uint8_t>> UpperBound{};
+    bool HasColumnIndex = false;
+    bool HasOffsetIndex = false;
+};
+
+struct TRowGroupMetadata
+{
+    int32_t Ordinal = 0;
+    int64_t RecordCount = 0;
+    int64_t CompressedBytes = 0;
+    int64_t UncompressedBytes = 0;
+    std::vector<TColumnChunkMetadata> Columns{};
+};
+
+struct TFileDetails
+{
+    BaseIdentity Identity{};
+    SnapshotSelector SelectorResolved{};
+    TDataFileMetadata File{};
+    std::vector<TRowGroupMetadata> RowGroups{};
+};
+
 struct ScanExplanation
 {
     ScanInfo info{};

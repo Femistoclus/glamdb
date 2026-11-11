@@ -9,6 +9,7 @@
 
 #if GLAMDB_HAS_STORAGE
 #include "core/backend/local_storage_backend.h"
+#include "core/scan/file_metadata.h"
 #include "core/scan/metadata.h"
 #include "core/scan/scan_cursor.h"
 #endif
@@ -1404,6 +1405,39 @@ Result<CollectionStatistics> Engine::GetStatistics(std::string_view id, Snapshot
         ErrorDetail{"DEPENDENCY_UNAVAILABLE", "storage metadata is not built", RetryHint::OperatorAction});
 #endif
 }
+
+Result<TFileListing> Engine::ListFiles(std::string_view collectionID, SnapshotSelector selector) const
+{
+#if GLAMDB_HAS_STORAGE
+    return impl_->ReadView<TFileListing>(collectionID, [&](const TScanContext& context) {
+        return ReadFiles(context, selector);
+    });
+#else
+    (void)collectionID;
+    (void)selector;
+    return std::unexpected(
+        ErrorDetail{"DEPENDENCY_UNAVAILABLE", "storage metadata is not built", RetryHint::OperatorAction});
+#endif
+}
+
+// The IDs have distinct validated UUID and SHA-256 formats.
+// NOLINTBEGIN(bugprone-easily-swappable-parameters)
+Result<TFileDetails>
+Engine::GetFileDetails(std::string_view collectionID, std::string_view fileID, SnapshotSelector selector) const
+{
+#if GLAMDB_HAS_STORAGE
+    return impl_->ReadView<TFileDetails>(collectionID, [&](const TScanContext& context) {
+        return ReadFileDetails(context, fileID, selector);
+    });
+#else
+    (void)collectionID;
+    (void)fileID;
+    (void)selector;
+    return std::unexpected(
+        ErrorDetail{"DEPENDENCY_UNAVAILABLE", "storage metadata is not built", RetryHint::OperatorAction});
+#endif
+}
+// NOLINTEND(bugprone-easily-swappable-parameters)
 
 Result<ScanExplanation> Engine::ExplainScan(const ScanRequest& request) const
 {

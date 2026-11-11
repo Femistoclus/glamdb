@@ -32,6 +32,12 @@ public:
     Result<SnapshotHistory> ListSnapshots(std::string_view collection_id) const;
     Result<CollectionStatistics> GetStatistics(std::string_view collection_id,
         SnapshotSelector selector = SnapshotSelector::Latest()) const;
+    Result<TFileListing> ListFiles(std::string_view collectionID,
+        SnapshotSelector selector = SnapshotSelector::Latest()) const;
+    // Only opaque IDs returned by ListFiles; membership is checked before file I/O.
+    Result<TFileDetails> GetFileDetails(std::string_view collectionID,
+        std::string_view fileID,
+        SnapshotSelector selector = SnapshotSelector::Latest()) const;
     // Plans and validates one fixed view without reading Parquet data.
     Result<ScanExplanation> ExplainScan(const ScanRequest& request) const;
     CreateOutcome CreateCollection(const CreateCollectionRequest& request);

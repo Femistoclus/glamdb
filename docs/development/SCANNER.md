@@ -136,7 +136,8 @@ distinguishable from a planted special file and also fails closed.
 ## Scan path
 
 The facade also exposes capabilities, retained snapshot history, selected-view
-statistics and scan explain. Cursor profiles measure completed execution work.
+statistics, snapshot-bound file/row-group details and scan explain. Cursor profiles
+measure completed execution work.
 See [public metadata](METADATA.md) for provenance, unknown counters and limits.
 
 `Engine::Scan` validates the collection, resolves the confirmed SQLite view

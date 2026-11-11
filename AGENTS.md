@@ -76,7 +76,8 @@ key uniqueness nor replacement semantics.
 
 Key-value upserts and deletes are a subsequent extension using copy-on-write
 and an explicit KV collection mode. Native capabilities, receipt-backed snapshot
-history, selected-view statistics, explain and cursor profiles use the public
+history, selected-view statistics, snapshot-bound file/row-group details,
+explain and cursor profiles use the public
 facade; see [the metadata guide](docs/development/METADATA.md). Their HTTP/SDK/UI
 adapters and object storage remain later extensions. Compaction, snapshot expiration,
 garbage collection, asynchronous admission, replication, multiple writers, and

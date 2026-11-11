@@ -320,6 +320,39 @@ TEST_F(SupersededRootTest, MetadataRetainsItsConfirmedRootAcrossAppend)
     EXPECT_EQ(Roots().size(), 1U);
 }
 
+TEST_F(SupersededRootTest, FileDetailsRetainTheirConfirmedRootAcrossAppend)
+{
+    const auto first = Commit(FirstOperation, FirstRows);
+    const auto listing = Engine_->ListFiles(test::collection_id);
+    ASSERT_TRUE(listing);
+    ASSERT_EQ(listing->Files.size(), 1U);
+    const auto resolved = Roots();
+    ASSERT_EQ(resolved.size(), 1U);
+    std::promise<std::thread::id> readerID;
+    std::promise<void> armed;
+    auto reader = std::async(std::launch::async, [&] {
+        readerID.set_value(std::this_thread::get_id());
+        armed.get_future().wait();
+        return Engine_->GetFileDetails(test::collection_id, listing->Files.front().FileID);
+    });
+    Gate_->Arm(readerID.get_future().get());
+    armed.set_value();
+    const bool entered = Gate_->WaitEntered(10s);
+    if (!entered) {
+        Gate_->Release();
+    }
+    ASSERT_TRUE(entered);
+    Commit(SecondOperation, SecondRows);
+    EXPECT_TRUE(std::filesystem::exists(resolved.front()));
+    Gate_->Release();
+    const auto details = reader.get();
+    ASSERT_TRUE(details) << details.error().message;
+    EXPECT_EQ(details->SelectorResolved, SnapshotSelector::Id(first.snapshot_id));
+    EXPECT_EQ(details->File.RecordCount, 3);
+    Commit(ThirdOperation, FirstRows);
+    EXPECT_FALSE(std::filesystem::exists(resolved.front()));
+}
+
 // A scan that finishes while the next append walks the warehouse for capacity
 // must not unlink its root under that walk: a root removed between the walk's
 // readdir and fstatat failed preflight as corruption and closed the store.
