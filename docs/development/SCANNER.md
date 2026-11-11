@@ -114,7 +114,8 @@ taken from committed metadata, so malformed or missing persisted state there
 is corruption; environmental read failures (I/O errors, descriptor or memory
 exhaustion) keep their own codes and do not close readiness. Manifest lists
 and manifests are read whole through the FileIO before Avro decoding, so a
-read error cannot surface as a truncated, apparently malformed file. Every
+read error cannot surface as a truncated, apparently malformed file; data-file
+reads keep the first FileIO error and report it instead of the decoder's. Every
 `CORRUPTION` closes readiness.
 
 | Source | Condition | Engine code |
@@ -172,11 +173,30 @@ joins a writer attempt or holds a SQLite read transaction.
   Strings compare by unsigned UTF-8 bytes (`key` literals `<= 1024` bytes, other
   strings `<= 1 MiB`); literal `-0.0` normalizes to `0.0`; NaN/Inf and
   out-of-range timestamps are `INVALID_ARGUMENT`.
-- Each file is read whole (at most 32 MiB in this profile) and its footer is
-  checked by the same verifier as recovery: exact field IDs 1..N, names,
-  repetition, physical/logical types, row group counts and the manifest row
-  count. All columns referenced by `projection` and `predicate` are deduplicated
-  and read from Parquet; before `SelectRows` evaluates the predicate or any
+- Each data file (at most 32 MiB in this profile) is opened through the
+  store FileIO with the length its manifest records and read with positioned
+  reads of one stream (`core/scan/data_file_source.h`): the magic, trailer
+  and footer, which are checked by the same verifier as recovery (exact
+  length, field IDs 1..N, names, repetition, physical/logical types, row
+  group counts and the manifest row count). That verified footer is handed to
+  the Parquet reader, so it is decoded once per open. The reader then reads,
+  synchronously and without pre-buffering, one column chunk per row group of
+  each field referenced by `projection` or `predicate` (deduplicated); unread
+  chunks and page indexes are never touched. Each read lies inside the file
+  (a request outside it is `CORRUPTION`), and the decoder holds at most the
+  current column chunk of each read field. A FileIO failure under
+  the decoder keeps its storage classification (an I/O error stays `IO_ERROR`
+  and does not close readiness), and the stream close is checked after the
+  file is decoded. Before opening a file the cursor keeps the shared scan
+  budget's reservations (twice the file size plus 64 KiB of data, 256 MiB of
+  footer/decoder metadata; see [shared resources](SHARED_RESOURCES.md)); every
+  read buffer retains the data reservation until it is released, although at
+  most the file length is held at once, and Arrow decoding is charged by the
+  per-scan pool. Cancellation is checked after the footer
+  reads and after each batch, as for whole-file reads. One FileIO stream
+  stays open while the file is decoded. `TScanReadStats` (`GetScanReadStats`) reports the read
+  calls, the largest read and the peak held read bytes per cursor;
+  `data_bytes_read` is the total of those reads. Before `SelectRows` evaluates the predicate or any
   value is returned, every decoded projection and filter-only column is
   validated: Arrow `ValidateFull` (offsets and UTF-8), string limits (1024 bytes
   for `key`, 1 MiB otherwise), finite non-negative-zero floats and timestamps in

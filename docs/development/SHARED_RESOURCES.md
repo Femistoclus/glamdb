@@ -40,7 +40,7 @@ Scan reservations have separate lifetimes:
 | 16 MiB cursor metadata, 1 MiB selection data, 16 KiB ordinary control | Cursor destruction; returned schemas/buffers, including `ScanInfo::output_schema`, also retain the shared cursor metadata envelope. |
 | 256 MiB pending manifest metadata | After all descriptors from that manifest have been consumed, or on scan failure/EOS. |
 | 256 MiB footer/decoder metadata | After the active file reader is destroyed. This overlaps pending manifest admission. |
-| Twice the file size plus 64 KiB data | Last ownership of the whole-file byte source. Arrow allocations are separately charged. |
+| Twice the file size plus 64 KiB data | Last ownership of the data-file source and of every read buffer it returned (the footer, then column chunks of read fields; at most the file length at once). Arrow allocations are separately charged. |
 | 4 KiB plus 2 KiB per projected field, output metadata | Final ownership of each original result's schema or backing buffers, including slices and nonempty C Data exports. |
 
 The output envelope covers the supported flat arrays' descriptors, buffer

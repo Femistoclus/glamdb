@@ -117,8 +117,9 @@ struct ScanInfo
 enum class ScanState : uint8_t { Open, Complete, Cancelled, Failed };
 
 // Cumulative completed work, including partial scans. Bytes count successful
-// whole data-file reads, including footers and unprojected column bytes; they
-// exclude metadata, failed/partial I/O and physical-device/cache measurements.
+// data-file reads (Parquet magic, footer and the column chunks of projected and
+// filtered fields); they exclude metadata, failed/partial I/O and
+// physical-device/cache measurements.
 struct ScanProfile
 {
     ScanState state = ScanState::Open;

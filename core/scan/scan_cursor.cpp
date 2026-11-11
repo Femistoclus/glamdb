@@ -4,7 +4,7 @@
 #include "core/api/canonical.h"
 #include "core/backend/storage_errors.h"
 #include "core/engine/storage_mapping.h"
-#include "core/scan/buffer_file.h"
+#include "core/scan/data_file_source.h"
 #include "core/scan/predicate.h"
 #include "core/scan/scan_planner.h"
 #include "core/storage/format_verifier.h"
@@ -15,11 +15,11 @@
 #include "storage/resources.h"
 
 #include <arrow/api.h>
-#include <arrow/io/memory.h>
 #include <iceberg/file_io.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/file_reader.h>
 #include <parquet/metadata.h>
+#include <parquet/properties.h>
 #include <parquet/schema.h>
 
 #include <algorithm>
@@ -341,10 +341,11 @@ public:
     ScanProfile Profile() const override
     {
         std::lock_guard lock(Mutex_);
+        const auto openBytes = Source_ ? Source_->Reads().Bytes : 0;
         ScanProfile profile{.state = State_,
             .manifests_read = {ManifestsRead_, MetricKind::Measured},
             .data_files_read = {DataFilesRead_, MetricKind::Measured},
-            .data_bytes_read = {DataBytesRead_, MetricKind::Measured},
+            .data_bytes_read = {DataBytesRead_ + openBytes, MetricKind::Measured},
             .rows_decoded = {RowsDecoded_, MetricKind::Measured},
             .rows_returned = {RowsReturned_, MetricKind::Measured},
             .rows_filtered = {RowsFiltered_, MetricKind::Measured},
@@ -361,6 +362,19 @@ public:
             profile.state = ScanState::Cancelled;
         }
         return profile;
+    }
+
+    TScanReadStats ReadStats() const
+    {
+        std::lock_guard lock(Mutex_);
+        auto stats = ReadStats_;
+        if (Source_) {
+            const auto reads = Source_->Reads();
+            stats.ReadCalls += reads.Calls;
+            stats.MaxReadBytes = std::max(stats.MaxReadBytes, reads.MaxReadBytes);
+            stats.PeakHeldBytes = std::max(stats.PeakHeldBytes, reads.PeakHeldBytes);
+        }
+        return stats;
     }
 
 private:
@@ -408,6 +422,9 @@ private:
     size_t NextIndexedFile_ = 0;
     std::shared_ptr<ResourceReservation> PendingMemory_;
     std::deque<TScanFile> PendingFiles_;
+    TScanReadStats ReadStats_;
+    // The open data file; the decoder reads it through this source.
+    std::shared_ptr<TDataFileSource> Source_;
     // A RecordBatchReader must not outlive its FileReader; members are
     // destroyed in reverse order.
     std::unique_ptr<parquet::arrow::FileReader> FileReader_;
@@ -429,6 +446,7 @@ private:
         BatchReader_.reset();
         FileReader_.reset();
         FileMemory_.reset();
+        FinishSource();
     }
 
     void Release()
@@ -469,11 +487,11 @@ private:
                 }
             }
             std::shared_ptr<arrow::RecordBatch> batch;
-            DecodeParquet("read Parquet batch", [&] {
+            DecodeData("read Parquet batch", [&] {
                 CheckArrow(BatchReader_->ReadNext(&batch), "CORRUPTION", "read Parquet batch");
             });
             if (!batch) {
-                ReleaseFile();
+                CloseFile();
                 continue;
             }
             RowsDecoded_ += batch->num_rows();
@@ -495,42 +513,101 @@ private:
         return std::shared_ptr<arrow::RecordBatch>{};
     }
 
+    // Adds the reads of the current data file to the cursor totals and drops it.
+    void FinishSource()
+    {
+        if (!Source_) {
+            return;
+        }
+        const auto reads = Source_->Reads();
+        DataBytesRead_ += reads.Bytes;
+        ReadStats_.ReadCalls += reads.Calls;
+        ReadStats_.MaxReadBytes = std::max(ReadStats_.MaxReadBytes, reads.MaxReadBytes);
+        ReadStats_.PeakHeldBytes = std::max(ReadStats_.PeakHeldBytes, reads.PeakHeldBytes);
+        Source_.reset();
+    }
+
+    // A FileIO failure under the decoder keeps its storage classification
+    // (an I/O error is not corruption).
+    void ThrowReadError() const
+    {
+        if (Source_) {
+            if (auto error = Source_->ReadError()) {
+                throw Failure(StorageError(*error, "read data file", EStoragePath::Read, "IO_ERROR"));
+            }
+        }
+    }
+
+    template <class TFunction>
+    void DecodeData(std::string_view context, TFunction&& fn)
+    {
+        try {
+            DecodeParquet(context, std::forward<TFunction>(fn));
+        } catch (const Failure&) {
+            ThrowReadError();
+            throw;
+        }
+    }
+
+    // The file is fully decoded: close its stream like a whole-file read did.
+    void CloseFile()
+    {
+        BatchReader_.reset();
+        FileReader_.reset();
+        const auto closed = Source_ ? Source_->CloseStream() : iceberg::Status{};
+        FinishSource();
+        FileMemory_.reset();
+        if (!closed) {
+            throw Failure(StorageError(closed.error(), "read data file", EStoragePath::Read, "IO_ERROR"));
+        }
+    }
+
     void OpenFile(const TScanFile& file)
     {
-        // Reserve before FileIO creates the std::string and the upstream
-        // footer parser materializes metadata. Arrow decoding is charged by Pool_.
+        // Reserve before the footer verifier materializes the footer bytes and
+        // metadata, with the shared scan budget's data-file rule (twice the
+        // file size plus 64 KiB; see SHARED_RESOURCES.md). Read buffers are
+        // charged to it and each returned read buffer retains it; at most the
+        // file length is held at once (the footer, then one column chunk per
+        // read field). Arrow decoding is charged by Pool_.
         RequireInput(file.SizeBytes >= 0 && file.SizeBytes <= (32LL << 20), "invalid data file size");
         auto bytesMemory = Take(Context_.Resources->Reserve(ResourceClass::Data,
             static_cast<uint64_t>(file.SizeBytes) * 2 + (64ULL << 10)));
         FileMemory_ = Take(Context_.Resources->Reserve(ResourceClass::Metadata, 256ULL << 20));
-        // Writer limits bound one data file to 32 MiB in this profile.
-        auto bytes = TakeIceberg(Context_.FileIO->ReadFile(file.Path, static_cast<size_t>(file.SizeBytes)),
+        // Only the footer and the column chunks of read fields are read, each
+        // with one positioned read inside the length the manifest records
+        // (writer limits bound one data file to 32 MiB in this profile).
+        auto input = TakeIceberg(Context_.FileIO->NewInputFile(file.Path, static_cast<size_t>(file.SizeBytes)),
             "IO_ERROR",
             "read data file");
-        ++DataFilesRead_;
-        DataBytesRead_ += static_cast<int64_t>(bytes.size());
-        CheckActive();
-        if (static_cast<int64_t>(bytes.size()) != file.SizeBytes) {
-            Fail("CORRUPTION", "read data file", "file length differs from its manifest");
-        }
+        auto stream = TakeIceberg(input->Open(), "IO_ERROR", "read data file");
+        Source_ = std::make_shared<TDataFileSource>(file.Path,
+            std::move(input),
+            std::move(stream),
+            file.SizeBytes,
+            std::move(bytesMemory));
         // The same strict footer check as recovery: field IDs, names,
-        // repetition, physical/logical types and row counts per row group.
-        // The reader uses this verified footer instead of decoding it again.
-        TBufferInputFile buffered({.Location = file.Path, .Bytes = bytes});
+        // repetition, physical/logical types, length and row counts per row
+        // group. The reader uses this verified footer instead of decoding it again.
+        const auto verified = Source_->AsInputFile();
         auto footer = TakeIceberg(
-            NGlamDB::NStorage::ReadParquetFooter(buffered, *FileSchema_, {file.SizeBytes, file.RecordCount}),
+            NGlamDB::NStorage::ReadParquetFooter(*verified, *FileSchema_, {file.SizeBytes, file.RecordCount}),
             "CORRUPTION",
             "verify Parquet file");
-        DecodeParquet("open Parquet file", [&] {
-            auto buffer = std::make_shared<TLeaseBuffer>(arrow::Buffer::FromString(std::move(bytes)), bytesMemory);
-            auto source = std::make_shared<arrow::io::BufferReader>(std::move(buffer));
+        ++DataFilesRead_;
+        CheckActive();
+        DecodeData("open Parquet file", [&] {
+            parquet::ArrowReaderProperties properties;
+            // Synchronous reads, one column chunk at a time, on this thread.
+            properties.set_pre_buffer(false);
+            properties.set_use_threads(false);
+            properties.set_batch_size(BatchRows_);
             auto reader =
                 TakeArrow(parquet::arrow::FileReader::Make(Pool_.get(),
-                              parquet::ParquetFileReader::Open(source, parquet::ReaderProperties(Pool_.get()), footer),
-                              parquet::default_arrow_reader_properties()),
+                              parquet::ParquetFileReader::Open(Source_, parquet::ReaderProperties(Pool_.get()), footer),
+                              properties),
                     "CORRUPTION",
                     "open Parquet file");
-            reader->set_batch_size(BatchRows_);
             std::vector<int> rowGroups(static_cast<size_t>(reader->num_row_groups()));
             std::iota(rowGroups.begin(), rowGroups.end(), 0);
             std::vector<int> columns;
@@ -633,6 +710,12 @@ private:
 };
 
 } // namespace
+
+std::optional<TScanReadStats> GetScanReadStats(const ScanCursor& cursor)
+{
+    const auto* scan = dynamic_cast<const TScanCursor*>(&cursor);
+    return scan ? std::optional(scan->ReadStats()) : std::nullopt;
+}
 
 Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanRequest& request)
 {

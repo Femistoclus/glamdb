@@ -151,7 +151,34 @@ TEST_F(NativeMetadata, ProfilesActualWorkAndPreservesZeroLimitLaziness)
     EXPECT_EQ(profile.rows_returned.value, 2);
     EXPECT_EQ(profile.rows_decoded.value, 3);
     EXPECT_EQ(profile.data_files_read.value, 1);
-    EXPECT_EQ(profile.data_bytes_read.value, a.compressed_data_bytes_added);
+    // Only the magic, the footer and the column chunks of "key" and "value"
+    // (projection plus predicate) are read.
+    const auto listing = Engine_->ListFiles(test::collection_id);
+    ASSERT_TRUE(listing);
+    ASSERT_EQ(listing->Files.size(), 1U);
+    const auto details = Engine_->GetFileDetails(test::collection_id, listing->Files.front().FileID);
+    ASSERT_TRUE(details);
+    int64_t expectedBytes = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(Temporary_.path)) {
+        if (entry.path().extension() == ".parquet") {
+            const auto bytes = ReadBytes(entry.path());
+            ASSERT_EQ(static_cast<int64_t>(bytes.size()), a.compressed_data_bytes_added);
+            uint32_t footer = 0;
+            for (size_t index = 0; index < 4; ++index) {
+                footer |= uint32_t{static_cast<uint8_t>(bytes[bytes.size() - 8 + index])} << (8 * index);
+            }
+            expectedBytes += 12 + int64_t{footer};
+        }
+    }
+    for (const auto& group : details->RowGroups) {
+        for (const auto& column : group.Columns) {
+            if (column.FieldID == 1 || column.FieldID == 2) {
+                expectedBytes += column.CompressedBytes;
+            }
+        }
+    }
+    EXPECT_EQ(profile.data_bytes_read.value, expectedBytes);
+    EXPECT_LT(expectedBytes, a.compressed_data_bytes_added);
     EXPECT_EQ(profile.manifests_read.value, 0);
     EXPECT_FALSE(profile.elapsed_us.value);
     ASSERT_TRUE(cursor.Next());

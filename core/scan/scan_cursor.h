@@ -3,8 +3,10 @@
 #include "storage/scan.h"
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 
 namespace arrow {
 class MemoryPool;
@@ -41,5 +43,21 @@ struct TScanContext
 };
 
 Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanRequest& request);
+
+// Data read work of one cursor beyond the public ScanProfile; internal, for
+// tests and benchmarks. Reads are positioned reads of data files through the
+// store FileIO (footers and column chunks); ScanProfile::data_bytes_read is
+// their byte total.
+struct TScanReadStats
+{
+    int64_t ReadCalls = 0;
+    // The largest single read, and the most read bytes held at once by the
+    // decoder of one file.
+    int64_t MaxReadBytes = 0;
+    int64_t PeakHeldBytes = 0;
+};
+
+// nullopt for a cursor that OpenScan did not create.
+std::optional<TScanReadStats> GetScanReadStats(const ScanCursor& cursor);
 
 } // namespace glamdb::detail

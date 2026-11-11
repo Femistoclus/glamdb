@@ -119,12 +119,14 @@ Every `Metric` contains an optional integer and a `MetricKind`:
 Explain lists all candidate files before execution. File and row-group pruning
 are unsupported and explicitly false. A small limit may stop execution early;
 this is not pruning. Projection includes predicate fields in physical reads.
-The scanner reads entire Parquet files, then decodes only requested columns.
+The scanner reads the Parquet magic and footer, then only the column chunks of
+projected and filtered fields.
 
-Profile counters count successfully decoded manifests, successful whole-file
-reads and their bytes, decoded rows before filtering/limit, and rows returned
-after filtering/limit. Bytes include footers and unprojected column bytes but
-exclude metadata, failed/partial reads and device/cache I/O. `Complete` means
+Profile counters count successfully decoded manifests, opened data files (their
+footer was read and verified), the bytes of successful data-file reads, decoded
+rows before filtering/limit, and rows returned after filtering/limit. Bytes
+include the magic and footer and exclude unread column chunks, page indexes,
+metadata, failed/partial reads and device/cache I/O. `Complete` means
 the caller reached EOS, including limit exhaustion; it does not mean every
 candidate was read. Open profiles are partial. Cancellation is observable
 before another `Next()`; terminal complete/failed states are retained through
