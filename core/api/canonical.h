@@ -9,15 +9,26 @@
 #include <string_view>
 #include <type_traits>
 
+namespace arrow {
+class MemoryPool;
+}
+
 namespace glamdb::detail {
 
 struct NormalizedInput
 {
+    // Owned input in one of two forms. Rows: NormalizeRows/NormalizeOwnedRows.
     std::vector<Row> rows;
+    // Columns (rows stays empty): NormalizeBatches. One batch in schema order
+    // (MakeArrowSchema) holding the same canonical values MakeRecordBatch
+    // would build from the normalized rows.
+    std::shared_ptr<arrow::RecordBatch> columns;
     std::string payload_hash;
     size_t decoded_bytes = 0;
     // Built during backend admission and retained until this append finishes.
     std::shared_ptr<arrow::RecordBatch> writer_batch;
+
+    size_t RowCount() const;
 };
 
 // Fingerprinting uses fixed-size state, independent of owned payload admission.
@@ -96,12 +107,15 @@ NormalizeRows(const SchemaSpec& schema, std::string_view collection_id, const st
 // Normalizes rows the caller already owns by moving them: no second copy.
 Result<NormalizedInput>
 NormalizeOwnedRows(const SchemaSpec& schema, std::string_view collection_id, std::vector<Row>&& rows);
+// Copies caller batches once into owned columns and hashes that copy.
 // `reserved`, when set, is the owned-input reservation admitted for this input
-// (FingerprintInput); a different shape rejects the input as changed.
+// (FingerprintInput); a different shape rejects the input as changed. Owned
+// buffers come from `pool` (default: Arrow's default pool).
 Result<NormalizedInput> NormalizeBatches(const SchemaSpec& schema,
     std::string_view collection_id,
     const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-    std::optional<size_t> reserved = std::nullopt);
+    std::optional<size_t> reserved = std::nullopt,
+    arrow::MemoryPool* pool = nullptr);
 Result<std::string> FingerprintBatches(const SchemaSpec& schema,
     std::string_view collection_id,
     const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches);

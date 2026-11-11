@@ -1424,7 +1424,7 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
             std::nullopt,
             std::nullopt};
         Require(ValidateOutcome(committed).has_value() &&
-                receipt.rows_appended == static_cast<int64_t>(input.rows.size()),
+                receipt.rows_appended == static_cast<int64_t>(input.RowCount()),
             "IO_ERROR",
             "producer returned an invalid receipt or row count");
         {

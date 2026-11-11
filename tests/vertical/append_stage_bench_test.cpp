@@ -5,7 +5,8 @@
 // 1000 and 10000 rows); GLAMDB_APPEND_STAGE_DIR names an existing parent
 // directory for the disposable stores (default: a temporary directory).
 //
-// Input-side stages (one inspection, fingerprint, normalization, writer batch) are
+// Input-side stages (one inspection, fingerprint, normalization, writer batch:
+// MakeRecordBatch from owned rows or CopyRecordBatch of owned columns) are
 // timed by calling the same functions on the same batches outside an append.
 // Backend stages are timed inside real appends by a delegating backend; the
 // remainder of the append wall time is coordinator/catalog work.
@@ -13,6 +14,8 @@
 #include "core/api/canonical.h"
 #include "core/engine/storage_mapping.h"
 #include "tests/vertical/vertical_support.h"
+
+#include <arrow/memory_pool.h>
 
 #include <algorithm>
 #include <chrono>
@@ -261,6 +264,12 @@ private:
     std::shared_ptr<detail::StorageBackend> Inner_;
 };
 
+std::shared_ptr<THookBackend>& Hooks()
+{
+    static std::shared_ptr<THookBackend> slot;
+    return slot;
+}
+
 struct TShape
 {
     std::size_t Fields = 0;
@@ -321,6 +330,14 @@ TEST(AppendStageBench, NativeAppendStagesByShape)
             }));
             ASSERT_TRUE(normalized) << normalized.error().message;
             decoded = normalized->decoded_bytes;
+            if (normalized->columns != nullptr) {
+                // Columnar owned input: no per-row stages; the writer batch is a copy.
+                owned.push_back(0);
+                makeBatch.push_back(Time([&] {
+                    ASSERT_TRUE(detail::CopyRecordBatch(*normalized->columns, nullptr));
+                }));
+                continue;
+            }
             auto copy = normalized->rows;
             owned.push_back(Time([&] {
                 ASSERT_TRUE(detail::NormalizeOwnedRows(schema, test::collection_id, std::move(copy)));
@@ -389,6 +406,127 @@ TEST(AppendStageBench, NativeAppendStagesByShape)
         engine.reset();
         std::filesystem::remove_all(root);
     }
+}
+
+// Converts owned columns back to rows, for the row-form comparison only.
+std::vector<Row> ToRows(const SchemaSpec& schema, const arrow::RecordBatch& batch)
+{
+    std::vector<Row> rows(static_cast<std::size_t>(batch.num_rows()));
+    for (std::size_t field = 0; field < schema.fields.size(); ++field) {
+        const auto& array = *batch.column(static_cast<int>(field));
+        for (int64_t row = 0; row < batch.num_rows(); ++row) {
+            auto& cells = rows[static_cast<std::size_t>(row)];
+            if (array.IsNull(row)) {
+                cells.emplace_back(std::monostate{});
+                continue;
+            }
+            switch (schema.fields[field].type) {
+                case FieldType::String:
+                    cells.emplace_back(std::string(static_cast<const arrow::StringArray&>(array).GetView(row)));
+                    break;
+                case FieldType::Bool:
+                    cells.emplace_back(static_cast<const arrow::BooleanArray&>(array).Value(row));
+                    break;
+                case FieldType::Int64:
+                    cells.emplace_back(static_cast<const arrow::Int64Array&>(array).Value(row));
+                    break;
+                case FieldType::Float64:
+                    cells.emplace_back(static_cast<const arrow::DoubleArray&>(array).Value(row));
+                    break;
+                case FieldType::TimestampUsUtc:
+                    cells.emplace_back(TimestampUs{static_cast<const arrow::TimestampArray&>(array).Value(row)});
+                    break;
+            }
+        }
+    }
+    return rows;
+}
+
+// Owned input and writer batch bytes of the row form (owned rows, the
+// materialized canonical string while hashing, MakeRecordBatch) and of the
+// columnar form (owned columns, CopyRecordBatch), on the same inputs.
+TEST(AppendStageBench, OwnedInputBytesByShape)
+{
+    if (EnvCount("GLAMDB_APPEND_STAGE_BENCH", 0) == 0) {
+        GTEST_SKIP() << "Set GLAMDB_APPEND_STAGE_BENCH to run this benchmark.";
+    }
+    std::printf("fields,rows,decoded_kib,reservation_kib,rows_owned_kib,rows_canonical_string_kib,rows_writer_kib,"
+                "columns_owned_kib,columns_writer_kib\n");
+    for (const auto& shape : Shapes()) {
+        const auto schema = MakeSchema(shape.Fields);
+        const std::vector<std::shared_ptr<arrow::RecordBatch>> batches{MakeBatch(schema, shape.Rows, 0)};
+        arrow::ProxyMemoryPool ownedPool(arrow::default_memory_pool());
+        const auto columns = detail::NormalizeBatches(schema, test::collection_id, batches, std::nullopt, &ownedPool);
+        ASSERT_TRUE(columns && columns->columns);
+        arrow::ProxyMemoryPool copyPool(arrow::default_memory_pool());
+        ASSERT_TRUE(detail::CopyRecordBatch(*columns->columns, &copyPool));
+
+        const auto rows = detail::NormalizeRows(schema, test::collection_id, ToRows(schema, *columns->columns));
+        ASSERT_TRUE(rows);
+        ASSERT_EQ(rows->payload_hash, columns->payload_hash);
+        std::size_t rowBytes = rows->rows.capacity() * sizeof(Row);
+        for (const auto& row : rows->rows) {
+            rowBytes += row.capacity() * sizeof(Cell);
+            for (const auto& cell : row) {
+                // Heap storage beyond the in-cell short-string buffer.
+                if (const auto* text = std::get_if<std::string>(&cell); text != nullptr && text->capacity() > 23) {
+                    rowBytes += text->capacity() + 1;
+                }
+            }
+        }
+        arrow::ProxyMemoryPool makePool(arrow::default_memory_pool());
+        ASSERT_TRUE(detail::MakeRecordBatch(schema, rows->rows, &makePool));
+        const auto reservation = detail::InputReservation(schema, batches);
+        ASSERT_TRUE(reservation);
+        std::printf("%zu,%zu,%zu,%zu,%zu,%zu,%lld,%lld,%lld\n",
+            shape.Fields,
+            shape.Rows,
+            columns->decoded_bytes / 1024,
+            *reservation / 1024,
+            rowBytes / 1024,
+            columns->decoded_bytes / 1024,
+            static_cast<long long>(makePool.max_memory() / 1024),
+            static_cast<long long>(ownedPool.max_memory() / 1024),
+            static_cast<long long>(copyPool.max_memory() / 1024));
+    }
+}
+
+// Peak RSS growth of real appends over the prebuilt inputs, one shape per
+// process: GLAMDB_APPEND_STAGE_RSS=<fields>x<rows>.
+TEST(AppendStageBench, AppendPeakRssGrowth)
+{
+    const char* value = std::getenv("GLAMDB_APPEND_STAGE_RSS");
+    if (value == nullptr || *value == 0) {
+        GTEST_SKIP() << "Set GLAMDB_APPEND_STAGE_RSS=<fields>x<rows> to run this benchmark.";
+    }
+    const std::string text = value;
+    const auto x = text.find('x');
+    const TShape shape{std::stoul(text.substr(0, x)), std::stoul(text.substr(x + 1))};
+    const auto schema = MakeSchema(shape.Fields);
+    std::vector<std::shared_ptr<arrow::RecordBatch>> inputs;
+    for (std::size_t index = 0; index < 5; ++index) {
+        inputs.push_back(MakeBatch(schema, shape.Rows, index));
+    }
+    test::TempDir temporary;
+    const auto root = temporary.path / "store";
+    auto created = detail::EngineFactory::CreateWith({test::store_id, root.string()}, THookBackend::Factory(Hooks()));
+    ASSERT_TRUE(created) << created.error().message;
+    auto engine = std::move(*created);
+    ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", schema}).disposition,
+        CommitDisposition::Committed);
+    const auto before = PeakRssKb();
+    for (std::size_t index = 0; index < inputs.size(); ++index) {
+        const auto operation = std::format("00000000-0000-4000-8000-{:012x}", index + 1);
+        ASSERT_EQ(engine->AppendDurable({test::collection_id, operation, {}, {inputs[index]}}).disposition,
+            CommitDisposition::Committed);
+    }
+    std::printf("fields,rows,peak_rss_before_kb,peak_rss_after_kb,growth_kb\n%zu,%zu,%ld,%ld,%ld\n",
+        shape.Fields,
+        shape.Rows,
+        before,
+        PeakRssKb(),
+        PeakRssKb() - before);
+    ASSERT_TRUE(engine->Shutdown(5000ms));
 }
 
 } // namespace

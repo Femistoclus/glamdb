@@ -1,6 +1,7 @@
 #include "core/api/canonical.h"
 
 #include "core/api/binary.h"
+#include "core/engine/storage_mapping.h"
 
 #include <arrow/api.h>
 
@@ -92,6 +93,7 @@ struct Column
     // Value bitmap (bool), fixed-width values, or string offsets.
     const uint8_t* values = nullptr;
     const char* data = nullptr;
+    int64_t data_bytes = 0;
 
     bool IsNull(int64_t row) const
     {
@@ -146,6 +148,7 @@ std::vector<Column> Columns(const SchemaSpec& schema, const arrow::RecordBatch& 
             column.all_null = column.validity == nullptr && data.null_count == data.length;
             column.values = buffer(1);
             column.data = reinterpret_cast<const char*>(buffer(2));
+            column.data_bytes = column.data == nullptr ? 0 : data.buffers[2]->size();
         }
         columns.push_back(column);
     }
@@ -245,24 +248,134 @@ void HashRows(CanonicalHasher& hash, const std::vector<Column>& columns, int64_t
     }
 }
 
-Cell Read(const Column& column, int64_t row)
+// Caller buffers differ from what was inspected or fingerprinted.
+struct InputChanged
+{ };
+
+ErrorDetail InputChangedError()
 {
-    if (column.IsNull(row)) {
-        return std::monostate{};
+    // The same error as the coordinator's hash comparison.
+    return {"INVALID_ARGUMENT", "Arrow input changed during append", RetryHint::OperatorAction};
+}
+
+[[noreturn]] void ThrowArrow(const arrow::Status& status)
+{
+    if (status.IsOutOfMemory()) {
+        throw std::bad_alloc();
     }
-    switch (column.type) {
-        case FieldType::String:
-            return std::string(column.Text(row));
-        case FieldType::Bool:
-            return column.Bool(row);
+    throw Failure({"INTERNAL", BoundedDiagnostic("owned Arrow input: " + status.ToString()), RetryHint::OperatorAction});
+}
+
+std::shared_ptr<arrow::Buffer> Allocate(int64_t bytes, arrow::MemoryPool* pool)
+{
+    auto buffer = arrow::AllocateBuffer(bytes, pool);
+    if (!buffer.ok()) {
+        ThrowArrow(buffer.status());
+    }
+    // Padding and NULL slots are deterministic zeros.
+    std::memset((*buffer)->mutable_data(), 0, static_cast<size_t>((*buffer)->capacity()));
+    return std::shared_ptr<arrow::Buffer>(std::move(*buffer));
+}
+
+// One owned column of every batch in schema form: no slice offset, a validity
+// bitmap only when a value is NULL (as Arrow builders produce), zeroed NULL
+// slots, +0.0 for -0.0 and no string bytes behind NULLs. Every string range is
+// checked against its source buffer and the space counted for it, so input
+// that changes after inspection cannot make the copy read or write out of
+// bounds; it only fails the hash comparison afterwards.
+std::shared_ptr<arrow::Array> OwnColumn(const FieldSpec& field,
+    const std::vector<std::vector<Column>>& batches,
+    const std::vector<std::shared_ptr<arrow::RecordBatch>>& sources,
+    size_t index,
+    int64_t rows,
+    arrow::MemoryPool* pool)
+{
+    auto validity = Allocate(arrow::bit_util::BytesForBits(rows), pool);
+    auto* valid = validity->mutable_data();
+    int64_t nulls = 0;
+    int64_t row = 0;
+    const auto each = [&](auto&& visit) {
+        row = 0;
+        for (size_t batch = 0; batch < batches.size(); ++batch) {
+            const auto& column = batches[batch][index];
+            const auto length = sources[batch]->num_rows();
+            for (int64_t source = 0; source < length; ++source, ++row) {
+                visit(column, source);
+            }
+        }
+    };
+    each([&](const Column& column, int64_t source) {
+        if (column.IsNull(source)) {
+            ++nulls;
+        } else {
+            arrow::bit_util::SetBit(valid, row);
+        }
+    });
+    std::vector<std::shared_ptr<arrow::Buffer>> buffers{nulls == 0 ? nullptr : validity};
+    switch (field.type) {
+        case FieldType::String: {
+            int64_t bytes = 0;
+            each([&](const Column& column, int64_t source) {
+                if (arrow::bit_util::GetBit(valid, row)) {
+                    bytes += column.Length(source);
+                }
+            });
+            if (bytes > 16LL * 1024 * 1024) {
+                throw InputChanged{};
+            }
+            auto offsets = Allocate((rows + 1) * static_cast<int64_t>(sizeof(int32_t)), pool);
+            auto data = Allocate(bytes, pool);
+            auto* out = reinterpret_cast<int32_t*>(offsets->mutable_data());
+            int32_t written = 0;
+            each([&](const Column& column, int64_t source) {
+                if (arrow::bit_util::GetBit(valid, row)) {
+                    const auto begin = column.Begin(source);
+                    const auto length = column.Length(source);
+                    if (begin < 0 || length < 0 || length > bytes - written ||
+                        static_cast<int64_t>(begin) + length > column.data_bytes)
+                    {
+                        throw InputChanged{};
+                    }
+                    std::memcpy(data->mutable_data() + written, column.data + begin, static_cast<size_t>(length));
+                    written += length;
+                }
+                out[row + 1] = written;
+            });
+            buffers.push_back(std::move(offsets));
+            buffers.push_back(std::move(data));
+            break;
+        }
+        case FieldType::Bool: {
+            auto values = Allocate(arrow::bit_util::BytesForBits(rows), pool);
+            each([&](const Column& column, int64_t source) {
+                if (arrow::bit_util::GetBit(valid, row) && column.Bool(source)) {
+                    arrow::bit_util::SetBit(values->mutable_data(), row);
+                }
+            });
+            buffers.push_back(std::move(values));
+            break;
+        }
         case FieldType::Int64:
-            return column.Value<int64_t>(row);
         case FieldType::Float64:
-            return column.Value<double>(row);
-        case FieldType::TimestampUsUtc:
-            return TimestampUs{column.Value<int64_t>(row)};
+        case FieldType::TimestampUsUtc: {
+            auto values = Allocate(rows * 8, pool);
+            auto* out = values->mutable_data();
+            const bool floating = field.type == FieldType::Float64;
+            each([&](const Column& column, int64_t source) {
+                if (!arrow::bit_util::GetBit(valid, row)) {
+                    return;
+                }
+                auto value = column.Value<int64_t>(source);
+                if (floating && std::bit_cast<double>(value) == 0) {
+                    value = std::bit_cast<int64_t>(0.0);
+                }
+                std::memcpy(out + row * 8, &value, 8);
+            });
+            buffers.push_back(std::move(values));
+            break;
+        }
     }
-    throw Failure({"INVALID_ARGUMENT", "unsupported Arrow field", RetryHint::FixInput});
+    return arrow::MakeArray(arrow::ArrayData::Make(MakeArrowType(field.type), rows, std::move(buffers), nulls));
 }
 
 size_t Reservation(const SchemaSpec& schema, const Shape& shape)
@@ -339,7 +452,8 @@ Result<FingerprintedInput> FingerprintInput(const SchemaSpec& schema,
 Result<NormalizedInput> NormalizeBatches(const SchemaSpec& schema,
     std::string_view collection_id,
     const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-    std::optional<size_t> reserved)
+    std::optional<size_t> reserved,
+    arrow::MemoryPool* pool)
 {
     try {
         // Inspected again: these are caller buffers, and this pass validates
@@ -347,29 +461,51 @@ Result<NormalizedInput> NormalizeBatches(const SchemaSpec& schema,
         // the admitted reservation means the caller changed the input.
         const auto shape = Inspect(schema, batches);
         if (reserved && Reservation(schema, shape) != *reserved) {
-            // The same error as the coordinator's hash comparison.
-            return std::unexpected(
-                ErrorDetail{"INVALID_ARGUMENT", "Arrow input changed during append", RetryHint::OperatorAction});
+            return std::unexpected(InputChangedError());
         }
-        std::vector<Row> rows;
-        rows.reserve(shape.rows);
+        // The only copy of caller memory: canonical owned columns. Every
+        // later check, the hash and the writer read this copy, never the
+        // caller's buffers again.
+        std::vector<std::vector<Column>> views;
+        views.reserve(batches.size());
         for (const auto& batch : batches) {
-            const auto columns = Columns(schema, *batch, MapFields(schema, *batch, true));
-            for (int64_t index = 0; index < batch->num_rows(); ++index) {
-                Row row;
-                row.reserve(columns.size());
-                for (const auto& column : columns) {
-                    row.push_back(Read(column, index));
-                }
-                rows.push_back(std::move(row));
-            }
+            views.push_back(Columns(schema, *batch, MapFields(schema, *batch, true)));
         }
-        return NormalizeOwnedRows(schema, collection_id, std::move(rows));
+        const auto rows = static_cast<int64_t>(shape.rows);
+        std::vector<std::shared_ptr<arrow::Array>> arrays;
+        arrays.reserve(schema.fields.size());
+        for (size_t field = 0; field < schema.fields.size(); ++field) {
+            arrays.push_back(OwnColumn(schema.fields[field], views, batches, field, rows, pool));
+        }
+        NormalizedInput result;
+        result.columns = arrow::RecordBatch::Make(MakeArrowSchema(schema), rows, std::move(arrays));
+        std::vector<int> identity(schema.fields.size());
+        for (size_t field = 0; field < identity.size(); ++field) {
+            identity[field] = static_cast<int>(field);
+        }
+        const auto header = EncodeAppendHeader(schema, collection_id, shape.rows);
+        if (!header) {
+            throw Failure(header.error());
+        }
+        CanonicalHasher hash;
+        hash.Bytes(*header);
+        HashRows(hash, Columns(schema, *result.columns, identity), rows);
+        result.decoded_bytes = hash.Size() - header->size();
+        Require(result.decoded_bytes <= 16ULL * 1024 * 1024, "INPUT_TOO_LARGE", "append exceeds decoded input limit");
+        result.payload_hash = hash.Digest();
+        return result;
+    } catch (const InputChanged&) {
+        return std::unexpected(InputChangedError());
     } catch (const Failure& error) {
         auto detail = error.detail;
         detail.retry_hint = RetryHint::FixInput;
         return std::unexpected(std::move(detail));
     }
+}
+
+size_t NormalizedInput::RowCount() const
+{
+    return columns != nullptr ? static_cast<size_t>(columns->num_rows()) : rows.size();
 }
 
 } // namespace glamdb::detail

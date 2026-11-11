@@ -5,6 +5,7 @@
 
 #include "core/api/binary.h"
 #include "core/api/canonical.h"
+#include "core/engine/storage_mapping.h"
 
 #include <arrow/api.h>
 #include <gtest/gtest.h>
@@ -250,20 +251,23 @@ TEST(CanonicalHashOracle, AllInputPathsMatchTheOracle)
         ASSERT_TRUE(normalized) << normalized.error().message;
         EXPECT_EQ(normalized->payload_hash, expected);
         EXPECT_EQ(normalized->decoded_bytes, decoded);
-        // -0.0 is stored as +0.0; everything else as given.
-        auto stored = rows;
-        for (auto& row : stored) {
-            if (auto* value = std::get_if<double>(&row[4]); value != nullptr && *value == 0) {
-                *value = 0.0;
+        // The owned columns hold exactly what the writer batch built from the
+        // normalized rows holds, and -0.0 is stored as +0.0.
+        ASSERT_NE(normalized->columns, nullptr);
+        EXPECT_TRUE(normalized->rows.empty());
+        EXPECT_EQ(normalized->RowCount(), rows.size());
+        const auto expectedBatch = MakeRecordBatch(AllTypes, fromRows->rows);
+        ASSERT_TRUE(expectedBatch);
+        EXPECT_TRUE(normalized->columns->Equals(**expectedBatch));
+        EXPECT_TRUE(normalized->columns->ValidateFull().ok());
+        const auto& floats = static_cast<const arrow::DoubleArray&>(*normalized->columns->column(4));
+        for (int64_t row = 0; row < floats.length(); ++row) {
+            if (floats.IsValid(row) && floats.Value(row) == 0) {
+                EXPECT_FALSE(std::signbit(floats.Value(row))) << row;
             }
         }
-        ASSERT_EQ(normalized->rows.size(), stored.size());
-        for (size_t row = 0; row < stored.size(); ++row) {
-            ASSERT_EQ(normalized->rows[row], stored[row]) << row;
-            if (const auto* value = std::get_if<double>(&normalized->rows[row][4]); value != nullptr && *value == 0) {
-                EXPECT_FALSE(std::signbit(*value)) << row;
-            }
-        }
+        EXPECT_EQ(EstimateRecordBatchBytes(AllTypes, *normalized->columns),
+            EstimateRecordBatchBytes(AllTypes, fromRows->rows));
     }
 }
 

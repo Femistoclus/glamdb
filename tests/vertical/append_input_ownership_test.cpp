@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstring>
 #include <future>
+#include <limits>
 
 namespace glamdb {
 namespace {
@@ -89,6 +90,41 @@ TEST_F(AppendInputOwnershipTest, MutatingCallerBuffersAfterReturnChangesNothingC
     EXPECT_EQ(conflict.error ? conflict.error->code : "", "OPERATION_CONFLICT");
     EXPECT_EQ(Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}}), first);
     EXPECT_NE(*detail::FingerprintBatches(Schema, test::collection_id, {batch}), *expectedHash);
+}
+
+// Owned columns of sliced and chunked input store exactly the input values.
+TEST_F(AppendInputOwnershipTest, SlicedAndChunkedInputStoresExactValues)
+{
+    const std::vector<TInputRow> rows{
+        {"dup", 1, 0.5, true, 10},
+        {"dup", 1, 0.5, true, 10},
+        {"", std::nullopt, std::nullopt, std::nullopt, std::nullopt},
+        {"\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87",
+            std::numeric_limits<int64_t>::min(),
+            -0.0,
+            false,
+            -62135596800000000LL},
+        {std::string(1024, 'k'),
+            std::numeric_limits<int64_t>::max(),
+            std::numeric_limits<double>::max(),
+            true,
+            253402300799999999LL},
+        {"tail", std::nullopt, -1.5, std::nullopt, 0},
+    };
+    auto stored = rows;
+    stored[3].Score = 0.0;
+    const auto batch = Batch(rows);
+    const std::vector<std::shared_ptr<arrow::RecordBatch>> input{
+        batch->Slice(0, 1), batch->Slice(1, 3), batch->Slice(4, 0), batch->Slice(4)};
+    const auto hash = detail::FingerprintBatches(Schema, test::collection_id, {batch});
+    ASSERT_TRUE(hash);
+    const auto outcome = Engine_->AppendDurable({test::collection_id, FirstOperation, {}, input});
+    ASSERT_EQ(outcome.disposition, CommitDisposition::Committed)
+        << (outcome.error ? outcome.error->message : std::string());
+    EXPECT_EQ(outcome.result->payload_hash, *hash);
+    EXPECT_EQ(outcome.result->rows_appended, 6);
+    EXPECT_EQ(Read(), Expected({&stored}));
+    EXPECT_EQ(Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {batch}}), outcome);
 }
 
 // A queued call fingerprints its input before it waits for the writer. If the

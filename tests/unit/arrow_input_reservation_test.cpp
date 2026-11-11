@@ -39,18 +39,28 @@ TEST(ArrowInputReservation, NullHeavyReservationCoversOwnedRowsAndWriterAllocati
     const auto batch = arrow::RecordBatch::Make(arrow::schema({}), 10000, std::vector<std::shared_ptr<arrow::Array>>{});
     const auto reservation = InputReservation(schema, {batch});
     ASSERT_TRUE(reservation);
-    const auto normalized = NormalizeBatches(schema, "00112233-4455-6677-8899-aabbccddeeff", {batch});
+    arrow::ProxyMemoryPool ownedPool(arrow::default_memory_pool());
+    const auto normalized =
+        NormalizeBatches(schema, "00112233-4455-6677-8899-aabbccddeeff", {batch}, std::nullopt, &ownedPool);
     ASSERT_TRUE(normalized);
+    ASSERT_NE(normalized->columns, nullptr);
     arrow::ProxyMemoryPool pool(arrow::default_memory_pool());
-    const auto writerBatch = MakeRecordBatch(schema, normalized->rows, &pool);
+    const auto writerBatch = CopyRecordBatch(*normalized->columns, &pool);
     ASSERT_TRUE(writerBatch);
-    size_t ownedBytes = normalized->rows.capacity() * sizeof(Row);
-    for (const auto& row : normalized->rows) {
-        ownedBytes += row.capacity() * sizeof(Cell);
-    }
     // The reservation must at least cover these simultaneous live allocations;
     // the canonical NULL encoding alone does not measure the writer's slots.
-    EXPECT_GE(*reservation, ownedBytes + static_cast<size_t>(pool.max_memory()));
+    EXPECT_GE(*reservation, static_cast<size_t>(ownedPool.max_memory() + pool.max_memory()));
+    // Row-form input (NormalizeRows) with its writer batch fits it as well.
+    std::vector<Row> rows(10000, Row(schema.fields.size(), std::monostate{}));
+    const auto fromRows = NormalizeRows(schema, "00112233-4455-6677-8899-aabbccddeeff", rows);
+    ASSERT_TRUE(fromRows);
+    arrow::ProxyMemoryPool rowPool(arrow::default_memory_pool());
+    ASSERT_TRUE(MakeRecordBatch(schema, fromRows->rows, &rowPool));
+    size_t ownedBytes = fromRows->rows.capacity() * sizeof(Row);
+    for (const auto& row : fromRows->rows) {
+        ownedBytes += row.capacity() * sizeof(Cell);
+    }
+    EXPECT_GE(*reservation, ownedBytes + static_cast<size_t>(rowPool.max_memory()));
     EXPECT_LE(*reservation, static_cast<size_t>(Limits{}.max_owned_input_bytes));
 }
 

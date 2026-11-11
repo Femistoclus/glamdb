@@ -32,5 +32,12 @@ MakeRecordBatch(const SchemaSpec& schema, const std::vector<Row>& rows, arrow::M
 // computed without building the batch: every column is counted with a
 // validity bitmap. Equal when every column contains a NULL.
 int64_t EstimateRecordBatchBytes(const SchemaSpec& schema, const std::vector<Row>& rows);
+// The same estimate for owned input columns (NormalizedInput::columns), which
+// hold exactly the values of the normalized rows.
+int64_t EstimateRecordBatchBytes(const SchemaSpec& schema, const arrow::RecordBatch& columns);
+
+// Deep copy of owned input columns into `pool`: every buffer is allocated from
+// it, so the copy is accounted and refusable like MakeRecordBatch.
+Result<std::shared_ptr<arrow::RecordBatch>> CopyRecordBatch(const arrow::RecordBatch& batch, arrow::MemoryPool* pool);
 
 } // namespace glamdb::detail
