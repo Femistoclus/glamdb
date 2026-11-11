@@ -780,7 +780,7 @@ async function createForm(form) {
             );
         } catch (error) {
             if (state.api !== api) return;
-            if ([400, 401, 403, 409, 413, 415, 422, 429].includes(error.status)) {
+            if ([400, 401, 403, 409, 413, 415, 422, 429, 507].includes(error.status)) {
                 state.creation = null;
                 throw error;
             }

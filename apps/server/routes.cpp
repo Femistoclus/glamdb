@@ -188,9 +188,9 @@ TResponse TRoutes::Handle(const TRequest& request) const
         Require(response.Body.size() <= MaxResponseBytes, "response exceeds transport limit", "RESOURCE_EXHAUSTED");
         return response;
     } catch (const TFailure& error) {
-        return {ErrorStatus(error.Detail.code), EncodeError(error.Detail).dump()};
+        return {ErrorStatus(error.Detail), EncodeError(error.Detail).dump()};
     } catch (const detail::Failure& error) {
-        return {ErrorStatus(error.detail.code), EncodeError(error.detail).dump()};
+        return {ErrorStatus(error.detail), EncodeError(error.detail).dump()};
     } catch (const TJson::exception&) {
         return ErrorResponse(400, "INVALID_ARGUMENT", "invalid JSON request");
     } catch (const std::bad_alloc&) {

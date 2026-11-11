@@ -172,6 +172,23 @@ TEST(Transport, ErrorPolicyPreservesOperationalRecovery)
         "SameIdAfterReconcile");
     EXPECT_THROW(ParseTarget("/databases/id%2Fcollections/healthz"), TFailure);
 }
+TEST(Transport, ExhaustedCapacityIs507AndAdmissionIs429)
+{
+    using enum RetryHint;
+    EXPECT_EQ(ErrorStatus(ErrorDetail{"RESOURCE_EXHAUSTED", "storage preflight", OperatorAction}), 507);
+    EXPECT_EQ(ErrorStatus(ErrorDetail{"CAPACITY_EXCEEDED", "catalog full", OperatorAction}), 507);
+    for (const auto hint : {SameIdAfterReconcile, NewOperationId, FixInput}) {
+        EXPECT_EQ(ErrorStatus(ErrorDetail{"RESOURCE_EXHAUSTED", "pending budget is full", hint}), 429);
+    }
+    EXPECT_EQ(ErrorStatus("RESOURCE_EXHAUSTED"), 429);
+    try {
+        Require(false, "scan session limit", "RESOURCE_EXHAUSTED");
+        FAIL();
+    } catch (const TFailure& error) {
+        EXPECT_EQ(ErrorStatus(error.Detail), 429);
+    }
+    EXPECT_EQ(ErrorStatus(ErrorDetail{"OPERATION_IN_PROGRESS", "busy", OperatorAction}), 503);
+}
 TEST(Transport, RejectsInvalidUtf8AndMalformedJsonTokens)
 {
     for (const auto& input : {std::string("[\"") + char(0xFF) + "\"]",

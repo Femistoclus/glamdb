@@ -138,6 +138,35 @@ TEST(OutcomeJson, CollectionSuccessMatchesExistingUiShapeAndStableFieldIds)
     EXPECT_EQ(JsonAt(encoded->body, "$.mode").text, "append");
 }
 
+TEST(OutcomeJson, ExhaustedCapacityIs507WhileAdmissionStays429)
+{
+    const ErrorDetail capacity{"RESOURCE_EXHAUSTED",
+        "storage preflight: No space left on device",
+        RetryHint::OperatorAction};
+    const ErrorDetail admission{"RESOURCE_EXHAUSTED", "pending budget is full", RetryHint::SameIdAfterReconcile};
+    for (const auto& [error, status] : {std::pair{capacity, 507}, std::pair{admission, 429}}) {
+        const auto created = json_adapter::ToJson(CreateOutcome{CommitDisposition::DefinitelyNotCommitted,
+            CommitPhase::Validation,
+            std::nullopt,
+            error,
+            std::nullopt});
+        ASSERT_TRUE(created);
+        EXPECT_EQ(created->status, status);
+        EXPECT_EQ(JsonAt(created->body, "$.outcome").text, "definitely_not_committed");
+        const auto appended = json_adapter::ToJson(AppendOutcome{test::operation_id,
+            CommitDisposition::DefinitelyNotCommitted,
+            CommitPhase::Validation,
+            std::nullopt,
+            error,
+            std::nullopt});
+        ASSERT_TRUE(appended);
+        EXPECT_EQ(appended->status, status);
+        EXPECT_EQ(JsonAt(appended->body, "$.error.code").text, "RESOURCE_EXHAUSTED");
+        EXPECT_EQ(JsonAt(appended->body, "$.error.retry_hint").text,
+            status == 507 ? "OperatorAction" : "SameIdAfterReconcile");
+    }
+}
+
 TEST(OutcomeJson, InvalidRecoveryAndContradictoryCreateOutcomeAreRejected)
 {
     const ErrorDetail error{"IO_ERROR", "uncertain", RetryHint::SameIdAfterReconcile};

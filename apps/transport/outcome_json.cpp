@@ -159,11 +159,6 @@ std::string Receipt(const AppendResult& result)
     return out.Finish();
 }
 
-int ErrorStatus(const ErrorDetail& error)
-{
-    return NTransport::ErrorPolicy(error.code).Status;
-}
-
 std::string Collection(const CollectionInfo& collection)
 {
     constexpr std::array<std::string_view, 5> types{"string", "bool", "int64", "float64", "timestamp_us_utc"};
@@ -214,7 +209,7 @@ Result<Response> ToJson(const AppendOutcome& outcome)
             // never a terminal outcome of that operation ID.
             Object error;
             error.Add("error", Error(*outcome.error));
-            return Response{ErrorStatus(*outcome.error), error.Finish()};
+            return Response{NTransport::ErrorStatus(*outcome.error), error.Finish()};
         }
         Object out;
         out.String("outcome", Disposition(outcome.disposition));
@@ -232,7 +227,7 @@ Result<Response> ToJson(const AppendOutcome& outcome)
         }
         const auto status = outcome.disposition == CommitDisposition::Committed ? 200
             : outcome.disposition == CommitDisposition::CommitUnknown           ? 503
-                                                                                : ErrorStatus(*outcome.error);
+                                                                      : NTransport::ErrorStatus(*outcome.error);
         return Response{status, out.Finish()};
     } catch (const detail::Failure& error) {
         return std::unexpected(error.detail);
@@ -277,7 +272,8 @@ Result<Response> ToJson(const CreateOutcome& outcome)
             out.Add("recovery_required", "true");
             out.Add("recovery", recovery.Finish());
         }
-        return Response{outcome.disposition == CommitDisposition::CommitUnknown ? 503 : ErrorStatus(*outcome.error),
+        return Response{
+            outcome.disposition == CommitDisposition::CommitUnknown ? 503 : NTransport::ErrorStatus(*outcome.error),
             out.Finish()};
     } catch (const detail::Failure& error) {
         return std::unexpected(error.detail);

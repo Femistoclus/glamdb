@@ -247,7 +247,12 @@ Errors are `{error:{code,message,retry_hint}}`, with the core retry hint unchang
 400 invalid request, 401 authentication, 404 authoritative absence, 409 conflict,
 412 precondition, 413 oversized body or decoded input, 415 media type, 429 bounded resource admission,
 501 unsupported, 503 recovery/dependency/unresolved outcome, 504 deadline,
-507 storage capacity, 500 corruption/unexpected error. Database, collection and
+507 exhausted capacity, 500 corruption/unexpected error. Core `RESOURCE_EXHAUSTED`
+is 429 when a retry with the same ID may succeed (busy writer, pending budget) and
+507 when the core marks it `OperatorAction`: free-space reserves, store limits,
+`max_collections`/`max_operations`/catalog bytes, or failed allocation. `CAPACITY_EXCEEDED`
+is always 507. The free-space reserve is the larger of 1 GiB and 5% of the data
+filesystem plus 512 MiB for an attempt and journal. Database, collection and
 operation absence have distinct codes; only `OPERATION_NOT_FOUND` proves an
 operation lookup absent. Transport errors carry the shared retry policy; unexpected
 write failures preserve the original ID for outcome resolution.
