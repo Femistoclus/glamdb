@@ -120,6 +120,9 @@ glamdb-cli bench write --url http://127.0.0.1:8080 --database DATABASE_UUID --co
 
 # query.json contains SDK scan parameters; {} reads the whole fixed view.
 glamdb-cli bench read --url http://127.0.0.1:8080 --database DATABASE_UUID --collection COLLECTION_UUID --query query.json --format arrow --users 2 --duration 60s --report run/read/
+
+# Batch-native Arrow from four independent client processes, one merged report.
+glamdb-cli bench read --url http://127.0.0.1:8080 --database DATABASE_UUID --collection COLLECTION_UUID --query query.json --format arrow --consume batches --processes 4 --users 32 --spawn-rate 32 --duration 60s --report run/read-batches/
 ```
 
 `--users` is concurrency; `--spawn-rate` is new users per second, **not RPS**.
@@ -129,8 +132,17 @@ write becomes uncertain. Each worker consumes its dataset once. The summary
 states whether it consumed every part. Data generation, hash validation and
 target/capability checks occur before measurement. Measured run throughput
 includes file reads, SDK encoding, SQLite transactions, user startup and drain.
-Append latency surrounds the SDK append call, excluding the pre-send journal
-transaction and the outcome update. This measures the network SDK scenario.
+Locust append latency surrounds the SDK append call (HTTP send/receive and
+response validation), excluding the pre-send journal transactions and the
+outcome update. This measures the network SDK scenario. `summary.json`
+additionally splits every attempted append into client time buckets, each with
+count, total, mean, max and share of the client end-to-end time:
+`input_load` (dataset part read, hash check and decode), `sdk_prepare`
+(`prepare_append`: encoding, canonical hash, body), `journal` (pre-send
+prepare/attempt SQLite transactions, row counting and the outcome update),
+`http_send` (the same interval as Locust's `append` latency) and `end_to_end`
+(from loading the part through the recorded outcome). The buckets do not
+overlap; end-to-end also contains small bookkeeping outside them.
 
 `--timeout 30` bounds each SDK operation/full scan. `--stop-timeout 3` permits
 up to three seconds to finish in-flight calls before Locust cancels them. Ctrl-C
@@ -141,11 +153,24 @@ report; its durable pre-send operations remain available for resolve.
 The current scan query supports `projection`, one typed `predicate`, `limit`,
 and `snapshot_id`, following the SDK contract and advertised capabilities.
 Arbitrary SQL/AND/OR and unavailable stats/files/snapshots/explain scenarios are
-not offered. `--format json` and `arrow` consume **all** pages. Each Arrow page
-is a complete independent IPC stream; the SDK/PyArrow decode each page and
+not offered. Every read mode consumes **all** pages of every scan. Each Arrow
+page is a complete independent IPC stream; the SDK/PyArrow decode each page and
 validate its identity and integrity. No byte-concatenated IPC export is used.
-Arrow measurements include decoding to Python rows. JSON response byte counts
-are not invented; Arrow byte counts are the SDK's consumed stream bytes.
+`--consume` selects how the client consumes the data, recorded as
+`read_mode` in `summary.json` and in the Locust entry name:
+
+| Options | `read_mode` | Locust name | Client work per scan |
+| --- | --- | --- | --- |
+| `--format json` (default) | `json-decoded-rows` | `scan/json/decoded` | SDK JSON decoding to Python rows |
+| `--format arrow` | `arrow-python-rows` | `scan/arrow/decoded` | Arrow IPC decode plus `to_pylist()` per batch |
+| `--format arrow --consume batches` | `arrow-batches` | `scan/arrow/batches` | Arrow IPC decode; counts rows and batch buffer bytes only |
+
+`--consume rows` is the default and keeps the historical behaviour.
+`--consume batches` requires `--format arrow`; it is the batch-native client
+and never materializes Python values. None of these modes isolates engine
+capacity: all include the SDK, HTTP and Python client costs. JSON response byte
+counts are not invented; Arrow byte counts are the SDK's consumed stream bytes,
+and batch mode adds in-memory `arrow_batch_bytes`.
 
 `GLAMDB_TOKEN` stays in the environment, outside argv, manifests and reports.
 Only loopback HTTP is permitted. Other endpoints require verified HTTPS.
@@ -163,6 +188,26 @@ machine details and scenario parameters. Unavailable server build version is
 `summary.json` supplements Locust with attempts, unique operation IDs, terminal
 and unknown outcomes, confirmed rows/request-body bytes and their rates, full
 scans/pages/rows, unresolved operations, per-worker CPU/RSS and PASS/FAIL/INCOMPLETE.
+
+Admission refusals (`SERVER_BUSY`, `DATABASE_BUSY`, `RESOURCE_EXHAUSTED`,
+`REQUEST_TIMEOUT`) and other failures are fired to Locust under separate request
+types (`REFUSED`, `ERROR`); successes use `SDK`. Each Locust entry therefore holds
+one population, and `latency_ms` in `summary.json` copies Locust's own
+p50/p95/p99/avg/max for `success`, `refused` and `error` separately. Locust's
+aggregated row still mixes them. `throughput` reports `offered_attempts`
+(scans started or append sends), `successful_operations` (completed scans or
+unique committed appends), `rejected_attempts`, the remaining unsuccessful
+attempts and per-second rates; refusals and failures never count as successful
+throughput. `rejections_by_code` and `errors_by_code` count failures by error
+code. Refusals and errors still make the run FAIL as before; the separation only
+changes how they are measured. A refused append keeps the conservative journal
+handling below (it is not reinterpreted as definitely not committed).
+
+`client_cpu` lists user+system CPU seconds and the share of one core for every
+worker process (`controller` is a distributed master's own CPU). A process at or
+above 85% of one core is marked `saturated`, and `generator_saturated` is true
+when any is: the Python client, not the server, may then bound the result. Use
+more `--processes` or a separate load host before interpreting such a run.
 `pending.jsonl` lists unresolved IDs/states without copying row payloads into the report.
 Only unique committed operations count toward confirmed throughput. Reading is
 timed from opening a view through consuming/decoding its last page. A partial
@@ -203,6 +248,19 @@ are bound to their original endpoint; resolving on another URL is rejected.
 Exit codes: 0 PASS, 1 FAIL, 2 invalid configuration/usage, 3 INCOMPLETE,
 4 missing interpreter/dependency, 130 interrupted. Individual `request` and
 `create-store` commands retain their existing exit codes.
+
+## Multiple client processes
+
+One Python process is limited to about one CPU core. `--processes N` starts a
+local Locust master and N fresh worker interpreters in one command; `--users`
+are spread across them by Locust and the master writes one merged Locust and
+`summary.json` report. Workers are ordinary distributed workers (below): each
+owns a journal and, for writes, appends one full dataset copy. The control
+socket uses `--master-host`/`--master-port` (default `127.0.0.1:5557`; choose
+another free port for parallel runs). `--processes` excludes `--master` and
+`--worker`. Fresh interpreters are used instead of Locust's fork-based
+`--processes`, which is not safe on macOS. If the master is killed, workers stop
+when they lose the master heartbeat.
 
 ## Distributed Locust workers
 
