@@ -9,6 +9,7 @@
 
 #if GLAMDB_HAS_STORAGE
 #include "core/backend/local_storage_backend.h"
+#include "core/scan/metadata.h"
 #include "core/scan/scan_cursor.h"
 #endif
 
@@ -437,6 +438,53 @@ struct Engine::Impl
             root_readers.erase(reader);
         }
     }
+
+#if GLAMDB_HAS_STORAGE
+    template <class T, class TRead>
+    Result<T> ReadView(std::string_view id, TRead&& read)
+    {
+        std::string root;
+        bool leased = false;
+        const auto release = [&] {
+            if (std::exchange(leased, false)) {
+                ReleaseRoot(root);
+            }
+        };
+        try {
+            Require(ValidUuid(id), "INVALID_ARGUMENT", "metadata requires a canonical collection UUID");
+            TScanContext context;
+            {
+                std::lock_guard lock(state_mutex);
+                CheckReady();
+                context.Collection = CachedCollection(id);
+                const auto view = std::ranges::find_if(confirmed_views, [&](const auto& item) {
+                    return item.info.collection_id == id;
+                });
+                Require(view != confirmed_views.end(), "CORRUPTION", "confirmed collection view is missing");
+                context.Base = view->base;
+                root = context.Base.metadata_location;
+                ++root_readers[root];
+                leased = true;
+            }
+            Require(backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
+            context.FileIO = Take(backend->ReadOnlyFileIO());
+            auto result = read(context);
+            release();
+            return result;
+        } catch (const Failure& error) {
+            release();
+            CloseOnCorruption(error.detail);
+            return std::unexpected(error.detail);
+        } catch (const std::bad_alloc& error) {
+            release();
+            return std::unexpected(
+                ErrorDetail{"RESOURCE_EXHAUSTED", BoundedDiagnostic(error.what()), RetryHint::OperatorAction});
+        } catch (const std::exception& error) {
+            release();
+            return std::unexpected(ExceptionError(error));
+        }
+    }
+#endif
 
     void RefreshCache()
     {
@@ -1339,6 +1387,60 @@ Result<std::optional<AppendOutcome>> Engine::FindAppendOutcome(std::string_view 
         impl->CloseOnCorruption(error.detail);
         return std::unexpected(error.detail);
     }
+}
+
+EngineCapabilities Engine::GetCapabilities() const
+{
+    return impl_->backend ? impl_->backend->GetCapabilities() : EngineCapabilities{};
+}
+
+Result<SnapshotHistory> Engine::ListSnapshots(std::string_view id) const
+{
+    const auto impl = impl_;
+#if GLAMDB_HAS_STORAGE
+    return impl->ReadView<SnapshotHistory>(id, [&](const TScanContext& context) {
+        std::vector<AppendResult> receipts;
+        for (const auto& record : impl->catalog->Operations()) {
+            if (record.state == OperationState::Committed && record.outcome && record.outcome->result) {
+                receipts.push_back(*record.outcome->result);
+            }
+        }
+        return ReadHistory(context, receipts);
+    });
+#else
+    (void)id;
+    return std::unexpected(
+        ErrorDetail{"DEPENDENCY_UNAVAILABLE", "storage metadata is not built", RetryHint::OperatorAction});
+#endif
+}
+
+Result<CollectionStatistics> Engine::GetStatistics(std::string_view id, SnapshotSelector selector) const
+{
+    const auto impl = impl_;
+#if GLAMDB_HAS_STORAGE
+    return impl->ReadView<CollectionStatistics>(id, [&](const TScanContext& context) {
+        return ReadStatistics(context, selector);
+    });
+#else
+    (void)id;
+    (void)selector;
+    return std::unexpected(
+        ErrorDetail{"DEPENDENCY_UNAVAILABLE", "storage metadata is not built", RetryHint::OperatorAction});
+#endif
+}
+
+Result<ScanExplanation> Engine::ExplainScan(const ScanRequest& request) const
+{
+    const auto impl = impl_;
+#if GLAMDB_HAS_STORAGE
+    return impl->ReadView<ScanExplanation>(request.collection_id, [&](const TScanContext& context) {
+        return detail::ExplainScan(context, request);
+    });
+#else
+    (void)request;
+    return std::unexpected(
+        ErrorDetail{"DEPENDENCY_UNAVAILABLE", "storage metadata is not built", RetryHint::OperatorAction});
+#endif
 }
 
 Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) const

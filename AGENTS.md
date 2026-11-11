@@ -54,7 +54,7 @@ separate, explicitly disposable in-memory mock remains a development profile. Th
 invariants below describe the intended engine, not qualified guarantees.
 
 Data studio separates compact read and schema-driven write panels; the form
-generates typed JSON, while a batch JSON editor remains optional. Without native
+generates typed JSON, while a batch JSON editor remains optional. Without HTTP
 metadata APIs, Overview can count rows via a cancellable fixed-snapshot scan.
 Snapshots and Storage show only confirmed receipts from this session, clearly
 labelled as partial observations rather than complete history or file inventory.
@@ -72,8 +72,10 @@ Append preserves every input row, including duplicate keys. It provides neither
 key uniqueness nor replacement semantics.
 
 Key-value upserts and deletes are a subsequent extension using copy-on-write
-and an explicit KV collection mode. Additional native metadata/explain APIs and
-object storage remain later extensions. Compaction, snapshot expiration,
+and an explicit KV collection mode. Native capabilities, receipt-backed snapshot
+history, selected-view statistics, explain and cursor profiles use the public
+facade; see [the metadata guide](docs/development/METADATA.md). Their HTTP/SDK/UI
+adapters and object storage remain later extensions. Compaction, snapshot expiration,
 garbage collection, asynchronous admission, replication, multiple writers, and
 schema evolution are outside the initial append scope. Consult
 [docs/ROADMAP.md](docs/ROADMAP.md) when assessing feature scope; its current

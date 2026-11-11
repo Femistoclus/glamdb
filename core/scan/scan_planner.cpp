@@ -149,18 +149,37 @@ void AppendFiles(const TScanManifests& plan,
 
 } // namespace
 
-Result<TScanManifests>
-PlanManifests(const std::shared_ptr<iceberg::FileIO>& io, const BaseIdentity& base, const SnapshotSelector& selector)
+Result<std::unique_ptr<iceberg::TableMetadata>> ReadScanRoot(const std::shared_ptr<iceberg::FileIO>& io,
+    const BaseIdentity& base)
 {
     try {
         Require(io != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
         NGlamDB::NStorage::RegisterStorageFormats();
         const auto limit = static_cast<int64_t>(NGlamDB::NStorage::TStorageLimits{}.RootBytes);
-        const auto metadata =
-            Take(NGlamDB::NStorage::ReadTableMetadata(*io, base.metadata_location, std::nullopt, limit),
-                "IO_ERROR",
-                "read committed root");
+        auto metadata = Take(NGlamDB::NStorage::ReadTableMetadata(*io, base.metadata_location, std::nullopt, limit),
+            "IO_ERROR",
+            "read committed root");
         CheckRoot(*metadata, base);
+        return metadata;
+    } catch (const Failure& error) {
+        return std::unexpected(error.detail);
+    } catch (const std::bad_alloc& error) {
+        return std::unexpected(
+            ErrorDetail{"RESOURCE_EXHAUSTED", BoundedDiagnostic(error.what()), RetryHint::OperatorAction});
+    } catch (const std::exception& error) {
+        return std::unexpected(ErrorDetail{"INTERNAL", BoundedDiagnostic(error.what()), RetryHint::OperatorAction});
+    }
+}
+
+Result<TScanManifests>
+PlanManifests(const std::shared_ptr<iceberg::FileIO>& io, const BaseIdentity& base, const SnapshotSelector& selector)
+{
+    try {
+        const auto root = ReadScanRoot(io, base);
+        if (!root) {
+            return std::unexpected(root.error());
+        }
+        const auto& metadata = *root;
         TScanManifests plan;
         const auto snapshot = SelectSnapshot(*metadata, selector);
         if (!snapshot) {

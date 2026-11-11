@@ -2,6 +2,7 @@
 
 #include "core/api/canonical.h"
 #include "core/catalog/durable_sqlite_catalog.h"
+#include "storage/metadata.h"
 
 #include <span>
 
@@ -52,6 +53,10 @@ public:
         bool write_failure_latched = false;
     };
     virtual ~StorageBackend() = default;
+    virtual EngineCapabilities GetCapabilities() const
+    {
+        return {.backend = BackendKind::Custom};
+    }
     // Concurrent, bounded observation only: no file I/O or writer/cache locks.
     virtual Health GetHealth() const
     {

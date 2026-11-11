@@ -134,5 +134,54 @@ TEST_F(ScanReadErrorClassificationTest, TransientManifestReadFailureIsNotCorrupt
     EXPECT_EQ(CountRows(), static_cast<int64_t>(FirstRows.size()));
 }
 
+TEST_F(ScanReadErrorClassificationTest, MetadataFailuresPreserveClassificationAndExplainReadsNoData)
+{
+    for (const int method : {0, 1, 2}) {
+        SCOPED_TRACE(method);
+        Faults_->AddRule(
+            {EIOOp::OpenRead, "*.metadata.json", 1, 1, std::make_error_code(std::errc::io_error), std::nullopt});
+        const auto failure = method == 0 ? Status(Engine_->GetStatistics(test::collection_id).transform([](auto) {
+        }))
+            : method == 1                ? Status(Engine_->ListSnapshots(test::collection_id).transform([](auto) {
+              }))
+                          : Status(Engine_->ExplainScan({.collection_id = test::collection_id}).transform([](auto) {
+                            }));
+        ASSERT_FALSE(failure);
+        EXPECT_EQ(failure.error().code, "IO_ERROR");
+        EXPECT_TRUE(Engine_->GetHealth().read_available);
+    }
+    // If explain or statistics opens Parquet, this persistent fault rejects it.
+    Faults_->AddRule({EIOOp::OpenRead, "*.parquet", 1, 100, std::make_error_code(std::errc::io_error), std::nullopt});
+    EXPECT_TRUE(Engine_->GetStatistics(test::collection_id));
+    EXPECT_TRUE(Engine_->ExplainScan({.collection_id = test::collection_id}));
+    const auto cursor = Engine_->Scan({.collection_id = test::collection_id});
+    ASSERT_TRUE(cursor);
+    const auto failed = (*cursor)->Next();
+    ASSERT_FALSE(failed);
+    EXPECT_EQ(failed.error().code, "IO_ERROR");
+    EXPECT_EQ((*cursor)->Profile().state, ScanState::Failed);
+    EXPECT_EQ((*cursor)->Profile().data_files_read.value, 0);
+    EXPECT_EQ((*cursor)->Profile().rows_returned.value, 0);
+}
+
+TEST_F(ScanReadErrorClassificationTest, MissingMetadataClosesReadiness)
+{
+    Faults_->AddRule({EIOOp::OpenRead,
+        "*.metadata.json",
+        1,
+        1,
+        std::make_error_code(std::errc::no_such_file_or_directory),
+        std::nullopt});
+    const auto result = Engine_->ListSnapshots(test::collection_id);
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().code, "CORRUPTION");
+    EXPECT_FALSE(Engine_->GetHealth().read_available);
+    const auto blocked = Engine_->GetStatistics(test::collection_id);
+    ASSERT_FALSE(blocked);
+    EXPECT_EQ(blocked.error().code, "RECOVERY_REQUIRED");
+    ASSERT_TRUE(Engine_->Reconcile());
+    EXPECT_TRUE(Engine_->GetStatistics(test::collection_id));
+}
+
 } // namespace
 } // namespace glamdb

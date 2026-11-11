@@ -1,5 +1,6 @@
 #pragma once
 
+#include "storage/metrics.h"
 #include "storage/types.h"
 
 #include <cstdint>
@@ -113,6 +114,22 @@ struct ScanInfo
     SnapshotSelector selector_resolved{};
 };
 
+enum class ScanState : uint8_t { Open, Complete, Cancelled, Failed };
+
+// Cumulative completed work, including partial scans. Bytes count successful
+// whole data-file reads, including footers and unprojected column bytes; they
+// exclude metadata, failed/partial I/O and physical-device/cache measurements.
+struct ScanProfile
+{
+    ScanState state = ScanState::Open;
+    Metric manifests_read{};
+    Metric data_files_read{};
+    Metric data_bytes_read{};
+    Metric rows_decoded{};
+    Metric rows_returned{};
+    Metric elapsed_us{};
+};
+
 class ScanCursor
 {
 public:
@@ -122,6 +139,12 @@ public:
     // nullptr marks the end of the stream; a read failure is an error, never EOS.
     virtual Result<std::shared_ptr<arrow::RecordBatch>> Next() = 0;
     virtual void Cancel() = 0;
+    // Thread-safe observation; counters remain available after EOS/error.
+    // Custom cursors may leave unsupported measurements unavailable.
+    virtual ScanProfile Profile() const
+    {
+        return {};
+    }
 };
 
 } // namespace glamdb

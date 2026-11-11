@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -128,6 +129,39 @@ void CheckViews(glamdb::Engine& engine, int64_t snapshotA, int64_t snapshotB)
     CheckScan(engine, glamdb::SnapshotSelector::Latest(), RowsAB, glamdb::SnapshotSelector::Id(snapshotB));
     CheckScan(engine, glamdb::SnapshotSelector::Id(snapshotA), RowsA, glamdb::SnapshotSelector::Id(snapshotA));
     CheckScan(engine, glamdb::SnapshotSelector::InitialEmpty(), {}, glamdb::SnapshotSelector::InitialEmpty());
+    const auto capabilities = engine.GetCapabilities();
+    Check(capabilities.backend == glamdb::BackendKind::LocalStorage && capabilities.metadata && capabilities.scan &&
+            capabilities.append && !capabilities.file_pruning && !capabilities.row_group_pruning &&
+            !capabilities.durability_qualified,
+        "native capabilities do not claim pruning or qualified durability");
+    const auto history = Take(engine.ListSnapshots(CollectionId), "snapshot history");
+    Check(history.snapshots.size() == 2 && history.snapshots[0].snapshot_id == snapshotA &&
+            history.snapshots[1].snapshot_id == snapshotB && history.snapshots[1].parent_snapshot_id == snapshotA,
+        "retained history and parent identity");
+    const auto a = Take(engine.FindAppendOutcome(CollectionId, OperationA), "metadata receipt A");
+    const auto b = Take(engine.FindAppendOutcome(CollectionId, OperationB), "metadata receipt B");
+    Check(a && b && a->result && b->result && history.snapshots[0].receipt == *a->result &&
+            history.snapshots[1].receipt == *b->result,
+        "history includes original durable receipts");
+    for (const auto& [selector, rows, files] : {std::tuple{glamdb::SnapshotSelector::Latest(), 5, 2},
+             std::tuple{glamdb::SnapshotSelector::Id(snapshotA), 3, 1},
+             std::tuple{glamdb::SnapshotSelector::InitialEmpty(), 0, 0}})
+    {
+        const auto stats = Take(engine.GetStatistics(CollectionId, selector), "selected statistics");
+        Check(stats.rows.value == rows && stats.data_files.value == files && !stats.logical_bytes.value &&
+                stats.rows.kind == glamdb::MetricKind::Metadata && stats.identity == history.identity,
+            "view-specific metadata with unavailable logical size");
+        const auto explanation =
+            Take(engine.ExplainScan({.collection_id = CollectionId, .selector = selector}), "explain");
+        Check(explanation.info.selector_resolved == stats.selector_resolved &&
+                explanation.candidates.rows.value == rows && !explanation.file_pruning &&
+                !explanation.row_group_pruning && explanation.estimated_output_rows.value == rows,
+            "explain uses the selected fixed view");
+    }
+    auto zero = Take(engine.Scan({.collection_id = CollectionId, .limit = 0}), "zero limit");
+    Check(!Take(zero->Next(), "zero next") && zero->Profile().data_files_read.value == 0 &&
+            zero->Profile().rows_returned.value == 0 && zero->Profile().state == glamdb::ScanState::Complete,
+        "zero-limit execution reads no data files");
 }
 
 void Write(glamdb::Engine& engine, const std::string& receiptPath)
@@ -190,6 +224,17 @@ void Reopen(glamdb::Engine& engine, const std::string& receiptPath)
 
 void CheckUnavailable(glamdb::Engine& engine)
 {
+    const auto capabilities = engine.GetCapabilities();
+    Check(capabilities.backend == glamdb::BackendKind::Unavailable && !capabilities.metadata && !capabilities.scan &&
+            !capabilities.append && !capabilities.durability_qualified,
+        "storage-disabled capabilities");
+    const auto stats = engine.GetStatistics(CollectionId);
+    const auto history = engine.ListSnapshots(CollectionId);
+    const auto explain = engine.ExplainScan({.collection_id = CollectionId});
+    Check(!stats && stats.error().code == "DEPENDENCY_UNAVAILABLE" && !history &&
+            history.error().code == "DEPENDENCY_UNAVAILABLE" && !explain &&
+            explain.error().code == "DEPENDENCY_UNAVAILABLE",
+        "storage-disabled metadata reports dependency errors");
     const auto created = engine.CreateCollection({CollectionId, "events", Schema});
     Check(created.disposition == glamdb::CommitDisposition::DefinitelyNotCommitted && !created.info && created.error &&
             created.error->code == "DEPENDENCY_UNAVAILABLE",

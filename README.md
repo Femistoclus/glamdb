@@ -47,6 +47,10 @@ unavailable metadata/explain APIs. A separate **disposable in-memory mock**
 remains available for development. Its data files,
 snapshots and commits are synthetic and disappear on restart.
 
+The embedded C++ facade also exposes [native metadata](docs/development/METADATA.md):
+capabilities, receipt-backed snapshot history, selected-view statistics, scan
+explain and execution profiles. HTTP metadata/explain adapters remain pending.
+
 The workbench also has a **public browser demo** requiring no token or Python
 server. Each page instance owns its sample data; visitors can create/append,
 filter, explore snapshots and export JSON. Reload resets only that visitor's

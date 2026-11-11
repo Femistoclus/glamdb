@@ -13,9 +13,13 @@ namespace iceberg {
 class FileIO;
 class PartitionSpec;
 class Schema;
+struct TableMetadata;
 } // namespace iceberg
 
 namespace glamdb::detail {
+
+Result<std::unique_ptr<iceberg::TableMetadata>> ReadScanRoot(const std::shared_ptr<iceberg::FileIO>& io,
+    const BaseIdentity& base);
 
 struct TScanFile
 {

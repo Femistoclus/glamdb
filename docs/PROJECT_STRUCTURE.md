@@ -68,7 +68,7 @@ glamdb/
 | Path | Purpose |
 | --- | --- |
 | `AGENTS.md` | Repository guidance for coding agents, maintained alongside implementation changes. |
-| `public/storage/` | Installed public engine API/request/outcome/scan types, plus the independent storage schema DTO. |
+| `public/storage/` | Installed engine API/request/outcome/scan/metadata types, metric provenance and the independent storage schema DTO. |
 | `core/api/`, `core/catalog/`, `core/engine/` | `glamdb_core` / `glamdb::core`: canonical input, SQLite catalog, coordinator, and public facade. |
 | `core/backend/` | Storage backend bridging the coordinator seam to `glamdb_storage` (built with `GLAMDB_BUILD_STORAGE`). |
 | `core/scan/` | Predicate evaluation (always built), snapshot planning and Parquet scan cursor (storage builds). |

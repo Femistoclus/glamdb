@@ -286,6 +286,40 @@ TEST_F(SupersededRootTest, RootStaysUntilAConcurrentScanHasPlanned)
     EXPECT_EQ(Read(), Expected({&FirstRows, &SecondRows}));
 }
 
+TEST_F(SupersededRootTest, MetadataRetainsItsConfirmedRootAcrossAppend)
+{
+    const auto first = Commit(FirstOperation, FirstRows);
+    const auto resolved = Roots();
+    ASSERT_EQ(resolved.size(), 1U);
+    std::promise<std::thread::id> readerID;
+    std::promise<void> armed;
+    auto reader = std::async(std::launch::async, [&] {
+        readerID.set_value(std::this_thread::get_id());
+        armed.get_future().wait();
+        return Engine_->ExplainScan({.collection_id = test::collection_id});
+    });
+    Gate_->Arm(readerID.get_future().get());
+    armed.set_value();
+    const bool entered = Gate_->WaitEntered(10s);
+    if (!entered) {
+        Gate_->Release();
+    }
+    ASSERT_TRUE(entered);
+    Commit(SecondOperation, SecondRows);
+    EXPECT_TRUE(std::filesystem::exists(resolved.front()));
+    Gate_->Release();
+    const auto explanation = reader.get();
+    ASSERT_TRUE(explanation) << explanation.error().message;
+    EXPECT_EQ(explanation->info.selector_resolved, SnapshotSelector::Id(first.snapshot_id));
+    EXPECT_EQ(explanation->candidates.rows.value, 3);
+    const auto latest = Engine_->GetStatistics(test::collection_id);
+    ASSERT_TRUE(latest);
+    EXPECT_EQ(latest->rows.value, 5);
+    Commit(ThirdOperation, FirstRows);
+    EXPECT_FALSE(std::filesystem::exists(resolved.front())) << "metadata leaked a root lease";
+    EXPECT_EQ(Roots().size(), 1U);
+}
+
 // A scan that finishes while the next append walks the warehouse for capacity
 // must not unlink its root under that walk: a root removed between the walk's
 // readdir and fstatat failed preflight as corruption and closed the store.
