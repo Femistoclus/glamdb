@@ -342,6 +342,10 @@ class Client:
                         expected_payload_hash: str | None = None) -> AppendOutcome:
         try:
             kind, result, error_value = value.get("outcome"), value.get("result"), value.get("error")
+            if isinstance(error_value, dict) and error_value.get("code") in ("OPERATION_CONFLICT", "IDEMPOTENCY_CONFLICT"):
+                # A conflicting request changes nothing; it is not the original operation's outcome.
+                raise HTTPError(status, ErrorDetail.from_dict(error_value), raw=value,
+                                operation_id=budget.operation_id, collection_id=budget.collection_id)
             if kind == "committed":
                 if status != 200 or not isinstance(result, dict) or error_value is not None:
                     raise ProtocolError("invalid committed append outcome", raw=value)

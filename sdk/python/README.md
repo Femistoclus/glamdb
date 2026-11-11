@@ -84,7 +84,10 @@ terminal outcome, an `OperationInProgress`, `commit_unknown`, or `None` for an
 authoritative `NOT_FOUND`. A recovery-pending HTTP error remains an error;
 it is not absence. Do not change the ID just because a response was lost or an
 outcome is unknown. A terminal failed outcome may request a *new, explicit*
-operation ID for a corrected attempt.
+operation ID for a corrected attempt. A retry whose content conflicts with the
+bound operation (`OPERATION_CONFLICT`/`IDEMPOTENCY_CONFLICT`) raises
+`HTTPError`; it is not an outcome of that operation, which may already be
+committed.
 
 `create_collection` requires a caller collection UUID. Its returned
 `CreateOutcome.info` contains collection metadata. For a lost create response,
