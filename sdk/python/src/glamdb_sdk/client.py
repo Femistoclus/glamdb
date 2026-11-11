@@ -16,7 +16,7 @@ from .errors import (AuthenticationError, ErrorDetail, HTTPError, ProtocolError,
 from .models import ANY, AppendOutcome, CreateOutcome, OperationInProgress, Page, ScanResult
 from .predicates import Predicate
 from .request import AppendRequest, json_bytes, schema_fingerprint, uuid_string
-from .transport import Deadline, read_json, translate_transport
+from .transport import JSON_ACCEPT_ENCODING, Deadline, read_json, translate_transport
 
 
 class Client:
@@ -88,7 +88,7 @@ class Client:
             raise TransportError("client is closed", collection_id=budget.collection_id, operation_id=budget.operation_id)
         remaining = budget.check()
         timeout = self._timeout if remaining is None else min(self._timeout, remaining)
-        headers = {"Accept": accept}
+        headers = {"Accept": accept, "Accept-Encoding": JSON_ACCEPT_ENCODING}
         if accept == "application/vnd.apache.arrow.stream":
             headers["Accept-Encoding"] = "identity"
         if body is not None:

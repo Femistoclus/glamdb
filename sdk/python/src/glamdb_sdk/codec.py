@@ -207,7 +207,8 @@ def decode_rows(schema: Schema, rows: Iterable[Mapping[str, Any]]) -> list[dict[
         for field in schema.fields:
             value = row.get(field.name)
             if value is None:
-                decoded[field.name] = sized[field.name] = None
+                # Missing and NULL alike: encode_scalar enforces nullability.
+                decoded[field.name] = sized[field.name] = encode_scalar(field, None)
             elif field.type == "int64":
                 if not isinstance(value, str):
                     raise ValidationError("wire int64 must be a decimal string")
