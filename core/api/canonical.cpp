@@ -6,7 +6,9 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <type_traits>
 #include <unordered_set>
+#include <utility>
 
 namespace glamdb::detail {
 namespace {
@@ -388,8 +390,12 @@ Result<std::string> EncodeAppendHeader(const SchemaSpec& schema, std::string_vie
     }
 }
 
-Result<NormalizedInput>
-NormalizeRows(const SchemaSpec& schema, std::string_view collection_id, const std::vector<Row>& rows)
+namespace {
+
+// Copies caller rows, or moves rows the caller already owns: either way the
+// normalized rows hold the only copy of the payload cells.
+template <class TRows>
+Result<NormalizedInput> Normalize(const SchemaSpec& schema, std::string_view collection_id, TRows& rows)
 {
     try {
         const auto header = EncodeAppendHeader(schema, collection_id, rows.size());
@@ -401,7 +407,7 @@ NormalizeRows(const SchemaSpec& schema, std::string_view collection_id, const st
         const auto header_size = out.bytes.size();
         NormalizedInput result;
         result.rows.reserve(rows.size());
-        for (const auto& row : rows) {
+        for (auto& row : rows) {
             Require(row.size() == schema.fields.size(), "INVALID_ARGUMENT", "row width does not match schema");
             // Validate sizes before making an owned copy of caller memory.
             for (const auto& cell : row) {
@@ -409,9 +415,14 @@ NormalizeRows(const SchemaSpec& schema, std::string_view collection_id, const st
                     Require(text->size() <= 1024ULL * 1024, "INVALID_ARGUMENT", "oversized string");
                 }
             }
-            Row normalized = row;
+            Row normalized;
+            if constexpr (std::is_const_v<TRows>) {
+                normalized = row;
+            } else {
+                normalized = std::move(row);
+            }
             const auto before = out.bytes.size();
-            for (size_t i = 0; i < row.size(); ++i) {
+            for (size_t i = 0; i < normalized.size(); ++i) {
                 EncodeCell(out, schema.fields[i], normalized[i]);
                 Require(out.bytes.size() - before <= 2ULL * 1024 * 1024 &&
                         out.bytes.size() - header_size <= 16ULL * 1024 * 1024,
@@ -428,6 +439,20 @@ NormalizeRows(const SchemaSpec& schema, std::string_view collection_id, const st
         detail.retry_hint = RetryHint::FixInput;
         return std::unexpected(std::move(detail));
     }
+}
+
+} // namespace
+
+Result<NormalizedInput>
+NormalizeRows(const SchemaSpec& schema, std::string_view collection_id, const std::vector<Row>& rows)
+{
+    return Normalize(schema, collection_id, rows);
+}
+
+Result<NormalizedInput>
+NormalizeOwnedRows(const SchemaSpec& schema, std::string_view collection_id, std::vector<Row>&& rows)
+{
+    return Normalize(schema, collection_id, rows);
 }
 
 } // namespace glamdb::detail
