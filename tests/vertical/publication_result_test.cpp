@@ -138,8 +138,10 @@ TEST_F(BackendPublicationTest, OnlySuccessfulOuterCommitPromotesCandidate)
     EXPECT_TRUE(Backend_->CheckAppendAdmissible(Store_, info, next, Input_));
     EXPECT_FALSE(Backend_->CheckAppendAdmissible(Store_, View_.info, View_.base, Input_));
     const auto operation = Catalog_->FindOperation(test::collection_id, FirstOperation);
-    ASSERT_TRUE(operation && operation->outcome && operation->outcome->result);
-    EXPECT_EQ(*operation->outcome->result, receipt);
+    ASSERT_TRUE(operation);
+    ASSERT_TRUE(operation.value().outcome);
+    ASSERT_TRUE(operation.value().outcome.value().result);
+    EXPECT_EQ(operation.value().outcome.value().result.value(), receipt);
 }
 
 TEST_F(BackendPublicationTest, RolledBackOuterTransactionDiscardsCandidateAndPreservesBase)
@@ -167,7 +169,9 @@ TEST_F(BackendPublicationTest, RolledBackOuterTransactionDiscardsCandidateAndPre
     ASSERT_FALSE(location.empty());
     Backend_->PublicationFinished(test::collection_id, location, CommitDisposition::DefinitelyNotCommitted);
     EXPECT_EQ(Catalog_->Base(test::collection_id), View_.base);
-    EXPECT_EQ(Catalog_->FindOperation(test::collection_id, FirstOperation)->state, detail::OperationState::Bound);
+    const auto operation = Catalog_->FindOperation(test::collection_id, FirstOperation);
+    ASSERT_TRUE(operation);
+    EXPECT_EQ(operation.value().state, detail::OperationState::Bound);
     EXPECT_TRUE(Backend_->CheckAppendAdmissible(Store_, View_.info, View_.base, Input_));
     // A late, erroneous success handoff must not revive the discarded candidate.
     Backend_->PublicationFinished(test::collection_id, location, CommitDisposition::Committed);
@@ -247,7 +251,7 @@ TEST(BackendPublicationIntegration, LostCommitResultKeepsReadersOnConfirmedViewU
     const auto first = engine->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
     ASSERT_EQ(first.disposition, CommitDisposition::Committed);
     ASSERT_TRUE(first.result);
-    EXPECT_EQ(retry.result->parent_snapshot_id, first.result->snapshot_id);
+    EXPECT_EQ(retry.result.value().parent_snapshot_id, first.result.value().snapshot_id);
     EXPECT_EQ(read(), Expected({&FirstRows, &SecondRows}));
     EXPECT_EQ(engine->AppendDurable({test::collection_id, ThirdOperation, {}, {Batch(SecondRows)}}).disposition,
         CommitDisposition::Committed);
