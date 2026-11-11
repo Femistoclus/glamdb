@@ -183,7 +183,10 @@ The normal profile also runs named `vertical`, `nostorage` (a separate
 `GLAMDB_BUILD_STORAGE=OFF` build) and `mock` contours.
 Python tests use repository-wide pytest discovery (excluding native tooling,
 vendor, and generated trees); Node and Playwright use their own discovery.
-Both test workflows skip documentation-only changes. See
+All six native profiles are required checks and run on every PR, including
+documentation-only changes. The main ruleset is tracked in
+`.github/rulesets/main.json`; changes also need to be applied in GitHub.
+Workbench checks still skip documentation-only changes. See
 [test CI](docs/development/BUILDING.md#test-ci) for logs and reproduction.
 
 ```sh

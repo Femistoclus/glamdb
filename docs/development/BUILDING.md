@@ -230,11 +230,29 @@ conventions need no CI list entry. `bash scripts/check-workbench.sh` runs all th
 suites locally even if an earlier suite fails; an optional `python`, `node`, or
 `browser` argument selects one suite.
 
-Both workflows run on PRs, pushes to `main`, and manual dispatch. They skip changes
-limited to `docs/`, Markdown, issue templates, CODEOWNERS, and LICENSE. These are
-exclusions rather than a source-directory allowlist, so new code directories still
-trigger tests. Manual dispatch bypasses these filters. Do not require a skipped
-workflow as an unconditional branch-protection check.
+Both workflows run on PRs, pushes to `main`, and manual dispatch. Native tests
+have no path filters: all six profiles run even for documentation-only changes.
+Each `Native / <profile>` job is a required check from GitHub Actions, alongside
+`Workflow security`. Ordinary merges and auto-merge wait for all seven checks
+to pass on an up-to-date branch. The maintainer PR-only bypass still applies.
+
+Workbench checks skip changes limited to `docs/`, Markdown, issue templates,
+CODEOWNERS, and LICENSE. New code directories still trigger tests, and manual
+dispatch bypasses these filters. Do not require this filtered workflow as an
+unconditional branch-protection check.
+
+The main ruleset is tracked in [`.github/rulesets/main.json`](../../.github/rulesets/main.json).
+Merging that file does not update GitHub settings. A repository administrator
+must apply it separately:
+
+```sh
+gh api --method PUT repos/glamourdb/glamdb/rulesets/26868823 \
+  --input .github/rulesets/main.json
+```
+
+Keep the required check names in sync with the native matrix. Removing a path
+filter ensures required checks are emitted; the active GitHub ruleset enforces
+the merge requirement.
 
 ### Instrumentation and reproduction
 

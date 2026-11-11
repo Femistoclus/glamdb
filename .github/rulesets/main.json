@@ -1,0 +1,99 @@
+{
+  "name": "Protect main — one maintainer approval",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "exclude": [],
+      "include": [
+        "refs/heads/main"
+      ]
+    }
+  },
+  "rules": [
+    {
+      "type": "deletion"
+    },
+    {
+      "type": "non_fast_forward"
+    },
+    {
+      "type": "required_linear_history"
+    },
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 1,
+        "dismiss_stale_reviews_on_push": true,
+        "required_reviewers": [
+          {
+            "minimum_approvals": 1,
+            "file_patterns": [
+              "*",
+              "**/*"
+            ],
+            "reviewer": {
+              "id": 20593850,
+              "type": "Team"
+            }
+          }
+        ],
+        "require_code_owner_review": true,
+        "dismissal_restriction": {
+          "enabled": false,
+          "allowed_actors": []
+        },
+        "require_last_push_approval": true,
+        "required_review_thread_resolution": true,
+        "require_extra_approval_for_unattributed_changes": false,
+        "allowed_merge_methods": [
+          "squash"
+        ]
+      }
+    },
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": true,
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [
+          {
+            "context": "Workflow security",
+            "integration_id": 15368
+          },
+          {
+            "context": "Native / normal",
+            "integration_id": 15368
+          },
+          {
+            "context": "Native / asan",
+            "integration_id": 15368
+          },
+          {
+            "context": "Native / ubsan",
+            "integration_id": 15368
+          },
+          {
+            "context": "Native / msan",
+            "integration_id": 15368
+          },
+          {
+            "context": "Native / tsan",
+            "integration_id": 15368
+          },
+          {
+            "context": "Native / lsan",
+            "integration_id": 15368
+          }
+        ]
+      }
+    }
+  ],
+  "bypass_actors": [
+    {
+      "actor_id": 20593850,
+      "actor_type": "Team",
+      "bypass_mode": "pull_request"
+    }
+  ]
+}

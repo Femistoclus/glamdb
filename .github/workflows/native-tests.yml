@@ -1,22 +1,11 @@
 name: Native tests
 
+# Required native checks must be emitted for documentation-only PRs too.
 on:
   pull_request:
     branches: [main]
-    paths-ignore:
-      - 'docs/**'
-      - '**/*.md'
-      - '.github/ISSUE_TEMPLATE/**'
-      - '.github/CODEOWNERS'
-      - 'LICENSE'
   push:
     branches: [main]
-    paths-ignore:
-      - 'docs/**'
-      - '**/*.md'
-      - '.github/ISSUE_TEMPLATE/**'
-      - '.github/CODEOWNERS'
-      - 'LICENSE'
   workflow_dispatch:
 
 permissions:
