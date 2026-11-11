@@ -200,6 +200,9 @@ ManifestFiles(const std::shared_ptr<iceberg::FileIO>& io, const TScanManifests& 
         return files;
     } catch (const Failure& error) {
         return std::unexpected(error.detail);
+    } catch (const std::bad_alloc& error) {
+        return std::unexpected(
+            ErrorDetail{"RESOURCE_EXHAUSTED", BoundedDiagnostic(error.what()), RetryHint::OperatorAction});
     } catch (const std::exception& error) {
         return std::unexpected(ErrorDetail{"INTERNAL", BoundedDiagnostic(error.what()), RetryHint::OperatorAction});
     }
