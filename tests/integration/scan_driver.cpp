@@ -149,7 +149,7 @@ public:
     Status CheckAppendAdmissible(const StoreInfo& store,
         const CollectionInfo& collection,
         const BaseIdentity& base,
-        const detail::NormalizedInput& input) override
+        detail::NormalizedInput& input) override
     {
         return Inner_->CheckAppendAdmissible(store, collection, base, input);
     }

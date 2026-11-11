@@ -13,6 +13,10 @@
 #include <string>
 #include <string_view>
 
+namespace arrow {
+class MemoryPool;
+}
+
 namespace NGlamDB::NIO {
 struct ILocalFS;
 class TStoreDirs;
@@ -33,6 +37,8 @@ struct TLocalStorageOptions
     NGlamDB::NStorage::TStorageLimits Storage{};
     NGlamDB::NStorage::TDataWriterLimits Writer{};
     NGlamDB::NStorage::TFileIOLimits FileIO{};
+    // Allocator for the normalized writer batch; empty selects Arrow's default.
+    std::shared_ptr<arrow::MemoryPool> InputPool{};
     // Filesystem adapter; empty selects the POSIX implementation. Tests inject
     // faults here.
     std::shared_ptr<NGlamDB::NIO::ILocalFS> Fs{};
@@ -62,7 +68,7 @@ public:
     Status CheckAppendAdmissible(const StoreInfo& store,
         const CollectionInfo& collection,
         const BaseIdentity& base,
-        const NormalizedInput& input) override;
+        NormalizedInput& input) override;
     Result<std::unique_ptr<StagedAppend>> PrepareAppend(const StoreInfo& store,
         const BoundOperation& binding,
         const CollectionInfo& collection,

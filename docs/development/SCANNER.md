@@ -87,7 +87,11 @@ writer row/byte limits (1..10000 rows, 2 MiB per row including fixed slot
 headers for `NULL` cells, 16 MiB Arrow buffers, estimated without building a
 batch), the warehouse preflight, the exact base root against
 `TStorageLimits::RootBytes` and `MetadataLogEntries`, and the minimum store
-usage increment of one append. Exactly one Arrow batch is built per append.
+usage increment of one append. After these checks it allocates exactly one
+normalized Arrow batch before binding and retains it in the call-owned input;
+`PrepareAppend` reuses that batch. Allocation refusal is `RESOURCE_EXHAUSTED`
+with `OperatorAction`, consumes no ID and releases partial buffers. The owned-input
+reservation remains charged until the call and its batch finish.
 Limits that only the produced files reveal (`MaxFileBytes`, candidate root
 size, aggregate usage) fail after binding as `RESOURCE_EXHAUSTED` with
 `OperatorAction`; the ID stays permanently failed. The default storage limits

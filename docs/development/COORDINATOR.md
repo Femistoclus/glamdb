@@ -34,7 +34,10 @@ automatic file cleanup remain outside this MVP.
 - The coordinator validates and fingerprints Arrow input without copying the
   payload. It copies into owned normalized rows only for a new operation, after
   acquiring the writer and resolving any previous outcome. Caller-owned Arrow
-  buffers must remain immutable throughout the synchronous call.
+  buffers must remain immutable throughout the synchronous call. Backend admission
+  checks disk/write health and writer limits, then builds the normalized writer
+  batch before binding. Allocation refusal leaves the ID unbound; production
+  reuses the admitted batch. Final publication still rechecks changing capacity.
   Field IDs follow fixed schema order from 1; omitted nullable values become
   NULL, duplicate rows remain, float negative zero normalizes, nonfinite floats
   fail, and timestamps are UTC microseconds in years 0001 through 9999. SHA-256

@@ -39,6 +39,7 @@ protected:
         auto input = detail::NormalizeBatches(Schema, test::collection_id, {Batch(FirstRows)});
         ASSERT_TRUE(input);
         Input_ = std::move(*input);
+        ASSERT_TRUE(Backend_->CheckAppendAdmissible(Store_, View_.info, View_.base, Input_));
     }
 
     detail::BoundOperation Binding() const
@@ -51,6 +52,29 @@ protected:
             "00000000-0000-7000-8000-000000000034"};
     }
 };
+
+TEST_F(BackendPublicationTest, AdmittedBatchRetainsItsAllocatorAfterBackendRelease)
+{
+    auto pool = std::make_shared<arrow::ProxyMemoryPool>(arrow::default_memory_pool());
+    const std::weak_ptr<arrow::MemoryPool> lifetime = pool;
+    detail::TLocalStorageOptions options;
+    options.InputPool = pool;
+    Backend_.reset();
+    auto backend = detail::TLocalStorageBackend::Open(Root_, Store_, options);
+    ASSERT_TRUE(backend);
+    ASSERT_TRUE((*backend)->VerifyRetained(Store_, std::span(&View_, 1), {}));
+    ASSERT_TRUE((*backend)->CheckAppendAdmissible(Store_, View_.info, View_.base, Input_));
+    auto batch = Input_.writer_batch;
+    ASSERT_NE(batch, nullptr);
+    Input_ = {};
+    backend->reset();
+    options.InputPool.reset();
+    pool.reset();
+    EXPECT_FALSE(lifetime.expired());
+    EXPECT_TRUE(batch->ValidateFull().ok());
+    batch.reset();
+    EXPECT_TRUE(lifetime.expired());
+}
 
 // A caller presenting a tentative root must not authorize its promotion.
 TEST_F(BackendPublicationTest, TentativePointerCannotPromoteCandidate)

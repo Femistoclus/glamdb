@@ -283,7 +283,10 @@ run `./scripts/test-storage-in-docker.sh asan-ubsan`. See
 `GLAMDB_DATA`; it rebuilds the dependency prefix when its recipe fingerprint changes.
 
 The coordinator supplies owned, immutable normalized batches and expected
-operation summaries, runs capacity preflight before binding an attempt, and
+operation summaries. Backend admission checks capacity and allocates the writer
+batch before binding; production reuses it under the call's owned-input reservation.
+The reservation includes Arrow slot growth for NULL and omitted fields.
+Allocation refusal consumes no operation ID. The coordinator
 confirms the outer catalog COMMIT. A publication guard's `GetCandidate()` is
 tentative until that confirmation. Scan callers retain a `ReadOnlyView()` so
 reads do not join the writer's attempt. Isolated storage tests use an in-memory

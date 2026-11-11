@@ -32,6 +32,7 @@
 #include <charconv>
 #include <format>
 #include <limits>
+#include <new>
 #include <optional>
 #include <set>
 #include <unordered_map>
@@ -46,6 +47,14 @@ namespace NStorage = NGlamDB::NStorage;
 constexpr std::string_view CatalogNamespace = "columnar";
 constexpr std::string_view OperationKey = "glamdb.operation-id";
 constexpr std::string_view ContentHashKey = "glamdb.content-hash";
+
+// Arrow buffers borrow their pool. The aliasing batch handle keeps the pool
+// alive even if a backend caller retains it after releasing the backend.
+struct TAdmittedBatch
+{
+    std::shared_ptr<arrow::MemoryPool> Pool;
+    std::shared_ptr<arrow::RecordBatch> Batch;
+};
 
 [[noreturn]] void Fail(std::string_view code, std::string_view context, std::string_view message)
 {
@@ -140,6 +149,9 @@ TResult Guarded(TFunction&& body)
         return body();
     } catch (const Failure& error) {
         return std::unexpected(error.detail);
+    } catch (const std::bad_alloc& error) {
+        return std::unexpected(
+            ErrorDetail{"RESOURCE_EXHAUSTED", BoundedDiagnostic(error.what()), RetryHint::OperatorAction});
     } catch (const std::exception& error) {
         return std::unexpected(ErrorDetail{"INTERNAL", BoundedDiagnostic(error.what()), RetryHint::OperatorAction});
     }
@@ -540,7 +552,7 @@ Result<std::unique_ptr<StagedCreate>> TLocalStorageBackend::PrepareCreate(const 
 Status TLocalStorageBackend::CheckAppendAdmissible(const StoreInfo& store,
     const CollectionInfo& collection,
     const BaseIdentity& base,
-    const NormalizedInput& input)
+    NormalizedInput& input)
 {
     return Guarded<Status>([&]() -> Status {
         CheckStore(store);
@@ -578,6 +590,12 @@ Status TLocalStorageBackend::CheckAppendAdmissible(const StoreInfo& store,
         CheckUsage(NStorage::CheckStorageCapacity(minUsage, Options_.Storage),
             "RESOURCE_EXHAUSTED",
             "storage capacity");
+        auto batch = MakeRecordBatch(collection.schema, input.rows, Options_.InputPool.get());
+        if (!batch) {
+            throw Failure(batch.error());
+        }
+        auto owner = std::make_shared<TAdmittedBatch>(Options_.InputPool, std::move(*batch));
+        input.writer_batch = std::shared_ptr<arrow::RecordBatch>(owner, owner->Batch.get());
         return {};
     });
 }
@@ -610,18 +628,15 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
             EStoragePath::Write,
             "create attempt");
         auto scope = TakeIceberg(FileIO_->BindAttempt(attempt), "IO_ERROR", "bind append attempt");
-        auto batch = MakeRecordBatch(collection.schema, input.rows);
-        if (!batch) {
-            throw Failure(batch.error());
-        }
+        Require(input.writer_batch != nullptr, "INTERNAL", "append input was not admitted");
 
         const auto location = TableLocation(Store_.store_id, binding.collection_id);
         const auto dataPath =
             std::format("{}/data/{}-{}-00000.parquet", location, binding.operation_id, binding.attempt_id);
-        const auto data =
-            TakeIceberg(NStorage::WriteDataFile(FileIO_, attempt, *base->Metadata, dataPath, {*batch}, Options_.Writer),
-                "IO_ERROR",
-                "write data file");
+        const auto data = TakeIceberg(
+            NStorage::WriteDataFile(FileIO_, attempt, *base->Metadata, dataPath, {input.writer_batch}, Options_.Writer),
+            "IO_ERROR",
+            "write data file");
         Require(data.DataFile != nullptr && data.DataFile->record_count == static_cast<int64_t>(input.rows.size()),
             "IO_ERROR",
             "data file does not contain every input row");
