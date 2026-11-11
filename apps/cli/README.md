@@ -8,7 +8,7 @@ Build the client alone with CMake 3.28+, Ninja, a C++23 compiler and OpenSSL dev
 headers/libraries. No engine dependency installation is needed:
 
 ```sh
-git submodule update --init third_party/cli11 third_party/asio third_party/json
+git submodule update --init third_party/cli11 third_party/asio third_party/json third_party/reproc
 cmake -S apps/cli -B build/client -G Ninja -DCMAKE_CXX_COMPILER=clang++-18
 cmake --build build/client
 ```
@@ -110,3 +110,9 @@ python tests/client/cli_network_test.py build/client/glamdb-cli build/local/apps
 
 These checks use real localhost sockets and disposable certificates/stores. They
 verify client transport and engine API access, not storage power-loss durability.
+# Workload commands
+
+The same executable also offers `generate` and `bench write/read/verify/resolve`
+through an optional Python environment. See the
+[workload guide](../../tools/workload/README.md) for installation, exact outcome
+journals, Locust reports and native E2E. Ordinary requests do not require Python.

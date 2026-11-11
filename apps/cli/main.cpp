@@ -1,4 +1,5 @@
 #include "apps/client/http.h"
+#include "workload.h"
 #include <CLI/CLI.hpp>
 #include <cerrno>
 #include <csignal>
@@ -7,6 +8,7 @@
 #include <fstream>
 #include <iostream>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <stdexcept>
 #include <unistd.h>
 #include <utility>
@@ -121,6 +123,8 @@ try {
 #endif
     CLI::App app{"GlamDB network client"};
     app.require_subcommand(1);
+    std::optional<int> workloadExitCode;
+    glamdb::NClient::AddWorkloadCommands(app, workloadExitCode);
     auto* request = app.add_subcommand("request", "Call any server API route; write exact response bytes");
     auto* create = app.add_subcommand("create-store", "Create a database through the running server");
     glamdb::NClient::TRequest input;
@@ -149,6 +153,9 @@ try {
         app.parse(argc, argv);
     } catch (const CLI::ParseError& error) {
         return app.exit(error) == 0 ? 0 : 2;
+    }
+    if (workloadExitCode) {
+        return *workloadExitCode;
     }
     if (!url.empty() &&
         (request->count("--host") || request->count("--port") || create->count("--host") || create->count("--port")))

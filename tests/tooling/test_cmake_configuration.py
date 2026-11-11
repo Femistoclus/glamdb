@@ -82,7 +82,7 @@ class CmakeConfigurationTest(unittest.TestCase):
             self.skipTest("the pinned dependency prefix is not configured")
         shutil.copytree(ROOT / "public", self.source / "public")
         (self.source / "third_party").mkdir()
-        for name in ("cli11", "asio", "json"):
+        for name in ("cli11", "asio", "json", "reproc"):
             (self.source / "third_party" / name).symlink_to(ROOT / "third_party" / name, target_is_directory=True)
         result = self.configure("-DGLAMDB_IO_ONLY=OFF", "-DGLAMDB_BUILD_STORAGE=OFF", "-DBUILD_TESTING=OFF",
                                 f"-DCMAKE_PREFIX_PATH={prefix}", "-DCMAKE_CXX_SCAN_FOR_MODULES=OFF")

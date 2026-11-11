@@ -30,7 +30,8 @@ class NativeAcceptanceRunner(unittest.TestCase):
             f'with open({str(self.log)!r}, "a") as output:\n'
             '    print(json.dumps({"args": sys.argv, "server": os.getenv("GLAMDB_NATIVE_SERVER"), '
             '"required": os.getenv("GLAMDB_REQUIRE_NATIVE_CLIENTS"), '
-            '"schemas": os.getenv("GLAMDB_VALIDATE_SCHEMAS")}), file=output)\n'
+            '"schemas": os.getenv("GLAMDB_VALIDATE_SCHEMAS"), '
+            '"e2e_python": os.getenv("GLAMDB_E2E_PYTHON")}), file=output)\n'
             f'raise SystemExit({result})\n')
         executable.chmod(0o755)
         return executable
@@ -57,11 +58,18 @@ class NativeAcceptanceRunner(unittest.TestCase):
         result = self.run_script('check-native-http.sh', str(server.parents[2]), str(client))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         records = self.records()
+        self.assertEqual(len(records), 4)
+        self.assertEqual(records[0]['args'][1:], ['-c', 'import glamdb_sdk, httpx, pyarrow, jsonschema'])
         self.assertEqual(records[1]['args'][1:], ['tests/client/cli_network_test.py', str(client), str(server)])
-        self.assertEqual(records[2]['args'][1:], ['--prefix', 'ui', 'run', 'test:e2e'])
-        self.assertEqual(records[2]['server'], str(server))
-        self.assertEqual(records[2]['required'], '1')
-        self.assertEqual(records[2]['schemas'], '1')
+        self.assertEqual(records[2]['args'][1:], ['tools/workload/tests/native_e2e_test.py', str(client), str(server),
+                                               '--report-root', 'artifacts/native-normal/workload'])
+        self.assertEqual(Path(records[3]['args'][0]).name, 'npm')
+        self.assertEqual(records[3]['args'][1:], ['--prefix', 'ui', 'run', 'test:e2e'])
+        for record in records[1:]:
+            self.assertEqual(record['server'], str(server))
+            self.assertEqual(record['required'], '1')
+            self.assertEqual(record['schemas'], '1')
+            self.assertEqual(record['e2e_python'], str(python))
 
     def test_missing_client_dependency_fails_before_ctest(self):
         self.env['GLAMDB_NATIVE_PYTHON'] = str(self.fake('python', 23))
@@ -106,6 +114,18 @@ class NativeAcceptanceRunner(unittest.TestCase):
         result = self.run_script('check-native-http.sh', str(self.root / 'build'), str(self.root / 'standalone/glamdb-cli'))
         self.assertEqual(result.returncode, 29, result.stdout + result.stderr)
         self.assertEqual(len(self.records()), 2)
+
+    def test_workload_failure_blocks_browser_in_acceptance_runner(self):
+        self.test_native_browser_receives_real_server_and_standalone_client()
+        self.log.write_text('')
+        python = self.root / 'bin/python'
+        script = python.read_text().replace('raise SystemExit(0)', 'raise SystemExit(31 if len(sys.argv) > 1 and sys.argv[1].endswith("tools/workload/tests/native_e2e_test.py") else 0)')
+        python.write_text(script)
+        result = self.run_script('check-native-http.sh', str(self.root / 'build'), str(self.root / 'standalone/glamdb-cli'))
+        self.assertEqual(result.returncode, 31, result.stdout + result.stderr)
+        records = self.records()
+        self.assertEqual(len(records), 3)
+        self.assertEqual(records[-1]['args'][1], 'tools/workload/tests/native_e2e_test.py')
 
 
 if __name__ == '__main__':

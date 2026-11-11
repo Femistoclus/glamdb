@@ -171,6 +171,7 @@ Preserve these boundaries when adding or changing engine behavior:
 | `apps/mock_server/` | Disposable Python mock, real HTTP/Arrow, no warehouse/catalog access. |
 | `fixtures/`, `tools/verification/` | Literal canonical/metadata inputs, independent row oracle and evidence helpers. |
 | `sdk/python/`, `ui/` | Standalone Python HTTP SDK; HTML/CSS/ES-module pink workbench and browser/unit tests. |
+| `tools/workload/` | Mimesis datasets, SDK/Locust workloads, per-worker SQLite outcome journals and full verification. |
 | `probes/`, `benchmarks/` | Installed-dependency/compatibility probes and workload measurements. |
 | `scripts/` | Developer tooling, including quality checks. |
 | `third_party/` | Pinned upstream submodules and `lock.json`. |
@@ -325,6 +326,18 @@ cmake --build --preset deps-local --parallel 2
 ```
 
 ## Code and dependency conventions
+
+The network CLI's `generate` and `bench write/read/verify/resolve` use the optional
+Python package through reproc; the CLI still builds without engine dependencies.
+See [the workload guide](tools/workload/README.md). Install its hash-pinned
+`tools/workload/requirements.txt` and local package before testing. Run
+`bash scripts/check-workload.sh unit`; the default `bash scripts/check-workload.sh`
+requires the built real server and CLI and runs native TLS E2E without mock fallback.
+The normal native CI contour includes this E2E. Mock transports belong only in
+explicit fault tests. Preserve exact saved append UUID/body/hash, never silently
+retry or reconcile, and count only unique committed operations. Locust owns
+scheduling, distributed statistics and percentiles; do not implement another load
+engine or duplicate SDK codecs. Token values stay exclusively in the environment.
 
 Follow [the C++ style guide](docs/development/CPP_STYLE_GUIDE.md) for naming,
 declarations, layout, and error handling. Keep `.clang-format` aligned with its

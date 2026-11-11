@@ -136,6 +136,9 @@ if(TARGET glamdb_server)
         "${CMAKE_CURRENT_SOURCE_DIR}/client/cli_network_test.py"
         "${glamdb_test_cli}" "$<TARGET_FILE:glamdb_server>")
     set_tests_properties(glamdb.cli_network PROPERTIES LABELS "integration;http;cli" TIMEOUT 90)
+    add_test(NAME glamdb.cli_workload_bridge COMMAND "${Python3_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tools/workload/tests/bridge_test.py" "${glamdb_test_cli}")
+    set_tests_properties(glamdb.cli_workload_bridge PROPERTIES LABELS "integration;cli" TIMEOUT 30)
     add_test(NAME glamdb.scan_http COMMAND "${CMAKE_COMMAND}" -E env
         "PYTHONPATH=${PROJECT_SOURCE_DIR}/sdk/python/src"
         "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/server/scan_http_test.py"
