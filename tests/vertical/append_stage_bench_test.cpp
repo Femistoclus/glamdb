@@ -79,8 +79,11 @@ long PeakRssKb()
 // every tenth value of a nullable field is NULL.
 SchemaSpec MakeSchema(std::size_t fields)
 {
-    static constexpr FieldType Cycle[] = {
-        FieldType::Int64, FieldType::Float64, FieldType::String, FieldType::Bool, FieldType::TimestampUsUtc};
+    static constexpr FieldType Cycle[] = {FieldType::Int64,
+        FieldType::Float64,
+        FieldType::String,
+        FieldType::Bool,
+        FieldType::TimestampUsUtc};
     SchemaSpec schema{{{"key", FieldType::String, false}}};
     for (std::size_t field = 1; field < fields; ++field) {
         schema.fields.push_back({std::format("f{}", field), Cycle[(field - 1) % std::size(Cycle)], true});
@@ -350,7 +353,8 @@ TEST(AppendStageBench, NativeAppendStagesByShape)
         const auto root = parentPath / std::format("append-stage-{}-{}x{}", ::getpid(), shape.Fields, shape.Rows);
         std::filesystem::remove_all(root);
         std::shared_ptr<TTimingBackend> backend;
-        auto created = detail::EngineFactory::CreateWith({test::store_id, root.string()}, TTimingBackend::Factory(backend));
+        auto created =
+            detail::EngineFactory::CreateWith({test::store_id, root.string()}, TTimingBackend::Factory(backend));
         ASSERT_TRUE(created) << created.error().message;
         auto engine = std::move(*created);
         ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", schema}).disposition,

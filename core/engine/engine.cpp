@@ -1240,8 +1240,7 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
             unresolved = impl->BlockedAppend(request);
             collection = impl->CachedCollection(request.collection_id);
         }
-        const auto fingerprinted =
-            Take(FingerprintInput(collection.schema, request.collection_id, request.batches));
+        const auto fingerprinted = Take(FingerprintInput(collection.schema, request.collection_id, request.batches));
         const auto& payload_hash = fingerprinted.payload_hash;
         if (unresolved) {
             return UnresolvedAppend(*unresolved, payload_hash);

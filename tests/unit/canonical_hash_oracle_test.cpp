@@ -105,12 +105,7 @@ std::shared_ptr<arrow::RecordBatch> ToArrow(const std::vector<Row>& rows)
                                         arrow::field("b", arrow::boolean()),
                                         arrow::field("i", arrow::int64())}),
         static_cast<int64_t>(rows.size()),
-        {Finish(time),
-            Finish(key),
-            Finish(number),
-            Finish(text),
-            Finish(flag),
-            Finish(integer)});
+        {Finish(time), Finish(key), Finish(number), Finish(text), Finish(flag), Finish(integer)});
 }
 
 // Every type, NULLs, duplicates, empty and multi-byte strings, int64 and
@@ -162,7 +157,8 @@ std::vector<Row> Fixture()
     for (int index = 0; index < 600; ++index) {
         const auto value = random();
         rows.push_back({std::string("row-") + std::to_string(index),
-            value % 7 == 0 ? Cell(std::monostate{}) : Cell(std::string(value % 37, static_cast<char>('A' + value % 26))),
+            value % 7 == 0 ? Cell(std::monostate{})
+                           : Cell(std::string(value % 37, static_cast<char>('A' + value % 26))),
             value % 5 == 0 ? Cell(std::monostate{}) : Cell(value % 2 == 0),
             value % 3 == 0 ? Cell(std::monostate{}) : Cell(static_cast<int64_t>(value)),
             value % 11 == 0 ? Cell(std::monostate{}) : Cell(static_cast<double>(value % 100000) / 7 - 5000),

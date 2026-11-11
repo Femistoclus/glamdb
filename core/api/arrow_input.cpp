@@ -140,7 +140,7 @@ std::vector<Column> Columns(const SchemaSpec& schema, const arrow::RecordBatch& 
             const auto& data = *batch.column_data(mapping[field]);
             const auto buffer = [&data](size_t index) -> const uint8_t* {
                 return index < data.buffers.size() && data.buffers[index] != nullptr ? data.buffers[index]->data()
-                                                                                      : nullptr;
+                                                                                     : nullptr;
             };
             column.present = true;
             column.offset = data.offset;
@@ -175,8 +175,9 @@ Shape Inspect(const SchemaSpec& schema, const std::vector<std::shared_ptr<arrow:
             for (const auto& column : columns) {
                 if (column.IsNull(row)) {
                     Require(column.nullable, "INVALID_ARGUMENT", "NULL in required Arrow field");
-                    shape.null_slot_bytes +=
-                        column.type == FieldType::String ? 4 : column.type == FieldType::Bool ? 1 : 8;
+                    shape.null_slot_bytes += column.type == FieldType::String ? 4
+                        : column.type == FieldType::Bool                      ? 1
+                                                                              : 8;
                     continue;
                 }
                 if (column.type == FieldType::String) {
@@ -263,7 +264,8 @@ ErrorDetail InputChangedError()
     if (status.IsOutOfMemory()) {
         throw std::bad_alloc();
     }
-    throw Failure({"INTERNAL", BoundedDiagnostic("owned Arrow input: " + status.ToString()), RetryHint::OperatorAction});
+    throw Failure(
+        {"INTERNAL", BoundedDiagnostic("owned Arrow input: " + status.ToString()), RetryHint::OperatorAction});
 }
 
 std::shared_ptr<arrow::Buffer> Allocate(int64_t bytes, arrow::MemoryPool* pool)

@@ -275,7 +275,8 @@ void CheckWriterInput(const SchemaSpec& schema, const NormalizedInput& input, co
             if (schema.fields[column].type != FieldType::String) {
                 continue;
             }
-            const auto& strings = static_cast<const arrow::StringArray&>(*input.columns->column(static_cast<int>(column)));
+            const auto& strings =
+                static_cast<const arrow::StringArray&>(*input.columns->column(static_cast<int>(column)));
             for (size_t row = 0; row < rows; ++row) {
                 if (strings.IsValid(static_cast<int64_t>(row))) {
                     rowBytes[row] += strings.value_length(static_cast<int64_t>(row));
@@ -651,8 +652,9 @@ Status TLocalStorageBackend::CheckAppendAdmissible(const StoreInfo& store,
         CheckUsage(NStorage::CheckStorageCapacity(minUsage, Options_.Storage),
             "RESOURCE_EXHAUSTED",
             "storage capacity");
-        auto batch = input.columns != nullptr ? CopyRecordBatch(*input.columns, Options_.InputPool.get())
-                                              : MakeRecordBatch(collection.schema, input.rows, Options_.InputPool.get());
+        auto batch = input.columns != nullptr
+            ? CopyRecordBatch(*input.columns, Options_.InputPool.get())
+            : MakeRecordBatch(collection.schema, input.rows, Options_.InputPool.get());
         if (!batch) {
             throw Failure(batch.error());
         }

@@ -99,11 +99,7 @@ TEST_F(AppendInputOwnershipTest, SlicedAndChunkedInputStoresExactValues)
         {"dup", 1, 0.5, true, 10},
         {"dup", 1, 0.5, true, 10},
         {"", std::nullopt, std::nullopt, std::nullopt, std::nullopt},
-        {"\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87",
-            std::numeric_limits<int64_t>::min(),
-            -0.0,
-            false,
-            -62135596800000000LL},
+        {"\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87", std::numeric_limits<int64_t>::min(), -0.0, false, -62135596800000000LL},
         {std::string(1024, 'k'),
             std::numeric_limits<int64_t>::max(),
             std::numeric_limits<double>::max(),
@@ -114,8 +110,10 @@ TEST_F(AppendInputOwnershipTest, SlicedAndChunkedInputStoresExactValues)
     auto stored = rows;
     stored[3].Score = 0.0;
     const auto batch = Batch(rows);
-    const std::vector<std::shared_ptr<arrow::RecordBatch>> input{
-        batch->Slice(0, 1), batch->Slice(1, 3), batch->Slice(4, 0), batch->Slice(4)};
+    const std::vector<std::shared_ptr<arrow::RecordBatch>> input{batch->Slice(0, 1),
+        batch->Slice(1, 3),
+        batch->Slice(4, 0),
+        batch->Slice(4)};
     const auto hash = detail::FingerprintBatches(Schema, test::collection_id, {batch});
     ASSERT_TRUE(hash);
     const auto outcome = Engine_->AppendDurable({test::collection_id, FirstOperation, {}, input});

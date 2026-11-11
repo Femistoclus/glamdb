@@ -125,8 +125,8 @@ TEST(ArrowInputReservation, FingerprintInspectionYieldsTheSameReservation)
                                                         arrow::field("n", arrow::int64())}),
             rows,
             {Strings(rows, 12, 'k'), Strings(rows, 5, 's'), n});
-        const std::vector<std::vector<std::shared_ptr<arrow::RecordBatch>>> inputs{
-            {batch}, {batch->Slice(0, rows / 2), batch->Slice(rows / 2)}};
+        const std::vector<std::vector<std::shared_ptr<arrow::RecordBatch>>> inputs{{batch},
+            {batch->Slice(0, rows / 2), batch->Slice(rows / 2)}};
         for (const auto& batches : inputs) {
             const auto fingerprinted = FingerprintInput(schema, "00112233-4455-6677-8899-aabbccddeeff", batches);
             ASSERT_TRUE(fingerprinted) << fingerprinted.error().message;
