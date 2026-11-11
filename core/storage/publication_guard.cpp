@@ -79,14 +79,28 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
     if (rootSize < 0 || static_cast<std::uint64_t>(rootSize) != record.Value().Length) {
         return iceberg::ValidationFailed("Candidate metadata length differs from its receipt.");
     }
-    ICEBERG_ASSIGN_OR_RAISE(auto metadata,
-        ReadTableMetadata(*Context_.FileIO,
-            change.NewLocation,
-            std::nullopt,
-            static_cast<std::int64_t>(Context_.Limits.RootBytes)));
     TBaseState candidate;
     candidate.MetadataLocation = change.NewLocation;
-    candidate.Metadata = std::shared_ptr<iceberg::TableMetadata>(std::move(metadata));
+    const auto maxRootBytes = static_cast<std::int64_t>(Context_.Limits.RootBytes);
+    if (const auto& staged = Context_.StagedRoot) {
+        if (!staged->Metadata || !staged->Bytes || staged->Bytes->size() != record.Value().Length) {
+            return iceberg::ValidationFailed("Candidate metadata differs from its staged root.");
+        }
+        ICEBERG_RETURN_UNEXPECTED(
+            VerifyTableMetadataBytes(*Context_.FileIO, change.NewLocation, *staged->Bytes, maxRootBytes));
+        if (Context_.VerifyStagedRoot) {
+            ICEBERG_ASSIGN_OR_RAISE(auto parsed, ParseTableMetadata(*staged->Bytes));
+            ICEBERG_ASSIGN_OR_RAISE(auto reserialized, SerializeTableMetadata(*parsed));
+            if (!(*parsed == *staged->Metadata) || reserialized != *staged->Bytes) {
+                return iceberg::Invalid("CORRUPTION: Staged metadata does not round-trip through its root bytes.");
+            }
+        }
+        candidate.Metadata = staged->Metadata;
+    } else {
+        ICEBERG_ASSIGN_OR_RAISE(auto metadata,
+            ReadTableMetadata(*Context_.FileIO, change.NewLocation, std::nullopt, maxRootBytes));
+        candidate.Metadata = std::shared_ptr<iceberg::TableMetadata>(std::move(metadata));
+    }
     if (Context_.Base) {
         ICEBERG_RETURN_UNEXPECTED(
             CheckAppendMetadata(*Context_.Base->Metadata, *candidate.Metadata, Context_.ExpectedSummary));

@@ -12,6 +12,7 @@
 #include "core/io/write_latch.h"
 #include "core/storage/append_stager.h"
 #include "core/storage/base_state.h"
+#include "core/storage/format_verifier.h"
 #include "core/storage/publication_guard.h"
 #include "core/storage/table_profile.h"
 
@@ -701,9 +702,13 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
             "IO_ERROR",
             "stage append");
         auto root = MetadataLocation(location, MetadataVersion(base->MetadataLocation) + 1, binding.attempt_id);
-        CheckIceberg(iceberg::TableMetadataUtil::Write(*FileIO_, root, staged.Transaction->current()),
-            "IO_ERROR",
-            "write append metadata");
+        // Serialize the staged root once, exactly as TableMetadataUtil::Write
+        // does, and hand both forms to the guard, which compares the durable
+        // file with these bytes instead of parsing it again.
+        auto stagedMetadata = std::make_shared<const iceberg::TableMetadata>(staged.Transaction->current());
+        auto stagedBytes = std::make_shared<const std::string>(
+            TakeIceberg(NStorage::SerializeTableMetadata(*stagedMetadata), "IO_ERROR", "serialize append metadata"));
+        CheckIceberg(FileIO_->WriteFile(root, *stagedBytes), "IO_ERROR", "write append metadata");
         const auto snapshot = TakeIceberg(staged.Transaction->current().SnapshotById(staged.SnapshotID),
             "IO_ERROR",
             "read staged snapshot");
@@ -733,7 +738,9 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
             .ExpectedSummary = summary,
             .StoreUsage = ComputeStoreUsage(),
             .Limits = Options_.Storage,
-            .Warehouse = warehouse};
+            .Warehouse = warehouse,
+            .StagedRoot = NStorage::TStagedRoot{.Metadata = std::move(stagedMetadata), .Bytes = std::move(stagedBytes)},
+            .VerifyStagedRoot = Options_.VerifyStagedRoot};
         return std::make_unique<TStagedAppend>(shared_from_this(),
             binding.collection_id,
             collection.name,

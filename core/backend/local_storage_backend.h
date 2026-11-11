@@ -5,6 +5,7 @@
 #include "core/storage/data_file_writer.h"
 #include "core/storage/durable_local_file_io.h"
 
+#include <cstdlib>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -52,6 +53,24 @@ struct TLocalStorageOptions
     // anything else after admission is first seen by the next admission.
     // True walks the whole warehouse again before every append publication.
     bool WalkWarehouseAtPublication = false;
+    // The guard validates an append's in-memory staged root after comparing
+    // the durable file with its serialized bytes. True also parses the file
+    // and requires the parse to equal the staged root and to reserialize to
+    // the same bytes. Defaults to GLAMDB_VERIFY_ROUNDTRIP when set ("0" is
+    // off), otherwise on in builds without NDEBUG.
+    bool VerifyStagedRoot = DefaultVerifyStagedRoot();
+
+    static bool DefaultVerifyStagedRoot()
+    {
+        if (const char* value = std::getenv("GLAMDB_VERIFY_ROUNDTRIP"); value && *value) {
+            return std::string_view(value) != "0";
+        }
+#ifdef NDEBUG
+        return false;
+#else
+        return true;
+#endif
+    }
 };
 
 // Production bridge from the coordinator seam to the durable storage

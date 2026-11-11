@@ -49,6 +49,16 @@ from `VerifyReachable` or a previously confirmed publication.
    durable and before changing the catalog pointer. The guard seals the attempt,
    verifies the exact prepared base, metadata delta, reachable new files,
    retained manifests, expected summary fields, and aggregate logical capacity limits.
+   For an append the backend serializes the staged root once (the exact bytes of
+   `TableMetadataUtil::Write`) and passes both forms; the guard requires the
+   durable root to equal those bytes and runs every validation on the in-memory
+   staged metadata instead of parsing the file. This relies on parsing our roots
+   reproducing the staged metadata, which `vertical/root_round_trip_test.cpp`
+   establishes for roots written by real appends (byte-identical reserialization
+   and structural equality). `VerifyStagedRoot` (on by default without `NDEBUG`,
+   `GLAMDB_VERIFY_ROUNDTRIP=1|0` overrides it; the vertical CTest suite sets it)
+   additionally parses the durable root and requires that equality before
+   publication. Collection creation still parses its root.
    It rechecks the physical warehouse cap after production, before allowing
    publication: for an append it adds the physical size of every durable file
    of the sealed attempt (the larger of length and allocated blocks, recorded
@@ -154,7 +164,7 @@ target.
 | Real formats, bounded decoding, writer metrics and failures | `storage/format_verifier_test.cpp`, `storage/data_file_writer_test.cpp` |
 | Writer compatibility and entirely absent footer statistics | `storage/writer_compatibility_test.cpp` |
 | Staging, manifest round trips, no implicit publication | `storage/append_stager_test.cpp` |
-| Guard, closure/recovery, retained history, invalid candidates | `storage/publication_guard_test.cpp` |
+| Guard, closure/recovery, retained history, invalid candidates, staged-root byte/round-trip checks | `storage/publication_guard_test.cpp` |
 | Recovery visited index, exact duplicates, disk spill and workspace failures | `storage/recovery_visited_test.cpp` |
 | Capacity boundaries, orphans, preflight faults | `storage/capacity_test.cpp`, `io/local_fs_test.cpp` |
 
