@@ -88,6 +88,7 @@ public:
         std::span<const CollectionView> collections,
         std::span<const OperationRecord> operations) override;
     Result<std::shared_ptr<iceberg::FileIO>> ReadOnlyFileIO() override;
+    Result<std::shared_ptr<const NGlamDB::NStorage::TBaseState>> VerifiedScanState(const BaseIdentity& base) override;
 
     // A verified candidate is tentative until PublicationFinished confirms the
     // outer COMMIT. Recovery rebuilds the generation independently.

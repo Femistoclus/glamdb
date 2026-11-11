@@ -10,12 +10,19 @@ namespace iceberg {
 class FileIO;
 } // namespace iceberg
 
+namespace NGlamDB::NStorage {
+struct TBaseState;
+}
+
 namespace glamdb::detail {
 
 struct CollectionView
 {
     CollectionInfo info;
     BaseIdentity base;
+    // Pinned together with the engine's confirmed view. Custom backends may
+    // omit this and use the uncached authoritative planner.
+    std::shared_ptr<const NGlamDB::NStorage::TBaseState> scan_state{};
 };
 
 class StagedCreate
@@ -105,6 +112,12 @@ public:
     {
         return std::unexpected(
             ErrorDetail{"DEPENDENCY_UNAVAILABLE", "storage reader is not installed", RetryHint::OperatorAction});
+    }
+    // No I/O. Only an exact, explicitly confirmed root of the current verified
+    // generation may be pinned; tentative candidates are never returned.
+    virtual Result<std::shared_ptr<const NGlamDB::NStorage::TBaseState>> VerifiedScanState(const BaseIdentity&)
+    {
+        return nullptr;
     }
 };
 

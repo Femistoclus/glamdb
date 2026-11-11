@@ -27,7 +27,7 @@ and network CLI. Independent durable I/O and Arrow/Parquet/Iceberg
 storage primitives provide file production, staging, publication validation,
 recovery verification, and capacity checks. `core/backend/` connects them to the
 coordinator StorageBackend and `core/scan/` implements `Engine::Scan`
-(fixed snapshot, SQL three-valued compound predicates `True`/`Compare`/`In`/`IsNull`/`IsNotNull`/`And`/`Or`/`Not`, projection, limit; no pruning). See
+(fixed snapshot, verified membership index, SQL three-valued compound predicates `True`/`Compare`/`In`/`IsNull`/`IsNotNull`/`And`/`Or`/`Not`, projection, limit; no pruning). See
 [the scanner guide](docs/development/SCANNER.md) for their contract and
 validation status, [the coordinator guide](docs/development/COORDINATOR.md)
 for the integration contract, and [the storage guide](docs/development/STORAGE_MODULE.md)
@@ -158,7 +158,11 @@ Preserve these boundaries when adding or changing engine behavior:
   durability fence before lookups resume. The initial engine has no input
   payload journal or asynchronous job queue.
 - **Snapshot reads.** Resolve the selected view once and enumerate its files
-  through Iceberg manifests. Read neither uncommitted nor orphan files by
+  through verified Iceberg membership. Native scans pin the index with the
+  confirmed view; publication/recovery build it with strict closure validation.
+  Snapshot prefixes require the append-only profile; see
+  [the index contract and benchmark](docs/development/SCAN_INDEX.md).
+  Read neither uncommitted nor orphan files by
   scanning warehouse directories. Retain historical snapshots; an initial empty
   view stays empty after later writes. Pruning is conservative and followed by
   exact filtering with SQL three-valued NULL logic; only TRUE matches survive.

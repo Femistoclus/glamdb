@@ -583,9 +583,8 @@ TEST_F(EngineVerticalTest, MalformedAvroManifestAndOutOfRangeTimestampFailClosed
         output.write(corrupted.data(), static_cast<std::streamsize>(corrupted.size()));
     }
 
-    // Manifests are read on demand: the failure surfaces at open or first Next().
-    const auto scan = Engine_->Scan({.collection_id = test::collection_id});
-    const auto failure = scan ? (*scan)->Next() : std::unexpected(scan.error());
+    // Authoritative metadata reads detect corruption and revoke cached membership.
+    const auto failure = Engine_->GetStatistics(test::collection_id);
     ASSERT_FALSE(failure);
     EXPECT_EQ(failure.error().code, "CORRUPTION");
     const auto afterManifestCorruption = Engine_->ListCollections();

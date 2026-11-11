@@ -146,12 +146,12 @@ joins a writer attempt or holds a SQLite read transaction.
 
 - `SnapshotSelector`: `Latest` (resolved at open), `Id`, `InitialEmpty`.
   `ScanInfo.selector_resolved` reports `Id(snapshot)` or `InitialEmpty`.
-- Opening a scan reads the committed root and the selected manifest list; the
-  cursor reads each manifest's live entries only when it needs the next data
-  file, so `limit = 0` reads no manifest and a small limit reads only the
-  manifests it consumes. A malformed manifest therefore surfaces from
-  `Next()` (still `CORRUPTION`, closing readiness). Warehouse directories are
-  never listed. Delete manifests,
+- Native scans pin the confirmed generation's [verified membership index](SCAN_INDEX.md).
+  Opening and repeated planning read no root, manifest list or manifest.
+  `limit = 0` opens no data file. Recovery and publication derive the index
+  through the same strict closure verifier; observed corruption invalidates it.
+  Custom backends without an index retain the uncached planner and lazy manifest
+  reads. Warehouse directories are never listed for membership. Delete manifests,
   partitioned specs and non-Parquet files are `UNSUPPORTED_TABLE_FEATURE`.
 - `Predicate` supports `True`, comparisons (`Eq`, `Ne`, `Lt`, `Le`, `Gt`, `Ge`)
   of a field with a literal of the exact field type or an explicit `NULL`
@@ -190,8 +190,7 @@ joins a writer attempt or holds a SQLite read transaction.
   `Info()` remains valid. Detected corruption during `Next()`
   closes engine readiness. Read failures are errors, never EOS.
 
-Not implemented: file/row-group pruning, reuse of the backend's parsed root by
-scans, page CRC verification and qualification-scale attempt-volume/capacity measurements.
+Not implemented: file/row-group pruning, page CRC verification and qualification-scale attempt-volume/capacity measurements.
 The [process resource owner](SHARED_RESOURCES.md) now supplies scan working
 reservations, tracked Arrow allocation capacity and leases retained through
 slices and C Data exports. Compiled compound predicates retain metadata

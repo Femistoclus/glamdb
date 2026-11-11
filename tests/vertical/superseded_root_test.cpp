@@ -249,41 +249,29 @@ TEST_F(SupersededRootTest, OnlyTheCommittedRootRemainsAndHistoryStaysReadable)
     EXPECT_EQ(Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}}).result, first);
 }
 
-TEST_F(SupersededRootTest, RootStaysUntilAConcurrentScanHasPlanned)
+TEST_F(SupersededRootTest, IndexedCursorPinsMembershipAfterItsRootIsRetired)
 {
-    Commit(FirstOperation, FirstRows);
+    const auto first = Commit(FirstOperation, FirstRows);
     const auto resolved = Roots();
     ASSERT_EQ(resolved.size(), 1U);
-
-    std::promise<std::thread::id> readerID;
-    std::promise<void> armed;
-    auto reader = std::async(std::launch::async, [&] {
-        readerID.set_value(std::this_thread::get_id());
-        armed.get_future().wait();
-        return Read();
-    });
-    Gate_->Arm(readerID.get_future().get());
-    armed.set_value();
-    // The scan resolved the first root and is about to open it.
-    ASSERT_TRUE(Gate_->WaitEntered(10s));
-
+    auto cursor = Engine_->Scan({.collection_id = test::collection_id});
+    ASSERT_TRUE(cursor);
     Commit(SecondOperation, SecondRows);
-    EXPECT_TRUE(std::filesystem::exists(resolved.front())) << "superseded root removed under an active scan";
-    Gate_->Release();
-    EXPECT_EQ(reader.get(), Expected({&FirstRows}));
-    EXPECT_TRUE(Engine_->ListCollections()) << "the scan must not observe a missing root";
-    EXPECT_TRUE(std::filesystem::exists(resolved.front())) << "only the writer removes a released root";
-
-    // Shutdown holds the writer and removes roots released after the last append.
-    ASSERT_TRUE(Engine_->Shutdown(1000ms));
-    Engine_.reset();
-    const auto remaining = Roots();
-    ASSERT_EQ(remaining.size(), 1U);
-    EXPECT_NE(remaining.front(), resolved.front());
-    auto opened = OpenExisting({Root_.string(), test::store_id});
-    ASSERT_TRUE(opened) << opened.error().code << ": " << opened.error().message;
-    Engine_ = std::move(*opened);
+    EXPECT_FALSE(std::filesystem::exists(resolved.front()));
+    EXPECT_EQ((*cursor)->Info().selector_resolved, SnapshotSelector::Id(first.snapshot_id));
+    std::vector<std::string> rows;
+    while (true) {
+        const auto next = (*cursor)->Next();
+        ASSERT_TRUE(next) << next.error().message;
+        if (!*next) {
+            break;
+        }
+        const auto rendered = Render(**next);
+        rows.insert(rows.end(), rendered.begin(), rendered.end());
+    }
+    EXPECT_EQ(Sorted(std::move(rows)), Expected({&FirstRows}));
     EXPECT_EQ(Read(), Expected({&FirstRows, &SecondRows}));
+    EXPECT_EQ((*cursor)->Profile().manifests_read.value, 0);
 }
 
 TEST_F(SupersededRootTest, MetadataRetainsItsConfirmedRootAcrossAppend)
@@ -418,7 +406,7 @@ TEST_F(SupersededRootTest, FileDetailsRetainTheirConfirmedRootAcrossAppend)
     EXPECT_FALSE(std::filesystem::exists(resolved.front()));
 }
 
-// A scan that finishes while the next append walks the warehouse for capacity
+// A metadata read that finishes while the next append walks the warehouse for capacity
 // must not unlink its root under that walk: a root removed between the walk's
 // readdir and fstatat failed preflight as corruption and closed the store.
 TEST_F(SupersededRootTest, ReleasedRootIsNotRemovedDuringACapacityWalk)
@@ -432,21 +420,23 @@ TEST_F(SupersededRootTest, ReleasedRootIsNotRemovedDuringACapacityWalk)
     auto reader = std::async(std::launch::async, [&] {
         readerID.set_value(std::this_thread::get_id());
         armed.get_future().wait();
-        return Read();
+        return Engine_->GetStatistics(test::collection_id);
     });
     Gate_->Arm(readerID.get_future().get());
     armed.set_value();
     ASSERT_TRUE(Gate_->WaitEntered(10s));
     Commit(SecondOperation, SecondRows);
 
-    // The third append is inside its preflight walk when the scan finishes.
+    // The third append is inside its preflight walk when the metadata read finishes.
     Gate_->ArmWalk();
     auto writer = std::async(std::launch::async, [&] {
         return Engine_->AppendDurable({test::collection_id, ThirdOperation, {}, {Batch(FirstRows)}});
     });
     ASSERT_TRUE(Gate_->WaitWalkEntered(10s));
     Gate_->Release();
-    EXPECT_EQ(reader.get(), Expected({&FirstRows}));
+    const auto statistics = reader.get();
+    ASSERT_TRUE(statistics);
+    EXPECT_EQ(statistics->rows.value, 3);
     EXPECT_TRUE(std::filesystem::exists(resolved.front())) << "a released root was removed during a capacity walk";
     Gate_->ReleaseWalk();
 

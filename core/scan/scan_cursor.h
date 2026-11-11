@@ -14,6 +14,10 @@ namespace iceberg {
 class FileIO;
 } // namespace iceberg
 
+namespace NGlamDB::NStorage {
+struct TBaseState;
+}
+
 namespace glamdb::detail {
 
 struct TScanContext
@@ -33,6 +37,7 @@ struct TScanContext
     // A per-scan resource pool wraps it; empty selects Arrow's default pool.
     std::shared_ptr<arrow::MemoryPool> Pool{};
     std::function<void(const ErrorDetail&)> OnError;
+    std::shared_ptr<const NGlamDB::NStorage::TBaseState> VerifiedState{};
 };
 
 Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanRequest& request);

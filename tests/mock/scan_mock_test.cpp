@@ -326,6 +326,44 @@ TEST_F(ScanMockTest, CancelInsideReadIsDeterministic)
     EXPECT_EQ(next.error().code, "CANCELLED");
 }
 
+TEST_F(ScanMockTest, StopDuringManifestReadDoesNotOpenData)
+{
+    const auto plan = PlanManifests(IO_, Base_, SnapshotSelector::Id(Snap1_));
+    ASSERT_TRUE(plan) << plan.error().message;
+    ASSERT_FALSE(plan->Manifests.empty());
+    for (const bool closing : {false, true}) {
+        SCOPED_TRACE(closing);
+        auto stopped = std::make_shared<std::atomic<bool>>(false);
+        auto context = Context();
+        context.Closing = stopped;
+        const auto cursor =
+            OpenScan(std::move(context), {.collection_id = CollectionId, .selector = SnapshotSelector::Id(Snap1_)});
+        ASSERT_TRUE(cursor) << cursor.error().message;
+        bool manifestRead = false;
+        int dataReads = 0;
+        IO_->OnRead = [&](const std::string& path) {
+            if (path == plan->Manifests.front().manifest_path) {
+                manifestRead = true;
+                if (closing) {
+                    stopped->store(true);
+                } else {
+                    (*cursor)->Cancel();
+                }
+            }
+            if (path.ends_with(".parquet")) {
+                ++dataReads;
+            }
+        };
+        const auto next = (*cursor)->Next();
+        IO_->OnRead = nullptr;
+        ASSERT_TRUE(manifestRead);
+        ASSERT_FALSE(next);
+        EXPECT_EQ(next.error().code, "CANCELLED");
+        EXPECT_EQ((*cursor)->Profile().state, ScanState::Cancelled);
+        EXPECT_EQ(dataReads, 0);
+    }
+}
+
 TEST_F(ScanMockTest, ExtractedBufferRetainsFileIOAndOwner)
 {
     auto io = std::make_shared<TMemoryFileIO>();

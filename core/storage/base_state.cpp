@@ -123,7 +123,8 @@ iceberg::Result<TStorageUsage> CheckManifest(const std::shared_ptr<iceberg::File
     const NIO::TStoreUri& table,
     const std::shared_ptr<NIO::TIOAttempt>& attempt,
     const TStorageLimits& limits,
-    TRecoveryVisited* visited)
+    TRecoveryVisited* visited,
+    TScanMembership* scanIndex)
 {
     if (manifest.content != iceberg::ManifestContent::kData || manifest.partition_spec_id != metadata.default_spec_id ||
         manifest.added_snapshot_id != snapshot.snapshot_id || manifest.sequence_number != snapshot.sequence_number ||
@@ -165,6 +166,10 @@ iceberg::Result<TStorageUsage> CheckManifest(const std::shared_ptr<iceberg::File
     }
     ICEBERG_ASSIGN_OR_RAISE(auto footerBytes, CheckData(fileIO, *entry.data_file, *schema, table, attempt));
     ICEBERG_RETURN_UNEXPECTED(MarkVerified(attempt, manifest.manifest_path));
+    if (scanIndex) {
+        const auto& file = *entry.data_file;
+        scanIndex->Files.push_back({file.file_path, file.file_size_in_bytes, file.record_count});
+    }
     TStorageUsage delta;
     delta.DataFiles = 1;
     delta.Manifests = 1;
@@ -245,7 +250,8 @@ iceberg::Result<TBaseState> CheckAppendClosureImpl(const std::shared_ptr<iceberg
     const std::shared_ptr<NIO::TIOAttempt>& attempt,
     const TStorageLimits& limits,
     TRecoveryVisited* visited,
-    bool commitRoot)
+    bool commitRoot,
+    TScanMembership* scanIndex)
 {
     return CatchIcebergExceptions([&]() -> iceberg::Result<TBaseState> {
         if (!fileIO || !candidate.Metadata) {
@@ -298,7 +304,8 @@ iceberg::Result<TBaseState> CheckAppendClosureImpl(const std::shared_ptr<iceberg
                     table.Value(),
                     attempt,
                     limits,
-                    visited));
+                    visited,
+                    scanIndex));
             auto total = ReplaceUsage(delta, {.Next = fileUsage});
             if (!total) {
                 return iceberg::ValidationFailed("Manifest usage overflows.");
@@ -322,6 +329,16 @@ iceberg::Result<TBaseState> CheckAppendClosureImpl(const std::shared_ptr<iceberg
         candidate.Usage = usage.Value();
         candidate.CurrentManifests = std::move(manifests);
         ICEBERG_RETURN_UNEXPECTED(MarkVerified(attempt, snapshot->manifest_list));
+        if (scanIndex) {
+            const auto boundary = std::ranges::lower_bound(scanIndex->Snapshots,
+                snapshot->snapshot_id,
+                {},
+                &TSnapshotBoundary::SnapshotID);
+            if (boundary != scanIndex->Snapshots.end() && boundary->SnapshotID == snapshot->snapshot_id) {
+                return iceberg::ValidationFailed("Duplicate scan index snapshot.");
+            }
+            scanIndex->Snapshots.insert(boundary, {snapshot->snapshot_id, scanIndex->Files.size()});
+        }
         return std::move(candidate);
     });
 }
@@ -334,7 +351,23 @@ iceberg::Result<TBaseState> CheckAppendClosure(const std::shared_ptr<iceberg::Fi
     const std::shared_ptr<NIO::TIOAttempt>& attempt,
     const TStorageLimits& limits)
 {
-    return CheckAppendClosureImpl(fileIO, std::move(candidate), previousManifests, attempt, limits, nullptr, true);
+    return CatchIcebergExceptions([&]() -> iceberg::Result<TBaseState> {
+        if (!candidate.ScanIndex) {
+            return iceberg::ValidationFailed("Append has no verified scan index.");
+        }
+        auto scanIndex = std::make_shared<TScanMembership>(*candidate.ScanIndex);
+        ICEBERG_ASSIGN_OR_RAISE(auto state,
+            CheckAppendClosureImpl(fileIO,
+                std::move(candidate),
+                previousManifests,
+                attempt,
+                limits,
+                nullptr,
+                true,
+                scanIndex.get()));
+        state.ScanIndex = std::move(scanIndex);
+        return state;
+    });
 }
 
 iceberg::Result<TBaseState> VerifyRetainedSnapshot(const std::shared_ptr<iceberg::FileIO>& fileIO,
@@ -387,7 +420,7 @@ iceberg::Result<TBaseState> VerifyRetainedSnapshot(const std::shared_ptr<iceberg
             candidate.Usage.RootBytes = state.Usage.RootBytes;
         }
         ICEBERG_RETURN_UNEXPECTED(
-            CheckAppendClosureImpl(fileIO, std::move(candidate), previous, {}, limits, nullptr, commitRoot));
+            CheckAppendClosureImpl(fileIO, std::move(candidate), previous, {}, limits, nullptr, commitRoot, nullptr));
         return state;
     });
 }
@@ -404,6 +437,9 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
         const auto original = state.Metadata;
         ICEBERG_ASSIGN_OR_RAISE(auto view, EmptyHistoryView(*original));
         ICEBERG_ASSIGN_OR_RAISE(auto visited, TRecoveryVisited::Make(256ULL << 20, workspaceDirectory));
+        auto scanIndex = std::make_shared<TScanMembership>();
+        scanIndex->Files.reserve(original->snapshots.size());
+        scanIndex->Snapshots.reserve(original->snapshots.size());
         std::unordered_set<std::int64_t> snapshotIDs;
         snapshotIDs.reserve(original->snapshots.size());
         for (std::size_t index = 0; index < original->snapshots.size(); ++index) {
@@ -427,7 +463,8 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
                     {},
                     limits,
                     visited.get(),
-                    index + 1 == original->snapshots.size()));
+                    index + 1 == original->snapshots.size(),
+                    scanIndex.get()));
             if (next->snapshots.size() > 1) {
                 next->snapshots.erase(next->snapshots.begin());
                 next->snapshot_log.erase(next->snapshot_log.begin());
@@ -440,6 +477,7 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
             return iceberg::ValidationFailed("Recovery root has an inconsistent current snapshot.");
         }
         state.Metadata = original;
+        state.ScanIndex = std::move(scanIndex);
         return state;
     });
 }

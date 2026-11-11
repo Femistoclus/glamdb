@@ -1,7 +1,5 @@
-// A transient I/O failure while a scan reads committed metadata (root,
-// manifest list or manifest) is reported as an I/O error and does not close
-// engine readiness. Manifest bytes are read through the FileIO before Avro
-// decoding, so a read error cannot be mistaken for a malformed file.
+// Verified scans reuse membership; metadata APIs still read authoritative files.
+// Environmental read failures preserve their classification and readiness.
 
 #include "tests/support/fault_fs.h"
 #include "tests/vertical/vertical_support.h"
@@ -80,58 +78,30 @@ protected:
     }
 };
 
-TEST_F(ScanReadErrorClassificationTest, TransientRootReadFailureIsNotCorruption)
+TEST_F(ScanReadErrorClassificationTest, VerifiedScansDoNotRereadRoots)
 {
-    struct TCase
-    {
-        std::errc Error;
-        const char* Expected; // nullptr: any code except CORRUPTION
-    };
-    for (const auto& [error, expected] : {TCase{std::errc::io_error, "IO_ERROR"},
-             TCase{std::errc::too_many_files_open, "IO_ERROR"},
-             TCase{std::errc::not_enough_memory, nullptr}})
-    {
+    for (const auto error : {std::errc::io_error, std::errc::too_many_files_open, std::errc::not_enough_memory}) {
         SCOPED_TRACE(std::make_error_code(error).message());
-        // The next OpenRead of a *.metadata.json is the planner's committed-root read
-        // (Engine::Scan -> OpenScan -> PlanScan -> ReadTableMetadata).
         Faults_->AddRule({EIOOp::OpenRead, "*.metadata.json", 1, 1, std::make_error_code(error), std::nullopt});
-
-        const auto scan = Engine_->Scan({.collection_id = test::collection_id});
-        ASSERT_FALSE(scan);
-        EXPECT_NE(scan.error().code, "CORRUPTION") << scan.error().message;
-        if (expected != nullptr) {
-            EXPECT_EQ(scan.error().code, expected) << scan.error().message;
-        }
-
-        // A transient read failure must not close readiness.
-        const auto listed = Engine_->ListCollections();
-        EXPECT_TRUE(listed) << (listed ? std::string() : listed.error().code);
-        if (!listed) {
-            // Keep the remaining cases independent on the current code.
-            ASSERT_TRUE(Engine_->Reconcile());
-        }
-        // The fault was one-shot: the committed state is intact and readable.
         EXPECT_EQ(CountRows(), static_cast<int64_t>(FirstRows.size()));
+        // The metadata API still reads the authoritative root and consumes the fault.
+        const auto history = Engine_->ListSnapshots(test::collection_id);
+        ASSERT_FALSE(history);
+        EXPECT_NE(history.error().code, "CORRUPTION");
+        EXPECT_TRUE(Engine_->GetHealth().read_available);
+        EXPECT_TRUE(Engine_->ListSnapshots(test::collection_id));
     }
 }
 
-TEST_F(ScanReadErrorClassificationTest, TransientManifestReadFailureIsNotCorruption)
+TEST_F(ScanReadErrorClassificationTest, VerifiedScansDoNotRereadManifests)
 {
-    // Data manifests are named "<commit-uuid>-m<N>.avro"; manifest lists are
-    // "snap-<id>-<attempt>-<uuid>.avro" and never end with "-m<digit>.avro".
     Faults_->AddRule({EIOOp::PRead, "*-m[0-9].avro", 1, 1, std::make_error_code(std::errc::io_error), std::nullopt});
-
-    // Manifests are read on demand: the failure surfaces at open or first Next().
-    const auto scan = Engine_->Scan({.collection_id = test::collection_id});
-    const auto failure = scan ? (*scan)->Next() : std::unexpected(scan.error());
-    ASSERT_FALSE(failure);
-    EXPECT_NE(failure.error().code, "CORRUPTION") << failure.error().message;
-    const auto listed = Engine_->ListCollections();
-    EXPECT_TRUE(listed) << (listed ? std::string() : listed.error().code);
-    if (!listed) {
-        ASSERT_TRUE(Engine_->Reconcile());
-    }
     EXPECT_EQ(CountRows(), static_cast<int64_t>(FirstRows.size()));
+    const auto statistics = Engine_->GetStatistics(test::collection_id);
+    ASSERT_FALSE(statistics);
+    EXPECT_EQ(statistics.error().code, "IO_ERROR");
+    EXPECT_TRUE(Engine_->GetHealth().read_available);
+    EXPECT_TRUE(Engine_->GetStatistics(test::collection_id));
 }
 
 TEST_F(ScanReadErrorClassificationTest, MetadataFailuresPreserveClassificationAndExplainReadsNoData)

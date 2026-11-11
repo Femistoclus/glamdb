@@ -4,6 +4,7 @@
 #include "core/api/canonical.h"
 #include "core/backend/storage_errors.h"
 #include "core/scan/buffer_file.h"
+#include "core/storage/base_state.h"
 #include "core/storage/capacity.h"
 #include "core/storage/format_registry.h"
 #include "core/storage/format_verifier.h"
@@ -198,6 +199,53 @@ PlanManifests(const std::shared_ptr<iceberg::FileIO>& io, const BaseIdentity& ba
         plan.Manifests = DecodePersisted("read manifest list", [&] {
             return Take(list->Files(), "IO_ERROR", "read manifest list");
         });
+        return plan;
+    } catch (const Failure& error) {
+        return std::unexpected(error.detail);
+    } catch (const std::bad_alloc& error) {
+        return std::unexpected(
+            ErrorDetail{"RESOURCE_EXHAUSTED", BoundedDiagnostic(error.what()), RetryHint::OperatorAction});
+    } catch (const std::exception& error) {
+        return std::unexpected(ErrorDetail{"INTERNAL", BoundedDiagnostic(error.what()), RetryHint::OperatorAction});
+    }
+}
+
+Result<TScanManifests>
+PlanVerifiedScan(const NGlamDB::NStorage::TBaseState& state, const BaseIdentity& base, const SnapshotSelector& selector)
+{
+    try {
+        Require(state.Metadata && state.ScanIndex && state.MetadataLocation == base.metadata_location &&
+                state.Metadata->location == "store://" + base.store_id + "/warehouse/" + base.collection_id,
+            "CORRUPTION",
+            "scan index does not match the confirmed root");
+        CheckRoot(*state.Metadata, base);
+        TScanManifests plan;
+        plan.Index = state.ScanIndex;
+        switch (selector.kind) {
+            case SnapshotSelectorKind::Latest:
+                plan.SnapshotID = base.current_snapshot_id;
+                break;
+            case SnapshotSelectorKind::Id:
+                plan.SnapshotID = selector.snapshot_id;
+                break;
+            case SnapshotSelectorKind::InitialEmpty:
+                break;
+            default:
+                throw Failure({"INVALID_ARGUMENT", "unknown snapshot selector", RetryHint::FixInput});
+        }
+        if (plan.SnapshotID) {
+            const auto boundary = std::ranges::lower_bound(plan.Index->Snapshots,
+                *plan.SnapshotID,
+                {},
+                &NGlamDB::NStorage::TSnapshotBoundary::SnapshotID);
+            Require(boundary != plan.Index->Snapshots.end() && boundary->SnapshotID == *plan.SnapshotID,
+                selector.kind == SnapshotSelectorKind::Id ? "NOT_FOUND" : "CORRUPTION",
+                "snapshot is not retained by the verified scan index");
+            Require(boundary->FileCount <= plan.Index->Files.size(),
+                "CORRUPTION",
+                "selected snapshot has an invalid membership boundary");
+            plan.FileCount = boundary->FileCount;
+        }
         return plan;
     } catch (const Failure& error) {
         return std::unexpected(error.detail);

@@ -264,9 +264,8 @@ TEST_F(EngineIntegrityTest, FifoReplacingManifestIsCorruption)
     std::filesystem::remove(manifests.front());
     ASSERT_EQ(::mkfifo(manifests.front().c_str(), 0600), 0);
 
-    // Manifests are read on demand: the failure surfaces at open or first Next().
-    const auto scan = Engine_->Scan({.collection_id = test::collection_id});
-    const auto failure = scan ? (*scan)->Next() : std::unexpected(scan.error());
+    // A metadata read observes the corruption and revokes the verified index.
+    const auto failure = Engine_->GetStatistics(test::collection_id);
     ASSERT_FALSE(failure);
     EXPECT_EQ(failure.error().code, "CORRUPTION");
     EXPECT_EQ(Engine_->ListCollections().error().code, "RECOVERY_REQUIRED");
@@ -322,9 +321,9 @@ TEST_F(EngineIntegrityTest, RetryAfterObservedGarbageRootRequiresRecovery)
     ASSERT_EQ(roots.size(), 1U);
     const auto saved = ReadBytes(roots.front());
     WriteBytes(roots.front(), std::string(saved.size(), 'x'));
-    const auto scan = Engine_->Scan({.collection_id = test::collection_id});
-    ASSERT_FALSE(scan);
-    EXPECT_EQ(scan.error().code, "CORRUPTION");
+    const auto history = Engine_->ListSnapshots(test::collection_id);
+    ASSERT_FALSE(history);
+    EXPECT_EQ(history.error().code, "CORRUPTION");
 
     const auto retry = Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
     EXPECT_EQ(retry.disposition, CommitDisposition::CommitUnknown);

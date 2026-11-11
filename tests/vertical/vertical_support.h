@@ -195,6 +195,7 @@ public:
     std::function<void(const detail::BoundOperation&)> AfterPrepareAppend;
     std::function<void(std::string_view collectionID)> BeforeVerifyClosure;
     std::function<void(std::string_view collectionID)> AfterPublish;
+    std::function<void()> AfterPublication;
 
     explicit THookBackend(std::shared_ptr<detail::StorageBackend> inner)
         : Inner_(std::move(inner))
@@ -248,6 +249,9 @@ public:
     PublicationFinished(std::string_view collectionID, std::string_view location, CommitDisposition result) override
     {
         Inner_->PublicationFinished(collectionID, location, result);
+        if (AfterPublication) {
+            AfterPublication();
+        }
     }
 
     void InvalidateCache() override
@@ -274,6 +278,11 @@ public:
     Result<std::shared_ptr<iceberg::FileIO>> ReadOnlyFileIO() override
     {
         return Inner_->ReadOnlyFileIO();
+    }
+
+    Result<std::shared_ptr<const NGlamDB::NStorage::TBaseState>> VerifiedScanState(const BaseIdentity& base) override
+    {
+        return Inner_->VerifiedScanState(base);
     }
 
 private:

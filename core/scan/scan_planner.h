@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/storage/scan_index.h"
 #include "storage/scan.h"
 
 #include <iceberg/manifest/manifest_list.h>
@@ -17,17 +18,16 @@ class Schema;
 struct TableMetadata;
 } // namespace iceberg
 
+namespace NGlamDB::NStorage {
+struct TBaseState;
+}
+
 namespace glamdb::detail {
 
 Result<std::unique_ptr<iceberg::TableMetadata>> ReadScanRoot(const std::shared_ptr<iceberg::FileIO>& io,
     const BaseIdentity& base);
 
-struct TScanFile
-{
-    std::string Path;
-    int64_t SizeBytes = 0;
-    int64_t RecordCount = 0;
-};
+using TScanFile = NGlamDB::NStorage::TScanDataFile;
 
 struct TScanPlan
 {
@@ -36,7 +36,7 @@ struct TScanPlan
     std::vector<TScanFile> Files;
 };
 
-// The selected snapshot's manifests; their data files are listed on demand.
+// A verified membership prefix, or manifests for the uncached planner.
 struct TScanManifests
 {
     // nullopt is the initial empty view.
@@ -44,6 +44,10 @@ struct TScanManifests
     std::shared_ptr<iceberg::Schema> Schema;
     std::vector<std::shared_ptr<iceberg::PartitionSpec>> Specs;
     std::vector<iceberg::ManifestFile> Manifests;
+    // An indexed plan selects a prefix without copying its descriptors. Files
+    // are consumed in reverse order to match Iceberg fast-append manifests.
+    std::shared_ptr<const NGlamDB::NStorage::TScanMembership> Index{};
+    size_t FileCount = 0;
 };
 
 // Resolves the selector once against the committed root of `base` and reads
@@ -51,6 +55,10 @@ struct TScanManifests
 // orphan and unpublished files are not visible.
 Result<TScanManifests>
 PlanManifests(const std::shared_ptr<iceberg::FileIO>& io, const BaseIdentity& base, const SnapshotSelector& selector);
+
+Result<TScanManifests> PlanVerifiedScan(const NGlamDB::NStorage::TBaseState& state,
+    const BaseIdentity& base,
+    const SnapshotSelector& selector);
 
 // The live data files of one planned manifest.
 Result<std::vector<TScanFile>>

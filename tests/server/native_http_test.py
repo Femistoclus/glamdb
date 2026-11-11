@@ -156,10 +156,10 @@ class NativeHTTP(unittest.TestCase):
         path = self.collection()
         body = {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'recoverable'}]}
         committed = self.api(path + '/append', body)
-        metadata = list(Path(self.root).rglob('*.metadata.json'))
-        self.assertTrue(metadata)
-        for index, file in enumerate(metadata):
-            file.rename(Path(self.tmp.name) / f'metadata-{index}')
+        data_files = list(Path(self.root).rglob('*.parquet'))
+        self.assertTrue(data_files)
+        for index, file in enumerate(data_files):
+            file.rename(Path(self.tmp.name) / f'data-{index}')
         try:
             self.assertEqual(self.api(path + '/append', body), committed)
             self.assertEqual(self.api(path + '/scan', {}, status=500)['error']['code'], 'CORRUPTION')
@@ -179,8 +179,8 @@ class NativeHTTP(unittest.TestCase):
             self.api('/databases', {'name': 'test_database'}, status=503)
             self.assertEqual(self.api(lookup, status=503)['error']['code'], 'RECOVERY_REQUIRED')
         finally:
-            for index, file in enumerate(metadata):
-                (Path(self.tmp.name) / f'metadata-{index}').rename(file)
+            for index, file in enumerate(data_files):
+                (Path(self.tmp.name) / f'data-{index}').rename(file)
         self.api('/databases/' + self.store_id + '/reconcile', {})
         self.assertEqual(self.api(lookup), committed)
 

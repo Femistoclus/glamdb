@@ -1,3 +1,4 @@
+#include "core/storage/base_state.h"
 #include "tests/support/checked.h"
 #include "tests/support/journal_fault_vfs.h"
 #include "tests/vertical/vertical_support.h"
@@ -98,6 +99,8 @@ TEST_F(BackendPublicationTest, TentativePointerCannotPromoteCandidate)
             auto info = View_.info;
             info.current_snapshot_id = receipt.snapshot_id;
             const auto admitted = Backend_->CheckAppendAdmissible(Store_, info, tentative, Input_);
+            EXPECT_FALSE(Backend_->VerifiedScanState(tentative));
+            EXPECT_TRUE(Backend_->VerifiedScanState(View_.base));
             EXPECT_FALSE(admitted) << "tentative candidate was accepted before outer COMMIT";
             if (!admitted) {
                 EXPECT_EQ(admitted.error().code, "RECOVERY_REQUIRED");
@@ -129,6 +132,7 @@ TEST_F(BackendPublicationTest, MetadataOnlyBaseChangeRequiresVerification)
 TEST_F(BackendPublicationTest, MismatchedConfirmationInvalidatesGeneration)
 {
     Backend_->PublicationFinished(test::collection_id, "unexpected-root", CommitDisposition::Committed);
+    EXPECT_FALSE(Backend_->VerifiedScanState(View_.base));
     const auto admitted = Backend_->CheckAppendAdmissible(Store_, View_.info, View_.base, Input_);
     EXPECT_FALSE(admitted) << "confirmation without its exact candidate left a usable generation";
     if (!admitted) {
@@ -138,6 +142,8 @@ TEST_F(BackendPublicationTest, MismatchedConfirmationInvalidatesGeneration)
 
 TEST_F(BackendPublicationTest, OnlySuccessfulOuterCommitPromotesCandidate)
 {
+    const auto before = Backend_->VerifiedScanState(View_.base);
+    ASSERT_TRUE(before);
     const auto binding = Binding();
     Catalog_->BindOperation(binding);
     auto staged = Backend_->PrepareAppend(Store_, binding, View_.info, Input_, std::chrono::steady_clock::now() + 10s);
@@ -157,8 +163,14 @@ TEST_F(BackendPublicationTest, OnlySuccessfulOuterCommitPromotesCandidate)
     auto next = Catalog_->Base(test::collection_id);
     auto info = Catalog_->Collection(test::collection_id);
     // Even an authoritative pointer is not an implicit publication handoff.
+    EXPECT_FALSE(Backend_->VerifiedScanState(next));
     EXPECT_FALSE(Backend_->CheckAppendAdmissible(Store_, info, next, Input_));
     Backend_->PublicationFinished(test::collection_id, location, CommitDisposition::Committed);
+    const auto after = Backend_->VerifiedScanState(next);
+    ASSERT_TRUE(after);
+    EXPECT_NE(*before, *after);
+    EXPECT_TRUE((*before)->ScanIndex->Files.empty());
+    EXPECT_EQ((*after)->ScanIndex->Files.size(), 1U);
     staged->reset();
     EXPECT_TRUE(Backend_->CheckAppendAdmissible(Store_, info, next, Input_));
     EXPECT_FALSE(Backend_->CheckAppendAdmissible(Store_, View_.info, View_.base, Input_));
@@ -169,6 +181,8 @@ TEST_F(BackendPublicationTest, OnlySuccessfulOuterCommitPromotesCandidate)
 
 TEST_F(BackendPublicationTest, RolledBackOuterTransactionDiscardsCandidateAndPreservesBase)
 {
+    const auto before = Backend_->VerifiedScanState(View_.base);
+    ASSERT_TRUE(before);
     const auto binding = Binding();
     Catalog_->BindOperation(binding);
     auto staged = Backend_->PrepareAppend(Store_, binding, View_.info, Input_, std::chrono::steady_clock::now() + 10s);
@@ -191,6 +205,10 @@ TEST_F(BackendPublicationTest, RolledBackOuterTransactionDiscardsCandidateAndPre
         detail::Failure);
     ASSERT_FALSE(location.empty());
     Backend_->PublicationFinished(test::collection_id, location, CommitDisposition::DefinitelyNotCommitted);
+    const auto after = Backend_->VerifiedScanState(View_.base);
+    ASSERT_TRUE(after);
+    EXPECT_EQ(*before, *after);
+    EXPECT_TRUE((*after)->ScanIndex->Files.empty());
     EXPECT_EQ(Catalog_->Base(test::collection_id), View_.base);
     const auto operation = Catalog_->FindOperation(test::collection_id, FirstOperation);
     EXPECT_EQ(test::Present(operation).state, detail::OperationState::Bound);
@@ -209,10 +227,70 @@ TEST_F(BackendPublicationTest, RolledBackOuterTransactionDiscardsCandidateAndPre
 
 TEST_F(BackendPublicationTest, UnknownResultRequiresFullVerificationBeforeAnotherWrite)
 {
+    const auto before = Backend_->VerifiedScanState(View_.base);
+    ASSERT_TRUE(before);
     Backend_->PublicationFinished(test::collection_id, View_.base.metadata_location, CommitDisposition::CommitUnknown);
+    EXPECT_FALSE(Backend_->VerifiedScanState(View_.base));
     EXPECT_FALSE(Backend_->CheckAppendAdmissible(Store_, View_.info, View_.base, Input_));
     ASSERT_TRUE(Backend_->VerifyRetained(Store_, std::span(&View_, 1), {}));
+    const auto after = Backend_->VerifiedScanState(View_.base);
+    ASSERT_TRUE(after);
+    EXPECT_NE(*before, *after);
     EXPECT_TRUE(Backend_->CheckAppendAdmissible(Store_, View_.info, View_.base, Input_));
+}
+
+TEST_F(BackendPublicationTest, FailedRebuildDoesNotLeaveTheOldIndexUsable)
+{
+    const auto before = Backend_->VerifiedScanState(View_.base);
+    ASSERT_TRUE(before);
+    const auto roots = FilesIn(Root_ / "warehouse" / test::collection_id / "metadata");
+    ASSERT_EQ(roots.size(), 1U);
+    const auto saved = ReadBytes(roots.front());
+    WriteBytes(roots.front(), "invalid root");
+    EXPECT_FALSE(Backend_->VerifyRetained(Store_, std::span(&View_, 1), {}));
+    EXPECT_FALSE(Backend_->VerifiedScanState(View_.base));
+    WriteBytes(roots.front(), saved);
+    ASSERT_TRUE(Backend_->VerifyRetained(Store_, std::span(&View_, 1), {}));
+    const auto after = Backend_->VerifiedScanState(View_.base);
+    ASSERT_TRUE(after);
+    EXPECT_NE(*before, *after);
+}
+
+TEST(BackendPublicationIntegration, ScanPinsTheConfirmedViewDuringPublicationHandoff)
+{
+    test::TempDir temporary;
+    const auto root = temporary.path / "store";
+    std::shared_ptr<THookBackend> hooks;
+    auto created = detail::EngineFactory::CreateWith({test::store_id, root.string()}, THookBackend::Factory(hooks));
+    ASSERT_TRUE(created);
+    auto engine = *created;
+    ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", Schema}).disposition,
+        CommitDisposition::Committed);
+    const auto first = engine->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
+    ASSERT_EQ(first.disposition, CommitDisposition::Committed);
+    std::shared_ptr<ScanCursor> pinned;
+    hooks->AfterPublication = [&] {
+        const auto opened = engine->Scan({.collection_id = test::collection_id});
+        EXPECT_TRUE(opened) << (opened ? "" : opened.error().message);
+        if (opened) {
+            pinned = *opened;
+        }
+    };
+    const auto second = engine->AppendDurable({test::collection_id, SecondOperation, {}, {Batch(SecondRows)}});
+    hooks->AfterPublication = {};
+    ASSERT_EQ(second.disposition, CommitDisposition::Committed);
+    ASSERT_NE(pinned, nullptr);
+    EXPECT_EQ(pinned->Info().selector_resolved, SnapshotSelector::Id(test::Present(first.result).snapshot_id));
+    const auto batch = pinned->Next();
+    ASSERT_TRUE(batch);
+    ASSERT_NE(*batch, nullptr);
+    EXPECT_EQ(Sorted(Render(**batch)), Expected({&FirstRows}));
+    const auto end = pinned->Next();
+    ASSERT_TRUE(end);
+    EXPECT_EQ(*end, nullptr);
+    EXPECT_EQ(pinned->Profile().manifests_read.value, 0);
+    pinned.reset();
+    ASSERT_TRUE(engine->Shutdown(1000ms));
 }
 
 // Real SQLite journal fault, Parquet and Iceberg. The injected error loses the

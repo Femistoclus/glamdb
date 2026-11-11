@@ -152,7 +152,7 @@ TEST_F(NativeMetadata, ProfilesActualWorkAndPreservesZeroLimitLaziness)
     EXPECT_EQ(profile.rows_decoded.value, 3);
     EXPECT_EQ(profile.data_files_read.value, 1);
     EXPECT_EQ(profile.data_bytes_read.value, a.compressed_data_bytes_added);
-    EXPECT_EQ(profile.manifests_read.value, 1);
+    EXPECT_EQ(profile.manifests_read.value, 0);
     EXPECT_FALSE(profile.elapsed_us.value);
     ASSERT_TRUE(cursor.Next());
     EXPECT_EQ(cursor.Profile().rows_returned.value, 2);

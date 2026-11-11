@@ -1,7 +1,5 @@
-// Opening a scan reads the root and the selected manifest list; manifests are
-// read on demand. A zero or small limit therefore opens no manifest, or only
-// the ones it consumes, instead of every manifest of the snapshot (one per
-// append under Iceberg fast append).
+// Healthy native scans reuse verified membership. Planning and execution must
+// not reopen roots, manifest lists or cumulative data manifests.
 
 #include "tests/support/fault_fs.h"
 #include "tests/vertical/vertical_support.h"
@@ -24,21 +22,19 @@ std::string OperationId(int index)
     return buffer;
 }
 
-size_t ManifestOpens(const TFaultFS& faults)
+size_t MetadataOpens(const TFaultFS& faults)
 {
     size_t count = 0;
     for (const auto& event : faults.Events()) {
         const auto& path = event.Path;
-        if (event.Op == EIOOp::OpenRead && path.size() > 8 && path.ends_with(".avro") &&
-            path.find("/snap-") == std::string::npos)
-        {
+        if (event.Op == EIOOp::OpenRead && (path.ends_with(".avro") || path.ends_with(".metadata.json"))) {
             ++count;
         }
     }
     return count;
 }
 
-TEST(ScanPlanningCost, SmallScanDoesNotReadEveryManifest)
+TEST(ScanPlanningCost, RepeatedScansDoNotReadMetadata)
 {
     constexpr int Appends = 24;
     test::TempDir temporary;
@@ -70,16 +66,16 @@ TEST(ScanPlanningCost, SmallScanDoesNotReadEveryManifest)
             << (outcome.error ? outcome.error->code + ": " + outcome.error->message : std::string());
     }
 
-    for (const int64_t limit : {0, 1}) {
+    for (const int64_t limit : {0, 1, Appends}) {
         SCOPED_TRACE("limit=" + std::to_string(limit));
-        const auto before = ManifestOpens(*faults);
+        const auto before = MetadataOpens(*faults);
         const auto cursor = engine->Scan({.collection_id = test::collection_id, .limit = limit});
         ASSERT_TRUE(cursor) << cursor.error().code << ": " << cursor.error().message;
         const auto first = (*cursor)->Next();
         ASSERT_TRUE(first) << first.error().message;
         EXPECT_EQ(*first == nullptr, limit == 0);
-        const auto opened = ManifestOpens(*faults) - before;
-        EXPECT_LE(opened, 2U) << "manifests opened by a limit=" << limit << " scan after " << Appends << " appends";
+        const auto opened = MetadataOpens(*faults) - before;
+        EXPECT_EQ(opened, 0U) << "metadata opened by a limit=" << limit << " scan after " << Appends << " appends";
     }
 
     ASSERT_TRUE(engine->Shutdown(1000ms));

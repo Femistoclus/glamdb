@@ -272,10 +272,16 @@ TEST_P(TScanLifetimeTest, StopDuringDataReadDiscardsEos)
     StopDuringRead(".parquet", Predicate::Compare("key", CompareOp::Eq, std::string("absent")));
 }
 
-TEST_P(TScanLifetimeTest, StopDuringManifestReadDoesNotOpenData)
+TEST_P(TScanLifetimeTest, StopBeforeIndexedReadDoesNotOpenData)
 {
+    auto cursor = Engine_->Scan({.collection_id = test::collection_id});
+    ASSERT_TRUE(cursor) << cursor.error().message;
     const auto before = Gate_->DataOpens;
-    StopDuringRead(".avro");
+    Stop(*cursor);
+    const auto next = (*cursor)->Next();
+    ASSERT_FALSE(next);
+    EXPECT_EQ(next.error().code, "CANCELLED");
+    EXPECT_EQ((*cursor)->Profile().state, ScanState::Cancelled);
     EXPECT_EQ(Gate_->DataOpens, before);
 }
 

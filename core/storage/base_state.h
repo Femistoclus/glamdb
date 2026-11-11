@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/storage/capacity.h"
+#include "core/storage/scan_index.h"
 
 #include <iceberg/manifest/manifest_list.h>
 
@@ -26,6 +27,7 @@ struct TBaseState
     std::shared_ptr<const iceberg::TableMetadata> Metadata;
     std::vector<iceberg::ManifestFile> CurrentManifests;
     TStorageUsage Usage;
+    std::shared_ptr<const TScanMembership> ScanIndex{};
 };
 
 iceberg::Result<TBaseState> CheckAppendClosure(const std::shared_ptr<iceberg::FileIO>& fileIO,

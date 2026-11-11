@@ -91,10 +91,12 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
         ICEBERG_RETURN_UNEXPECTED(
             CheckAppendMetadata(*Context_.Base->Metadata, *candidate.Metadata, Context_.ExpectedSummary));
         candidate.Usage = Context_.Base->Usage;
+        candidate.ScanIndex = Context_.Base->ScanIndex;
     } else {
         const auto location = "store://" + std::string(Context_.Attempt->StoreId()) + "/warehouse/" +
             std::string(Context_.Attempt->CollectionId());
         ICEBERG_RETURN_UNEXPECTED(CheckCreateMetadata(*candidate.Metadata, Context_.Profile, location));
+        candidate.ScanIndex = std::make_shared<const TScanMembership>();
     }
     candidate.Usage.RootBytes = record.Value().Length;
     candidate.Usage.Snapshots = candidate.Metadata->snapshots.size();
