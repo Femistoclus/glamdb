@@ -201,8 +201,8 @@ TEST_F(ScanIndexTest, ReconciliationReusesRootReservationUnderMetadataPressure)
 {
     Append(FirstOperation, FirstRows);
     const auto owner = Engine_->GetResourceOwner();
-    auto pressure = owner->Reserve(ResourceClass::Metadata,
-        owner->GetLimits().memory_bytes[1] - owner->GetUsage().memory_bytes[1]);
+    auto pressure =
+        owner->Reserve(ResourceClass::Metadata, owner->GetLimits().memory_bytes[1] - owner->GetUsage().memory_bytes[1]);
     ASSERT_TRUE(pressure) << pressure.error().message;
     const auto recovered = Engine_->Reconcile();
     ASSERT_TRUE(recovered) << recovered.error().code << ": " << recovered.error().message;

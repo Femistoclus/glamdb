@@ -135,6 +135,8 @@ api $C/scan -d '{}'
 
 See the [server guide](docs/development/HTTP_SERVER.md) for manual startup and all
 routes, and the [CLI guide](apps/cli/README.md) for HTTPS and Arrow output.
+The service token grants access to all its databases; remote access uses a TLS
+proxy with a private loopback upstream. See the [access policy](docs/development/HTTP_SERVER.md#remote-access-through-tls).
 The server queues calls fairly across databases, keeps readers separate from
 publishers, and reserves replay space before admitting a scan. SDK cleanup and
 database-list failures preserve operation and cursor ownership.

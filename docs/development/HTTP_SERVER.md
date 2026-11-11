@@ -421,6 +421,10 @@ Configure the proxy with the deployment certificate and key, forward
 request. `X-Forwarded-*` headers grant no access. The single bearer identity can
 administer every managed database; a scan cursor is additionally bound to its
 database, collection and representation. A cursor alone never authenticates.
+There are no per-user or per-database grants; use separate service processes and
+tokens for separate access. Authentication precedes body admission and
+`100 Continue`. Validation errors omit unknown JSON field names and predicate
+operators so pasted secrets are not echoed.
 
 Set proxy header/body/concurrency limits and timeouts as well as the native
 limits. If the proxy accepts chunked uploads, buffer them under its own finite
@@ -463,7 +467,7 @@ keeps operation identity and durable outcome lookup separate from the connection
 
 ```sh
 GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 \
-ctest --preset local -R 'glamdb\.(native_http|scan_http|database_limits|transport\.|routes\.|cli)'
+ctest --preset local -R 'glamdb\.(native_http|http_security|scan_http|database_limits|transport\.|routes\.|cli)'
 # With workbench Python dependencies, also exercise SDK JSON/Arrow decoding:
 .venv/bin/python tests/server/native_http_test.py build/local/apps/server/glamdb build/local/apps/cli/glamdb-cli ui
 GLAMDB_NATIVE_SERVER="$PWD/build/local/apps/server/glamdb" \
@@ -485,6 +489,11 @@ input, row and scan-session limits, and credential-free errors/logs. The
 protected control progress, encoded routes and reservation release over HTTP and
 verified HTTPS. Its SQLite VFS fault controls are test-only; these admission
 cases use the production listener and storage without injecting a fault.
+
+`glamdb.http_security` checks credential-free JSON/predicate diagnostics and
+rejects missing/invalid credentials and oversized/encoded bodies before
+`100 Continue`, over HTTP and verified HTTPS. It reads the first raw response
+head so an incorrect interim Continue cannot be hidden by the HTTP client.
 
 The deterministic `glamdb.http_lifecycle` test uses a test-only backend barrier
 to disconnect and deliver SIGTERM during publication, verifies that the server

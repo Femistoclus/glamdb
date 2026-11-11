@@ -49,6 +49,7 @@ class NativeHTTP(unittest.TestCase):
             self.proc.terminate()
         out, err = self.proc.communicate(timeout=20)
         self.assertEqual(self.proc.returncode, 0, out + err)
+        self.assertNotIn(TOKEN, out + err)
 
     def request(self, path, body=None, token=TOKEN, accept='application/json', method=None):
         if path.startswith(('/collections', '/%63ollections')):

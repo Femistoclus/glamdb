@@ -355,9 +355,7 @@ Predicate ParsePredicateTree(const SchemaSpec& schema, const TJson& root)
         }
         const std::array<std::string_view, 6> comparisons{"eq", "ne", "lt", "le", "gt", "ge"};
         const auto opIt = std::ranges::find(comparisons, op);
-        Require(opIt != comparisons.end(),
-            "unsupported predicate operator: " + detail::BoundedDiagnostic(op),
-            "UNSUPPORTED_OPERATION");
+        Require(opIt != comparisons.end(), "unsupported predicate operator", "UNSUPPORTED_OPERATION");
         CheckKeys(node, {"op", "field", "value"});
         Require(node.contains("field") && node["field"].is_string(), "predicate field must be a string");
         Require(node.contains("value"), "comparison predicate requires value");
@@ -401,8 +399,7 @@ void CheckKeys(const TJson& value, std::initializer_list<std::string_view> keys)
     Require(value.is_object(), "expected JSON object");
     for (const auto& [key, ignored] : value.items()) {
         (void)ignored;
-        Require(std::find(keys.begin(), keys.end(), key) != keys.end(),
-            "unknown request field: " + detail::BoundedDiagnostic(key));
+        Require(std::find(keys.begin(), keys.end(), key) != keys.end(), "unknown request field");
     }
 }
 

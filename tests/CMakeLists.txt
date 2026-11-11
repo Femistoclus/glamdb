@@ -136,6 +136,10 @@ if(TARGET glamdb_server)
         "${CMAKE_CURRENT_SOURCE_DIR}/server/http_review_test.py"
         "$<TARGET_FILE:glamdb_server>" "${glamdb_test_cli}" "${PROJECT_SOURCE_DIR}/ui")
     set_tests_properties(glamdb.http_review PROPERTIES LABELS "integration;http" TIMEOUT 120)
+    add_test(NAME glamdb.http_security COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/server/http_security_test.py"
+        "$<TARGET_FILE:glamdb_server>" "${glamdb_test_cli}" "${PROJECT_SOURCE_DIR}/ui")
+    set_tests_properties(glamdb.http_security PROPERTIES LABELS "integration;http" TIMEOUT 120)
     add_test(NAME glamdb.database_limits COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/server/database_limits_test.py" "$<TARGET_FILE:glamdb_server>")
     set_tests_properties(glamdb.database_limits PROPERTIES LABELS "integration;http" TIMEOUT 120)

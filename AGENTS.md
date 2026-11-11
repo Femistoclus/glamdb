@@ -463,9 +463,12 @@ an unlisted Action prevents the entire workflow from starting.
 
 Native HTTP verification includes `glamdb.http_review` for framing/admission and
 `glamdb.native_http_fault` for registry, publication and listener recovery faults.
+`glamdb.http_security` checks credential-free diagnostics and rejection before
+Continue over HTTP and verified TLS, using the shared `tests/server/tls_proxy.py`.
+Keep request values out of validation diagnostics.
 Configure `Python3_EXECUTABLE` with SDK, PyArrow and
 JSON Schema dependencies (`requirements-native-ci.txt` for the CI Python/platform),
-then run `GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 ctest --preset local -R 'glamdb\.(native_http|transport\.|cli)'`.
+then run `GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 ctest --preset local -R 'glamdb\.(native_http|http_security|transport\.|cli)'`.
 The server requires `GLAMDB_BUILD_STORAGE=ON`; storage-disabled builds retain
 the network CLI and codecs. `GLAMDB_BUILD_ADMIN=ON` additionally builds the offline
 `glamdb-admin`; it is not required to initialize or operate a server. Run native browser checks with `GLAMDB_NATIVE_SERVER`
