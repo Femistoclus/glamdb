@@ -770,6 +770,12 @@ Status TLocalStorageBackend::VerifyRetained(const StoreInfo& store,
     return Guarded<Status>([&]() -> Status {
         // Verification only reads; a set write latch does not block it.
         CheckStore(store);
+        CheckIO(Dirs_->CheckIdentity(), EStoragePath::Read, "verify store directories");
+        // Physical retained files include orphans; logical reachable usage below
+        // is a separate budget. Recovery needs no reserve for a future append.
+        (void)TakeIO(NStorage::MeasureWarehouse(*Dirs_, Options_.Storage),
+            EStoragePath::Read,
+            "retained warehouse capacity");
         std::map<std::string, TCollectionState, std::less<>> verified;
         NStorage::TStorageUsage totalUsage;
         for (const auto& view : collections) {
@@ -786,11 +792,11 @@ Status TLocalStorageBackend::VerifyRetained(const StoreInfo& store,
             totalUsage = TakeUsage(NStorage::ReplaceUsage(totalUsage, {.Previous = {}, .Next = state->Usage}),
                 "CORRUPTION",
                 "aggregate storage usage");
+            CheckUsage(NStorage::CheckStorageCapacity(totalUsage, Options_.Storage),
+                "CORRUPTION",
+                "retained storage capacity");
             verified[view.info.collection_id].Confirmed = std::move(state);
         }
-        CheckUsage(NStorage::CheckStorageCapacity(totalUsage, Options_.Storage),
-            "CORRUPTION",
-            "retained storage capacity");
         for (const auto& operation : operations) {
             Require(operation.state != OperationState::Committed || verified.contains(operation.binding.collection_id),
                 "CORRUPTION",

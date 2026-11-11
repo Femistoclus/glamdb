@@ -26,7 +26,7 @@ from `VerifyReachable` or a previously confirmed publication.
    identity, measures the warehouse including orphan files, and reserves space
    for the next attempt, journal, and filesystem headroom. The catalog owner
    supplies aggregate storage usage separately to the publication guard. The
-   backend walks the warehouse once per append: `PrepareAppend` reuses the
+   backend measures the warehouse before production: `PrepareAppend` reuses the
    admission measurement (binding writes only the catalog) and rechecks the
    root identity and free space. The walk runs on a private descriptor, not
    under the shared warehouse handle that concurrent scans open files through.
@@ -48,11 +48,20 @@ from `VerifyReachable` or a previously confirmed publication.
 5. The catalog calls `BeforePointerChange` after the candidate metadata JSON is
    durable and before changing the catalog pointer. The guard seals the attempt,
    verifies the exact prepared base, metadata delta, reachable new files,
-   retained manifests, expected summary fields, and capacity limits.
+   retained manifests, expected summary fields, and aggregate logical capacity limits.
+   It remeasures physical warehouse usage after production, including staged files
+   and orphans, before allowing publication.
 6. `GetCandidate()` returns a tentative verified state. Install it as the next
    confirmed base only after the caller confirms its outer catalog COMMIT.
    Atomic pointer/outcome publication, uncertain-commit recovery, fencing, and
    client acknowledgements remain catalog/coordinator responsibilities.
+
+On open and reconciliation, the backend checks physical warehouse usage (including
+orphans) independently of reachable metadata/history usage. Recovery sums each
+verified collection with overflow and aggregate limit checks before admitting the
+next collection. It requires no disk reserve for a future write. A lower physical
+limit fails with `RESOURCE_EXHAUSTED`; retained logical usage outside the selected
+profile fails closed as `CORRUPTION`. Neither failure deletes retained files.
 
 For collection creation, `MakeTableProfile` supplies the schema and exact table
 properties used with the public Iceberg create API. The adapter and guard check
@@ -138,6 +147,12 @@ target.
 | Guard, closure/recovery, retained history, invalid candidates | `storage/publication_guard_test.cpp` |
 | Recovery visited index, exact duplicates, disk spill and workspace failures | `storage/recovery_visited_test.cpp` |
 | Capacity boundaries, orphans, preflight faults | `storage/capacity_test.cpp`, `io/local_fs_test.cpp` |
+
+The native `vertical/aggregate_capacity_test.cpp` suite additionally covers
+cross-collection root/history limits, uncertain COMMIT success and rollback,
+physical orphan usage on publication/reconciliation/reopen, and fresh-process
+rejection under lower limits. `vertical/append_preflight_cost_test.cpp` bounds
+warehouse traversal to admission and publication.
 
 The fault adapter also injects errors after a successful native file or directory
 sync. Nested traces distinguish the successful syscall from the reported error;

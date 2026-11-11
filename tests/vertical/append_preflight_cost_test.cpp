@@ -1,7 +1,6 @@
-// One append walks the warehouse at most once: PrepareAppend reuses the
-// admission preflight's measurement (binding writes only the catalog) and
-// still checks the free-space reserve. A walk costs one fstatat per retained
-// file, so a second walk doubled an O(files) cost on every append.
+// PrepareAppend reuses admission's measurement because binding writes only
+// the catalog. Publication must measure again after file production, so there
+// are two O(files) walks and no redundant walk between admission and production.
 
 #include "tests/support/fault_fs.h"
 #include "tests/vertical/vertical_support.h"
@@ -16,7 +15,7 @@ using namespace std::chrono_literals;
 using namespace glamdb::vertical;
 namespace NT = NGlamDB::NTesting;
 
-TEST(BackendPreflightCostTest, AppendWalksTheWarehouseAtMostOnce)
+TEST(BackendPreflightCostTest, AppendMeasuresWarehouseOnlyAtAdmissionAndPublication)
 {
     test::TempDir temporary;
     const auto root = temporary.path / "store";
@@ -44,7 +43,7 @@ TEST(BackendPreflightCostTest, AppendWalksTheWarehouseAtMostOnce)
         walks += events[index].Op == NT::EIOOp::MeasureTree ? 1 : 0;
         statfs += events[index].Op == NT::EIOOp::StatFs ? 1 : 0;
     }
-    EXPECT_LE(walks, 1U) << "warehouse tree walks during one append";
+    EXPECT_EQ(walks, 2U) << "warehouse tree walks during one append";
     EXPECT_GE(statfs, 1U) << "free-space reserve must still be checked";
     ASSERT_TRUE(engine->Shutdown(1000ms));
 }

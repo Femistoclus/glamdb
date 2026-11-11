@@ -143,7 +143,11 @@ Preserve these boundaries when adding or changing engine behavior:
   control memory separately, including allocations outside Arrow. Check that a
   published state can be reopened within the same limits. Capacity exhaustion
   produces backpressure before publication, not partial success or hidden
-  deletion of history. Orphan files consume capacity; automatic cleanup is
+  deletion of history. Publication rechecks physical warehouse usage after
+  production; recovery checks the same physical cap without reserving a future
+  attempt. Logical reachable
+  usage is accumulated with overflow and limit checks across collections.
+  Orphan files consume capacity; automatic cleanup is
   outside the initial scope. The only exception is a metadata root superseded
   by a confirmed append (the current root retains the whole history); it is
   removed once no scan is still resolving it. Detected corruption closes readiness; leave SQLite

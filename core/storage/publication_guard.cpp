@@ -115,6 +115,15 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
     if (!total || CheckStorageCapacity(total.Value(), Context_.Limits)) {
         return iceberg::ValidationFailed("CAPACITY: Candidate exceeds store capacity.");
     }
+    // Admission measured the warehouse before file production. Recheck the
+    // physical cap, including staged files and orphans, before publication.
+    const auto warehouse = MeasureWarehouse(*Context_.Directories, Context_.Limits);
+    if (!warehouse) {
+        if (warehouse.Error() == std::errc::no_space_on_device || warehouse.Error() == std::errc::value_too_large) {
+            return iceberg::ValidationFailed("CAPACITY: Candidate exceeds warehouse capacity.");
+        }
+        return iceberg::IOError("Cannot measure candidate warehouse: {}.", warehouse.Error().message());
+    }
     if (const auto error = Context_.Attempt->MarkFormatVerified(change.NewLocation)) {
         return iceberg::IOError("Cannot verify candidate metadata: {}.", error.message());
     }
