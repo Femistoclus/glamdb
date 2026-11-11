@@ -148,7 +148,11 @@ git submodule update --init third_party/arrow third_party/iceberg-cpp third_part
 
 `test-storage-in-docker.sh` reuses `glamdb-deps:clang18` and the installed prefix
 from the `glamdb-deps-clang18` volume. It does not rebuild dependencies. Set
-`GLAMDB_DEPS_VOLUME` to select another compatible prefix. The prefix and checkout
+`GLAMDB_DEPS_VOLUME` to select another compatible prefix. `build-deps-in-docker.sh`
+updates its volume incrementally; after a dependency recipe change that the old
+build tree cannot follow (for example a volume built before the patched Iceberg
+source), rerun it with `GLAMDB_DEPS_CLEAN=1` to rebuild from scratch.
+`scripts/glamdb-local.sh up` does this automatically. The prefix and checkout
 are mounted read-only; each offline run uses a fresh `/build` and at most two
 compile jobs. All unit and CTest suites and the three quality targets run with
 `GLAMDB_IO_ONLY=OFF` and `GLAMDB_BUILD_STORAGE=ON`, including catalog/coordinator

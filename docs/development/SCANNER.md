@@ -47,8 +47,13 @@ does not qualify physical power-loss durability.
 - `iceberg::Table` requires a catalog; the backend passes `TInertCatalog`,
   whose every operation fails, so no Iceberg commit can bypass the coordinator.
 - Guard candidates are tentative until the coordinator confirms the outer
-  SQLite `COMMIT` via `ConfirmPublication` (or a later binding/recovery
-  observes the committed root). Rollback discards the tentative candidate.
+  SQLite pointer/receipt `COMMIT` via `PublicationFinished(Committed)`.
+  `DefinitelyNotCommitted` discards the candidate without changing the confirmed
+  base; `CommitUnknown` invalidates the verified generation. A missing or
+  mismatched success candidate also invalidates it. Admission and preparation
+  accept only the exact explicitly confirmed base, including its metadata
+  location; they never promote a tentative root or silently reload another base.
+  `VerifyRetained` rebuilds the generation after reconciliation.
 - `VerifyRetained` runs the full `VerifyReachable` closure check for every
   collection root (manifest lists, manifests, data file lengths and Parquet
   footers), its schema, a one-to-one mapping between retained snapshots and

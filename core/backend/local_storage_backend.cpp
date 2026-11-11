@@ -688,18 +688,29 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
 
 // The StorageBackend override fixes the two string identity parameters.
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-void TLocalStorageBackend::ConfirmPublication(std::string_view collectionID, std::string_view metadataLocation)
+void TLocalStorageBackend::PublicationFinished(std::string_view collectionID,
+    std::string_view metadataLocation,
+    CommitDisposition result)
 {
     std::lock_guard lock(Mutex_);
-    auto it = Collections_.find(collectionID);
-    if (it == Collections_.end()) {
+    const auto it = Collections_.find(collectionID);
+    if (result == CommitDisposition::DefinitelyNotCommitted) {
+        if (it != Collections_.end()) {
+            it->second.Tentative.reset();
+        }
         return;
     }
-    auto& state = it->second;
-    if (state.Tentative && state.Tentative->MetadataLocation == metadataLocation) {
-        state.Confirmed = std::move(state.Tentative);
+    if (result == CommitDisposition::Committed && VerifiedGeneration_ && it != Collections_.end() &&
+        it->second.Tentative && it->second.Tentative->MetadataLocation == metadataLocation)
+    {
+        it->second.Confirmed = std::move(it->second.Tentative);
+        return;
     }
-    state.Tentative.reset();
+    // An uncertain result or a confirmation without its exact verified
+    // candidate cannot leave capacity/base accounting usable by later writes.
+    VerifiedGeneration_ = false;
+    Collections_.clear();
+    AdmittedWarehouseBytes_.reset();
 }
 
 void TLocalStorageBackend::DiscardCandidate(std::string_view collectionID)
@@ -759,6 +770,12 @@ Status TLocalStorageBackend::VerifyRetained(const StoreInfo& store,
     return Guarded<Status>([&]() -> Status {
         // Verification only reads; a set write latch does not block it.
         CheckStore(store);
+        CheckIO(Dirs_->CheckIdentity(), EStoragePath::Read, "verify store directories");
+        // Physical retained files include orphans; logical reachable usage below
+        // is a separate budget. Recovery needs no reserve for a future append.
+        (void)TakeIO(NStorage::MeasureWarehouse(*Dirs_, Options_.Storage),
+            EStoragePath::Read,
+            "retained warehouse capacity");
         std::map<std::string, TCollectionState, std::less<>> verified;
         NStorage::TStorageUsage totalUsage;
         for (const auto& view : collections) {
@@ -775,11 +792,11 @@ Status TLocalStorageBackend::VerifyRetained(const StoreInfo& store,
             totalUsage = TakeUsage(NStorage::ReplaceUsage(totalUsage, {.Previous = {}, .Next = state->Usage}),
                 "CORRUPTION",
                 "aggregate storage usage");
+            CheckUsage(NStorage::CheckStorageCapacity(totalUsage, Options_.Storage),
+                "CORRUPTION",
+                "retained storage capacity");
             verified[view.info.collection_id].Confirmed = std::move(state);
         }
-        CheckUsage(NStorage::CheckStorageCapacity(totalUsage, Options_.Storage),
-            "CORRUPTION",
-            "retained storage capacity");
         for (const auto& operation : operations) {
             Require(operation.state != OperationState::Committed || verified.contains(operation.binding.collection_id),
                 "CORRUPTION",
@@ -906,29 +923,15 @@ void TLocalStorageBackend::RequireVerified() const
 
 std::shared_ptr<const NStorage::TBaseState> TLocalStorageBackend::ResolveBase(const BaseIdentity& base)
 {
-    {
-        std::lock_guard lock(Mutex_);
-        RequireVerified();
-        auto it = Collections_.find(base.collection_id);
-        if (it != Collections_.end()) {
-            auto& state = it->second;
-            // The coordinator builds a binding from the committed SQLite
-            // pointer, so a matching tentative root is now confirmed.
-            if (state.Tentative && state.Tentative->MetadataLocation == base.metadata_location) {
-                state.Confirmed = std::move(state.Tentative);
-            }
-            state.Tentative.reset();
-            if (state.Confirmed && state.Confirmed->MetadataLocation == base.metadata_location) {
-                CheckIdentity(*state.Confirmed, base);
-                return state.Confirmed;
-            }
-        }
-    }
-    auto verified = VerifyCollection(base);
     std::lock_guard lock(Mutex_);
     RequireVerified();
-    Collections_[base.collection_id].Confirmed = verified;
-    return verified;
+    const auto it = Collections_.find(base.collection_id);
+    Require(it != Collections_.end() && it->second.Confirmed &&
+            it->second.Confirmed->MetadataLocation == base.metadata_location,
+        "RECOVERY_REQUIRED",
+        "prepared base is not the explicitly confirmed storage generation");
+    CheckIdentity(*it->second.Confirmed, base);
+    return it->second.Confirmed;
 }
 
 std::shared_ptr<const NStorage::TBaseState> TLocalStorageBackend::VerifyCollection(const BaseIdentity& base) const

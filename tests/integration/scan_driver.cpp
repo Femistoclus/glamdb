@@ -165,9 +165,9 @@ public:
         }
         _exit(77);
     }
-    void ConfirmPublication(std::string_view collection, std::string_view location) override
+    void PublicationFinished(std::string_view collection, std::string_view location, CommitDisposition result) override
     {
-        Inner_->ConfirmPublication(collection, location);
+        Inner_->PublicationFinished(collection, location, result);
     }
     void InvalidateCache() override
     {

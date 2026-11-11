@@ -31,7 +31,8 @@ def test_single_large_batch_peak_python_heap_is_about_one_body(legacy):
         assert request.method == "POST"
         if request.url.path.endswith("/scan/open"):
             if legacy:
-                return httpx.Response(404, json={"error": {"code": "ROUTE_NOT_FOUND"}})
+                return httpx.Response(404, json={"error": {
+                    "code": "ROUTE_NOT_FOUND", "message": "fixture provides a single Arrow response"}})
             return httpx.Response(200, json={"cursor": "first"})
         assert request.url.path.endswith("/scan")
         if not legacy:

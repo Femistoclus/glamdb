@@ -104,7 +104,7 @@ case "$stage" in
     fi
     cmake --preset local -B "$build" "${configure[@]}" \
       -DGLAMDB_BUILD_STORAGE=ON -DGLAMDB_BUILD_IO_PROBE=ON -DGLAMDB_IO_ONLY=OFF -DBUILD_TESTING=ON \
-      -DGLAMDB_BUILD_ADMIN=ON "-DPython3_EXECUTABLE=$python" "${client_override[@]}" \
+      -DGLAMDB_BUILD_ADMIN=ON "-DPython3_EXECUTABLE=$python" ${client_override[@]+"${client_override[@]}"} \
       -DCMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE=PRE_TEST
     cmake --build "$build" --parallel 2
     if [[ $profile == normal ]]; then

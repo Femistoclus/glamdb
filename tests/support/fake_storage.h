@@ -24,11 +24,17 @@ public:
     Status VerifyRetained(const StoreInfo& store,
         std::span<const detail::CollectionView> collections,
         std::span<const detail::OperationRecord> operations) override;
+    Health GetHealth() const override
+    {
+        return {false, write_available.load(), write_failure_latched.load()};
+    }
 
     std::filesystem::path Physical(std::string_view uri) const;
     std::filesystem::path root;
     std::filesystem::path last_root;
     std::atomic<int> prepares{0};
+    std::atomic<bool> write_available{true};
+    std::atomic<bool> write_failure_latched{false};
     bool fail_prepare = false;
     bool fail_guard = false;
     bool fail_after_pointer = false;
@@ -36,6 +42,7 @@ public:
     std::function<void()> on_prepare;
     std::function<void()> on_pointer;
     std::function<void()> on_verify;
+    std::function<void()> on_guard;
 };
 
 } // namespace glamdb::test

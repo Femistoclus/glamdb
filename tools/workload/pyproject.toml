@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glamdb-workload"
+version = "0.1.0"
+description = "Dataset generation and SDK workloads for the GlamDB network CLI"
+requires-python = ">=3.13"
+dependencies = ["glamdb-sdk==0.1.0"]
+
+[project.optional-dependencies]
+generate = ["mimesis==22.2.0"]
+bench = ["locust==2.47.0", "gevent==26.9.0"]
+arrow = ["pyarrow==25.0.0"]
+test = ["pytest==9.2.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

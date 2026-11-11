@@ -197,12 +197,36 @@ struct Engine::Impl
         Require(ready && !closed, "RECOVERY_REQUIRED", "authoritative reconciliation is required");
     }
 
+    Status BackendWriteHealth() const
+    {
+        if (!backend) {
+            return std::unexpected(ErrorDetail{"DEPENDENCY_UNAVAILABLE",
+                "durable storage producer is not installed",
+                RetryHint::OperatorAction});
+        }
+        const auto health = backend->GetHealth();
+        if (health.write_failure_latched) {
+            return std::unexpected(ErrorDetail{"IO_ERROR",
+                "a durable storage write failed in this engine instance; shut down and reopen the store",
+                RetryHint::OperatorAction});
+        }
+        if (!health.write_available) {
+            return std::unexpected(ErrorDetail{"DEPENDENCY_UNAVAILABLE",
+                "durable storage producer is unavailable",
+                RetryHint::OperatorAction});
+        }
+        return {};
+    }
+
     void CheckHealthy(uint64_t expected_generation) const
     {
         CheckReady();
         Require(health_generation == expected_generation,
             "RECOVERY_REQUIRED",
             "authoritative reconciliation is required");
+        if (const auto health = BackendWriteHealth(); !health) {
+            throw Failure(health.error());
+        }
     }
 
     // The caller holds commit_gate. Final decision of a publication guard.
@@ -217,7 +241,7 @@ struct Engine::Impl
                 "authoritative reconciliation is required",
                 RetryHint::SameIdAfterReconcile});
         }
-        return {};
+        return BackendWriteHealth();
     }
 
     // The caller holds state_mutex. Recheck at every admission/writer boundary:
@@ -597,10 +621,10 @@ struct Engine::Impl
     FailBound(const BoundOperation& binding, CommitPhase phase, ErrorDetail error, bool publication_started = false)
     {
         error.message = BoundedDiagnostic(error.message);
-        // The bound ID is consumed either way. Capacity and corruption need
-        // operator action before any new operation can succeed.
+        // The bound ID is consumed either way. Capacity, corruption and an
+        // unhealthy backend need operator action before a new ID can succeed.
         const bool operatorAction = error.code == "RESOURCE_EXHAUSTED" || error.code == "CORRUPTION" ||
-            error.code == "UNSUPPORTED_STORE_VERSION";
+            error.code == "UNSUPPORTED_STORE_VERSION" || !BackendWriteHealth();
         error.retry_hint = operatorAction ? RetryHint::OperatorAction : RetryHint::NewOperationId;
         auto failure = Rejected(binding.operation_id, phase, error);
         try {
@@ -878,6 +902,9 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
         Require(impl->backend != nullptr,
             "DEPENDENCY_UNAVAILABLE",
             "durable storage producer and closure guard are not installed");
+        if (const auto health = impl->BackendWriteHealth(); !health) {
+            throw Failure(health.error());
+        }
         const auto attempt = NewUuid();
         context = CreateRecoveryContext{impl->info.store_id,
             request.collection_id,
@@ -923,13 +950,21 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
         committed = true;
         if (gate.owns_lock()) {
             if (context->candidate_metadata_location) {
-                impl->backend->ConfirmPublication(created.collection_id, *context->candidate_metadata_location);
+                impl->backend->PublicationFinished(created.collection_id,
+                    *context->candidate_metadata_location,
+                    CommitDisposition::Committed);
             }
             gate.unlock();
         }
         impl->RefreshCache();
         return {CommitDisposition::Committed, CommitPhase::Complete, created, std::nullopt, std::nullopt};
     } catch (const Failure& error) {
+        if (publication_started && context && context->candidate_metadata_location) {
+            impl->backend->PublicationFinished(context->collection_id,
+                *context->candidate_metadata_location,
+                error.uncertain || committed ? CommitDisposition::CommitUnknown
+                                             : CommitDisposition::DefinitelyNotCommitted);
+        }
         impl->CloseOnCorruption(error.detail);
         if ((error.uncertain || committed) && context) {
             return impl->UnknownCreate(*context,
@@ -942,6 +977,11 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
             error.detail,
             std::nullopt};
     } catch (const std::exception& error) {
+        if (publication_started && context && context->candidate_metadata_location) {
+            impl->backend->PublicationFinished(context->collection_id,
+                *context->candidate_metadata_location,
+                CommitDisposition::CommitUnknown);
+        }
         if ((publication_started || committed) && context) {
             return impl->UnknownCreate(*context, CommitPhase::Reconciling, ExceptionError(error));
         }
@@ -1203,7 +1243,9 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         phase = CommitPhase::Complete;
         if (gate.owns_lock()) {
             if (context.candidate_metadata_location) {
-                impl->backend->ConfirmPublication(binding->collection_id, *context.candidate_metadata_location);
+                impl->backend->PublicationFinished(binding->collection_id,
+                    *context.candidate_metadata_location,
+                    CommitDisposition::Committed);
             }
             gate.unlock();
         }
@@ -1220,6 +1262,12 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         }
         return committed;
     } catch (const Failure& error) {
+        if (publication_started && binding && context.candidate_metadata_location) {
+            impl->backend->PublicationFinished(binding->collection_id,
+                *context.candidate_metadata_location,
+                error.uncertain || phase == CommitPhase::Complete ? CommitDisposition::CommitUnknown
+                                                                  : CommitDisposition::DefinitelyNotCommitted);
+        }
         impl->CloseOnCorruption(error.detail);
         if (!binding) {
             return Rejected(request.operation_id, phase, error.detail);
@@ -1231,6 +1279,11 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         return impl->FailBound(*binding, phase, error.detail, publication_started);
     } catch (const std::exception& error) {
         const auto detail = ExceptionError(error);
+        if (publication_started && binding && context.candidate_metadata_location) {
+            impl->backend->PublicationFinished(binding->collection_id,
+                *context.candidate_metadata_location,
+                CommitDisposition::CommitUnknown);
+        }
         if (!binding) {
             return Rejected(request.operation_id, phase, detail);
         }

@@ -112,6 +112,10 @@ Preserve these boundaries when adding or changing engine behavior:
   transaction commits. File finalization, buffer flush, file sync, checked close,
   and directory sync all matter. SQLite commits do not sync external files;
   successful internal Iceberg updates do not authorize a committed response.
+  The coordinator reports the outer result through `PublicationFinished`:
+  promote the exact candidate on success, discard it on rollback, invalidate
+  the verified generation on uncertainty. Admission/preparation only use an
+  explicitly confirmed base; reconciliation rebuilds invalidated generations.
   Preserve the first I/O failure through retries, repeated close, and cleanup.
   The initial catalog profile uses `journal_mode=DELETE` and `synchronous=EXTRA`,
   verified on the actual working connection.
@@ -142,7 +146,11 @@ Preserve these boundaries when adding or changing engine behavior:
   control memory separately, including allocations outside Arrow. Check that a
   published state can be reopened within the same limits. Capacity exhaustion
   produces backpressure before publication, not partial success or hidden
-  deletion of history. Orphan files consume capacity; automatic cleanup is
+  deletion of history. Publication rechecks physical warehouse usage after
+  production; recovery checks the same physical cap without reserving a future
+  attempt. Logical reachable
+  usage is accumulated with overflow and limit checks across collections.
+  Orphan files consume capacity; automatic cleanup is
   outside the initial scope. The only exception is a metadata root superseded
   by a confirmed append (the current root retains the whole history); it is
   removed once no scan is still resolving it. Detected corruption closes readiness; leave SQLite
@@ -166,6 +174,7 @@ Preserve these boundaries when adding or changing engine behavior:
 | `apps/mock_server/` | Disposable Python mock, real HTTP/Arrow, no warehouse/catalog access. |
 | `fixtures/`, `tools/verification/` | Literal canonical/metadata inputs, independent row oracle and evidence helpers. |
 | `sdk/python/`, `ui/` | Standalone Python HTTP SDK; HTML/CSS/ES-module pink workbench and browser/unit tests. |
+| `tools/workload/` | Mimesis datasets, SDK/Locust workloads, per-worker SQLite outcome journals and full verification. |
 | `probes/`, `benchmarks/` | Installed-dependency/compatibility probes and workload measurements. |
 | `scripts/` | Developer tooling, including quality checks. |
 | `third_party/` | Pinned upstream submodules and `lock.json`. |
@@ -267,6 +276,9 @@ build preserves the installed `glamdb::core` engine API. To include storage
 adapters, build the pinned prefix with `./scripts/build-deps-in-docker.sh`, then
 run `./scripts/test-storage-in-docker.sh asan-ubsan`. See
 [BUILDING](docs/development/BUILDING.md) for isolation and sanitizer compatibility.
+`scripts/glamdb-local.sh up|down|status|logs|cli` builds and runs a local server
+(native on Linux, Docker elsewhere) configured by `GLAMDB_PORT`, `GLAMDB_TOKEN` and
+`GLAMDB_DATA`; it rebuilds the dependency prefix when its recipe fingerprint changes.
 
 The coordinator supplies owned, immutable normalized batches and expected
 operation summaries, runs capacity preflight before binding an attempt, and
@@ -320,6 +332,18 @@ cmake --build --preset deps-local --parallel 2
 ```
 
 ## Code and dependency conventions
+
+The network CLI's `generate` and `bench write/read/verify/resolve` use the optional
+Python package through reproc; the CLI still builds without engine dependencies.
+See [the workload guide](tools/workload/README.md). Install its hash-pinned
+`tools/workload/requirements.txt` and local package before testing. Run
+`bash scripts/check-workload.sh unit`; the default `bash scripts/check-workload.sh`
+requires the built real server and CLI and runs native TLS E2E without mock fallback.
+The normal native CI contour includes this E2E. Mock transports belong only in
+explicit fault tests. Preserve exact saved append UUID/body/hash, never silently
+retry or reconcile, and count only unique committed operations. Locust owns
+scheduling, distributed statistics and percentiles; do not implement another load
+engine or duplicate SDK codecs. Token values stay exclusively in the environment.
 
 Follow [the C++ style guide](docs/development/CPP_STYLE_GUIDE.md) for naming,
 declarations, layout, and error handling. Keep `.clang-format` aligned with its

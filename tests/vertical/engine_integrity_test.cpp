@@ -635,17 +635,21 @@ TEST_F(EngineIntegrityTest, LatchedWriteFailureAllowsReconcileShutdownAndReopen)
 {
     NGlamDB::NIO::TPosixLocalFS posix;
     auto faults = std::make_shared<NGlamDB::NTesting::TFaultFS>(posix);
+    detail::TLocalStorageOptions options;
+    options.Fs = faults;
+    CreateTwoCollections(options);
+    CommitFirst();
+    const auto original = Engine_->FindAppendOutcome(test::collection_id, FirstOperation);
+    ASSERT_TRUE(original);
+    ASSERT_TRUE(original->has_value());
+
     faults->AddRule({NGlamDB::NTesting::EIOOp::SyncFile,
         "*.parquet",
         1,
         1,
         std::make_error_code(std::errc::io_error),
         std::nullopt});
-    detail::TLocalStorageOptions options;
-    options.Fs = faults;
-    CreateTwoCollections(options);
-
-    const auto failed = Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
+    const auto failed = Engine_->AppendDurable({test::collection_id, SecondOperation, {}, {Batch(FirstRows)}});
     EXPECT_EQ(failed.disposition, CommitDisposition::DefinitelyNotCommitted);
     ASSERT_TRUE(failed.error);
     EXPECT_EQ(test::Present(failed.error).code, "IO_ERROR");
@@ -656,6 +660,16 @@ TEST_F(EngineIntegrityTest, LatchedWriteFailureAllowsReconcileShutdownAndReopen)
     EXPECT_FALSE(health.write_ready);
     EXPECT_TRUE(health.storage_failure_latched);
     EXPECT_FALSE(health.durability_qualified);
+
+    EXPECT_EQ(Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}}),
+        test::Present(*original));
+    EXPECT_EQ(Engine_->AppendDurable({test::collection_id, SecondOperation, {}, {Batch(FirstRows)}}), failed);
+    const auto create = Engine_->CreateCollection({ThirdOperation, "blocked", Schema});
+    EXPECT_EQ(create.disposition, CommitDisposition::DefinitelyNotCommitted);
+    ASSERT_TRUE(create.error);
+    EXPECT_EQ(test::Present(create.error).code, "IO_ERROR");
+    ASSERT_TRUE(Engine_->ListCollections());
+    EXPECT_EQ(Engine_->ListCollections()->size(), 2U);
 
     const auto latched = Engine_->AppendDurable({test::collection_id, ThirdOperation, {}, {Batch(FirstRows)}});
     EXPECT_EQ(latched.disposition, CommitDisposition::DefinitelyNotCommitted);
@@ -669,6 +683,8 @@ TEST_F(EngineIntegrityTest, LatchedWriteFailureAllowsReconcileShutdownAndReopen)
     ASSERT_TRUE(Engine_->Reconcile());
     EXPECT_EQ(Engine_->GetHealth().state, StoreState::StorageFailed);
     EXPECT_FALSE(Engine_->GetHealth().write_ready);
+    EXPECT_EQ(Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}}),
+        test::Present(*original));
     EXPECT_NE(OpenCursor(test::collection_id), nullptr);
     ASSERT_TRUE(Engine_->Shutdown(1000ms));
     Engine_.reset();

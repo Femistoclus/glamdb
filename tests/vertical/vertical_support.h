@@ -244,9 +244,10 @@ public:
         return std::make_unique<TStaged>(this, binding.collection_id, std::move(*staged));
     }
 
-    void ConfirmPublication(std::string_view collectionID, std::string_view location) override
+    void
+    PublicationFinished(std::string_view collectionID, std::string_view location, CommitDisposition result) override
     {
-        Inner_->ConfirmPublication(collectionID, location);
+        Inner_->PublicationFinished(collectionID, location, result);
     }
 
     void InvalidateCache() override

@@ -64,6 +64,11 @@ automatic file cleanup remain outside this MVP.
   the final health decision runs inside the catalog guard while a commit gate
   is held through the outer COMMIT, so a concurrent corruption report either
   prevents that publication or is surfaced after it completes.
+- After the outer pointer/receipt transaction resolves, `PublicationFinished`
+  hands its disposition and exact candidate root to the backend. Success promotes
+  that candidate; rollback discards it; uncertainty invalidates the verified
+  generation until reconciliation. Storage admission/preparation cannot promote
+  candidates by observing a later pointer or reload a changed prepared base.
 - An uncertain binding/publication/failure-recording result closes readiness.
   Reconciliation closes the old handle, reopens authoritative SQLite state,
   validates retained storage in both directions, and commits a real fence
@@ -211,7 +216,13 @@ Independent catalog, coordinator and SDK reviews exercised these boundaries;
 their confirmed correctness defects have regression tests. Production
 coordinator-to-storage appends and scans are exercised in-process by
 `glamdb_vertical` and in fresh processes by `glamdb.scan_process` (see
-[SCANNER.md](SCANNER.md#validation-status)). Restore, combined capacity/RSS and
+[SCANNER.md](SCANNER.md#validation-status)). `BackendPublicationTest` exercises
+explicit promotion, rollback discard, uncertain-result invalidation and
+metadata-only base changes over the real backend. `BackendPublicationIntegration`
+uses the real SQLite journal fault VFS with Parquet/Iceberg files: scans during
+the tentative transaction and retained cursors after a lost COMMIT result keep
+the confirmed snapshot; new scans block until reconciliation. This injected
+result loss does not simulate loss of the OS page cache. Restore, combined capacity/RSS and
 OS-cache-loss/power-cut qualification remain NOT RUN.
 
 ## Public health observation
@@ -224,6 +235,13 @@ recovery in the reported state, including after a shutdown timeout. Closed
 engines remain observable. A missing storage backend advertises neither scans
 nor writes. The storage seam explicitly reports reader availability, so the
 coordinator test backend does not claim to support scans.
+
+The coordinator checks backend write health after resolving terminal retries,
+before staging a new collection or binding a new append, and again at the final
+publication decision inside the commit gate. An unavailable writer refuses new
+work without consuming an operation slot. A latched failure returns `IO_ERROR`
+with operator action required; it leaves confirmed reads, old receipts and
+reconciliation available, but only reopening can replace that backend instance.
 
 The [HTTP contract](HTTP_SERVER.md) defines the state table, lifecycle overlays,
 and 200/503 readiness mapping. Every health snapshot remains durability-unqualified;
