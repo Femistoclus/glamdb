@@ -164,6 +164,18 @@ void CheckViews(glamdb::Engine& engine, int64_t snapshotA, int64_t snapshotB)
     Check(a && b && a->result && b->result && history.snapshots[0].receipt == *a->result &&
             history.snapshots[1].receipt == *b->result,
         "history includes original durable receipts");
+    const auto firstPage = Take(engine.ListSnapshotsPage(CollectionId, {.PageSize = 1}), "history page");
+    const auto secondPage =
+        Take(engine.ListSnapshotsPage(CollectionId, {.PageSize = 1, .PageToken = firstPage.NextPageToken}),
+            "history continuation");
+    Check(firstPage.snapshots.size() == 1 && secondPage.snapshots.size() == 1 &&
+            firstPage.snapshots[0].snapshot_id == snapshotA && secondPage.snapshots[0].snapshot_id == snapshotB &&
+            firstPage.identity == secondPage.identity && secondPage.NextPageToken.empty(),
+        "paged history preserves ancestry and root identity");
+    const auto collectionPage = Take(engine.ListCollectionsPage({.PageSize = 1}), "collection page");
+    Check(collectionPage.CreationHighWaterMark == 1 && collectionPage.Collections.size() == 1 &&
+            collectionPage.NextPageToken.empty(),
+        "collection page reports its creation high-water mark");
     for (const auto& [selector, rows, files] : {std::tuple{glamdb::SnapshotSelector::Latest(), 5, 2},
              std::tuple{glamdb::SnapshotSelector::Id(snapshotA), 3, 1},
              std::tuple{glamdb::SnapshotSelector::InitialEmpty(), 0, 0}})
@@ -230,10 +242,21 @@ void Write(glamdb::Engine& engine, const std::string& receiptPath)
     output << RenderReceipt(receiptA) << '\n' << RenderReceipt(receiptB) << '\n';
     output.close();
     Check(!output.fail(), "save original receipts for the next process");
+    const auto files = Take(engine.ListFilesPage(CollectionId, {.PageSize = 1}), "file page before restart");
+    Check(!files.NextPageToken.empty(), "multi-file listing has a continuation");
+    std::ofstream cursorOutput(receiptPath + ".cursor");
+    cursorOutput << files.NextPageToken << '\n';
+    cursorOutput.close();
+    Check(!cursorOutput.fail(), "save cursor for restart rejection");
 }
 
 void Reopen(glamdb::Engine& engine, const std::string& receiptPath)
 {
+    std::ifstream cursorInput(receiptPath + ".cursor");
+    std::string oldCursor;
+    Check(static_cast<bool>(std::getline(cursorInput, oldCursor)) && !oldCursor.empty(), "read pre-restart cursor");
+    const auto stale = engine.ListFilesPage(CollectionId, {.PageSize = 1, .PageToken = oldCursor});
+    Check(!stale && stale.error().code == "INVALID_CURSOR", "restart explicitly invalidates metadata cursors");
     const auto collection = Take(engine.GetCollection(CollectionId), "get reopened collection");
     Check(collection.schema == Schema && collection.name == "events", "persisted collection schema and name");
     Check(Take(engine.ListCollections(), "list reopened collections").size() == 1, "persisted collection count");
@@ -274,12 +297,17 @@ void CheckUnavailable(glamdb::Engine& engine)
     const auto explain = engine.ExplainScan({.collection_id = CollectionId});
     const auto files = engine.ListFiles(CollectionId);
     const auto details = engine.GetFileDetails(CollectionId, std::string(64, '0'));
+    const auto historyPage = engine.ListSnapshotsPage(CollectionId);
+    const auto filePage = engine.ListFilesPage(CollectionId);
     Check(!stats && stats.error().code == "DEPENDENCY_UNAVAILABLE" && !history &&
             history.error().code == "DEPENDENCY_UNAVAILABLE" && !explain &&
             explain.error().code == "DEPENDENCY_UNAVAILABLE" && !files &&
             files.error().code == "DEPENDENCY_UNAVAILABLE" && !details &&
             details.error().code == "DEPENDENCY_UNAVAILABLE",
         "storage-disabled metadata reports dependency errors");
+    Check(!historyPage && historyPage.error().code == "DEPENDENCY_UNAVAILABLE" && !filePage &&
+            filePage.error().code == "DEPENDENCY_UNAVAILABLE",
+        "storage-disabled pages report dependency errors");
     const auto created = engine.CreateCollection({CollectionId, "events", Schema});
     Check(created.disposition == glamdb::CommitDisposition::DefinitelyNotCommitted && !created.info && created.error &&
             created.error->code == "DEPENDENCY_UNAVAILABLE",

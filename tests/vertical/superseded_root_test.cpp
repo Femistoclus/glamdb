@@ -320,6 +320,71 @@ TEST_F(SupersededRootTest, MetadataRetainsItsConfirmedRootAcrossAppend)
     EXPECT_EQ(Roots().size(), 1U);
 }
 
+TEST_F(SupersededRootTest, MetadataPagesRetainTheirRootWhileLoadingAcrossAppend)
+{
+    Commit(FirstOperation, FirstRows);
+    const auto second = Commit(SecondOperation, SecondRows);
+    const auto roots = Roots();
+    ASSERT_EQ(roots.size(), 1U);
+    std::promise<std::thread::id> readerID;
+    std::promise<void> armed;
+    auto reader = std::async(std::launch::async, [&] {
+        readerID.set_value(std::this_thread::get_id());
+        armed.get_future().wait();
+        return Engine_->ListFilesPage(test::collection_id, {.PageSize = 1});
+    });
+    Gate_->Arm(readerID.get_future().get());
+    armed.set_value();
+    const bool entered = Gate_->WaitEntered(10s);
+    if (!entered) {
+        Gate_->Release();
+    }
+    ASSERT_TRUE(entered);
+    Commit(ThirdOperation, FirstRows);
+    EXPECT_TRUE(std::filesystem::exists(roots.front()));
+    Gate_->Release();
+    const auto first = reader.get();
+    ASSERT_TRUE(first) << first.error().message;
+    EXPECT_EQ(first->Identity.current_snapshot_id, second.snapshot_id);
+    ASSERT_EQ(first->Files.size(), 1U);
+    ASSERT_FALSE(first->NextPageToken.empty());
+    Commit("00000000-0000-4000-8000-0000000000a4", FirstRows);
+    EXPECT_FALSE(std::filesystem::exists(roots.front()));
+    const auto next = Engine_->ListFilesPage(test::collection_id, {.PageSize = 1, .PageToken = first->NextPageToken});
+    ASSERT_TRUE(next);
+    EXPECT_EQ(next->Identity, first->Identity);
+    ASSERT_EQ(next->Files.size(), 1U);
+    EXPECT_LT(first->Files.front().FileID, next->Files.front().FileID);
+    EXPECT_TRUE(next->NextPageToken.empty());
+}
+
+TEST_F(SupersededRootTest, ReconcileInvalidatesAListingStillBeingLoaded)
+{
+    Commit(FirstOperation, FirstRows);
+    Commit(SecondOperation, SecondRows);
+    std::promise<std::thread::id> readerID;
+    std::promise<void> armed;
+    auto reader = std::async(std::launch::async, [&] {
+        readerID.set_value(std::this_thread::get_id());
+        armed.get_future().wait();
+        return Engine_->ListFilesPage(test::collection_id, {.PageSize = 1});
+    });
+    Gate_->Arm(readerID.get_future().get());
+    armed.set_value();
+    const bool entered = Gate_->WaitEntered(10s);
+    if (!entered) {
+        Gate_->Release();
+    }
+    ASSERT_TRUE(entered);
+    const auto reconciled = Engine_->Reconcile();
+    Gate_->Release();
+    ASSERT_TRUE(reconciled);
+    const auto interrupted = reader.get();
+    ASSERT_FALSE(interrupted);
+    EXPECT_EQ(interrupted.error().code, "INVALID_CURSOR");
+    EXPECT_TRUE(Engine_->ListFilesPage(test::collection_id, {.PageSize = 1}));
+}
+
 TEST_F(SupersededRootTest, FileDetailsRetainTheirConfirmedRootAcrossAppend)
 {
     const auto first = Commit(FirstOperation, FirstRows);

@@ -44,6 +44,14 @@ public:
     Result<CollectionInfo> GetCollection(std::string_view collection_id) const;
     Result<CollectionInfo> ResolveCollection(std::string_view exact_name) const;
     Result<std::vector<CollectionInfo>> ListCollections() const;
+    // Fixed listings; repeat all parameters on continuation. Tokens expire after
+    // five minutes and are valid only in this Engine and authorization context.
+    Result<TCollectionPage> ListCollectionsPage(const TMetadataPageRequest& request = {}) const;
+    Result<SnapshotHistory> ListSnapshotsPage(std::string_view collectionID,
+        const TMetadataPageRequest& request = {}) const;
+    Result<TFileListing> ListFilesPage(std::string_view collectionID,
+        const TMetadataPageRequest& request = {},
+        SnapshotSelector selector = SnapshotSelector::Latest()) const;
     Result<std::shared_ptr<const arrow::Schema>> Schema(std::string_view collection_id) const;
     // Immutable confirmed schema for decoding retries while recovery fences reads.
     // AppendDurable still validates identity, payload and write admission.

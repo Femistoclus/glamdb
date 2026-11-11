@@ -12,6 +12,9 @@ disabled builds return `DEPENDENCY_UNAVAILABLE`.
 | `ListSnapshots(collection)` | Retained snapshots, oldest first, joined with their original committed append receipts. Initial empty is not a snapshot. |
 | `GetStatistics(collection, selector)` | Rows, live data-file count and compressed data-file bytes from the selected view's manifests. |
 | `ListFiles(collection, selector)` | Stable opaque file IDs, lengths, row counts and field-ID metrics from the selected view's live manifest entries. |
+| `ListCollectionsPage(request)` | Creation-ordered collections at one creation high-water mark. |
+| `ListSnapshotsPage(collection, request)` | Pages of one retained append ancestry, oldest first. |
+| `ListFilesPage(collection, request, selector)` | File-ID-ordered pages of one resolved view. |
 | `GetFileDetails(collection, file_id, selector)` | Manifest descriptor and verified physical Parquet row-group/column metadata for a member of the selected view. |
 | `ExplainScan(request)` | Validated projection, physical read fields, predicate, batch size, limit, resolved view and candidate statistics. No Parquet reads. |
 | `ScanCursor::Profile()` | Thread-safe cumulative completed work, available after completion, cancellation and errors. |
@@ -59,8 +62,43 @@ verification of every data page. Corrupt/missing committed files close readiness
 environmental read/close failures retain `IO_ERROR` without closing readiness.
 
 File listings and details materialize caller-owned DTOs under existing local
-file/footer limits. Shared metadata reservations and fixed-view pagination are
-separate work; these APIs do not provide a process-wide memory bound.
+file/footer limits. Shared metadata reservations remain separate work; these
+APIs do not provide a process-wide memory bound.
+
+## Fixed-view pages
+
+Pass `TMetadataPageRequest` with `PageSize` (1–1024, default 100), an initially
+empty `PageToken`, and an adapter-supplied `AuthorizationContext`. Continue with
+the returned `NextPageToken` and the same arguments until that token is empty.
+An empty next token is terminal; an empty input token always starts a new view.
+The unpaged methods remain available.
+
+The first call materializes one verified listing. File and history pages retain
+its root identity and resolved snapshot; subsequent appends cannot add or
+remove entries from it. Collection pages retain the collection descriptors and
+creation high-water mark captured at admission. Replaying any continuation
+returns the same entries and next token. Materialized listings need no further
+file reads, so superseded root JSON files can retire normally between pages.
+
+Tokens are 256-bit random bearer capabilities authenticated by server-held
+lookup; they contain no caller-editable offsets or paths. Each continuation is
+bound to the API, collection, original selector, page size and authorization
+context. Adapters must derive that context from trusted authentication state,
+including the authorization generation/scope; accepting client-supplied context
+would not enforce authorization. Empty context is for a single embedded caller.
+Changed, malformed, foreign, expired and pre-restart tokens return
+`INVALID_CURSOR`. Invalid first-page arguments return `INVALID_ARGUMENT`.
+Tokens belong to one Engine instance and are invalidated on reconciliation or
+shutdown. Existing readiness errors still apply to cached pages.
+
+Each engine admits at most 32 retained or loading listings and 16 MiB of
+estimated retained DTO/token allocations. Admission refuses excess with
+`RESOURCE_EXHAUSTED`; it does not evict live cursors. Listings expire five
+minutes after admission, without renewal on replay; the next page request
+reclaims expired entries. Shutdown releases retained listings. Empty and
+single-page results retain no cursor. Listing construction, returned DTO copies,
+allocator overhead and other engine/transport allocations still require the
+host's shared metadata budget; this cache is not a process-wide RAM limit.
 
 Every `Metric` contains an optional integer and a `MetricKind`:
 
@@ -104,3 +142,9 @@ reads, classification and concurrent append. The installed consumer exercises
 the file APIs in separate write/reopen processes and checks dependency errors
 with storage disabled. These native tests are distinct from synthetic mock/UI
 descriptors and do not qualify power-loss durability.
+
+`TMetadataPagesTest` in the native vertical suite covers fixed membership across
+writes, parameter/authorization binding, foreign and reopened engines, historical
+and initial views. Its unit counterpart covers replay, absolute expiry, quota
+reclamation and admission failures with an explicit clock. The installed consumer
+carries a cursor between separate write/reopen processes to verify rejection.

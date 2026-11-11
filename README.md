@@ -53,7 +53,8 @@ snapshots and commits are synthetic and disappear on restart.
 
 The embedded C++ facade also exposes [native metadata](docs/development/METADATA.md):
 capabilities, receipt-backed snapshot history, selected-view statistics,
-snapshot-bound file and row-group details, scan explain and execution profiles.
+snapshot-bound file and row-group details, fixed-view collection/history/file
+pages, scan explain and execution profiles.
 HTTP metadata/explain adapters remain pending.
 
 The workbench also has a **public browser demo** requiring no token or Python

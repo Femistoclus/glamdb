@@ -17,7 +17,7 @@ if(NOT GLAMDB_IO_ONLY)
     find_package(Arrow 25 CONFIG REQUIRED GLOBAL)
     add_library(glamdb_core STATIC api/canonical.cpp api/codec.cpp api/arrow_input.cpp
         catalog/sqlite.cpp catalog/durable_sqlite_catalog.cpp
-        engine/storage_mapping.cpp engine/store_lease.cpp engine/engine.cpp
+        engine/storage_mapping.cpp engine/store_lease.cpp engine/engine.cpp engine/metadata_pages.cpp
         scan/predicate.cpp)
     add_library(glamdb::core ALIAS glamdb_core)
     target_link_libraries(glamdb_core PRIVATE "$<BUILD_INTERFACE:glamdb_build_options>" SQLite::SQLite3
