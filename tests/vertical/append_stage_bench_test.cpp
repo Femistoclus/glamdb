@@ -5,7 +5,7 @@
 // 1000 and 10000 rows); GLAMDB_APPEND_STAGE_DIR names an existing parent
 // directory for the disposable stores (default: a temporary directory).
 //
-// Input-side stages (inspection, fingerprint, normalization, writer batch) are
+// Input-side stages (one inspection, fingerprint, normalization, writer batch) are
 // timed by calling the same functions on the same batches outside an append.
 // Backend stages are timed inside real appends by a delegating backend; the
 // remainder of the append wall time is coordinator/catalog work.
@@ -313,7 +313,7 @@ TEST(AppendStageBench, NativeAppendStagesByShape)
                 ASSERT_TRUE(detail::InputReservation(schema, batches));
             }));
             fingerprint.push_back(Time([&] {
-                ASSERT_TRUE(detail::FingerprintBatches(schema, test::collection_id, batches));
+                ASSERT_TRUE(detail::FingerprintInput(schema, test::collection_id, batches));
             }));
             Result<detail::NormalizedInput> normalized;
             normalize.push_back(Time([&] {
@@ -359,7 +359,9 @@ TEST(AppendStageBench, NativeAppendStagesByShape)
         const auto publish = measured(backend->Times.Publish);
         const auto verify = measured(backend->Times.Verify);
         const auto append = Median(wall);
-        const auto inputSide = Median(fingerprint) + Median(inspect) + Median(normalize);
+        // As in AppendDurable: fingerprint (with the reservation) and normalization;
+        // inspect_ms is one inspection, contained in both.
+        const auto inputSide = Median(fingerprint) + Median(normalize);
         // Admission builds the writer batch; the input side runs before it.
         // The real backend verifies closure inside Publish, so publish includes verify.
         const auto other = append - inputSide - admissible - prepare - publish;

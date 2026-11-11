@@ -150,35 +150,27 @@ Cell Read(const arrow::Array& array, int64_t row, FieldType type)
     throw Failure({"INVALID_ARGUMENT", "unsupported Arrow field", RetryHint::FixInput});
 }
 
-} // namespace
-
-Result<size_t> InputReservation(const SchemaSpec& schema,
-    const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches)
+size_t Reservation(const SchemaSpec& schema, const Shape& shape)
 {
-    try {
-        const auto shape = Inspect(schema, batches);
-        // Payload bytes: the owned rows, the canonical string while hashing and
-        // the Arrow batch with builder growth (4 copies). STL cells, including
-        // tiny/null values whose buffers alone undercount RAM, exist once;
-        // row headers twice while the extracted rows are moved into the
-        // normalized input. NULL encodings omit typed slots, but Arrow still
-        // allocates them; reserve their builder growth separately.
-        return shape.decoded_bytes * 4 + shape.null_slot_bytes * 2 +
-            shape.rows * (sizeof(Row) * 2 + schema.fields.size() * sizeof(Cell)) + 65536;
-    } catch (const Failure& error) {
-        auto detail = error.detail;
-        detail.retry_hint = RetryHint::FixInput;
-        return std::unexpected(std::move(detail));
-    }
+    // Payload bytes: the owned rows, the canonical string while hashing and
+    // the Arrow batch with builder growth (4 copies). STL cells, including
+    // tiny/null values whose buffers alone undercount RAM, exist once;
+    // row headers twice while the extracted rows are moved into the
+    // normalized input. NULL encodings omit typed slots, but Arrow still
+    // allocates them; reserve their builder growth separately. Hashing now
+    // streams the canonical bytes; the estimate keeps that copy so that the
+    // owned-input budget admits exactly the same appends as before.
+    return shape.decoded_bytes * 4 + shape.null_slot_bytes * 2 +
+        shape.rows * (sizeof(Row) * 2 + schema.fields.size() * sizeof(Cell)) + 65536;
 }
 
-Result<std::string> FingerprintBatches(const SchemaSpec& schema,
+// Hashes batches that `shape` was inspected from in the same call.
+std::string Fingerprint(const SchemaSpec& schema,
     std::string_view collection_id,
-    const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches)
+    const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
+    const Shape& shape)
 {
-    try {
-        const auto shape = Inspect(schema, batches);
-        const auto header = EncodeAppendHeader(schema, collection_id, shape.rows);
+    const auto header = EncodeAppendHeader(schema, collection_id, shape.rows);
         if (!header) {
             throw Failure(header.error());
         }
@@ -233,7 +225,41 @@ Result<std::string> FingerprintBatches(const SchemaSpec& schema,
                 }
             }
         }
-        return hash.Digest();
+    return hash.Digest();
+}
+
+} // namespace
+
+Result<size_t> InputReservation(const SchemaSpec& schema,
+    const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches)
+{
+    try {
+        return Reservation(schema, Inspect(schema, batches));
+    } catch (const Failure& error) {
+        auto detail = error.detail;
+        detail.retry_hint = RetryHint::FixInput;
+        return std::unexpected(std::move(detail));
+    }
+}
+
+Result<std::string> FingerprintBatches(const SchemaSpec& schema,
+    std::string_view collection_id,
+    const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches)
+{
+    const auto result = FingerprintInput(schema, collection_id, batches);
+    if (!result) {
+        return std::unexpected(result.error());
+    }
+    return result->payload_hash;
+}
+
+Result<FingerprintedInput> FingerprintInput(const SchemaSpec& schema,
+    std::string_view collection_id,
+    const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches)
+{
+    try {
+        const auto shape = Inspect(schema, batches);
+        return FingerprintedInput{Fingerprint(schema, collection_id, batches, shape), Reservation(schema, shape)};
     } catch (const Failure& error) {
         auto detail = error.detail;
         detail.retry_hint = RetryHint::FixInput;
@@ -243,10 +269,19 @@ Result<std::string> FingerprintBatches(const SchemaSpec& schema,
 
 Result<NormalizedInput> NormalizeBatches(const SchemaSpec& schema,
     std::string_view collection_id,
-    const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches)
+    const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
+    std::optional<size_t> reserved)
 {
     try {
+        // Inspected again: these are caller buffers, and this pass validates
+        // exactly the memory the owned copy reads. A shape that differs from
+        // the admitted reservation means the caller changed the input.
         const auto shape = Inspect(schema, batches);
+        if (reserved && Reservation(schema, shape) != *reserved) {
+            // The same error as the coordinator's hash comparison.
+            return std::unexpected(
+                ErrorDetail{"INVALID_ARGUMENT", "Arrow input changed during append", RetryHint::OperatorAction});
+        }
         std::vector<Row> rows;
         rows.reserve(shape.rows);
         for (const auto& batch : batches) {

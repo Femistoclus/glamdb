@@ -5,6 +5,7 @@
 #include <array>
 #include <bit>
 #include <cstring>
+#include <optional>
 #include <string_view>
 #include <type_traits>
 
@@ -95,10 +96,25 @@ NormalizeRows(const SchemaSpec& schema, std::string_view collection_id, const st
 // Normalizes rows the caller already owns by moving them: no second copy.
 Result<NormalizedInput>
 NormalizeOwnedRows(const SchemaSpec& schema, std::string_view collection_id, std::vector<Row>&& rows);
+// `reserved`, when set, is the owned-input reservation admitted for this input
+// (FingerprintInput); a different shape rejects the input as changed.
 Result<NormalizedInput> NormalizeBatches(const SchemaSpec& schema,
     std::string_view collection_id,
-    const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches);
+    const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
+    std::optional<size_t> reserved = std::nullopt);
 Result<std::string> FingerprintBatches(const SchemaSpec& schema,
+    std::string_view collection_id,
+    const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches);
+
+struct FingerprintedInput
+{
+    std::string payload_hash;
+    // InputReservation of the same inspection.
+    size_t reservation = 0;
+};
+
+// FingerprintBatches and InputReservation from one inspection of the batches.
+Result<FingerprintedInput> FingerprintInput(const SchemaSpec& schema,
     std::string_view collection_id,
     const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches);
 Result<size_t> InputReservation(const SchemaSpec& schema,

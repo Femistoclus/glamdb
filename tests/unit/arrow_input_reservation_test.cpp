@@ -95,5 +95,52 @@ TEST(ArrowInputReservation, MaximumWideAppendFitsTheDefaultOwnedInputBudget)
         << "the reservation leaves no room for a standard library with larger cells";
 }
 
+// The engine takes its reservation from the fingerprint's inspection; it must
+// be exactly InputReservation, and normalization must reject any other shape.
+TEST(ArrowInputReservation, FingerprintInspectionYieldsTheSameReservation)
+{
+    const SchemaSpec schema{{{"key", FieldType::String, false},
+        {"s", FieldType::String, true},
+        {"n", FieldType::Int64, true},
+        {"omitted", FieldType::Bool, true}}};
+    for (const int64_t rows : {1, 7, 1000}) {
+        arrow::Int64Builder numbers;
+        for (int64_t row = 0; row < rows; ++row) {
+            EXPECT_TRUE((row % 3 == 0 ? numbers.AppendNull() : numbers.Append(row)).ok());
+        }
+        std::shared_ptr<arrow::Array> n;
+        ASSERT_TRUE(numbers.Finish(&n).ok());
+        const auto batch = arrow::RecordBatch::Make(arrow::schema({arrow::field("key", arrow::utf8(), false),
+                                                        arrow::field("s", arrow::utf8()),
+                                                        arrow::field("n", arrow::int64())}),
+            rows,
+            {Strings(rows, 12, 'k'), Strings(rows, 5, 's'), n});
+        const std::vector<std::vector<std::shared_ptr<arrow::RecordBatch>>> inputs{
+            {batch}, {batch->Slice(0, rows / 2), batch->Slice(rows / 2)}};
+        for (const auto& batches : inputs) {
+            const auto fingerprinted = FingerprintInput(schema, "00112233-4455-6677-8899-aabbccddeeff", batches);
+            ASSERT_TRUE(fingerprinted) << fingerprinted.error().message;
+            EXPECT_EQ(fingerprinted->reservation, InputReservation(schema, batches).value());
+            EXPECT_EQ(fingerprinted->payload_hash,
+                FingerprintBatches(schema, "00112233-4455-6677-8899-aabbccddeeff", batches).value());
+            const auto normalized =
+                NormalizeBatches(schema, "00112233-4455-6677-8899-aabbccddeeff", batches, fingerprinted->reservation);
+            ASSERT_TRUE(normalized) << normalized.error().message;
+            EXPECT_EQ(normalized->payload_hash, fingerprinted->payload_hash);
+            for (const auto other : {fingerprinted->reservation - 1, fingerprinted->reservation + 1}) {
+                const auto changed = NormalizeBatches(schema, "00112233-4455-6677-8899-aabbccddeeff", batches, other);
+                ASSERT_FALSE(changed);
+                EXPECT_EQ(changed.error().code, "INVALID_ARGUMENT");
+                EXPECT_EQ(changed.error().message, "Arrow input changed during append");
+            }
+        }
+    }
+    // Validation failures are the fingerprint's, with the same retry hint.
+    const auto invalid = FingerprintInput(schema, "00112233-4455-6677-8899-aabbccddeeff", {nullptr});
+    ASSERT_FALSE(invalid);
+    EXPECT_EQ(invalid.error().code, InputReservation(schema, {nullptr}).error().code);
+    EXPECT_EQ(invalid.error().retry_hint, RetryHint::FixInput);
+}
+
 } // namespace
 } // namespace glamdb::detail
