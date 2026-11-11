@@ -143,7 +143,12 @@ every SDK/workbench call, its core operation, request example, status and requir
 response-field types. `glamdb.native_http` executes them against real storage.
 The fixtures are a bounded response-shape vocabulary, not a full JSON Schema
 validator. Native `outcome_json_test` separately pins complete recovery/receipt
-serialization. The existing [mock contract](HTTP_MOCK_CONTRACT.md) remains a
+serialization. [Shared literal outcome/scalar fixtures](../../fixtures/http/README.md)
+also exercise native serialization, SDK/browser parsing, incomplete recovery
+rejection, and A/B/retry-A through native storage and fresh-process reopen.
+Nullable recovery fields must be present; SDK/browser responses retain extension
+fields. Fixture, mock and native integration evidence remain distinct.
+The existing [mock contract](HTTP_MOCK_CONTRACT.md) remains a
 separate, broader development profile.
 
 | HTTP route | Public core operation | Availability |

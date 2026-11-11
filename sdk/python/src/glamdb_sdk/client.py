@@ -17,6 +17,7 @@ from .errors import (AuthenticationError, ErrorDetail, HTTPError, OutcomeUnknown
 from .models import ANY, AppendOutcome, CreateOutcome, OperationInProgress, Page, ScanResult
 from .predicates import Predicate
 from .request import AppendRequest, json_bytes, schema_fingerprint, uuid_string
+from .recovery import validate_append_recovery, validate_create_recovery
 from .transport import JSON_ACCEPT_ENCODING, Deadline, read_json, translate_transport
 
 
@@ -358,6 +359,7 @@ class Client:
             elif kind == "commit_unknown":
                 if status != 503 or value.get("recovery_required") is not True or info is not None:
                     raise ProtocolError("invalid unknown create outcome", raw=value)
+                validate_create_recovery(value, cid, name, schema_fingerprint(schema).hex())
             elif status >= 400:
                 self._http_error(status, value, budget)
             else:
@@ -475,6 +477,7 @@ class Client:
             elif kind == "commit_unknown":
                 if status != 503 or value.get("recovery_required") is not True or result is not None:
                     raise ProtocolError("invalid unknown append outcome", raw=value)
+                validate_append_recovery(value, budget.collection_id, budget.operation_id, expected_payload_hash)
             elif status >= 400:
                 self._http_error(status, value, budget)
             else:

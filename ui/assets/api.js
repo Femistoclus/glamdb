@@ -1,3 +1,5 @@
+import { validateRecovery } from './recovery.js';
+
 export class APIError extends Error {
     constructor(status, payload) {
         const detail = payload?.error ?? payload;
@@ -105,6 +107,8 @@ export class WorkbenchAPI {
         } catch {
             throw new Error(`Server returned invalid JSON (${response.status})`);
         }
+        if (payload?.outcome === 'commit_unknown')
+            validateRecovery(payload, response.status, path, options.body);
         if (
             !response.ok &&
             !(

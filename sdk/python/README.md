@@ -71,6 +71,15 @@ example does not create new UUIDs or retry a write automatically.
 `ErrorDetail` retains `code`, `message`, `retry_hint` and every additional field
 in `error.raw`; recovery context remains in `outcome.raw`.
 
+Unknown append/create responses must include complete, consistent recovery
+contexts, including explicitly nullable candidate fields. Missing fields,
+conflicting collection/operation identities, or mismatched original payload/schema
+hashes raise `ProtocolError` with the original caller identity and raw response.
+Blocked lookup cannot claim publication or candidate metadata/snapshots. Additional
+response/recovery fields remain available in `raw`; validation does not discard them.
+The [shared conformance fixtures](../../fixtures/http/README.md) exercise these
+rules alongside native and browser parsing.
+
 A committed append receipt must include a valid SHA256 digest with
 `hash_version=1`, and its digest must match the frozen request. Outcome lookup
 checks digest format and version without guessing the original payload. Both

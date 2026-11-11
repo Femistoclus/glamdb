@@ -165,6 +165,10 @@ components. Read [the workbench guide](docs/development/WORKBENCH.md) for
 installation, runtime theme changes and testing. The [native HTTP contract](docs/development/HTTP_SERVER.md) and executable
 `fixtures/http/v0.json` inventory supported routes and explicit gaps. Keep
 transport dependencies outside the public API; do not invent missing metadata.
+Shared literal outcome/scalar vectors live in `fixtures/http/outcomes-v0.json`;
+see [the fixture guide](fixtures/http/README.md) for their native, SDK, mock and UI
+consumers. Keep complete recovery contexts in test doubles. Missing recovery
+fields are protocol errors; supported extension fields remain in client responses.
 For branding/static hosting read [PUBLIC_DEMO.md](docs/development/PUBLIC_DEMO.md).
 Preserve the supplied PNGs unchanged. Brand paths must be local assets; sizes
 belong in theme.json. Asset URLs must support both / and /glamdb/.

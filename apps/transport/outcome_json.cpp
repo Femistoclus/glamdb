@@ -260,6 +260,19 @@ Result<Response> ToJson(const CreateOutcome& outcome)
         out.Add("error", Error(*outcome.error));
         if (outcome.recovery) {
             const auto& context = *outcome.recovery;
+            const auto prefix = "store://" + context.store_id + "/warehouse/";
+            Require(detail::ValidUuid(context.store_id) && detail::ValidUuid(context.collection_id) &&
+                    !context.exact_name.empty() && context.exact_name.size() <= 128 &&
+                    detail::ValidUtf8(context.exact_name) && context.exact_name.find('\0') == std::string::npos &&
+                    detail::ValidDigest(context.schema_hash) && detail::ValidUuid(context.attempt_id) &&
+                    (!context.candidate_table_uuid || detail::ValidUuid(*context.candidate_table_uuid)) &&
+                    (!context.candidate_metadata_location ||
+                        (context.candidate_metadata_location->starts_with(prefix) &&
+                            context.candidate_metadata_location->size() > prefix.size() &&
+                            context.candidate_metadata_location->size() <= 2048 &&
+                            detail::ValidUtf8(*context.candidate_metadata_location))),
+                "INVALID_ARGUMENT",
+                "invalid create recovery context");
             Object recovery;
             recovery.String("store_id", context.store_id);
             recovery.String("collection_id", context.collection_id);

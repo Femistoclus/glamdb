@@ -218,6 +218,7 @@ test('unresolved append stays unresolved and retry keeps operation identity', as
     const dialog = page.getByRole('dialog');
     await dialog.getByRole('button', { name: 'Append rows', exact: true }).click();
     await expect(dialog.getByText('Outcome unresolved · keep this operation ID')).toBeVisible();
+    await expect(dialog.locator('#modal-error')).toContainText('recovery context');
     await dialog.getByRole('button', { name: 'Retry same operation', exact: true }).click();
     await expect.poll(() => attempts).toBe(2);
     await expect(dialog.getByLabel('Rows · JSON array')).toHaveAttribute('readonly', '');

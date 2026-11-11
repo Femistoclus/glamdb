@@ -115,7 +115,14 @@ def test_unknown_and_original_terminal_failure_are_returned_without_raising_or_r
     replies = [
         reply({"outcome": "commit_unknown", "phase": "reconciling", "operation_id": OP,
                "recovery_required": True, "error": {"code": "RECOVERY_REQUIRED", "message": "fence", "retry_hint": "SameIdAfterReconcile"},
-               "recovery": {"attempt_id": "first", "publication_started": True}}, 503),
+               "recovery": {"store_id": CID, "collection_id": CID, "operation_id": OP,
+                            "payload_hash": A_HASH, "hash_version": 1, "attempt_id": OP,
+                            "base": {"store_id": CID, "collection_id": CID, "table_uuid": OP,
+                                     "metadata_location": f"store://{CID}/warehouse/initial.json",
+                                     "current_snapshot_id": None, "schema_id": 0, "spec_id": 0},
+                            "candidate_snapshot_id": None, "candidate_metadata_location": None,
+                            "first_error": {"code": "RECOVERY_REQUIRED", "message": "fence", "retry_hint": "SameIdAfterReconcile"},
+                            "publication_started": True, "lookup_blocked": False}}, 503),
         reply({"outcome": "definitely_not_committed", "phase": "validation", "operation_id": OP,
                "error": {"code": "RESOURCE_EXHAUSTED", "message": "original capacity", "retry_hint": "NewOperationId", "extra": {"keep": 1}}}, 429),
     ]
@@ -124,7 +131,7 @@ def test_unknown_and_original_terminal_failure_are_returned_without_raising_or_r
     with client_with(handler) as client:
         unknown = client.append(CID, [{"key": "a"}], operation_id=OP, schema=SCHEMA)
         assert unknown.outcome == "commit_unknown" and not unknown.terminal
-        assert unknown.raw["recovery"]["attempt_id"] == "first"
+        assert unknown.raw["recovery"]["attempt_id"] == OP
         original = client.find_append_outcome(CID, OP)
         assert original.outcome == "definitely_not_committed" and original.terminal
         assert original.error.raw["extra"] == {"keep": 1}

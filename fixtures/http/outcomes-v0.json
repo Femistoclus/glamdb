@@ -1,0 +1,566 @@
+{
+  "fixture_version": 1,
+  "api_version": "v0",
+  "provenance": "Hand-authored v1 preimages, scalar values and outcomes. SHA-256 computed with stdlib hashlib, without production imports. Synthetic receipts are serialization evidence, not durability evidence.",
+  "store_id": "10000000-0000-4000-8000-000000000001",
+  "collection_id": "00112233-4455-6677-8899-aabbccddeeff",
+  "table_uuid": "10000000-0000-4000-8000-000000000002",
+  "attempt_id": "10000000-0000-4000-8000-000000000003",
+  "exact_name": "outcome_fixture",
+  "schema": {
+    "fields": [
+      {
+        "field_id": 1,
+        "name": "key",
+        "type": "string",
+        "nullable": false
+      },
+      {
+        "field_id": 2,
+        "name": "n",
+        "type": "int64",
+        "nullable": true
+      },
+      {
+        "field_id": 3,
+        "name": "ts",
+        "type": "timestamp_us_utc",
+        "nullable": true
+      }
+    ]
+  },
+  "schema_canonical_hex": "434f4c554d4e41522d534348454d4100010003000100000003006b657901000200000001006e030103000000020074730501",
+  "schema_fingerprint": "1eb5cc14fec568f06fd36d0f02a78888fcc348174626b71a2b5deb19d6b88c5d",
+  "appends": {
+    "a": {
+      "operation_id": "10000000-0000-4000-8000-000000000004",
+      "rows": [
+        {
+          "key": "same",
+          "n": "9007199254740993",
+          "ts": "2026-01-01T00:00:00.123456Z"
+        },
+        {
+          "key": "same",
+          "n": null,
+          "ts": null
+        },
+        {
+          "key": "same",
+          "n": "9007199254740993",
+          "ts": "2026-01-01T00:00:00.123456Z"
+        }
+      ],
+      "canonical_hex": "434f4c554d4e41522d415050454e4400010000112233445566778899aabbccddeeff1eb5cc14fec568f06fd36d0f02a78888fcc348174626b71a2b5deb19d6b88c5d0300000000000000010400000073616d65010100000000002000014022224648470600010400000073616d650000010400000073616d65010100000000002000014022224648470600",
+      "payload_hash": "17543a095056779caf7c592f8d8d151a97a2a5292d20dc7ea4307dd828ee27aa"
+    },
+    "b": {
+      "operation_id": "10000000-0000-4000-8000-000000000005",
+      "rows": [
+        {
+          "key": "later",
+          "n": "-9223372036854775808",
+          "ts": "0001-01-01T00:00:00.000001Z"
+        }
+      ],
+      "canonical_hex": "434f4c554d4e41522d415050454e4400010000112233445566778899aabbccddeeff1eb5cc14fec568f06fd36d0f02a78888fcc348174626b71a2b5deb19d6b88c5d010000000000000001050000006c61746572010000000000000080010140d400014023ff",
+      "payload_hash": "4f55358952e5b74f2c1e3c6eec192e06101e4f85b62631ae290e4b838f61ca9d"
+    }
+  },
+  "cases": [
+    {
+      "name": "committed",
+      "kind": "append",
+      "request": "a",
+      "status": 200,
+      "response": {
+        "outcome": "committed",
+        "phase": "complete",
+        "operation_id": "10000000-0000-4000-8000-000000000004",
+        "result": {
+          "collection_id": "00112233-4455-6677-8899-aabbccddeeff",
+          "operation_id": "10000000-0000-4000-8000-000000000004",
+          "payload_hash": "17543a095056779caf7c592f8d8d151a97a2a5292d20dc7ea4307dd828ee27aa",
+          "hash_version": 1,
+          "snapshot_id": "9007199254740993",
+          "parent_snapshot_id": null,
+          "rows_appended": "3",
+          "data_files_added": "1",
+          "compressed_data_bytes_added": "123",
+          "snapshot_created_at_us": "1767225600123000",
+          "durability_profile": "local-delete-extra-v1",
+          "receipt_version": 1
+        }
+      }
+    },
+    {
+      "name": "pre_binding_rejection",
+      "kind": "append",
+      "request": "a",
+      "status": 400,
+      "response": {
+        "outcome": "definitely_not_committed",
+        "phase": "validation",
+        "operation_id": "10000000-0000-4000-8000-000000000004",
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "message": "input rejected before binding",
+          "retry_hint": "FixInput"
+        }
+      }
+    },
+    {
+      "name": "registered_failure",
+      "kind": "append",
+      "request": "a",
+      "status": 503,
+      "response": {
+        "outcome": "definitely_not_committed",
+        "phase": "data",
+        "operation_id": "10000000-0000-4000-8000-000000000004",
+        "error": {
+          "code": "IO_ERROR",
+          "message": "data file sync failed",
+          "retry_hint": "OperatorAction"
+        }
+      }
+    },
+    {
+      "name": "unknown_publication",
+      "kind": "append",
+      "request": "a",
+      "status": 503,
+      "response": {
+        "outcome": "commit_unknown",
+        "phase": "catalog_commit",
+        "operation_id": "10000000-0000-4000-8000-000000000004",
+        "error": {
+          "code": "IO_ERROR",
+          "message": "outer COMMIT result lost",
+          "retry_hint": "SameIdAfterReconcile"
+        },
+        "recovery_required": true,
+        "recovery": {
+          "store_id": "10000000-0000-4000-8000-000000000001",
+          "collection_id": "00112233-4455-6677-8899-aabbccddeeff",
+          "operation_id": "10000000-0000-4000-8000-000000000004",
+          "payload_hash": "17543a095056779caf7c592f8d8d151a97a2a5292d20dc7ea4307dd828ee27aa",
+          "hash_version": 1,
+          "base": {
+            "store_id": "10000000-0000-4000-8000-000000000001",
+            "collection_id": "00112233-4455-6677-8899-aabbccddeeff",
+            "table_uuid": "10000000-0000-4000-8000-000000000002",
+            "metadata_location": "store://10000000-0000-4000-8000-000000000001/warehouse/00112233-4455-6677-8899-aabbccddeeff/metadata/initial.json",
+            "current_snapshot_id": null,
+            "schema_id": 0,
+            "spec_id": 0
+          },
+          "attempt_id": "10000000-0000-4000-8000-000000000003",
+          "candidate_snapshot_id": "9007199254740993",
+          "candidate_metadata_location": "store://10000000-0000-4000-8000-000000000001/warehouse/00112233-4455-6677-8899-aabbccddeeff/metadata/a.json",
+          "first_error": {
+            "code": "IO_ERROR",
+            "message": "outer COMMIT result lost",
+            "retry_hint": "SameIdAfterReconcile"
+          },
+          "publication_started": true,
+          "lookup_blocked": false
+        }
+      }
+    },
+    {
+      "name": "blocked_lookup",
+      "kind": "lookup",
+      "request": "a",
+      "status": 503,
+      "response": {
+        "outcome": "commit_unknown",
+        "phase": "reconciling",
+        "operation_id": "10000000-0000-4000-8000-000000000004",
+        "error": {
+          "code": "RECOVERY_REQUIRED",
+          "message": "authoritative lookup is blocked",
+          "retry_hint": "SameIdAfterReconcile"
+        },
+        "recovery_required": true,
+        "recovery": {
+          "store_id": "10000000-0000-4000-8000-000000000001",
+          "collection_id": "00112233-4455-6677-8899-aabbccddeeff",
+          "operation_id": "10000000-0000-4000-8000-000000000004",
+          "payload_hash": "17543a095056779caf7c592f8d8d151a97a2a5292d20dc7ea4307dd828ee27aa",
+          "hash_version": 1,
+          "base": {
+            "store_id": "10000000-0000-4000-8000-000000000001",
+            "collection_id": "00112233-4455-6677-8899-aabbccddeeff",
+            "table_uuid": "10000000-0000-4000-8000-000000000002",
+            "metadata_location": "store://10000000-0000-4000-8000-000000000001/warehouse/00112233-4455-6677-8899-aabbccddeeff/metadata/b.json",
+            "current_snapshot_id": "9007199254740995",
+            "schema_id": 0,
+            "spec_id": 0
+          },
+          "attempt_id": "10000000-0000-4000-8000-000000000003",
+          "candidate_snapshot_id": null,
+          "candidate_metadata_location": null,
+          "first_error": {
+            "code": "RECOVERY_REQUIRED",
+            "message": "authoritative lookup is blocked",
+            "retry_hint": "SameIdAfterReconcile"
+          },
+          "publication_started": false,
+          "lookup_blocked": true
+        }
+      }
+    },
+    {
+      "name": "lost_create",
+      "kind": "create",
+      "status": 503,
+      "response": {
+        "outcome": "commit_unknown",
+        "phase": "catalog_commit",
+        "error": {
+          "code": "IO_ERROR",
+          "message": "create COMMIT result lost",
+          "retry_hint": "SameIdAfterReconcile"
+        },
+        "recovery_required": true,
+        "recovery": {
+          "store_id": "10000000-0000-4000-8000-000000000001",
+          "collection_id": "00112233-4455-6677-8899-aabbccddeeff",
+          "exact_name": "outcome_fixture",
+          "schema_hash": "1eb5cc14fec568f06fd36d0f02a78888fcc348174626b71a2b5deb19d6b88c5d",
+          "attempt_id": "10000000-0000-4000-8000-000000000003",
+          "candidate_table_uuid": "10000000-0000-4000-8000-000000000002",
+          "candidate_metadata_location": null,
+          "publication_started": true
+        }
+      }
+    },
+    {
+      "name": "committed_b",
+      "kind": "append",
+      "request": "b",
+      "status": 200,
+      "response": {
+        "outcome": "committed",
+        "phase": "complete",
+        "operation_id": "10000000-0000-4000-8000-000000000005",
+        "result": {
+          "collection_id": "00112233-4455-6677-8899-aabbccddeeff",
+          "operation_id": "10000000-0000-4000-8000-000000000005",
+          "payload_hash": "4f55358952e5b74f2c1e3c6eec192e06101e4f85b62631ae290e4b838f61ca9d",
+          "hash_version": 1,
+          "snapshot_id": "9007199254740995",
+          "parent_snapshot_id": "9007199254740993",
+          "rows_appended": "1",
+          "data_files_added": "1",
+          "compressed_data_bytes_added": "124",
+          "snapshot_created_at_us": "1767225600123000",
+          "durability_profile": "local-delete-extra-v1",
+          "receipt_version": 1
+        }
+      }
+    },
+    {
+      "name": "retry_a_after_b",
+      "kind": "append",
+      "request": "a",
+      "status": 200,
+      "response": {
+        "outcome": "committed",
+        "phase": "complete",
+        "operation_id": "10000000-0000-4000-8000-000000000004",
+        "result": {
+          "collection_id": "00112233-4455-6677-8899-aabbccddeeff",
+          "operation_id": "10000000-0000-4000-8000-000000000004",
+          "payload_hash": "17543a095056779caf7c592f8d8d151a97a2a5292d20dc7ea4307dd828ee27aa",
+          "hash_version": 1,
+          "snapshot_id": "9007199254740993",
+          "parent_snapshot_id": null,
+          "rows_appended": "3",
+          "data_files_added": "1",
+          "compressed_data_bytes_added": "123",
+          "snapshot_created_at_us": "1767225600123000",
+          "durability_profile": "local-delete-extra-v1",
+          "receipt_version": 1
+        }
+      }
+    }
+  ],
+  "invalid_recovery": [
+    {
+      "name": "unknown_publication_missing_recovery",
+      "case": "unknown_publication",
+      "remove": "/recovery"
+    },
+    {
+      "name": "unknown_publication_missing_recovery_store_id",
+      "case": "unknown_publication",
+      "remove": "/recovery/store_id"
+    },
+    {
+      "name": "unknown_publication_missing_recovery_collection_id",
+      "case": "unknown_publication",
+      "remove": "/recovery/collection_id"
+    },
+    {
+      "name": "unknown_publication_missing_recovery_operation_id",
+      "case": "unknown_publication",
+      "remove": "/recovery/operation_id"
+    },
+    {
+      "name": "unknown_publication_missing_recovery_payload_hash",
+      "case": "unknown_publication",
+      "remove": "/recovery/payload_hash"
+    },
+    {
+      "name": "unknown_publication_missing_recovery_hash_version",
+      "case": "unknown_publication",
+      "remove": "/recovery/hash_version"
+    },
+    {
+      "name": "unknown_publication_missing_recovery_base",
+      "case": "unknown_publication",
+      "remove": "/recovery/base"
+    },
+    {
+      "name": "unknown_publication_missing_recovery_attempt_id",
+      "case": "unknown_publication",
+      "remove": "/recovery/attempt_id"
+    },
+    {
+      "name": "unknown_publication_missing_recovery_candidate_snapshot_id",
+      "case": "unknown_publication",
+      "remove": "/recovery/candidate_snapshot_id"
+    },
+    {
+      "name": "unknown_publication_missing_recovery_candidate_metadata_location",
+      "case": "unknown_publication",
+      "remove": "/recovery/candidate_metadata_location"
+    },
+    {
+      "name": "unknown_publication_missing_recovery_first_error",
+      "case": "unknown_publication",
+      "remove": "/recovery/first_error"
+    },
+    {
+      "name": "unknown_publication_missing_recovery_publication_started",
+      "case": "unknown_publication",
+      "remove": "/recovery/publication_started"
+    },
+    {
+      "name": "unknown_publication_missing_recovery_lookup_blocked",
+      "case": "unknown_publication",
+      "remove": "/recovery/lookup_blocked"
+    },
+    {
+      "name": "lost_create_missing_recovery",
+      "case": "lost_create",
+      "remove": "/recovery"
+    },
+    {
+      "name": "lost_create_missing_recovery_store_id",
+      "case": "lost_create",
+      "remove": "/recovery/store_id"
+    },
+    {
+      "name": "lost_create_missing_recovery_collection_id",
+      "case": "lost_create",
+      "remove": "/recovery/collection_id"
+    },
+    {
+      "name": "lost_create_missing_recovery_exact_name",
+      "case": "lost_create",
+      "remove": "/recovery/exact_name"
+    },
+    {
+      "name": "lost_create_missing_recovery_schema_hash",
+      "case": "lost_create",
+      "remove": "/recovery/schema_hash"
+    },
+    {
+      "name": "lost_create_missing_recovery_attempt_id",
+      "case": "lost_create",
+      "remove": "/recovery/attempt_id"
+    },
+    {
+      "name": "lost_create_missing_recovery_candidate_table_uuid",
+      "case": "lost_create",
+      "remove": "/recovery/candidate_table_uuid"
+    },
+    {
+      "name": "lost_create_missing_recovery_candidate_metadata_location",
+      "case": "lost_create",
+      "remove": "/recovery/candidate_metadata_location"
+    },
+    {
+      "name": "lost_create_missing_recovery_publication_started",
+      "case": "lost_create",
+      "remove": "/recovery/publication_started"
+    },
+    {
+      "name": "missing_base_store_id",
+      "case": "unknown_publication",
+      "remove": "/recovery/base/store_id"
+    },
+    {
+      "name": "missing_base_collection_id",
+      "case": "unknown_publication",
+      "remove": "/recovery/base/collection_id"
+    },
+    {
+      "name": "missing_base_table_uuid",
+      "case": "unknown_publication",
+      "remove": "/recovery/base/table_uuid"
+    },
+    {
+      "name": "missing_base_metadata_location",
+      "case": "unknown_publication",
+      "remove": "/recovery/base/metadata_location"
+    },
+    {
+      "name": "missing_base_current_snapshot_id",
+      "case": "unknown_publication",
+      "remove": "/recovery/base/current_snapshot_id"
+    },
+    {
+      "name": "missing_base_schema_id",
+      "case": "unknown_publication",
+      "remove": "/recovery/base/schema_id"
+    },
+    {
+      "name": "missing_base_spec_id",
+      "case": "unknown_publication",
+      "remove": "/recovery/base/spec_id"
+    },
+    {
+      "name": "wrong_collection",
+      "case": "unknown_publication",
+      "path": "/recovery/collection_id",
+      "value": "10000000-0000-4000-8000-000000000002"
+    },
+    {
+      "name": "wrong_operation",
+      "case": "unknown_publication",
+      "path": "/recovery/operation_id",
+      "value": "10000000-0000-4000-8000-000000000005"
+    },
+    {
+      "name": "wrong_hash",
+      "case": "unknown_publication",
+      "path": "/recovery/payload_hash",
+      "value": "0000000000000000000000000000000000000000000000000000000000000000",
+      "clients": [
+        "python"
+      ]
+    },
+    {
+      "name": "unsupported_hash",
+      "case": "unknown_publication",
+      "path": "/recovery/hash_version",
+      "value": 2
+    },
+    {
+      "name": "wrong_base_store",
+      "case": "unknown_publication",
+      "path": "/recovery/base/store_id",
+      "value": "10000000-0000-4000-8000-000000000002"
+    },
+    {
+      "name": "wrong_base_collection",
+      "case": "unknown_publication",
+      "path": "/recovery/base/collection_id",
+      "value": "10000000-0000-4000-8000-000000000002"
+    },
+    {
+      "name": "unsafe_snapshot_number",
+      "case": "unknown_publication",
+      "path": "/recovery/candidate_snapshot_id",
+      "value": 9007199254740993
+    },
+    {
+      "name": "invalid_attempt_uuid",
+      "case": "unknown_publication",
+      "path": "/recovery/attempt_id",
+      "value": "missing"
+    },
+    {
+      "name": "invalid_first_error",
+      "case": "unknown_publication",
+      "path": "/recovery/first_error",
+      "value": {}
+    },
+    {
+      "name": "invalid_publication_flag",
+      "case": "unknown_publication",
+      "path": "/recovery/publication_started",
+      "value": "true"
+    },
+    {
+      "name": "blocked_publication",
+      "case": "blocked_lookup",
+      "path": "/recovery/publication_started",
+      "value": true
+    },
+    {
+      "name": "blocked_candidate",
+      "case": "blocked_lookup",
+      "path": "/recovery/candidate_snapshot_id",
+      "value": "9007199254740993"
+    },
+    {
+      "name": "wrong_create_collection",
+      "case": "lost_create",
+      "path": "/recovery/collection_id",
+      "value": "10000000-0000-4000-8000-000000000002"
+    },
+    {
+      "name": "wrong_exact_name",
+      "case": "lost_create",
+      "path": "/recovery/exact_name",
+      "value": "another_name"
+    },
+    {
+      "name": "wrong_schema_hash",
+      "case": "lost_create",
+      "path": "/recovery/schema_hash",
+      "value": "0000000000000000000000000000000000000000000000000000000000000000",
+      "clients": [
+        "python"
+      ]
+    },
+    {
+      "name": "invalid_create_table",
+      "case": "lost_create",
+      "path": "/recovery/candidate_table_uuid",
+      "value": "missing"
+    }
+  ],
+  "retry_sequence": [
+    "a",
+    "b",
+    "a"
+  ],
+  "expected_latest_rows": [
+    {
+      "key": "same",
+      "n": "9007199254740993",
+      "ts": "2026-01-01T00:00:00.123456Z"
+    },
+    {
+      "key": "same",
+      "n": null,
+      "ts": null
+    },
+    {
+      "key": "same",
+      "n": "9007199254740993",
+      "ts": "2026-01-01T00:00:00.123456Z"
+    },
+    {
+      "key": "later",
+      "n": "-9223372036854775808",
+      "ts": "0001-01-01T00:00:00.000001Z"
+    }
+  ]
+}

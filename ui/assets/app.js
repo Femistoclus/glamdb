@@ -937,6 +937,8 @@ async function appendForm(form) {
         if (state.api === api && operation && !operation.terminal) {
             saveOutcome(operation, { outcome: 'transport_unknown' });
             showAppendOutcome(operation, { outcome: 'commit_unknown', recovery_required: true });
+            button.textContent = 'Retry same operation';
+            form.elements.rows.readOnly = true;
         }
         if (form.isConnected) form.querySelector('#modal-error').textContent = error.message;
     } finally {
