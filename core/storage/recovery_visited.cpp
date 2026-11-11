@@ -18,8 +18,10 @@ constexpr std::size_t MaxPathBytes = 2048;
 
 iceberg::Status SqliteError(int code)
 {
-    if ((code & 255) == SQLITE_FULL) {
-        return iceberg::IOError("CAPACITY_EXCEEDED: Recovery visited workspace is full (SQLite {}).", code);
+    if ((code & 255) == SQLITE_FULL || (code & 255) == SQLITE_NOMEM) {
+        return iceberg::IOError("{}CAPACITY_EXCEEDED: Recovery visited workspace is full (SQLite {}).",
+            ResourcePrefix,
+            code);
     }
     return iceberg::IOError("Recovery visited workspace failed (SQLite {}): {}.", code, sqlite3_errstr(code));
 }

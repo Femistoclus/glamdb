@@ -154,9 +154,12 @@ Result<size_t> InputReservation(const SchemaSpec& schema,
 {
     try {
         const auto shape = Inspect(schema, batches);
-        // Includes both normalization copies, canonical string growth and STL
-        // cells, including tiny/null values whose buffers alone undercount RAM.
-        return shape.decoded_bytes * 5 + shape.rows * (sizeof(Row) + schema.fields.size() * sizeof(Cell)) * 2 + 65536;
+        // Payload bytes: the owned rows, the canonical string while hashing and
+        // the Arrow batch with builder growth (4 copies). STL cells, including
+        // tiny/null values whose buffers alone undercount RAM, exist once;
+        // row headers twice while the extracted rows are moved into the
+        // normalized input.
+        return shape.decoded_bytes * 4 + shape.rows * (sizeof(Row) * 2 + schema.fields.size() * sizeof(Cell)) + 65536;
     } catch (const Failure& error) {
         auto detail = error.detail;
         detail.retry_hint = RetryHint::FixInput;
@@ -255,7 +258,7 @@ Result<NormalizedInput> NormalizeBatches(const SchemaSpec& schema,
                 rows.push_back(std::move(row));
             }
         }
-        return NormalizeRows(schema, collection_id, rows);
+        return NormalizeOwnedRows(schema, collection_id, std::move(rows));
     } catch (const Failure& error) {
         auto detail = error.detail;
         detail.retry_hint = RetryHint::FixInput;

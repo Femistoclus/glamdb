@@ -70,7 +70,7 @@ def normalize_schema(schema: dict) -> dict:
         if not isinstance(field, dict) or set(field) - {"field_id", "name", "type", "nullable"}:
             raise ValueError("invalid field specification")
         name, kind, nullable = field.get("name"), field.get("type"), field.get("nullable", False)
-        if not isinstance(name, str) or not name or len(_utf8(name, "field name")) > 128 or name in names:
+        if not isinstance(name, str) or not name or "\0" in name or len(_utf8(name, "field name")) > 128 or name in names:
             raise ValueError("field names must be unique, nonempty and at most 128 UTF-8 bytes")
         if not isinstance(kind, str) or kind not in TYPE_IDS or type(nullable) is not bool:
             raise ValueError("invalid field type or nullable flag")

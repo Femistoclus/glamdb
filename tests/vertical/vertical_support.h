@@ -201,7 +201,7 @@ public:
     { }
 
     static detail::BackendFactory Factory(std::shared_ptr<THookBackend>& slot,
-        detail::TLocalStorageOptions options = {})
+        const detail::TLocalStorageOptions& options = {})
     {
         return [&slot, options](const std::filesystem::path& path,
                    const StoreInfo& info) -> Result<std::shared_ptr<detail::StorageBackend>> {

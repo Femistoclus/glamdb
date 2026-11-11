@@ -44,6 +44,9 @@ std::unexpected<iceberg::Error> Failure(std::error_code error, std::string_view 
         kind = iceberg::ErrorKind::kNotAllowed;
     }
     std::string message = kind == iceberg::ErrorKind::kInvalid ? std::string(CorruptionPrefix) : std::string();
+    if (error == std::errc::not_enough_memory) {
+        message = std::string(ResourcePrefix);
+    }
     message += std::string(path) + ": " + error.message();
     return std::unexpected(iceberg::Error{kind, std::move(message)});
 }

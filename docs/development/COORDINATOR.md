@@ -43,7 +43,11 @@ deletion in this MVP.
   optional snapshot, schema and partition-spec IDs. Retrying identical content
   returns the original terminal result before evaluating a new precondition,
   reserving owned input or admitting another operation. Different content
-  conflicts. Arrow input errors use `FixInput`. A bound operation that fails
+  conflicts: the public API rejects that request as `DefinitelyNotCommitted`
+  with `OPERATION_CONFLICT`, which describes only the conflicting request, not
+  the bound operation (which may be committed or unknown). Outcome JSON
+  therefore emits it as a plain HTTP 409 error envelope without `outcome`.
+  Arrow input errors use `FixInput`. A bound operation that fails
   with `RESOURCE_EXHAUSTED`, `CORRUPTION` or `UNSUPPORTED_STORE_VERSION` keeps
   its permanent failed outcome with `OperatorAction`; other bound failures use
   `NewOperationId`.
@@ -64,6 +68,10 @@ deletion in this MVP.
   validates retained storage in both directions, and commits a real fence
   increment before resolving unfinished bindings. It never replays payloads.
   Missing/corrupt committed state fails closed.
+- The pending-call budget counts every admitted append, including the call
+  that holds the writer; that call is counted when it acquires the writer,
+  before its outcome lookup, so it is never refused definitely while a queued
+  call with the same ID can still publish.
 - Writer timeout or pending-call exhaustion first attempts a nonblocking lookup
   of an authoritative terminal outcome. It never reads through a tentative
   catalog transaction. If the lookup cannot resolve the original operation,
@@ -90,7 +98,9 @@ catalog pages, 16 pending calls and 128 MiB aggregate owned input. Per append:
 10,000 rows, 16 MiB canonical input, 2 MiB per row, 1 MiB per string and 1024
 bytes per key. Writer wait is at most five seconds; append deadline at most
 60 seconds. Configuration may lower these bounds. These are admission limits,
-not measured simultaneous RSS or full-storage capacity guarantees.
+not measured simultaneous RSS or full-storage capacity guarantees. All limits,
+including the catalog limits, are validated before `CreateStore` creates the
+root, so a rejected configuration leaves the root and store UUID reusable.
 
 ## Storage backend integration
 
@@ -117,7 +127,9 @@ integers. Append replies carry complete receipt/recovery fields. Unknown is
 HTTP 503 with `SameIdAfterReconcile`. Create success is a direct collection
 object, including `current_snapshot_id`, ordered `field_id` values and append
 mode, matching the SDK/UI contract in
-[PR #4](https://github.com/glamourdb/glamdb/pull/4).
+[PR #4](https://github.com/glamourdb/glamdb/pull/4). An `OPERATION_CONFLICT`
+append is the plain error envelope `{"error":{...}}` with HTTP 409, as in the
+mock contract; clients raise it instead of returning a terminal outcome.
 
 Recommended client adjustments:
 

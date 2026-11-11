@@ -181,15 +181,26 @@ std::error_code TStoreDirs::RemoveMetadataFile(const TStoreUri& location) const
 
 std::error_code TStoreDirs::CheckIdentity() const
 {
+    // Evidence that the path no longer names this store blocks writes until
+    // reopen. Other failures, such as descriptor or memory exhaustion, fail
+    // only this call; EIO and EROFS still latch like any write-path syscall.
+    const auto fail = [this](std::error_code error) {
+        if (error == std::errc::no_such_file_or_directory || error == std::errc::not_a_directory ||
+            error == std::errc::too_many_symbolic_link_levels)
+        {
+            Latch_->Block();
+        } else {
+            Latch_->Observe(error);
+        }
+        return error;
+    };
     auto current = Fs_->OpenDir(Path_);
     if (!current) {
-        Latch_->Block();
-        return current.Error();
+        return fail(current.Error());
     }
     auto identity = Fs_->Stat(current.Value());
     if (!identity) {
-        Latch_->Block();
-        return identity.Error();
+        return fail(identity.Error());
     }
     if (identity.Value().Device != Identity_.Device || identity.Value().Inode != Identity_.Inode) {
         Latch_->Block();
