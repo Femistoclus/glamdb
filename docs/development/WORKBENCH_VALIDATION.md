@@ -198,12 +198,14 @@ binary path or modified vendor code is committed. Starlette's TestClient warns
 about deprecated httpx support; Node26 emits upstream deprecation/color warnings.
 They remain visible and do not fail the checks.
 
-The following remain **NOT RUN / NOT VALIDATED**: native Parquet/Iceberg/SQLite
-integration, physical manifests/metrics/pruning, real create/close/reopen and
-recovery, C++ retained-buffer lifetime/capacity/ingestion qualification,
-full SQLite-image fault modeling, native process-crash campaigns, qualified
-Linux/ext4 power cuts, S3 and KV/COW/compaction. No destructive test was run on
-the user's volume. The mock and simplified model cannot establish these claims.
+This client report did not run native Parquet/Iceberg/SQLite integration, real
+create/close/reopen and recovery, or C++ retained-buffer lifetime tests. Native
+suites added later cover them; see the [roadmap status](../ROADMAP.md#current-status).
+The following remain **NOT RUN / NOT VALIDATED**: physical manifest
+metrics and pruning, capacity/ingestion qualification, full SQLite-image fault
+modeling, native process-crash campaigns, qualified Linux/ext4 power cuts, S3 and
+KV/COW/compaction. No destructive test was run on the user's volume. The mock
+and simplified model cannot establish these claims.
 
 See the [workbench guide](WORKBENCH.md) for reproducible commands and the
 [roadmap](../ROADMAP.md) for the remaining product milestones.

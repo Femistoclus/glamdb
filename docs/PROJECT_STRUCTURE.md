@@ -93,14 +93,17 @@ glamdb/
 | `docs/ROADMAP.md` | Implementation stages, prerequisites, and acceptance evidence. |
 | `third_party/` | Pinned upstream submodules and the direct dependency lock. |
 
-The tree contains the catalog/coordinator MVP, independent storage primitives,
-and a storage backend plus minimal scanner connecting them
-([SCANNER.md](development/SCANNER.md)); the latter are not yet validated
-against the pinned Iceberg build. Client and verification code uses an explicit disposable
-mock seam. Read [the module handoff](development/STORAGE_MODULE.md) for storage
-APIs and tests, [ARCHITECTURE.md](ARCHITECTURE.md) for engine responsibilities,
-[ROADMAP.md](ROADMAP.md) for remaining acceptance evidence, and
-[the workbench guide](development/WORKBENCH.md) for runnable client paths.
+The tree contains the catalog/coordinator, independent storage primitives, and
+the production storage backend plus minimal scanner connecting them
+([SCANNER.md](development/SCANNER.md)), tested against the pinned Arrow,
+Parquet, Iceberg and SQLite dependencies. The native HTTP server and network CLI
+([HTTP_SERVER.md](development/HTTP_SERVER.md)) serve that engine to the SDK and
+workbench; the disposable mock remains a separate development profile. Read
+[the module handoff](development/STORAGE_MODULE.md) for storage APIs and tests,
+[ARCHITECTURE.md](ARCHITECTURE.md) for engine responsibilities,
+[ROADMAP.md](ROADMAP.md#current-status) for current and remaining acceptance
+evidence, and [the workbench guide](development/WORKBENCH.md) for runnable
+client paths.
 
 Generated files belong in ignored `build/`, `.deps/`, and `artifacts/` directories.
 

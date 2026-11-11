@@ -168,16 +168,17 @@ See [WORKBENCH_VALIDATION.md](WORKBENCH_VALIDATION.md) for executed results,
 The simplified model assumes atomic durable catalog commit and cannot close
 the full SQLite/power-loss qualification gate.
 
-## Handoff to the actual engine
+## Remaining engine integration
 
-Replace the provisional HTTP mock with an adapter over the single C++ write
-authority. Preserve caller identities, precise scalar encoding, immutable
-receipts, all three outcomes, fixed-view cursors and context-managed stream
-ownership. Reuse the independent golden fixtures against actual C++ outputs;
-the mock deliberately reuses the row oracle, so it is not an independent test
-of a native scanner. Implement actual file/row-group metadata and report only
-supported pruning. Run fresh-process reopen, full fault and physical power-loss
-campaigns before making durability claims.
+The [native HTTP server](HTTP_SERVER.md) is the adapter over the single C++
+write authority; keep preserving caller identities, precise scalar encoding,
+immutable receipts, all three outcomes, fixed-view cursors and context-managed
+stream ownership there. The mock deliberately reuses the row oracle, so it is
+not an independent test of the native scanner; compare native outputs with the
+independent golden fixtures instead. Snapshot history, file/row-group metadata,
+explain and pruning still need public core methods before the Snapshots,
+Storage and Explain views can show native data. Full fault and physical
+power-loss campaigns are still required before any durability claim.
 
 See the [architecture](../ARCHITECTURE.md), [roadmap](../ROADMAP.md) and
 [validation report](WORKBENCH_VALIDATION.md) for supported behavior and the
