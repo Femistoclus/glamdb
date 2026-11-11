@@ -87,11 +87,17 @@ ExternalProject_Add(glamdb_sqlite
     INSTALL_COMMAND "${CMAKE_COMMAND}" --install <BINARY_DIR>
 )
 
+# Iceberg builds from a patched copy of the pinned submodule; see patches/iceberg-cpp.
+file(GLOB iceberg_patches LIST_DIRECTORIES false "${CMAKE_CURRENT_SOURCE_DIR}/patches/iceberg-cpp/*.patch")
 ExternalProject_Add(glamdb_iceberg
     DEPENDS glamdb_arrow glamdb_sqlite
-    SOURCE_DIR "${PROJECT_SOURCE_DIR}/third_party/iceberg-cpp"
+    SOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/iceberg-src"
     BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/iceberg"
-    DOWNLOAD_COMMAND ""
+    DOWNLOAD_COMMAND "${CMAKE_COMMAND}"
+        "-DSOURCE=${PROJECT_SOURCE_DIR}/third_party/iceberg-cpp"
+        "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/iceberg-src"
+        "-DPATCH_DIR=${CMAKE_CURRENT_SOURCE_DIR}/patches/iceberg-cpp"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/PrepareSource.cmake"
     UPDATE_COMMAND ""
     STEP_TARGETS configure
     CMAKE_ARGS ${dependency_args}
@@ -115,3 +121,6 @@ ExternalProject_Add(glamdb_iceberg
         -DICEBERG_S3=OFF
     BUILD_COMMAND "${CMAKE_COMMAND}" --build <BINARY_DIR> --parallel ${GLAMDB_DEPENDENCY_JOBS}
 )
+# Re-copy and re-patch the source when a recorded patch or the copy script changes.
+ExternalProject_Add_StepDependencies(glamdb_iceberg download
+    "${CMAKE_CURRENT_SOURCE_DIR}/PrepareSource.cmake" ${iceberg_patches})

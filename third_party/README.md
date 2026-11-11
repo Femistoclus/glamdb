@@ -79,7 +79,13 @@ file I/O, writer and scanner work. See the
   buffer ownership requirements.
 
 If an interface needs a patch, keep it narrow, pin the affected revision, and
-repeat the relevant experiment. Preserve the required semantics rather than
+repeat the relevant experiment. Patches live in
+`cmake/dependencies/patches/<dependency>/` with the pinned revision and the
+reason in their header; `cmake/dependencies/PrepareSource.cmake` copies the
+submodule into the build tree and applies them, so the submodule stays clean.
+The CI dependency cache key covers these files. Current patches:
+`iceberg-cpp/0001-build-json-lists-and-maps-linearly.patch` (table metadata
+JSON serialization was quadratic in retained snapshots). Preserve the required semantics rather than
 silently changing catalog type or weakening the commit boundary. Record the
 SQLite source/build/VFS and complete toolchain with integration results; the
 direct dependency lock alone is not that evidence.
