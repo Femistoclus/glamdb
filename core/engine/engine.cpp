@@ -362,42 +362,47 @@ struct Engine::Impl
         return *it;
     }
 
-    // After a committed append replaced `superseded` in confirmed_views: remove
-    // its root now, or when the last scan that resolved it has finished planning.
+    // Writer only. After a committed append replaced `superseded` in
+    // confirmed_views: queue its root and remove every queued root that no
+    // planning scan still holds. Removal stays on the writer because capacity
+    // preflight walks the warehouse on the writer, and a file unlinked between
+    // that walk's readdir and fstatat would fail it as corruption.
     void RetireRoot(const BaseIdentity& superseded)
     {
         {
             std::lock_guard lock(state_mutex);
-            if (root_readers.contains(superseded.metadata_location)) {
-                retired_roots.push_back(superseded);
-                return;
-            }
+            retired_roots.push_back(superseded);
+        }
+        RemoveReleasedRoots();
+    }
+
+    // Writer only (append or shutdown holds `writer`).
+    void RemoveReleasedRoots()
+    {
+        std::vector<BaseIdentity> released;
+        {
+            std::lock_guard lock(state_mutex);
+            const auto unleased = std::ranges::partition(retired_roots, [&](const auto& item) {
+                return root_readers.contains(item.metadata_location);
+            });
+            released.assign(unleased.begin(), unleased.end());
+            retired_roots.erase(unleased.begin(), unleased.end());
         }
         if (backend) {
-            backend->RetireRoot(superseded);
+            for (const auto& superseded : released) {
+                backend->RetireRoot(superseded);
+            }
         }
     }
 
+    // A scan finished planning from `location`. Only the lease ends here: the
+    // root, if superseded, is removed by the next writer that retires roots.
     void ReleaseRoot(const std::string& location)
     {
-        std::vector<BaseIdentity> ready_to_remove;
-        {
-            std::lock_guard lock(state_mutex);
-            const auto reader = root_readers.find(location);
-            if (reader == root_readers.end() || --reader->second != 0) {
-                return;
-            }
+        std::lock_guard lock(state_mutex);
+        const auto reader = root_readers.find(location);
+        if (reader != root_readers.end() && --reader->second == 0) {
             root_readers.erase(reader);
-            const auto retired = std::ranges::partition(retired_roots, [&](const auto& item) {
-                return item.metadata_location != location;
-            });
-            ready_to_remove.assign(retired.begin(), retired.end());
-            retired_roots.erase(retired.begin(), retired.end());
-        }
-        if (backend) {
-            for (const auto& superseded : ready_to_remove) {
-                backend->RetireRoot(superseded);
-            }
         }
     }
 
@@ -1304,6 +1309,8 @@ Status Engine::Shutdown(std::chrono::milliseconds timeout)
         if (!ready) {
             impl->Recover(true);
         }
+        // Roots whose scans finished after the last append.
+        impl->RemoveReleasedRoots();
         impl->catalog->Close();
         std::lock_guard state_lock(impl->state_mutex);
         impl->ready = false;

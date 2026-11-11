@@ -53,7 +53,11 @@ ready backend remain for coordinator tests.
   closes readiness.
 - After a committed append the backend removes the superseded root
   (`RetireRoot`). The engine defers it while a scan that resolved that root is
-  still planning; a root that cannot be removed remains an orphan.
+  still planning; a root that cannot be removed remains an orphan. Removal
+  runs only on the writer (after the next committed append, or at shutdown):
+  capacity preflight walks the warehouse on the writer, and a root unlinked
+  mid-walk would fail that walk as corruption. A finishing scan only ends its
+  lease.
 - Corruption reports and publication are ordered by the engine's commit gate.
   The writer takes it immediately before the guard's final health decision and
   holds it through the outer `COMMIT`; a reader that detects corruption takes

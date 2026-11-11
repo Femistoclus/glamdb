@@ -1,5 +1,6 @@
 // Superseded metadata roots are removed after a confirmed publication, but
-// never while a scan that resolved them is still planning.
+// never while a scan that resolved them is still planning, and only by the
+// writer, which also walks the warehouse for capacity preflight.
 
 #include "tests/vertical/vertical_support.h"
 
@@ -18,7 +19,8 @@ using namespace std::chrono_literals;
 using namespace glamdb::vertical;
 namespace NIO = NGlamDB::NIO;
 
-// Delegates to POSIX and can hold one thread inside its next root open.
+// Delegates to POSIX and can hold one thread inside its next root open, and
+// the next warehouse walk at its start.
 class TRootGateFS final : public NIO::ILocalFS
 {
 public:
@@ -41,6 +43,27 @@ public:
     {
         std::lock_guard lock(Mutex_);
         Released_ = true;
+        Changed_.notify_all();
+    }
+
+    void ArmWalk()
+    {
+        std::lock_guard lock(Mutex_);
+        WalkArmed_ = true;
+    }
+
+    bool WaitWalkEntered(std::chrono::milliseconds timeout)
+    {
+        std::unique_lock lock(Mutex_);
+        return Changed_.wait_for(lock, timeout, [&] {
+            return WalkEntered_;
+        });
+    }
+
+    void ReleaseWalk()
+    {
+        std::lock_guard lock(Mutex_);
+        WalkReleased_ = true;
         Changed_.notify_all();
     }
 
@@ -94,6 +117,17 @@ public:
     }
     NIO::TResult<std::uint64_t> MeasureTree(const NIO::THandle& directory, std::uint64_t limit) override
     {
+        {
+            std::unique_lock lock(Mutex_);
+            if (WalkArmed_) {
+                WalkArmed_ = false;
+                WalkEntered_ = true;
+                Changed_.notify_all();
+                Changed_.wait(lock, [&] {
+                    return WalkReleased_;
+                });
+            }
+        }
         return Inner_.MeasureTree(directory, limit);
     }
     std::error_code SyncFile(const NIO::THandle& file) override
@@ -121,6 +155,9 @@ private:
     bool Armed_ = false;
     bool Entered_ = false;
     bool Released_ = false;
+    bool WalkArmed_ = false;
+    bool WalkEntered_ = false;
+    bool WalkReleased_ = false;
 };
 
 class SupersededRootTest : public ::testing::Test
@@ -235,11 +272,60 @@ TEST_F(SupersededRootTest, RootStaysUntilAConcurrentScanHasPlanned)
     Gate_->Release();
     EXPECT_EQ(reader.get(), Expected({&FirstRows}));
     EXPECT_TRUE(Engine_->ListCollections()) << "the scan must not observe a missing root";
+    EXPECT_TRUE(std::filesystem::exists(resolved.front())) << "only the writer removes a released root";
 
+    // Shutdown holds the writer and removes roots released after the last append.
+    ASSERT_TRUE(Engine_->Shutdown(1000ms));
+    Engine_.reset();
     const auto remaining = Roots();
     ASSERT_EQ(remaining.size(), 1U);
     EXPECT_NE(remaining.front(), resolved.front());
+    auto opened = OpenExisting({Root_.string(), test::store_id});
+    ASSERT_TRUE(opened) << opened.error().code << ": " << opened.error().message;
+    Engine_ = std::move(*opened);
     EXPECT_EQ(Read(), Expected({&FirstRows, &SecondRows}));
+}
+
+// A scan that finishes while the next append walks the warehouse for capacity
+// must not unlink its root under that walk: a root removed between the walk's
+// readdir and fstatat failed preflight as corruption and closed the store.
+TEST_F(SupersededRootTest, ReleasedRootIsNotRemovedDuringACapacityWalk)
+{
+    Commit(FirstOperation, FirstRows);
+    const auto resolved = Roots();
+    ASSERT_EQ(resolved.size(), 1U);
+
+    std::promise<std::thread::id> readerID;
+    std::promise<void> armed;
+    auto reader = std::async(std::launch::async, [&] {
+        readerID.set_value(std::this_thread::get_id());
+        armed.get_future().wait();
+        return Read();
+    });
+    Gate_->Arm(readerID.get_future().get());
+    armed.set_value();
+    ASSERT_TRUE(Gate_->WaitEntered(10s));
+    Commit(SecondOperation, SecondRows);
+
+    // The third append is inside its preflight walk when the scan finishes.
+    Gate_->ArmWalk();
+    auto writer = std::async(std::launch::async, [&] {
+        return Engine_->AppendDurable({test::collection_id, ThirdOperation, {}, {Batch(FirstRows)}});
+    });
+    ASSERT_TRUE(Gate_->WaitWalkEntered(10s));
+    Gate_->Release();
+    EXPECT_EQ(reader.get(), Expected({&FirstRows}));
+    EXPECT_TRUE(std::filesystem::exists(resolved.front())) << "a released root was removed during a capacity walk";
+    Gate_->ReleaseWalk();
+
+    const auto outcome = writer.get();
+    EXPECT_EQ(outcome.disposition, CommitDisposition::Committed)
+        << (outcome.error ? outcome.error->code + ": " + outcome.error->message : std::string());
+    EXPECT_TRUE(Engine_->ListCollections());
+    // The committing writer removed both superseded roots.
+    EXPECT_EQ(Roots().size(), 1U);
+    EXPECT_FALSE(std::filesystem::exists(resolved.front()));
+    EXPECT_EQ(Read(), Expected({&FirstRows, &SecondRows, &FirstRows}));
 }
 
 } // namespace
