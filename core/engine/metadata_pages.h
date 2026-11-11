@@ -3,6 +3,7 @@
 #include "storage/metadata.h"
 
 #include <functional>
+#include <list>
 #include <map>
 #include <mutex>
 
@@ -28,13 +29,15 @@ public:
         std::string_view parameters,
         const TLoad& load,
         TClock::time_point now = TClock::now(),
-        std::optional<uint64_t> admissionGeneration = {});
+        std::optional<uint64_t> admissionGeneration = {},
+        const std::shared_ptr<ResourceOwner>& resources = {});
     uint64_t GetGeneration() const;
     void Clear();
 
 private:
     struct TSession
     {
+        std::shared_ptr<const void> ResourceLease{};
         std::string Binding;
         TListing Listing;
         TClock::time_point Expires;
@@ -44,14 +47,15 @@ private:
     };
 
     void Expire(TClock::time_point now);
-    static TListing ReadPage(const TSession& session, size_t offset, size_t pageSize);
+    static TListing
+    ReadPage(const TSession& session, size_t offset, size_t pageSize, const std::shared_ptr<ResourceOwner>& resources);
 
     TOptions Options_;
     mutable std::mutex Mutex_;
     size_t Pending_ = 0;
     size_t ChargedBytes_ = 0;
     uint64_t Generation_ = 0;
-    std::vector<TSession> Sessions_;
+    std::list<TSession> Sessions_;
 };
 
 } // namespace glamdb::detail

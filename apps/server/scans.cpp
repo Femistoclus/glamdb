@@ -1,5 +1,7 @@
 #include "apps/server/scans.h"
 
+#include "storage/resources.h"
+
 #include <arrow/io/memory.h>
 #include <arrow/ipc/api.h>
 #include <arrow/util/byte_size.h>
@@ -107,6 +109,8 @@ struct TScans::TImpl
 {
     struct TSession
     {
+        std::shared_ptr<ResourceOwner> Resources;
+        std::shared_ptr<ResourceReservation> DescriptorMemory;
         std::mutex Mutex;
         std::string Database, Collection, NextToken, ReplayToken;
         bool Arrow = false, Ended = false;
@@ -444,7 +448,10 @@ struct TScans::TImpl
         Require(writer->Close().ok(), "cannot finish Arrow scan page", "INTERNAL");
         return std::move(sink->Bytes);
     }
-    TResponse Page(const TPtr& session, const std::string& token)
+    TResponse Page(const TPtr& session,
+        const std::string& token,
+        const std::shared_ptr<ResourceReservation>& outgoing,
+        const std::shared_ptr<ResourceReservation>& replay)
     {
         CheckActive(*session);
         Require(token == session->ReplayToken || token == session->NextToken,
@@ -452,6 +459,7 @@ struct TScans::TImpl
             "NOT_FOUND");
         if (token == session->ReplayToken) {
             auto response = session->Replay;
+            response.ResourceLease = outgoing;
             CheckActive(*session);
             return response; // Replay does not extend idle or absolute lifetime.
         }
@@ -476,7 +484,9 @@ struct TScans::TImpl
             response = {200, std::move(body)};
         }
         Require(response.Body.size() <= MaxResponseBytes, "scan response exceeds response byte limit");
+        response.ResourceLease = outgoing;
         session->Replay = response;
+        session->Replay.ResourceLease = replay;
         CheckActive(*session);
         session->ReplayToken = token;
         session->NextToken = next;
@@ -523,6 +533,8 @@ TResponse TScans::Open(const std::shared_ptr<Engine>& engine,
         session = Impl_->Find({.Database = database, .Collection = collection, .Token = token});
     } else {
         session = std::make_shared<TImpl::TSession>();
+        session->Resources = engine->GetResourceOwner();
+        session->DescriptorMemory = Unwrap(session->Resources->Reserve(ResourceClass::Control, 16ULL << 10));
         session->Database = database;
         session->Collection = collection;
         session->Arrow = arrow;
@@ -550,6 +562,14 @@ TResponse TScans::Open(const std::shared_ptr<Engine>& engine,
             Session.Busy = false;
         }
     } activity{*session};
+    // Reserve all new copies before consuming the cursor. A parent refusal
+    // preserves an existing cursor and its previous replay.
+    auto work = Unwrap(session->Resources->Reserve(ResourceClass::Data, 128ULL << 20));
+    auto outgoing = Unwrap(session->Resources->Reserve(ResourceClass::Data, 2 * MaxResponseBytes + (64ULL << 10)));
+    std::shared_ptr<ResourceReservation> replay;
+    if (!openOnly && token != session->ReplayToken) {
+        replay = Unwrap(session->Resources->Reserve(ResourceClass::Data, 2 * MaxResponseBytes + (64ULL << 10)));
+    }
     try {
         if (!body.contains("cursor")) {
             Impl_->Register(session);
@@ -580,7 +600,7 @@ TResponse TScans::Open(const std::shared_ptr<Engine>& engine,
                     {"identity", EncodeIdentity(session->Info.identity)}}
                     .dump()};
         }
-        return Impl_->Page(session, token);
+        return Impl_->Page(session, token, outgoing, replay);
     } catch (...) {
         Impl_->Release(session);
         throw;

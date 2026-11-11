@@ -50,6 +50,7 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
     const std::string& rootLocation,
     const std::string& storeID,
     const std::string& collectionID,
-    const TStorageLimits& limits = {});
+    const TStorageLimits& limits = {},
+    const std::string& workspaceDirectory = {});
 
 }

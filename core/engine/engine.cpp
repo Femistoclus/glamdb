@@ -15,6 +15,10 @@
 #include "core/scan/scan_cursor.h"
 #endif
 
+#include "core/resources/envelopes.h"
+#include "core/resources/metadata_result.h"
+#include "storage/resources.h"
+
 #include <algorithm>
 #include <atomic>
 #include <map>
@@ -121,17 +125,19 @@ MakeBackend(const BackendFactory& factory, const std::filesystem::path& root, co
     return Take(factory(root, info));
 }
 
-BackendFactory DefaultBackendFactory()
+BackendFactory DefaultBackendFactory(std::shared_ptr<ResourceOwner> resources)
 {
 #if GLAMDB_HAS_STORAGE
-    return [](const std::filesystem::path& root, const StoreInfo& info) -> Result<std::shared_ptr<StorageBackend>> {
-        auto backend = TLocalStorageBackend::Open(root, info);
+    return [resources = std::move(resources)](const std::filesystem::path& root,
+               const StoreInfo& info) -> Result<std::shared_ptr<StorageBackend>> {
+        auto backend = TLocalStorageBackend::Open(root, info, {.Resources = resources});
         if (!backend) {
             return std::unexpected(backend.error());
         }
         return std::shared_ptr<StorageBackend>(std::move(*backend));
     };
 #else
+    (void)resources;
     return {};
 #endif
 }
@@ -150,6 +156,9 @@ BackendFactory FixedBackend(std::shared_ptr<StorageBackend> backend)
 
 struct Engine::Impl
 {
+    std::shared_ptr<ResourceOwner> resources;
+    std::vector<std::shared_ptr<ResourceReservation>> store_resources;
+    std::vector<std::shared_ptr<ResourceReservation>> attempt_resources;
     StoreInfo info;
     Limits limits;
     std::shared_ptr<StoreLease> lease;
@@ -183,6 +192,50 @@ struct Engine::Impl
     std::optional<RecoveryContext> recovery;
     std::optional<AppendOutcome> pending_failure;
     std::optional<CreateOutcome> unresolved_create;
+
+    void ReserveStoreMemory(const std::shared_ptr<ResourceOwner>& supplied)
+    {
+        resources = supplied ? supplied : ResourceOwner::ProcessDefault();
+        store_resources.push_back(Take(resources->Reserve(ResourceClass::Metadata, CatalogMemoryBytes)));
+        store_resources.push_back(Take(resources->Reserve(ResourceClass::Recovery, RecoveryMemoryBytes)));
+    }
+
+    void ReserveStoreDevice(const std::string& root)
+    {
+        // Catalog growth/journal and a bounded recovery workspace on this
+        // exact device stay protected for the entire engine lifetime.
+        store_resources.push_back(Take(resources->ReserveDevice(root,
+            2 * static_cast<uint64_t>(limits.max_catalog_bytes) + WorkspaceDiskBytes + (8ULL << 20),
+            32)));
+    }
+
+    void ReserveAttempt()
+    {
+        std::vector<std::shared_ptr<ResourceReservation>> reserved;
+        reserved.push_back(Take(resources->Reserve(ResourceClass::Control, ControlMemoryBytes)));
+        reserved.push_back(Take(resources->Reserve(ResourceClass::Completion, CompletionMemoryBytes)));
+        reserved.push_back(Take(resources->Reserve(ResourceClass::Data, WriteDataMemoryBytes)));
+        reserved.push_back(Take(resources->Reserve(ResourceClass::Metadata, MetadataWorkBytes)));
+        reserved.push_back(Take(resources->ReserveDevice(lease->Root().string(), AttemptDiskBytes, 64)));
+        attempt_resources = std::move(reserved);
+    }
+
+    struct TAttemptRelease
+    {
+        Impl& Owner;
+        std::unique_lock<std::timed_mutex>& Writer;
+        ~TAttemptRelease()
+        {
+            if (!Writer.owns_lock()) {
+                return;
+            }
+            std::lock_guard lock(Owner.state_mutex);
+            // Uncertain work transfers its protected capacity to recovery.
+            if (!Owner.recovery && !Owner.unresolved_create) {
+                Owner.attempt_resources.clear();
+            }
+        }
+    };
 
     ~Impl()
     {
@@ -422,7 +475,8 @@ struct Engine::Impl
                     return TMetadataPages::TListing(std::move(*listing));
                 },
                 TMetadataPages::TClock::now(),
-                admissionGeneration);
+                admissionGeneration,
+                resources);
             if (!page) {
                 return std::unexpected(page.error());
             }
@@ -511,8 +565,13 @@ struct Engine::Impl
                 leased = true;
             }
             Require(backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
+            auto memory = Take(resources->Reserve(ResourceClass::Metadata, MetadataWorkBytes));
+            context.Resources = resources;
             context.FileIO = Take(backend->ReadOnlyFileIO());
             auto result = read(context);
+            if (const auto retained = RetainMetadata(resources, result); !retained) {
+                throw Failure(retained.error());
+            }
             release();
             return result;
         } catch (const Failure& error) {
@@ -652,6 +711,7 @@ struct Engine::Impl
         active.reset();
         recovery.reset();
         pending_failure.reset();
+        attempt_resources.clear();
         unresolved_create.reset();
         ready = true;
     }
@@ -740,6 +800,8 @@ EngineFactory::CreateWith(const CreateStoreRequest& request, const BackendFactor
         impl->info = {request.store_id, request.profile_id, 1};
         impl->limits = request.limits;
         ValidateConfig(impl->info, impl->limits);
+        impl->ReserveStoreMemory(request.resources);
+        impl->ReserveStoreDevice(request.absolute_root);
         impl->lease = StoreLease::Create(request.absolute_root, impl->info);
         impl->backend = MakeBackend(backend, impl->lease->Root(), impl->info);
         impl->catalog = DurableSqliteCatalogStore::Create(impl->lease->Root() / "catalog.sqlite",
@@ -764,7 +826,11 @@ EngineFactory::OpenWith(const OpenStoreRequest& request, const BackendFactory& b
         impl->info = {request.expected_store_id, request.profile_id, 1};
         impl->limits = request.limits;
         ValidateConfig(impl->info, impl->limits);
+        impl->ReserveStoreMemory(request.resources);
         impl->lease = StoreLease::Open(request.absolute_root, impl->info);
+        // Exclusive open reclaims interrupted workspaces before their retained
+        // bytes/inodes can prevent admission of the next recovery workspace.
+        impl->ReserveStoreDevice(impl->lease->Root().string());
         impl->backend = MakeBackend(backend, impl->lease->Root(), impl->info);
         impl->catalog = DurableSqliteCatalogStore::Open(impl->lease->Root() / "catalog.sqlite",
             impl->info,
@@ -784,15 +850,20 @@ EngineFactory::OpenWith(const OpenStoreRequest& request, const BackendFactory& b
 Engine::Engine(std::shared_ptr<Impl> implementation)
     : impl_(std::move(implementation))
 { }
+std::shared_ptr<ResourceOwner> Engine::GetResourceOwner() const
+{
+    return impl_->resources;
+}
+
 Engine::~Engine() = default;
 
 Result<std::shared_ptr<Engine>> CreateStore(const CreateStoreRequest& request)
 {
-    return detail::EngineFactory::CreateWith(request, DefaultBackendFactory());
+    return detail::EngineFactory::CreateWith(request, DefaultBackendFactory(request.resources));
 }
 Result<std::shared_ptr<Engine>> OpenExisting(const OpenStoreRequest& request)
 {
-    return detail::EngineFactory::OpenWith(request, DefaultBackendFactory());
+    return detail::EngineFactory::OpenWith(request, DefaultBackendFactory(request.resources));
 }
 const StoreInfo& Engine::GetStoreInfo() const
 {
@@ -873,7 +944,7 @@ Result<TCollectionPage> Engine::ListCollectionsPage(const TMetadataPageRequest& 
             return std::unexpected(collections.error());
         }
         const auto highWater = collections->empty() ? 0 : collections->back().creation_sequence;
-        return TCollectionPage{highWater, std::move(*collections), {}};
+        return TCollectionPage{.CreationHighWaterMark = highWater, .Collections = std::move(*collections)};
     });
 }
 
@@ -949,6 +1020,7 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
 {
     const auto impl = impl_;
     std::unique_lock writer_lock(impl->writer, std::defer_lock);
+    Impl::TAttemptRelease release{*impl, writer_lock};
     std::optional<CreateRecoveryContext> context;
     bool publication_started = false;
     bool committed = false;
@@ -1036,6 +1108,7 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
             std::nullopt,
             std::nullopt,
             false};
+        impl->ReserveAttempt();
         auto staged = Take(impl->backend->PrepareCreate(impl->info, request, attempt));
         Require(staged != nullptr, "IO_ERROR", "producer returned no staged collection");
         auto info = staged->Info();
@@ -1122,10 +1195,12 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
     // Retain the writer across catch handlers: recording a failure and setting
     // an unknown barrier are part of the serialized attempt, too.
     std::unique_lock writer_lock(impl->writer, std::defer_lock);
+    Impl::TAttemptRelease release{*impl, writer_lock};
     struct Admission
     {
         std::shared_ptr<Impl> owner;
         size_t bytes = 0;
+        std::shared_ptr<ResourceReservation> shared_input;
         ~Admission()
         {
             if (owner) {
@@ -1273,6 +1348,8 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
             impl->owned_input_bytes += reservation;
             admission.bytes = reservation;
         }
+        admission.shared_input = Take(impl->resources->Reserve(ResourceClass::Data, reservation));
+        impl->ReserveAttempt();
         auto input = Take(NormalizeBatches(collection.schema, request.collection_id, request.batches));
         Require(input.payload_hash == payload_hash, "INVALID_ARGUMENT", "Arrow input changed during append");
         const auto base = impl->catalog->Base(request.collection_id);
@@ -1588,6 +1665,7 @@ Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) con
             leased_root = context.Base.metadata_location;
         }
         Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
+        context.Resources = impl->resources;
         context.FileIO = Take(impl->backend->ReadOnlyFileIO());
         context.Closing = std::shared_ptr<const std::atomic<bool>>(impl, &impl->closing);
         context.Lease = impl;

@@ -1,6 +1,8 @@
 #include "apps/server/server.h"
 #include "apps/server/admission.h"
 
+#include "storage/resources.h"
+
 #include <asio.hpp>
 
 #include <algorithm>
@@ -68,7 +70,8 @@ class TSession : public std::enable_shared_from_this<TSession>
 
 public:
     TSession(TTcp::socket socket, TState& state)
-        : Socket_(std::move(socket))
+        : DescriptorMemory_(Unwrap(state.Routes.GetResourceOwner()->Reserve(ResourceClass::Completion, 256ULL << 10)))
+        , Socket_(std::move(socket))
         , Timer_(state.IO)
         , State_(state)
     { }
@@ -279,6 +282,10 @@ private:
             Write(ErrorResponse(401, "UNAUTHORIZED", "bearer token required"));
             return;
         }
+        const bool protectedCall = UsesProtectedAdmission(Request_) && Request_.ContentLength <= (64ULL << 10);
+        BodyMemory_ = Unwrap(
+            State_.Routes.GetResourceOwner()->Reserve(protectedCall ? ResourceClass::Completion : ResourceClass::Data,
+                static_cast<uint64_t>(Request_.ContentLength) * 2 + (64ULL << 10)));
         ReleaseHeaders();
         HeaderProbe_ = false;
         Input_.erase(0, size);
@@ -494,6 +501,7 @@ private:
         std::error_code ignored;
         Socket_.cancel(ignored);
         Header_ = SerializeResponseHead(response);
+        OutputMemory_ = std::move(response.ResourceLease);
         Output_ = std::move(response.Body);
         Deadline(std::chrono::seconds(30));
         const std::array buffers{asio::buffer(Header_), asio::buffer(Output_)};
@@ -526,6 +534,8 @@ private:
                 });
             });
     }
+    std::shared_ptr<ResourceReservation> DescriptorMemory_, BodyMemory_;
+    std::shared_ptr<const void> OutputMemory_;
     TTcp::socket Socket_;
     asio::steady_timer Timer_;
     TState& State_;

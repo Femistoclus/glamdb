@@ -3,13 +3,27 @@ import json
 import unittest
 import uuid
 import sys
+import select
+import subprocess
 
+REPLAY_DRIVER = sys.argv.pop(4)
 _test_arguments = sys.argv[4:]
 from native_http_test import NativeHTTP
 sys.argv[1:] = _test_arguments
 
 
 class ScanHTTP(NativeHTTP):
+    def start(self):
+        if self._testMethodName != 'test_replay_pressure_preserves_explicit_cursor':
+            return super().start()
+        # This logical quota case needs eight open stores and 64 cursors.
+        self.proc = subprocess.Popen([REPLAY_DRIVER, self.data_dir, 'many-readers'],
+                                     env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertTrue(select.select([self.proc.stdout], [], [], 15)[0], 'replay service did not start')
+        line = self.proc.stdout.readline()
+        self.assertTrue(line, 'replay service did not report its address')
+        self.port = json.loads(line)['port']
+
     # Reuse only the socket/process helpers, not the unrelated inherited cases.
     def test_scan_fixed_identity(self):
         path = self.collection()

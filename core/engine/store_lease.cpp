@@ -3,6 +3,7 @@
 #include "core/api/binary.h"
 #include "core/api/canonical.h"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -39,6 +40,26 @@ void ValidateRoot(const std::filesystem::path& root)
 std::string Identity(const StoreInfo& info)
 {
     return "GLAMDB\n1\n" + info.store_id + "\n" + info.profile_id + "\n";
+}
+
+void CleanupRecoveryWorkspaces(const std::filesystem::path& root)
+{
+    // TRecoveryVisited uses mkstemp(".recovery-XXXXXX") on this device.
+    // The caller holds exclusive ownership and has validated the store identity.
+    constexpr std::string_view prefix = ".recovery-";
+    for (const auto& entry : std::filesystem::directory_iterator(root)) {
+        const auto name = entry.path().filename().string();
+        if (name.size() != prefix.size() + 6 || !name.starts_with(prefix)) {
+            continue;
+        }
+        const auto suffix = std::string_view(name).substr(prefix.size());
+        const bool generated = std::ranges::all_of(suffix, [](char value) {
+            return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9');
+        });
+        if (generated && std::filesystem::is_regular_file(entry.symlink_status())) {
+            std::filesystem::remove(entry.path());
+        }
+    }
 }
 
 } // namespace
@@ -103,6 +124,7 @@ std::shared_ptr<StoreLease> StoreLease::Open(const std::filesystem::path& root, 
     Require(std::filesystem::is_directory(std::filesystem::symlink_status(root / "warehouse")),
         "STORE_INCOMPLETE",
         "warehouse is missing or a symlink");
+    CleanupRecoveryWorkspaces(root);
     return lease;
 }
 

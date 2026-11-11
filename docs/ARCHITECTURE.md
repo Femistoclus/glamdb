@@ -174,8 +174,9 @@ allocation. Lazy file planning does not bound materialized table metadata or
 retained snapshot history. Account for buffers held by callers as well as work
 still executing inside the engine. The [shared resource budget contract](development/RESOURCE_BUDGETS.md)
 defines units, owners, reservation/release lifetimes, completion/recovery reserves
-and limit errors. Its matrices distinguish current checks from the aggregate
-memory and per-device reservations still required to enforce this architecture.
+and limit errors. Its matrices distinguish shared reservation envelopes from remaining RSS and
+caller-owned metadata qualification. See the [resource owner](development/SHARED_RESOURCES.md)
+for the process parent, protected completion/recovery and atomic device admission.
 
 The synchronous append profile caps ordinary append input at 16 MiB of canonical
 decoded data and 10,000 rows, with one new Parquet file and one snapshot. Current

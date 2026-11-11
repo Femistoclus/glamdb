@@ -15,6 +15,9 @@
 #include "core/storage/publication_guard.h"
 #include "core/storage/table_profile.h"
 
+#include "core/resources/arrow_pool.h"
+#include "storage/resources.h"
+
 #include <arrow/record_batch.h>
 #include <iceberg/constants.h>
 #include <iceberg/manifest/manifest_entry.h>
@@ -55,6 +58,33 @@ struct TAdmittedBatch
     std::shared_ptr<arrow::MemoryPool> Pool;
     std::shared_ptr<arrow::RecordBatch> Batch;
 };
+
+struct TRetainedState
+{
+    std::shared_ptr<ResourceReservation> Memory;
+    std::shared_ptr<const NStorage::TBaseState> State;
+};
+
+std::shared_ptr<ResourceReservation> ReserveRoot(const std::shared_ptr<ResourceOwner>& owner, uint64_t bytes)
+{
+    // Parsed maps, strings, snapshot objects and current manifest descriptors.
+    // Serialized input is capped before this multiplication.
+    if (bytes > (64ULL << 20)) {
+        throw Failure({"RESOURCE_EXHAUSTED", "root exceeds the metadata profile", RetryHint::OperatorAction});
+    }
+    auto memory = owner->Reserve(ResourceClass::Metadata, bytes * 32 + (4ULL << 20));
+    if (!memory) {
+        throw Failure(memory.error());
+    }
+    return std::move(*memory);
+}
+
+std::shared_ptr<const NStorage::TBaseState> RetainState(std::shared_ptr<ResourceReservation> memory,
+    std::shared_ptr<const NStorage::TBaseState> state)
+{
+    auto retained = std::make_shared<TRetainedState>(std::move(memory), std::move(state));
+    return std::shared_ptr<const NStorage::TBaseState>(retained, retained->State.get());
+}
 
 [[noreturn]] void Fail(std::string_view code, std::string_view context, std::string_view message)
 {
@@ -478,6 +508,8 @@ TLocalStorageBackend::Open(const std::filesystem::path& root, const StoreInfo& s
 {
     return Guarded<Result<std::shared_ptr<TLocalStorageBackend>>>(
         [&]() -> Result<std::shared_ptr<TLocalStorageBackend>> {
+            options.Resources = options.Resources ? options.Resources : ResourceOwner::ProcessDefault();
+            options.InputPool = MakeResourcePool(options.Resources, options.InputPool);
             auto fs = options.Fs ? options.Fs : std::make_shared<NIO::TPosixLocalFS>();
             auto dirs = TakeIO(NIO::TStoreDirs::Open(std::move(fs), root, std::make_shared<NIO::TWriteLatch>()),
                 EStoragePath::Preflight,
@@ -712,6 +744,13 @@ void TLocalStorageBackend::PublicationFinished(std::string_view collectionID,
     if (result == CommitDisposition::DefinitelyNotCommitted) {
         if (it != Collections_.end()) {
             it->second.Tentative.reset();
+            it->second.TentativeMemory.reset();
+            if (it->second.ConfirmedMemory) {
+                CacheMemory_[std::string(collectionID)] = it->second.ConfirmedMemory;
+            }
+            if (!it->second.Confirmed) {
+                CacheMemory_.erase(std::string(collectionID));
+            }
         }
         return;
     }
@@ -719,6 +758,7 @@ void TLocalStorageBackend::PublicationFinished(std::string_view collectionID,
         it->second.Tentative && it->second.Tentative->MetadataLocation == metadataLocation)
     {
         it->second.Confirmed = std::move(it->second.Tentative);
+        it->second.ConfirmedMemory = std::move(it->second.TentativeMemory);
         return;
     }
     // An uncertain result or a confirmation without its exact verified
@@ -734,6 +774,9 @@ void TLocalStorageBackend::DiscardCandidate(std::string_view collectionID)
     auto it = Collections_.find(collectionID);
     if (it != Collections_.end()) {
         it->second.Tentative.reset();
+        it->second.TentativeMemory.reset();
+        // The staged object unwinds before the coordinator classifies a
+        // failed COMMIT. PublicationFinished alone may refund root capacity.
     }
 }
 
@@ -791,6 +834,7 @@ Status TLocalStorageBackend::VerifyRetained(const StoreInfo& store,
         (void)TakeIO(NStorage::MeasureWarehouse(*Dirs_, Options_.Storage),
             EStoragePath::Read,
             "retained warehouse capacity");
+        InvalidateCache();
         std::map<std::string, TCollectionState, std::less<>> verified;
         NStorage::TStorageUsage totalUsage;
         for (const auto& view : collections) {
@@ -810,7 +854,12 @@ Status TLocalStorageBackend::VerifyRetained(const StoreInfo& store,
             CheckUsage(NStorage::CheckStorageCapacity(totalUsage, Options_.Storage),
                 "CORRUPTION",
                 "retained storage capacity");
-            verified[view.info.collection_id].Confirmed = std::move(state);
+            auto& entry = verified[view.info.collection_id];
+            entry.Confirmed = std::move(state);
+            {
+                std::lock_guard lock(Mutex_);
+                entry.ConfirmedMemory = CacheMemory_.at(view.info.collection_id);
+            }
         }
         for (const auto& operation : operations) {
             Require(operation.state != OperationState::Committed || verified.contains(operation.binding.collection_id),
@@ -819,6 +868,9 @@ Status TLocalStorageBackend::VerifyRetained(const StoreInfo& store,
         }
         std::lock_guard lock(Mutex_);
         Collections_ = std::move(verified);
+        std::erase_if(CacheMemory_, [&](const auto& item) {
+            return !Collections_.contains(item.first);
+        });
         VerifiedGeneration_ = true;
         return {};
     });
@@ -862,12 +914,15 @@ Result<std::shared_ptr<iceberg::FileIO>> TLocalStorageBackend::ReadOnlyFileIO()
 void TLocalStorageBackend::RecordCandidate(std::string_view collectionID,
     std::shared_ptr<const NStorage::TBaseState> candidate)
 {
+    auto memory = ReserveRootMemory(collectionID, candidate->Usage.RootBytes, false);
+    candidate = RetainState(memory, std::move(candidate));
     std::lock_guard lock(Mutex_);
     auto it = Collections_.find(collectionID);
     if (it == Collections_.end()) {
         it = Collections_.emplace(std::string(collectionID), TCollectionState{}).first;
     }
     it->second.Tentative = std::move(candidate);
+    it->second.TentativeMemory = std::move(memory);
 }
 
 void TLocalStorageBackend::CheckStore(const StoreInfo& store) const
@@ -913,15 +968,45 @@ std::shared_ptr<const NStorage::TBaseState> TLocalStorageBackend::ResolveBase(co
     return it->second.Confirmed;
 }
 
-std::shared_ptr<const NStorage::TBaseState> TLocalStorageBackend::VerifyCollection(const BaseIdentity& base) const
+std::shared_ptr<ResourceReservation>
+TLocalStorageBackend::ReserveRootMemory(std::string_view collectionID, uint64_t bytes, bool reuse)
+{
+    if (bytes > (64ULL << 20)) {
+        throw Failure({"RESOURCE_EXHAUSTED", "root exceeds the metadata profile", RetryHint::OperatorAction});
+    }
+    if (reuse) {
+        std::lock_guard lock(Mutex_);
+        const auto found = CacheMemory_.find(collectionID);
+        // Only the map can own a reused reservation. A still-live old state
+        // needs its own charge until its last alias has been destroyed.
+        if (found != CacheMemory_.end() && found->second.use_count() == 1 &&
+            found->second->GetBytes() >= bytes * 32 + (4ULL << 20))
+        {
+            return found->second;
+        }
+    }
+    auto memory = ReserveRoot(Options_.Resources, bytes);
+    std::lock_guard lock(Mutex_);
+    CacheMemory_[std::string(collectionID)] = memory;
+    return memory;
+}
+
+std::shared_ptr<const NStorage::TBaseState> TLocalStorageBackend::VerifyCollection(const BaseIdentity& base)
 {
     const std::shared_ptr<iceberg::FileIO> view =
         TakeIceberg(FileIO_->ReadOnlyView(), "IO_ERROR", "open read-only FileIO");
-    auto state = TakeRetained(
-        NStorage::VerifyReachable(view, base.metadata_location, Store_.store_id, base.collection_id, Options_.Storage),
+    auto input = TakeRetained(view->NewInputFile(base.metadata_location), "inspect retained root");
+    const auto size = TakeRetained(input->Size(), "size retained root");
+    auto memory = ReserveRootMemory(base.collection_id, static_cast<uint64_t>(size), true);
+    auto state = TakeRetained(NStorage::VerifyReachable(view,
+                                  base.metadata_location,
+                                  Store_.store_id,
+                                  base.collection_id,
+                                  Options_.Storage,
+                                  Dirs_->Path().string()),
         "verify retained collection");
     CheckIdentity(state, base);
-    return std::make_shared<const NStorage::TBaseState>(std::move(state));
+    return RetainState(std::move(memory), std::make_shared<const NStorage::TBaseState>(std::move(state)));
 }
 
 } // namespace glamdb::detail

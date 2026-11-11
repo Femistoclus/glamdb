@@ -4,7 +4,9 @@
 #include <iceberg/util/macros.h>
 #include <sqlite3.h>
 
+#include <filesystem>
 #include <string>
+#include <unistd.h>
 #include <utility>
 
 namespace NGlamDB::NStorage {
@@ -68,7 +70,8 @@ bool IsKnownKind(NIO::EFileKind kind)
 
 } // namespace
 
-iceberg::Result<std::unique_ptr<TRecoveryVisited>> TRecoveryVisited::Make(std::uint64_t maxBytes)
+iceberg::Result<std::unique_ptr<TRecoveryVisited>> TRecoveryVisited::Make(std::uint64_t maxBytes,
+    const std::string& directory)
 {
     return CatchIcebergExceptions([&]() -> iceberg::Result<std::unique_ptr<TRecoveryVisited>> {
         if (maxBytes < 2 * PageBytes || maxBytes > MaxWorkspaceBytes) {
@@ -79,14 +82,27 @@ iceberg::Result<std::unique_ptr<TRecoveryVisited>> TRecoveryVisited::Make(std::u
             return iceberg::NotSupported("SQLite must default temporary databases to disk storage.");
         }
         auto result = std::unique_ptr<TRecoveryVisited>(new TRecoveryVisited);
-        ICEBERG_RETURN_UNEXPECTED(result->Initialize(maxBytes));
+        ICEBERG_RETURN_UNEXPECTED(result->Initialize(maxBytes, directory));
         return result;
     });
 }
 
-iceberg::Status TRecoveryVisited::Initialize(std::uint64_t maxBytes)
+iceberg::Status TRecoveryVisited::Initialize(std::uint64_t maxBytes, const std::string& directory)
 {
-    const auto opened = sqlite3_open_v2("",
+    if (!directory.empty()) {
+        // Process death can leave this file behind. Exclusive, identity-validated
+        // StoreLease::Open reclaims this exact name pattern before device admission.
+        Path_ = (std::filesystem::path(directory) / ".recovery-XXXXXX").string();
+        const auto descriptor = mkstemp(Path_.data());
+        if (descriptor < 0) {
+            Path_.clear();
+            return iceberg::IOError("Cannot create recovery workspace.");
+        }
+        if (close(descriptor) != 0) {
+            return iceberg::IOError("Cannot close recovery workspace.");
+        }
+    }
+    const auto opened = sqlite3_open_v2(Path_.c_str(),
         &Database_,
         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_PRIVATECACHE | SQLITE_OPEN_FULLMUTEX |
             SQLITE_OPEN_EXRESCODE,
@@ -122,6 +138,10 @@ TRecoveryVisited::~TRecoveryVisited()
 {
     sqlite3_finalize(Insert_);
     sqlite3_close_v2(Database_);
+    if (!Path_.empty()) {
+        std::error_code ignored;
+        std::filesystem::remove(Path_, ignored);
+    }
 }
 
 iceberg::Result<bool> TRecoveryVisited::Insert(NIO::EFileKind kind, std::string_view path)

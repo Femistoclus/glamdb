@@ -26,6 +26,7 @@ public:
     Engine& operator=(const Engine&) = delete;
 
     const StoreInfo& GetStoreInfo() const;
+    std::shared_ptr<ResourceOwner> GetResourceOwner() const;
     // No catalog/file I/O and no writer wait; remains callable during recovery/shutdown.
     StoreHealth GetHealth() const;
     EngineCapabilities GetCapabilities() const;

@@ -120,9 +120,12 @@ root, so a rejected configuration leaves the root and store UUID reusable.
 
 See the [shared resource budget contract](RESOURCE_BUDGETS.md) for the limit
 matrix, reservation/release ownership, retained-buffer lifetimes and protected
-completion/recovery requirements. The owned-input estimate does not cover HTTP
-decoding, all writer allocations or scan buffers; the current checks are
-store-local rather than a shared process-memory governor.
+completion/recovery requirements. The [process resource owner](SHARED_RESOURCES.md)
+adds shared data, metadata, control, completion, recovery and device reservations
+to these store-local checks. New attempts acquire capacity before binding;
+uncertain outcomes retain it until reconciliation. The owned-input estimate is
+one charge within that parent; HTTP decoding, writer work and scan buffers have
+separate reservations. Conservative upstream envelopes require RSS calibration.
 
 ## Storage backend integration
 

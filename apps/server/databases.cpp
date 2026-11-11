@@ -4,6 +4,8 @@
 #include "core/catalog/sqlite.h"
 #include "core/engine/store_lease.h"
 
+#include "storage/resources.h"
+
 #include <atomic>
 #include <cerrno>
 #include <dirent.h>
@@ -126,6 +128,9 @@ TJson Current(const TEntry& entry)
 void ConfigureRegistry(detail::Database& registry)
 {
     registry.Execute("PRAGMA busy_timeout=250");
+    registry.Execute("PRAGMA cache_size=-2048");
+    registry.Execute("PRAGMA mmap_size=0");
+    Require(registry.Integer("PRAGMA max_page_count=4096") == 4096, "registry page cap was not applied", "IO_ERROR");
     Require(registry.Text("PRAGMA journal_mode=DELETE") == "delete", "registry requires DELETE journal", "IO_ERROR");
     registry.Execute("PRAGMA synchronous=EXTRA");
     Require(registry.Integer("PRAGMA synchronous") == 3, "registry requires EXTRA synchronous", "IO_ERROR");
@@ -311,6 +316,8 @@ void ValidateName(const std::string& name)
 
 struct TDatabases::TImpl
 {
+    std::shared_ptr<ResourceOwner> Resources;
+    std::vector<std::shared_ptr<ResourceReservation>> Reservations;
     TDirectoryLock DirectoryLock;
     std::filesystem::path Root;
     detail::Database Registry;
@@ -404,8 +411,10 @@ struct TDatabases::TImpl
         try {
             const bool initialize = create && !entry.Initialized && ReclaimIncompleteStore(path, false);
             auto engine = initialize
-                ? Unwrap(CreateStore({entry.ID, path.string(), "local-delete-extra-v1", entry.ResourceLimits}))
-                : Unwrap(OpenExisting({path.string(), entry.ID, "local-delete-extra-v1", entry.ResourceLimits}));
+                ? Unwrap(
+                      CreateStore({entry.ID, path.string(), "local-delete-extra-v1", entry.ResourceLimits, Resources}))
+                : Unwrap(OpenExisting(
+                      {path.string(), entry.ID, "local-delete-extra-v1", entry.ResourceLimits, Resources}));
             entry.Instance = std::move(engine);
             if (!entry.Initialized || !entry.AutoOpen) {
                 std::lock_guard lock(Mutex);
@@ -431,10 +440,16 @@ struct TDatabases::TImpl
     }
 };
 
-TDatabases::TDatabases(const std::filesystem::path& directory, const std::string& registryVfs)
+TDatabases::TDatabases(const std::filesystem::path& directory,
+    const std::string& registryVfs,
+    std::shared_ptr<ResourceOwner> resources)
     : Impl_(std::make_unique<TImpl>())
 {
     auto& self = *Impl_;
+    self.Resources = resources ? std::move(resources) : ResourceOwner::ProcessDefault();
+    self.Reservations.push_back(Unwrap(self.Resources->Reserve(ResourceClass::Metadata, 16ULL << 20)));
+    self.Reservations.push_back(Unwrap(self.Resources->Reserve(ResourceClass::Recovery, 16ULL << 20)));
+    self.Reservations.push_back(Unwrap(self.Resources->ReserveDevice(directory.string(), 33ULL << 20, 16)));
     Require(directory.is_absolute() && directory.has_filename() && directory == directory.lexically_normal() &&
             directory.string().find('\0') == std::string::npos &&
             std::filesystem::canonical(directory.parent_path()) == directory.parent_path(),
@@ -505,6 +520,11 @@ TDatabases::TDatabases(const std::filesystem::path& directory, const std::string
         }
     }
 }
+std::shared_ptr<ResourceOwner> TDatabases::GetResourceOwner() const
+{
+    return Impl_->Resources;
+}
+
 TDatabases::~TDatabases() = default;
 
 TJson TDatabases::List() const

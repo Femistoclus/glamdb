@@ -1,5 +1,6 @@
 #include "apps/server/routes.h"
 #include "core/engine/engine_factory.h"
+#include "storage/resources.h"
 #include "tests/support/arrow_batch.h"
 #include "tests/support/checked.h"
 #include "tests/support/fake_storage.h"
@@ -86,5 +87,44 @@ TEST(NativeRoutes, DecodedInputLimitIsAnInputErrorWithoutBindingAnOperation)
     const auto outcome = engine->FindAppendOutcome(test::collection_id, test::operation_id);
     ASSERT_TRUE(outcome);
     EXPECT_FALSE(outcome->has_value());
+}
+} // namespace glamdb::NServer
+
+namespace glamdb::NServer {
+TEST(NativeRoutes, SharedPressurePreservesLookupAndOutgoingResponseCharges)
+{
+    test::TempDir temporary;
+    auto owner = std::make_shared<ResourceOwner>();
+    auto created = CreateStore(
+        {.store_id = test::store_id, .absolute_root = (temporary.path / "store").string(), .resources = owner});
+    ASSERT_TRUE(created) << created.error().message;
+    auto engine = *created;
+    ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", SchemaSpec{{{"n", FieldType::Int64, true}}}})
+                  .disposition,
+        CommitDisposition::Committed);
+    ASSERT_EQ(engine->AppendDurable({test::collection_id, test::operation_id, {}, {test::Batch()}}).disposition,
+        CommitDisposition::Committed);
+    TRoutes routes(engine, {}, "secret");
+    NTransport::TRequest request;
+    request.Method = "GET";
+    request.Target = std::string("/collections/") + test::collection_id + "/operations/" + test::operation_id;
+    request.Headers["authorization"] = "Bearer secret";
+    auto saturated = owner->Reserve(ResourceClass::Data, owner->GetLimits().memory_bytes[0]);
+    ASSERT_TRUE(saturated);
+    {
+        auto response = routes.Handle(request);
+        ASSERT_EQ(response.Status, 200) << response.Body;
+        EXPECT_GT(owner->GetUsage().memory_bytes[3], 0);
+    }
+    EXPECT_EQ(owner->GetUsage().memory_bytes[3], 0);
+    request.Target = std::string("/collections/") + test::collection_id + "/scan";
+    request.Method = "POST";
+    request.Body = "{}";
+    request.Headers["content-type"] = "application/json";
+    EXPECT_EQ(routes.Handle(request).Status, 507);
+    saturated->reset();
+    auto response = routes.Handle(request);
+    EXPECT_EQ(response.Status, 200) << response.Body;
+    EXPECT_GT(owner->GetUsage().memory_bytes[0], 0);
 }
 } // namespace glamdb::NServer

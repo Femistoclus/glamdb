@@ -223,7 +223,7 @@ std::vector<TRowGroupMetadata> DescribeRowGroups(const parquet::FileMetaData& fo
 TFileListing ReadFiles(const TScanContext& context, const SnapshotSelector& selector)
 {
     const auto plan = Take(PlanManifests(context.FileIO, context.Base, selector));
-    TFileListing listing{context.Base, ResolveSelector(plan), {}};
+    TFileListing listing{.Identity = context.Base, .SelectorResolved = ResolveSelector(plan)};
     std::set<std::string> seen;
     for (size_t index = 0; index < plan.Manifests.size(); ++index) {
         for (const auto& file : Take(ReadManifestDataFiles(context.FileIO, plan, index))) {
@@ -258,7 +258,9 @@ TFileDetails ReadFileDetails(const TScanContext& context, std::string_view fileI
         }
     }
     Require(selected != nullptr, "NOT_FOUND", "File does not belong to the selected snapshot.");
-    TFileDetails result{context.Base, ResolveSelector(plan), DescribeFile(context.Base, *selected, *plan.Schema), {}};
+    TFileDetails result{.Identity = context.Base,
+        .SelectorResolved = ResolveSelector(plan),
+        .File = DescribeFile(context.Base, *selected, *plan.Schema)};
     try {
         auto input = TakeStorage(context.FileIO->NewInputFile(selected->file_path), "open selected data file");
         const auto footer = TakeStorage(NGlamDB::NStorage::ReadParquetFooter(*input,

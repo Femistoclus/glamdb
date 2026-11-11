@@ -40,6 +40,18 @@ bool IsToken(std::string_view text)
 }
 } // namespace
 
+bool UsesProtectedAdmission(const TRequest& request)
+{
+    const auto [path, query] = ParseTarget(request.Target);
+    (void)query;
+    const auto split = path.starts_with("/databases/") ? path.find('/', 11) : std::string::npos;
+    const auto suffix = split == std::string::npos ? path : path.substr(split);
+    return path == "/healthz" || path == "/databases" ||
+        (path.starts_with("/databases/") && split == std::string::npos) || suffix == "/readyz" ||
+        suffix == "/capabilities" || suffix == "/open" || suffix == "/close" || suffix == "/reconcile" ||
+        suffix == "/discard" || suffix.find("/operations/") != std::string::npos || suffix.ends_with("/scan/cancel");
+}
+
 TRequest ParseHeaders(std::string_view bytes)
 {
     Require(bytes.size() <= 16384 && bytes.ends_with("\r\n\r\n"), "invalid HTTP headers");

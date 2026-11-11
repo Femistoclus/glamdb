@@ -18,6 +18,7 @@ namespace glamdb::detail {
 
 struct TScanContext
 {
+    std::shared_ptr<ResourceOwner> Resources{};
     CollectionInfo Collection;
     // The committed view resolved once by the engine.
     BaseIdentity Base;
@@ -28,8 +29,8 @@ struct TScanContext
     // Retains engine resources and the store lock in returned Arrow buffers
     // until the last batch, extracted buffer, slice or C Data export is released.
     std::shared_ptr<const void> Lease;
-    // Owned allocator/accounting state for decoded and filtered Arrow buffers.
-    // Empty selects a per-scan proxy over Arrow's default pool.
+    // Optional owned upstream allocator for decoded and filtered Arrow buffers.
+    // A per-scan resource pool wraps it; empty selects Arrow's default pool.
     std::shared_ptr<arrow::MemoryPool> Pool{};
     std::function<void(const ErrorDetail&)> OnError;
 };

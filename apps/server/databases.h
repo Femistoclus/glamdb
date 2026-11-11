@@ -11,10 +11,13 @@ class TDatabases
 {
 public:
     // Optional VFS is an internal seam for deterministic registry fault tests.
-    explicit TDatabases(const std::filesystem::path& directory, const std::string& registryVfs = {});
+    explicit TDatabases(const std::filesystem::path& directory,
+        const std::string& registryVfs = {},
+        std::shared_ptr<ResourceOwner> resources = {});
     ~TDatabases();
     TDatabases(const TDatabases&) = delete;
     TDatabases& operator=(const TDatabases&) = delete;
+    std::shared_ptr<ResourceOwner> GetResourceOwner() const;
     NTransport::TJson List() const;
     NTransport::TJson Get(const std::string& id) const;
     StoreHealth Health(const std::string& id) const;

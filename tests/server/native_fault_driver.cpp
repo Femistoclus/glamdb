@@ -2,6 +2,8 @@
 #include "apps/server/server.h"
 #include "tests/support/journal_fault_vfs.h"
 
+#include "storage/resources.h"
+
 #include <fcntl.h>
 #include <sys/resource.h>
 #include <unistd.h>
@@ -16,7 +18,7 @@
 // production managed server and storage backend. No fault route is installed.
 int main(int argc, char** argv)
 try {
-    if (argc < 2 || argc > 4) {
+    if (argc < 2 || argc > 5) {
         return 2;
     }
     glamdb::test::JournalFaultVfs core, registry;
@@ -24,7 +26,16 @@ try {
     if (sqlite3_vfs_register(coreVfs, 1) != SQLITE_OK) {
         return 3;
     }
-    auto databases = std::make_shared<glamdb::NServer::TDatabases>(argv[1], registry.Name());
+    std::shared_ptr<glamdb::ResourceOwner> resources;
+    if (argc == 5) {
+        glamdb::NTransport::Require(std::string_view(argv[4]) == "many-readers", "unknown test resource profile");
+        glamdb::ResourceLimits limits;
+        limits.memory_bytes[0] = 4ULL << 30;
+        limits.memory_bytes[1] = 16ULL << 30;
+        limits.memory_bytes[4] = 8ULL << 30;
+        resources = std::make_shared<glamdb::ResourceOwner>(limits);
+    }
+    auto databases = std::make_shared<glamdb::NServer::TDatabases>(argv[1], registry.Name(), resources);
     glamdb::NServer::TRoutes routes(databases, {}, "fault-test-token");
     // RunServer owns cout's formatting state. Control replies use synchronized
     // stdio, and reading commands must not implicitly flush cout on this thread.
@@ -116,7 +127,7 @@ try {
     glamdb::NServer::RunServer(routes,
         "127.0.0.1",
         0,
-        argc == 4 ? std::chrono::milliseconds(std::stoul(argv[3])) : std::chrono::seconds(10),
+        argc >= 4 ? std::chrono::milliseconds(std::stoul(argv[3])) : std::chrono::seconds(10),
         argc >= 3 ? static_cast<size_t>(std::stoul(argv[2])) : 96);
     drained = true;
     controls.join();

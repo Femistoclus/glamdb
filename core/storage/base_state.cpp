@@ -396,13 +396,14 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
     const std::string& rootLocation,
     const std::string& storeID,
     const std::string& collectionID,
-    const TStorageLimits& limits)
+    const TStorageLimits& limits,
+    const std::string& workspaceDirectory)
 {
     return CatchIcebergExceptions([&]() -> iceberg::Result<TBaseState> {
         ICEBERG_ASSIGN_OR_RAISE(auto state, ReadRecoveryRoot(fileIO, rootLocation, storeID, collectionID, limits));
         const auto original = state.Metadata;
         ICEBERG_ASSIGN_OR_RAISE(auto view, EmptyHistoryView(*original));
-        ICEBERG_ASSIGN_OR_RAISE(auto visited, TRecoveryVisited::Make());
+        ICEBERG_ASSIGN_OR_RAISE(auto visited, TRecoveryVisited::Make(256ULL << 20, workspaceDirectory));
         std::unordered_set<std::int64_t> snapshotIDs;
         snapshotIDs.reserve(original->snapshots.size());
         for (std::size_t index = 0; index < original->snapshots.size(); ++index) {

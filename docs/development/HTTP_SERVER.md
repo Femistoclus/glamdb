@@ -303,6 +303,8 @@ Active production scans have no absolute lifetime limit. Admission reserves the
 16 MiB hard response bound for each session within a shared 1 GiB replay budget,
 before planning or consuming rows. This logical reservation covers retained
 serialized bodies, not pending Arrow buffers, outgoing copies or total memory.
+Shared process-memory refusal happens before page consumption and preserves an
+existing cursor and its last replay.
 Completed replay caches may be evicted to admit new scans. A failed page invalidates its session. Close, reconciliation
 and shutdown release sessions after admitted calls drain. Cancellation releases
 between page calls; it does not interrupt an active filesystem read.
@@ -384,10 +386,16 @@ of the full 64-field append schema (1,300,100 parser events). These transport
 bounds are not a qualified process-memory or storage budget.
 
 The [shared resource budget matrix](RESOURCE_BUDGETS.md) specifies which limits
-are per request, store or service, who reserves/releases them and which aggregate
-budgets remain required. HTTP body bytes, parsed JSON/Arrow allocations and core
-canonical bytes are different quantities; the per-store owned-input limit does
-not cover adapter allocations or all databases together.
+are per request, store or service and who reserves/releases them. A
+[process resource owner](SHARED_RESOURCES.md) now admits all managed databases,
+registry state, request bodies, parsing work, scan replay and outgoing responses.
+HTTP body bytes, parsed JSON/Arrow allocations and core canonical bytes have
+separate charges. Socket/header descriptors use protected completion capacity;
+lookup and lifecycle bodies up to 64 KiB also use it. Larger control bodies use
+ordinary data capacity within the existing 16 MiB wire limit. Ordinary data
+saturation preserves small outcome, readiness and reconciliation requests.
+The conservative working envelopes and [measured profile](SHARED_RESOURCES_VALIDATION.md)
+do not qualify a universal RSS bound.
 
 HTTP/1.1 uses Content-Length and closes each response connection. Duplicate
 headers, folded headers, Transfer-Encoding, compressed requests and pipelined bytes

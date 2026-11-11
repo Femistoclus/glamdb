@@ -22,6 +22,13 @@ inline constexpr size_t MaxPredicateNodes = 1024;
 inline constexpr size_t MaxPredicateLiterals = 4096;
 inline constexpr int64_t EvalStripRows = 2048;
 
+struct TPredicateResources
+{
+    static Result<uint64_t> Measure(const Predicate& predicate);
+    // Call only after Measure validates the tree's depth and size.
+    static Predicate Retain(const Predicate& predicate, const std::shared_ptr<const void>& lease);
+};
+
 enum class ETruthValue : uint8_t { False = 0, Unknown = 1, True = 2 };
 
 enum class EBoundOpKind : uint8_t {
@@ -59,6 +66,8 @@ struct TBoundOp
 
 struct TBoundPredicate
 {
+    // Destroy compiled literals before their reservation.
+    std::shared_ptr<const void> ResourceLease;
     std::vector<size_t> ReferencedFields;
     std::vector<FieldType> ReferencedTypes;
     std::vector<TBoundOp> Ops;
@@ -72,7 +81,9 @@ struct TBoundPredicate
 
 // Validates the predicate tree (depth, nodes, literals, fields, and literal
 // domains without implicit casts) and compiles it to a flat post-order program.
-Result<TBoundPredicate> BindPredicate(const Predicate& predicate, const SchemaSpec& schema);
+Result<TBoundPredicate> BindPredicate(const Predicate& predicate,
+    const SchemaSpec& schema,
+    const std::shared_ptr<ResourceOwner>& resources = {});
 
 // Evaluates SQL three-valued logic over referencedColumns (ordered as
 // predicate.ReferencedFields) and returns row indices where the root is TRUE.

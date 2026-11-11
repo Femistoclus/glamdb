@@ -2,6 +2,8 @@
 
 #include "core/api/binary.h"
 #include "core/api/canonical.h"
+#include "core/resources/envelopes.h"
+#include "core/resources/metadata_result.h"
 
 #include <algorithm>
 #include <array>
@@ -140,6 +142,17 @@ size_t Measure(const TMetadataPages::TListing& listing)
     return charge.GetBytes();
 }
 
+void RetainListing(const std::shared_ptr<ResourceOwner>& resources, TMetadataPages::TListing& listing)
+{
+    std::visit(
+        [&](auto& value) {
+            if (const auto retained = RetainMetadata(resources, value); !retained) {
+                throw Failure(retained.error());
+            }
+        },
+        listing);
+}
+
 } // namespace
 
 TMetadataPages::TMetadataPages()
@@ -161,7 +174,10 @@ void TMetadataPages::Expire(TClock::time_point now)
     });
 }
 
-TMetadataPages::TListing TMetadataPages::ReadPage(const TSession& session, size_t offset, size_t pageSize)
+TMetadataPages::TListing TMetadataPages::ReadPage(const TSession& session,
+    size_t offset,
+    size_t pageSize,
+    const std::shared_ptr<ResourceOwner>& resources)
 {
     auto result = std::visit(
         [&](const auto& value) -> TListing {
@@ -185,6 +201,7 @@ TMetadataPages::TListing TMetadataPages::ReadPage(const TSession& session, size_
             return page;
         },
         session.Listing);
+    RetainListing(resources, result);
     return result;
 }
 
@@ -192,7 +209,8 @@ Result<TMetadataPages::TListing> TMetadataPages::Read(const TMetadataPageRequest
     std::string_view parameters,
     const TLoad& load,
     TClock::time_point now,
-    std::optional<uint64_t> admissionGeneration)
+    std::optional<uint64_t> admissionGeneration,
+    const std::shared_ptr<ResourceOwner>& resources)
 {
     bool pending = false;
     uint64_t generation = 0;
@@ -201,6 +219,19 @@ Result<TMetadataPages::TListing> TMetadataPages::Read(const TMetadataPageRequest
                 parameters.size() <= 2048,
             "INVALID_ARGUMENT",
             "Metadata page parameters exceed their limits.");
+        {
+            std::lock_guard lock(Mutex_);
+            Require(!admissionGeneration || *admissionGeneration == Generation_,
+                "INVALID_CURSOR",
+                "Metadata cursor admission was invalidated.");
+            // Reclaim expired leases even when working admission is exhausted.
+            Expire(now);
+        }
+        const auto owner = resources ? resources : ResourceOwner::ProcessDefault();
+        auto workingMemory = owner->Reserve(ResourceClass::Metadata, MetadataWorkBytes);
+        if (!workingMemory) {
+            throw Failure(workingMemory.error());
+        }
         Encoder encoded;
         encoded.Text(parameters);
         encoded.Number(request.PageSize);
@@ -211,7 +242,6 @@ Result<TMetadataPages::TListing> TMetadataPages::Read(const TMetadataPageRequest
             Require(!admissionGeneration || *admissionGeneration == Generation_,
                 "INVALID_CURSOR",
                 "Metadata cursor admission was invalidated.");
-            Expire(now);
             if (!request.PageToken.empty()) {
                 Require(ValidDigest(request.PageToken), "INVALID_CURSOR", "Metadata cursor is invalid or expired.");
                 for (const auto& session : Sessions_) {
@@ -220,7 +250,7 @@ Result<TMetadataPages::TListing> TMetadataPages::Read(const TMetadataPageRequest
                         Require(session.Binding == encoded.bytes,
                             "INVALID_CURSOR",
                             "Metadata cursor parameters or authorization changed.");
-                        return ReadPage(session, positionIt->second, pageSize);
+                        return ReadPage(session, positionIt->second, pageSize, owner);
                     }
                 }
                 throw Failure({"INVALID_CURSOR", "Metadata cursor is invalid or expired.", RetryHint::FixInput});
@@ -239,22 +269,30 @@ Result<TMetadataPages::TListing> TMetadataPages::Read(const TMetadataPageRequest
         TSession session{.Binding = std::move(encoded.bytes),
             .Listing = std::move(*listing),
             .Expires = now + Options_.Lifetime};
+        RetainListing(owner, session.Listing);
         const auto count = Count(session.Listing);
         if (count > pageSize) {
             const auto tokenCount = (count - 1) / pageSize;
-            TCharge charge;
-            charge.Add(sizeof(TSession));
-            charge.Add(session.Binding);
-            charge.Add(Measure(session.Listing));
             // Reserve both token strings, tree nodes and vector capacity up front.
             Require(tokenCount <= Options_.MaxBytes / 512,
                 "RESOURCE_EXHAUSTED",
                 "Metadata cursor exceeds its memory limit.");
-            charge.Add(tokenCount * 512);
+            TCharge descriptors;
+            descriptors.Add(sizeof(TSession) + 4096);
+            descriptors.Add(session.Binding);
+            descriptors.Add(tokenCount * 512);
+            TCharge charge;
+            charge.Add(descriptors.GetBytes());
+            charge.Add(Measure(session.Listing));
             session.ChargedBytes = charge.GetBytes();
             Require(session.ChargedBytes <= Options_.MaxBytes,
                 "RESOURCE_EXHAUSTED",
                 "Metadata cursor exceeds its memory limit.");
+            auto descriptorMemory = owner->Reserve(ResourceClass::Metadata, descriptors.GetBytes());
+            if (!descriptorMemory) {
+                throw Failure(descriptorMemory.error());
+            }
+            session.ResourceLease = std::move(*descriptorMemory);
             session.Tokens.reserve(tokenCount);
             for (size_t index = 0; index < tokenCount; ++index) {
                 auto token = NewToken();
@@ -264,7 +302,7 @@ Result<TMetadataPages::TListing> TMetadataPages::Read(const TMetadataPageRequest
                 session.Tokens.push_back(std::move(token));
             }
         }
-        auto page = ReadPage(session, 0, pageSize);
+        auto page = ReadPage(session, 0, pageSize, owner);
         {
             std::lock_guard lock(Mutex_);
             --Pending_;

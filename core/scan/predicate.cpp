@@ -2,12 +2,15 @@
 
 #include "core/api/canonical.h"
 #include "core/engine/storage_mapping.h"
+#include "storage/resources.h"
 
 #include <arrow/api.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <new>
 #include <string>
 #include <string_view>
@@ -19,6 +22,8 @@ namespace {
 
 struct TChildList
 {
+    // Deferred destruction can outlive the parent node's lease.
+    std::shared_ptr<const void> ResourceLease{};
     std::vector<Predicate> Items;
     std::unique_ptr<TChildList> Next;
 };
@@ -33,6 +38,8 @@ struct TDestroyQueue
 
 struct Predicate::Node
 {
+    // Subtree copies from an explanation keep the shared charge alive.
+    std::shared_ptr<const void> resource_lease;
     Kind kind = Kind::True;
     std::string field;
     CompareOp op = CompareOp::Eq;
@@ -129,7 +136,7 @@ Predicate Predicate::And(std::vector<Predicate> args)
     auto node = std::make_shared<Node>();
     node->kind = Kind::And;
     if (!args.empty()) {
-        node->children = std::make_unique<TChildList>(TChildList{std::move(args), nullptr});
+        node->children = std::make_unique<TChildList>(TChildList{.Items = std::move(args), .Next = nullptr});
     }
     return Predicate(std::move(node));
 }
@@ -139,7 +146,7 @@ Predicate Predicate::Or(std::vector<Predicate> args)
     auto node = std::make_shared<Node>();
     node->kind = Kind::Or;
     if (!args.empty()) {
-        node->children = std::make_unique<TChildList>(TChildList{std::move(args), nullptr});
+        node->children = std::make_unique<TChildList>(TChildList{.Items = std::move(args), .Next = nullptr});
     }
     return Predicate(std::move(node));
 }
@@ -150,7 +157,7 @@ Predicate Predicate::Not(Predicate arg)
     node->kind = Kind::Not;
     std::vector<Predicate> items;
     items.push_back(std::move(arg));
-    node->children = std::make_unique<TChildList>(TChildList{std::move(items), nullptr});
+    node->children = std::make_unique<TChildList>(TChildList{.Items = std::move(items), .Next = nullptr});
     return Predicate(std::move(node));
 }
 
@@ -511,10 +518,130 @@ struct TCompileFrame
 
 } // namespace
 
-Result<TBoundPredicate> BindPredicate(const Predicate& predicate, const SchemaSpec& schema)
+Result<uint64_t> TPredicateResources::Measure(const Predicate& predicate)
+{
+    struct TFrame
+    {
+        const Predicate* Item;
+        size_t Depth;
+    };
+    std::array<TFrame, MaxPredicateNodes> pending{};
+    pending[0] = {&predicate, 0};
+    size_t pendingCount = 1;
+    size_t nodeCount = 1;
+    size_t literalCount = 0;
+    uint64_t bytes = 4096;
+    const auto add = [&](uint64_t count, uint64_t width = 1) {
+        constexpr auto Max = std::numeric_limits<uint64_t>::max();
+        if ((count != 0 && width > Max / count) || count * width > Max - bytes) {
+            bytes = Max;
+        } else {
+            bytes += count * width;
+        }
+    };
+    const auto allocation = [&](uint64_t count, uint64_t width = 1) {
+        if (count != 0) {
+            add(count, width);
+            add(128);
+            if (count > 4095 / width) {
+                add(4096);
+            }
+        }
+    };
+    const auto text = [&](const std::string& value) {
+        allocation(value.capacity());
+        add(1);
+    };
+    const auto literal = [&](const OptionalLiteral& value) {
+        if (value) {
+            if (const auto* valueText = std::get_if<std::string>(&*value)) {
+                text(*valueText);
+            }
+        }
+    };
+    while (pendingCount != 0) {
+        const auto frame = pending[--pendingCount];
+        if (frame.Depth > MaxPredicateDepth) {
+            return std::unexpected(InvalidPredicate("predicate exceeds maximum depth"));
+        }
+        const auto& node = frame.Item->node_;
+        if (!node) {
+            continue;
+        }
+        allocation(1, sizeof(Predicate::Node));
+        text(node->field);
+        literal(node->optional_value);
+        const auto count = node->kind == Predicate::Kind::Compare ? size_t{1} : node->values.size();
+        if (count > MaxPredicateLiterals - literalCount) {
+            return std::unexpected(InvalidPredicate("predicate exceeds maximum literal count"));
+        }
+        literalCount += count;
+        allocation(node->values.capacity(), sizeof(OptionalLiteral));
+        for (const auto& value : node->values) {
+            literal(value);
+        }
+        if (node->children) {
+            const auto& children = node->children->Items;
+            if (children.size() > MaxPredicateNodes - nodeCount) {
+                return std::unexpected(InvalidPredicate("predicate exceeds maximum node count"));
+            }
+            nodeCount += children.size();
+            allocation(1, sizeof(TChildList));
+            allocation(children.capacity(), sizeof(Predicate));
+            for (const auto& child : children) {
+                pending[pendingCount++] = {&child, frame.Depth + 1};
+            }
+        }
+    }
+    return bytes;
+}
+
+Predicate TPredicateResources::Retain(const Predicate& predicate, const std::shared_ptr<const void>& lease)
+{
+    if (!predicate.node_) {
+        return {};
+    }
+    const auto& source = *predicate.node_;
+    auto node = std::make_shared<Predicate::Node>();
+    node->resource_lease = lease;
+    node->kind = source.kind;
+    node->field = source.field;
+    node->op = source.op;
+    node->optional_value = source.optional_value;
+    node->values = source.values;
+    if (source.children) {
+        std::vector<Predicate> children;
+        children.reserve(source.children->Items.size());
+        for (const auto& child : source.children->Items) {
+            children.push_back(Retain(child, lease));
+        }
+        node->children = std::make_unique<TChildList>(
+            TChildList{.ResourceLease = lease, .Items = std::move(children), .Next = nullptr});
+    }
+    return Predicate(std::move(node));
+}
+
+Result<TBoundPredicate>
+BindPredicate(const Predicate& predicate, const SchemaSpec& schema, const std::shared_ptr<ResourceOwner>& resources)
 {
     try {
         TBoundPredicate bound;
+        if (resources) {
+            const auto bytes = TPredicateResources::Measure(predicate);
+            if (!bytes) {
+                return std::unexpected(bytes.error());
+            }
+            constexpr uint64_t Overhead = 4ULL << 20;
+            if (*bytes > (std::numeric_limits<uint64_t>::max() - Overhead) / 2) {
+                return std::unexpected(ResourceExhausted("predicate reservation overflows"));
+            }
+            // Include compiled vectors, allocator overhead and transient copies.
+            auto memory = resources->Reserve(ResourceClass::Metadata, Overhead + 2 * *bytes);
+            if (!memory) {
+                return std::unexpected(memory.error());
+            }
+            bound.ResourceLease = std::move(*memory);
+        }
         std::vector<TCompileFrame> stack;
         stack.push_back(TCompileFrame{.Node = &predicate, .Depth = 0, .EmitOnly = false});
 

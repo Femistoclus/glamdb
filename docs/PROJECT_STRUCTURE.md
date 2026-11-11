@@ -71,6 +71,7 @@ glamdb/
 | `public/storage/` | Installed engine API/request/outcome/scan/metadata types, metric provenance and the independent storage schema DTO. |
 | `core/api/`, `core/catalog/`, `core/engine/` | `glamdb_core` / `glamdb::core`: canonical input, SQLite catalog, coordinator, and public facade. |
 | `core/backend/` | Storage backend bridging the coordinator seam to `glamdb_storage` (built with `GLAMDB_BUILD_STORAGE`). |
+| `core/resources/` | Shared memory/device owner, Arrow pools and conservative working envelopes. |
 | `core/scan/` | Predicate evaluation (always built), snapshot planning and Parquet scan cursor (storage builds). |
 | `core/io/` | Independent `glamdb_io`: local filesystem, store directories/URIs, attempts, receipts, SHA-256, durable files and copying. |
 | `core/storage/` | `glamdb_storage`: FileIO adapter, profiles, Parquet writer, Iceberg staging, publication, recovery and capacity. |

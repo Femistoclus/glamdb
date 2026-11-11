@@ -32,10 +32,13 @@ class NativeFaultHTTP(unittest.TestCase):
 
     def start(self):
         arguments = [DRIVER, str(self.directory)]
-        if hasattr(self, 'connection_limit') or hasattr(self, 'request_timeout_ms'):
+        many_readers = self._testMethodName == 'test_32_and_64_concurrent_snapshot_sessions_finish_without_busy_refusals'
+        if hasattr(self, 'connection_limit') or hasattr(self, 'request_timeout_ms') or many_readers:
             arguments.append(str(getattr(self, 'connection_limit', 96)))
-        if hasattr(self, 'request_timeout_ms'):
-            arguments.append(str(self.request_timeout_ms))
+        if hasattr(self, 'request_timeout_ms') or many_readers:
+            arguments.append(str(getattr(self, 'request_timeout_ms', 10000)))
+        if many_readers:
+            arguments.append('many-readers')
         self.process = subprocess.Popen(arguments, stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
         self.assertTrue(select.select([self.process.stdout], [], [], 20)[0], 'server startup timed out')

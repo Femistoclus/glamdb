@@ -3,6 +3,8 @@
 #include "tests/support/checked.h"
 #include "tests/vertical/vertical_support.h"
 
+#include "storage/resources.h"
+
 #include <condition_variable>
 #include <future>
 #include <mutex>
@@ -104,21 +106,25 @@ class ScanSessionsTest : public ::testing::Test
 protected:
     test::TempDir Temporary;
     std::shared_ptr<TPausedFS> Fs = std::make_shared<TPausedFS>();
+    std::shared_ptr<ResourceOwner> Resources = ResourceOwner::ProcessDefault();
     std::shared_ptr<Engine> Db;
     void SetUp() override
     {
         const detail::BackendFactory factory =
-            [fs = Fs](const std::filesystem::path& path,
+            [fs = Fs, resources = Resources](const std::filesystem::path& path,
                 const StoreInfo& info) -> Result<std::shared_ptr<detail::StorageBackend>> {
             detail::TLocalStorageOptions options;
             options.Fs = fs;
+            options.Resources = resources;
             auto backend = detail::TLocalStorageBackend::Open(path, info, options);
             if (!backend) {
                 return std::unexpected(backend.error());
             }
             return std::shared_ptr<detail::StorageBackend>(std::move(*backend));
         };
-        auto created = detail::EngineFactory::CreateWith({test::store_id, (Temporary.path / "db").string()}, factory);
+        auto created = detail::EngineFactory::CreateWith(
+            {.store_id = test::store_id, .absolute_root = (Temporary.path / "db").string(), .resources = Resources},
+            factory);
         ASSERT_TRUE(created);
         Db = std::move(*created);
         ASSERT_EQ(Db->CreateCollection({test::collection_id, "rows", Schema}).disposition,
@@ -372,6 +378,20 @@ TEST_P(ReplayAdmissionTest, AdmissionRefusalPreservesCursorAndLastReplay)
             EXPECT_EQ(scans.Open(Db, "victim", collection, {{"cursor", replayToken}}, false, false).Body, replayBody);
         }
     }
+    const auto owner = Db->GetResourceOwner();
+    auto pressure =
+        owner->Reserve(ResourceClass::Data, owner->GetLimits().memory_bytes[0] - owner->GetUsage().memory_bytes[0]);
+    ASSERT_TRUE(pressure);
+    try {
+        scans.Open(Db, "victim", collection, {{"cursor", token}}, false, false);
+        FAIL() << "page admitted while shared data memory was full";
+    } catch (const TFailure& error) {
+        EXPECT_EQ(error.Detail.code, "RESOURCE_EXHAUSTED");
+    }
+    pressure->reset();
+    if (!replayToken.empty()) {
+        EXPECT_EQ(scans.Open(Db, "victim", collection, {{"cursor", replayToken}}, false, false).Body, replayBody);
+    }
     scans.Cancel(tokens.front().first, collection, {{"cursor", tokens.front().second}});
     EXPECT_FALSE(Open(scans, "overflow", collection).empty());
     // A later append must not enter the refused cursor's already fixed view.
@@ -389,8 +409,19 @@ TEST_P(ReplayAdmissionTest, AdmissionRefusalPreservesCursorAndLastReplay)
     EXPECT_EQ(scans.Open(Db, "victim", collection, {{"cursor", reopened}}, false, false).Status, 200);
 }
 INSTANTIATE_TEST_SUITE_P(FirstAndNextPage, ReplayAdmissionTest, ::testing::Bool());
-TEST_F(ScanSessionsTest, EveryAdmittedLargePageRetainsItsReplayAndNextCursor)
+class LargeReplayScanSessionsTest : public ScanSessionsTest
 {
+    void SetUp() override
+    {
+        // Thirty-three retained readers each keep a 256 MiB footer envelope.
+        ResourceLimits limits;
+        limits.memory_bytes[1] = 16ULL << 30;
+        Resources = std::make_shared<ResourceOwner>(limits);
+        ScanSessionsTest::SetUp();
+    }
+};
+TEST_F(LargeReplayScanSessionsTest, EveryAdmittedLargePageRetainsItsReplayAndNextCursor)
+try {
     const std::string collection = "00000000-0000-4000-8000-0000000000c3";
     SchemaSpec schema{{{"key", FieldType::String, false}}};
     TJson row{{"key", "same"}};
@@ -420,6 +451,10 @@ TEST_F(ScanSessionsTest, EveryAdmittedLargePageRetainsItsReplayAndNextCursor)
         EXPECT_TRUE(envelope.at("next_cursor").is_null());
         EXPECT_GT(last.Body.size(), 4U * 1024 * 1024);
     }
+} catch (const TFailure& error) {
+    const auto usage = Db->GetResourceOwner()->GetUsage();
+    FAIL() << error.Detail.code << ": " << error.Detail.message << "; data peak=" << usage.memory_peak[0]
+           << "; metadata peak=" << usage.memory_peak[1];
 }
 
 TEST_F(ScanSessionsTest, ActiveScansCanUseIdleExpiryWithoutAnAbsoluteLifetime)

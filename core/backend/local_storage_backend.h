@@ -30,6 +30,10 @@ namespace iceberg {
 class Catalog;
 } // namespace iceberg
 
+namespace glamdb {
+class ResourceReservation;
+}
+
 namespace glamdb::detail {
 
 struct TLocalStorageOptions
@@ -42,6 +46,7 @@ struct TLocalStorageOptions
     // Filesystem adapter; empty selects the POSIX implementation. Tests inject
     // faults here.
     std::shared_ptr<NGlamDB::NIO::ILocalFS> Fs{};
+    std::shared_ptr<ResourceOwner> Resources{};
 };
 
 // Production bridge from the coordinator seam to the durable storage
@@ -94,6 +99,7 @@ private:
     {
         std::shared_ptr<const NGlamDB::NStorage::TBaseState> Confirmed;
         std::shared_ptr<const NGlamDB::NStorage::TBaseState> Tentative;
+        std::shared_ptr<ResourceReservation> ConfirmedMemory, TentativeMemory;
     };
 
     const StoreInfo Store_;
@@ -105,6 +111,9 @@ private:
     std::mutex Mutex_;
     std::map<std::string, TCollectionState, std::less<>> Collections_;
     bool VerifiedGeneration_ = false;
+    // Preserve admitted root capacity while invalidating uncertain metadata.
+    // Recovery can rebuild the selected root even when ordinary memory is full.
+    std::map<std::string, std::shared_ptr<ResourceReservation>, std::less<>> CacheMemory_;
     // Warehouse bytes measured by the admission preflight of the append that
     // is about to be prepared. Binding writes only the catalog, so
     // PrepareAppend reuses them instead of walking the warehouse again.
@@ -125,7 +134,8 @@ private:
     void RequireVerified() const;
     NGlamDB::NStorage::TStorageUsage ComputeStoreUsage();
     std::shared_ptr<const NGlamDB::NStorage::TBaseState> ResolveBase(const BaseIdentity& base);
-    std::shared_ptr<const NGlamDB::NStorage::TBaseState> VerifyCollection(const BaseIdentity& base) const;
+    std::shared_ptr<ResourceReservation> ReserveRootMemory(std::string_view collectionID, uint64_t bytes, bool reuse);
+    std::shared_ptr<const NGlamDB::NStorage::TBaseState> VerifyCollection(const BaseIdentity& base);
 };
 
 } // namespace glamdb::detail

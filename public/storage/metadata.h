@@ -29,6 +29,8 @@ struct TMetadataPageRequest
 
 struct TCollectionPage
 {
+    // Declared first so payload allocations are freed before the reservation.
+    std::shared_ptr<const void> ResourceLease{};
     int64_t CreationHighWaterMark = 0;
     std::vector<CollectionInfo> Collections{};
     std::string NextPageToken{};
@@ -44,6 +46,8 @@ struct SnapshotMetadata
 
 struct SnapshotHistory
 {
+    // Declared first so payload allocations are freed before the reservation.
+    std::shared_ptr<const void> resource_lease{};
     // The confirmed root from which the entire history was read.
     BaseIdentity identity{};
     // Oldest first; initial empty is a view, not a snapshot.
@@ -53,6 +57,8 @@ struct SnapshotHistory
 
 struct CollectionStatistics
 {
+    // Declared first so payload allocations are freed before the reservation.
+    std::shared_ptr<const void> resource_lease{};
     // Root identity and selected snapshot are separate for historical views.
     BaseIdentity identity{};
     SnapshotSelector selector_resolved{};
@@ -87,6 +93,8 @@ struct TDataFileMetadata
 
 struct TFileListing
 {
+    // Declared first so payload allocations are freed before the reservation.
+    std::shared_ptr<const void> ResourceLease{};
     BaseIdentity Identity{};
     SnapshotSelector SelectorResolved{};
     std::vector<TDataFileMetadata> Files{};
@@ -121,6 +129,8 @@ struct TRowGroupMetadata
 
 struct TFileDetails
 {
+    // Declared first so payload allocations are freed before the reservation.
+    std::shared_ptr<const void> ResourceLease{};
     BaseIdentity Identity{};
     SnapshotSelector SelectorResolved{};
     TDataFileMetadata File{};
@@ -129,6 +139,8 @@ struct TFileDetails
 
 struct ScanExplanation
 {
+    // Declared first so payload allocations are freed before the reservation.
+    std::shared_ptr<const void> resource_lease{};
     ScanInfo info{};
     std::vector<std::string> read_fields{};
     Predicate predicate{};

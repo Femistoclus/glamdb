@@ -15,6 +15,8 @@ class RecordBatch;
 
 namespace glamdb {
 
+class ResourceOwner;
+
 enum class RetryHint : uint8_t { SameIdAfterReconcile, NewOperationId, FixInput, OperatorAction };
 
 struct ErrorDetail
@@ -221,6 +223,7 @@ struct CreateStoreRequest
     std::string absolute_root;
     std::string profile_id = "local-delete-extra-v1";
     Limits limits{};
+    std::shared_ptr<ResourceOwner> resources{};
 };
 
 struct OpenStoreRequest
@@ -229,6 +232,7 @@ struct OpenStoreRequest
     std::string expected_store_id;
     std::string profile_id = "local-delete-extra-v1";
     Limits limits{};
+    std::shared_ptr<ResourceOwner> resources{};
 };
 
 } // namespace glamdb

@@ -36,8 +36,11 @@ See the [coordinator guide](docs/development/COORDINATOR.md)
 and [storage guide](docs/development/STORAGE_MODULE.md) for supported boundaries.
 The [shared resource budget matrix](docs/development/RESOURCE_BUDGETS.md) names
 limit units, owners and enforcement points, including retained buffers and
-completion/recovery reserves. It separates existing local checks from aggregate
-memory and device reservations still required for a bounded process.
+completion/recovery reserves. A [process resource owner](docs/development/SHARED_RESOURCES.md)
+shares finite memory and device reservations across databases and HTTP work.
+[Measured multi-database tests](docs/development/SHARED_RESOURCES_VALIDATION.md)
+cover saturation, retained buffers and fresh-process reopen; the conservative
+upstream envelopes still require broader RSS and capacity qualification.
 Power-loss, capacity and ingestion qualification (G4) are **NOT RUN**. The
 [roadmap status](docs/ROADMAP.md#current-status) separates implemented code
 from executed evidence for each gate.

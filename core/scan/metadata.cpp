@@ -9,6 +9,7 @@
 #include <iceberg/table_metadata.h>
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <map>
 
@@ -66,7 +67,7 @@ SnapshotHistory ReadHistory(const TScanContext& context, std::span<const AppendR
                 "multiple receipts identify one snapshot");
         }
     }
-    SnapshotHistory history{context.Base, {}};
+    SnapshotHistory history{.identity = context.Base};
     auto snapshots = root->snapshots;
     for (const auto& snapshot : snapshots) {
         Require(snapshot != nullptr, "CORRUPTION", "retained snapshot is null");
@@ -120,13 +121,25 @@ ScanExplanation ExplainScan(const TScanContext& context, const ScanRequest& requ
     result.predicate = request.predicate;
     result.limit = request.limit;
     result.batch_rows = request.batch_rows;
-    const auto boundPredicate = Take(BindPredicate(request.predicate, context.Collection.schema));
-    for (size_t index = 0; index < context.Collection.schema.fields.size(); ++index) {
-        const auto& field = context.Collection.schema.fields[index];
+    // OpenScan has already validated the tree. Collect field references without
+    // compiling another copy of its potentially large literal sets.
+    std::vector<std::string_view> referencedFields;
+    std::array<const Predicate*, MaxPredicateNodes> pending{};
+    pending[0] = &request.predicate;
+    size_t pendingCount = 1;
+    while (pendingCount != 0) {
+        const auto& predicate = *pending[--pendingCount];
+        if (!predicate.field().empty()) {
+            referencedFields.push_back(predicate.field());
+        }
+        for (const auto& child : predicate.children()) {
+            pending[pendingCount++] = &child;
+        }
+    }
+    for (const auto& field : context.Collection.schema.fields) {
         const bool projected =
             !request.projection || std::ranges::find(*request.projection, field.name) != request.projection->end();
-        const bool referenced =
-            std::ranges::find(boundPredicate.ReferencedFields, index) != boundPredicate.ReferencedFields.end();
+        const bool referenced = std::ranges::find(referencedFields, field.name) != referencedFields.end();
         if (projected || referenced) {
             result.read_fields.push_back(field.name);
         }

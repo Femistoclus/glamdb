@@ -19,6 +19,10 @@ class Schema;
 
 namespace glamdb {
 
+namespace detail {
+struct TPredicateResources;
+}
+
 enum class SnapshotSelectorKind : uint8_t { Latest, Id, InitialEmpty };
 
 // Latest is resolved exactly once when a scan opens. InitialEmpty is the
@@ -82,6 +86,7 @@ public:
     std::span<const Predicate> children() const noexcept;
 
 private:
+    friend struct detail::TPredicateResources;
     struct Node;
     explicit Predicate(std::shared_ptr<const Node> node) noexcept;
 

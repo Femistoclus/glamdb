@@ -1,4 +1,5 @@
 #include "core/engine/metadata_pages.h"
+#include "storage/resources.h"
 
 #include <gtest/gtest.h>
 
@@ -70,6 +71,30 @@ TEST(TMetadataPagesTest, ExpiresAbsolutelyAndReclaimsCapacity)
     ASSERT_FALSE(expired);
     EXPECT_EQ(expired.error().code, "INVALID_CURSOR");
     ASSERT_TRUE(pages.Read({.PageSize = 1}, "collections", load, start + std::chrono::seconds(10)));
+}
+
+TEST(TMetadataPagesTest, ExpiredSessionsReleaseSharedChargesBeforeWorkingAdmission)
+{
+    auto owner = std::make_shared<ResourceOwner>();
+    TMetadataPages pages({.Lifetime = std::chrono::seconds(10)});
+    const auto start = TMetadataPages::TClock::now();
+    const auto load = []() -> Result<TMetadataPages::TListing> {
+        return Collections();
+    };
+    auto first = pages.Read({.PageSize = 1}, "collections", load, start, {}, owner);
+    ASSERT_TRUE(first);
+    ASSERT_FALSE(std::get<TCollectionPage>(*first).NextPageToken.empty());
+    first = TMetadataPages::TListing(TCollectionPage{});
+    EXPECT_GT(owner->GetUsage().memory_bytes[1], 0);
+    auto pressure =
+        owner->Reserve(ResourceClass::Metadata, owner->GetLimits().memory_bytes[1] - owner->GetUsage().memory_bytes[1]);
+    ASSERT_TRUE(pressure);
+    const auto expired = pages.Read({.PageSize = 1}, "collections", load, start + std::chrono::seconds(10), {}, owner);
+    ASSERT_FALSE(expired);
+    EXPECT_EQ(expired.error().code, "RESOURCE_EXHAUSTED");
+    EXPECT_EQ(owner->GetUsage().memory_bytes[1], (*pressure)->GetBytes());
+    pressure->reset();
+    ASSERT_TRUE(pages.Read({.PageSize = 1}, "collections", load, start + std::chrono::seconds(10), {}, owner));
 }
 
 TEST(TMetadataPagesTest, ValidatesBeforeLoadingAndRecoversFromFailures)
