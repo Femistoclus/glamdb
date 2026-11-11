@@ -15,7 +15,12 @@ from glamdb_verify import append_hash, canonical_append, normalize_rows, normali
 
 
 MOCK = {"backend": "mock", "mock": True, "durability_validation": "designed"}
+HEALTH = {
+    'state': 'ready', 'read_available': True, 'write_ready': True,
+    'storage_failure_latched': False, 'durability_qualified': False, **MOCK,
+}
 CAPABILITIES = {
+    'health': HEALTH,
     "scan_pagination": False,
     **MOCK, "mode": "append", "key_unique": False, "cow": False,
     "deletes": False, "compaction": False, "async_admission": False,

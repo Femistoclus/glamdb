@@ -206,3 +206,18 @@ coordinator-to-storage appends and scans are exercised in-process by
 `glamdb_vertical` and in fresh processes by `glamdb.scan_process` (see
 [SCANNER.md](SCANNER.md#validation-status)). Restore, combined capacity/RSS and
 OS-cache-loss/power-cut qualification remain NOT RUN.
+
+## Public health observation
+
+`Engine::GetHealth()` returns a point-in-time `StoreHealth` without catalog I/O
+or waiting for the writer. Recovery and corruption fences close new reads and
+writes. A local durable-I/O latch separately closes writes while confirmed reads
+remain available; `Reconcile()` does not clear it. Shutdown takes precedence over
+recovery in the reported state, including after a shutdown timeout. Closed
+engines remain observable. A missing storage backend advertises neither scans
+nor writes. The storage seam explicitly reports reader availability, so the
+coordinator test backend does not claim to support scans.
+
+The [HTTP contract](HTTP_SERVER.md) defines the state table, lifecycle overlays,
+and 200/503 readiness mapping. Every health snapshot remains durability-unqualified;
+backend availability and successful recovery are not qualification evidence.

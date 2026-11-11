@@ -43,6 +43,9 @@ TEST_F(CoordinatorFaultTest, LostOuterCommitResultBlocksWritersAndFenceFailureKe
     const auto unknown = engine->AppendDurable(Request());
     ASSERT_EQ(unknown.disposition, CommitDisposition::CommitUnknown);
     EXPECT_EQ(unknown.phase, CommitPhase::CatalogCommit);
+    EXPECT_EQ(engine->GetHealth().state, StoreState::RecoveryRequired);
+    EXPECT_FALSE(engine->GetHealth().read_available);
+    EXPECT_FALSE(engine->GetHealth().write_ready);
     ASSERT_TRUE(unknown.recovery);
     EXPECT_TRUE(test::Present(unknown.recovery).publication_started);
     EXPECT_EQ(test::Present(engine->FindAppendOutcome(test::collection_id, test::operation_id).value()).disposition,

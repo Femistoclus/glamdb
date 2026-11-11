@@ -277,12 +277,14 @@ private:
         Request_.Body = std::move(Input_);
         const auto [path, query] = ParseTarget(Request_.Target);
         (void)query;
-        if (Request_.Method == "GET" && (path == "/healthz" || path == "/capabilities")) {
+        const auto split = path.starts_with("/databases/") ? path.find('/', 11) : std::string::npos;
+        const auto suffix = split == std::string::npos ? path : path.substr(split);
+        // Health observation is bounded and does no I/O. Keep it available even
+        // when operation lookups occupy every control worker behind a writer.
+        if (Request_.Method == "GET" && (path == "/healthz" || suffix == "/capabilities" || suffix == "/readyz")) {
             Write(State_.Routes.Handle(Request_));
             return;
         }
-        const auto split = path.starts_with("/databases/") ? path.find('/', 11) : std::string::npos;
-        const auto suffix = split == std::string::npos ? path : path.substr(split);
         const bool lifecycle = Request_.Method == "POST" &&
             (path == "/databases" || suffix == "/open" || suffix == "/close" || suffix == "/reconcile" ||
                 suffix == "/discard");

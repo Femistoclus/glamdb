@@ -94,6 +94,20 @@ upstream as
 which is after v0.4.0 and not yet released. Delete the patch in the change
 that moves the pin to a revision containing that commit: the patch no longer
 applies there, so the dependency build fails until it is removed.
+
+After pulling changes to dependency recipes or patches, rerun the `deps-local`
+configure and build commands above before rebuilding the application. Building
+`local` alone uses the existing installed libraries and does not refresh them.
+If an older Iceberg build reports that `iceberg-src/CMakeLists.txt` does not
+match the cached `third_party/iceberg-cpp/CMakeLists.txt`, discard only its
+generated CMake cache and rerun the dependency build:
+
+```sh
+cmake -E rm -f build/deps-local/cmake/dependencies/iceberg/CMakeCache.txt
+cmake --build --preset deps-local --parallel 2
+cmake --build --preset local --parallel 2
+```
+
 Preserve the required semantics rather than
 silently changing catalog type or weakening the commit boundary. Record the
 SQLite source/build/VFS and complete toolchain with integration results; the

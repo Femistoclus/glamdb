@@ -420,6 +420,34 @@ TJson TDatabases::Get(const std::string& id) const
     const auto entry = Impl_->Find(id);
     return Current(*entry);
 }
+StoreHealth TDatabases::Health(const std::string& id) const
+{
+    const auto entry = Impl_->Find(id);
+    // Never wait behind a lifecycle operation: its published descriptor is
+    // available throughout recovery, draining, and shutdown.
+    std::shared_lock lock(entry->Gate, std::try_to_lock);
+    const auto descriptor = Current(*entry);
+    const auto state = descriptor.at("state").get<std::string>();
+    StoreHealth health;
+    if (state == "closed") {
+        health.state = StoreState::Closed;
+    } else if (state == "closing") {
+        health.state = StoreState::Stopping;
+    } else if (state == "opening" || state == "reconciling" || !lock.owns_lock()) {
+        health.state = StoreState::Recovering;
+    } else if (!entry->Instance || entry->RegistryFence) {
+        health.state = StoreState::RecoveryRequired;
+    } else {
+        health = entry->Instance->GetHealth();
+        if (!entry->Accepting) {
+            health.state = StoreState::Recovering;
+            health.read_available = false;
+            health.write_ready = false;
+        }
+    }
+    return health;
+}
+
 TJson TDatabases::Create(const TJson& body)
 {
     CheckKeys(body, {"name", "database_id", "limits"});

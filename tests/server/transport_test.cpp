@@ -1,8 +1,31 @@
 #include "apps/transport/http.h"
 
+#include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 
 namespace glamdb::NTransport {
+TEST(Transport, HealthStateFixturesKeepReadinessSeparateFromDurability)
+{
+    std::ifstream input(
+        std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "fixtures/http/health-states.json");
+    const auto fixtures = TJson::parse(input);
+    const std::vector<StoreHealth> states{
+        {StoreState::Recovering},
+        {StoreState::Ready, true, true},
+        {StoreState::RecoveryRequired},
+        {StoreState::StorageFailed, true, false, true},
+        {StoreState::Unavailable},
+        {StoreState::Stopping},
+        {StoreState::Closed},
+    };
+    for (size_t index = 0; index < states.size(); ++index) {
+        const auto response = ReadinessResponse(states[index]);
+        EXPECT_EQ(response.Status, fixtures[index]["status"]);
+        EXPECT_EQ(TJson::parse(response.Body), fixtures[index]["response"]);
+    }
+}
+
 TEST(Transport, RejectsAmbiguousJsonAndFraming)
 {
     EXPECT_THROW(ParseJson(R"({"operation_id":"a","operation_id":"b"})"), TFailure);

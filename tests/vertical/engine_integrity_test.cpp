@@ -650,6 +650,13 @@ TEST_F(EngineIntegrityTest, LatchedWriteFailureAllowsReconcileShutdownAndReopen)
     ASSERT_TRUE(failed.error);
     EXPECT_EQ(test::Present(failed.error).code, "IO_ERROR");
 
+    const auto health = Engine_->GetHealth();
+    EXPECT_EQ(health.state, StoreState::StorageFailed);
+    EXPECT_TRUE(health.read_available);
+    EXPECT_FALSE(health.write_ready);
+    EXPECT_TRUE(health.storage_failure_latched);
+    EXPECT_FALSE(health.durability_qualified);
+
     const auto latched = Engine_->AppendDurable({test::collection_id, ThirdOperation, {}, {Batch(FirstRows)}});
     EXPECT_EQ(latched.disposition, CommitDisposition::DefinitelyNotCommitted);
     ASSERT_TRUE(latched.error);
@@ -660,6 +667,8 @@ TEST_F(EngineIntegrityTest, LatchedWriteFailureAllowsReconcileShutdownAndReopen)
     EXPECT_FALSE(unbound->has_value());
 
     ASSERT_TRUE(Engine_->Reconcile());
+    EXPECT_EQ(Engine_->GetHealth().state, StoreState::StorageFailed);
+    EXPECT_FALSE(Engine_->GetHealth().write_ready);
     EXPECT_NE(OpenCursor(test::collection_id), nullptr);
     ASSERT_TRUE(Engine_->Shutdown(1000ms));
     Engine_.reset();
@@ -667,6 +676,10 @@ TEST_F(EngineIntegrityTest, LatchedWriteFailureAllowsReconcileShutdownAndReopen)
     auto reopened = detail::EngineFactory::OpenWith({Root_.string(), test::store_id}, THookBackend::Factory(Hooks_));
     ASSERT_TRUE(reopened) << reopened.error().message;
     Engine_ = std::move(*reopened);
+    EXPECT_EQ(Engine_->GetHealth().state, StoreState::Ready);
+    EXPECT_TRUE(Engine_->GetHealth().read_available);
+    EXPECT_TRUE(Engine_->GetHealth().write_ready);
+    EXPECT_FALSE(Engine_->GetHealth().durability_qualified);
     EXPECT_EQ(Engine_->AppendDurable({test::collection_id, ThirdOperation, {}, {Batch(FirstRows)}}).disposition,
         CommitDisposition::Committed);
 }

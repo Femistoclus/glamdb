@@ -180,4 +180,9 @@ std::string ReadToken()
     return token;
 }
 
+TResponse ReadinessResponse(const StoreHealth& health)
+{
+    return {health.write_ready ? 200 : 503, EncodeHealth(health).dump()};
+}
+
 } // namespace glamdb::NTransport

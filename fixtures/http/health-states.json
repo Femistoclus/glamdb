@@ -1,0 +1,106 @@
+[
+  {
+    "status": 503,
+    "response": {
+      "state": "recovering",
+      "read_available": false,
+      "write_ready": false,
+      "storage_failure_latched": false,
+      "durability_qualified": false,
+      "backend": "local",
+      "mock": false,
+      "durability_validation": "designed"
+    }
+  },
+  {
+    "status": 200,
+    "response": {
+      "state": "ready",
+      "read_available": true,
+      "write_ready": true,
+      "storage_failure_latched": false,
+      "durability_qualified": false,
+      "backend": "local",
+      "mock": false,
+      "durability_validation": "designed"
+    }
+  },
+  {
+    "status": 503,
+    "response": {
+      "state": "recovery_required",
+      "read_available": false,
+      "write_ready": false,
+      "storage_failure_latched": false,
+      "durability_qualified": false,
+      "backend": "local",
+      "mock": false,
+      "durability_validation": "designed"
+    }
+  },
+  {
+    "status": 503,
+    "response": {
+      "state": "storage_failed",
+      "read_available": true,
+      "write_ready": false,
+      "storage_failure_latched": true,
+      "durability_qualified": false,
+      "backend": "local",
+      "mock": false,
+      "durability_validation": "designed"
+    }
+  },
+  {
+    "status": 503,
+    "response": {
+      "state": "unavailable",
+      "read_available": false,
+      "write_ready": false,
+      "storage_failure_latched": false,
+      "durability_qualified": false,
+      "backend": "local",
+      "mock": false,
+      "durability_validation": "designed"
+    }
+  },
+  {
+    "status": 503,
+    "response": {
+      "state": "stopping",
+      "read_available": false,
+      "write_ready": false,
+      "storage_failure_latched": false,
+      "durability_qualified": false,
+      "backend": "local",
+      "mock": false,
+      "durability_validation": "designed"
+    }
+  },
+  {
+    "status": 503,
+    "response": {
+      "state": "closed",
+      "read_available": false,
+      "write_ready": false,
+      "storage_failure_latched": false,
+      "durability_qualified": false,
+      "backend": "local",
+      "mock": false,
+      "durability_validation": "designed"
+    }
+  },
+  {
+    "status": 200,
+    "response": {
+      "state": "ready",
+      "read_available": true,
+      "write_ready": true,
+      "storage_failure_latched": false,
+      "durability_qualified": false,
+      "backend": "mock",
+      "mock": true,
+      "durability_validation": "designed"
+    }
+  }
+]

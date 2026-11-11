@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from glamdb_verify import wire_rows
 from starlette.exceptions import HTTPException
 
-from .state import CAPABILITIES, MOCK, MockError, MockStore, uuid_value
+from .state import CAPABILITIES, HEALTH, MOCK, MockError, MockStore, uuid_value
 from .theme import ThemeError, load_theme
 
 
@@ -162,7 +162,7 @@ def create_app(*, token, ui_dir, theme_file=None, seed_demo=False, enable_develo
 
     @app.middleware("http")
     async def authenticate(request, call_next):
-        if (request.url.path in ("/capabilities", "/collections", "/collections:resolve")
+        if (request.url.path in ("/readyz", "/capabilities", "/collections", "/collections:resolve")
                 or request.url.path.startswith(("/collections/", "/development/"))):
             auth = request.headers.get("authorization", "")
             scheme, separator, supplied = auth.partition(" ")
@@ -205,6 +205,10 @@ def create_app(*, token, ui_dir, theme_file=None, seed_demo=False, enable_develo
     @app.get("/healthz")
     async def health():
         return _json({"status": "ok", **MOCK})
+
+    @app.get("/readyz")
+    async def readiness():
+        return _json(HEALTH)
 
     @app.get("/capabilities")
     async def capabilities():

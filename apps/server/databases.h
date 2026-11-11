@@ -17,6 +17,7 @@ public:
     TDatabases& operator=(const TDatabases&) = delete;
     NTransport::TJson List() const;
     NTransport::TJson Get(const std::string& id) const;
+    StoreHealth Health(const std::string& id) const;
     NTransport::TJson Create(const NTransport::TJson& body);
     NTransport::TJson
     Change(const std::string& id, std::string_view action, const NTransport::TJson& body = NTransport::TJson::object());

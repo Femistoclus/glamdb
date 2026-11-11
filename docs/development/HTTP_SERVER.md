@@ -150,7 +150,8 @@ separate, broader development profile.
 
 | HTTP route | Public core operation | Availability |
 | --- | --- | --- |
-| `GET /capabilities` | Adapter inventory | Native features, predicates, transport limits |
+| `GET /capabilities` | Adapter inventory / `Engine::GetHealth` when scoped | Native features, predicates, transport limits; store health when selected |
+| `GET /databases/{id}/readyz` (legacy `/readyz`) | `Engine::GetHealth` plus lifecycle admission | Authenticated readiness snapshot; 200 when write-ready, otherwise 503 |
 | `GET /collections` | `ListCollections` | Complete bounded list; no pagination |
 | `POST /collections` | `CreateCollection` | Fixed-schema append collection |
 | `GET /collections:resolve?name=...` | `ResolveCollection` | Exact name |
@@ -174,11 +175,60 @@ snapshot selection. The adapter never reads core catalog tables or enumerates th
 warehouse; its separate registry stores only database lifecycle metadata. Metadata/explain must be added through public core methods, not
 synthetic values. The UI respects `features` and reports unavailable sections.
 
-`GET /healthz` is public process liveness, **not write readiness**. An opened
-engine has completed open/recovery, but core errors may subsequently prevent
-writes. `backend=local`, `mock=false` do not imply power-loss qualification;
-`durability_validation=designed` remains explicit. Database lifecycle state is not a per-write readiness guarantee. Global engine
-resource accounting remains a separate follow-up contract.
+`GET /healthz` is public process liveness, **not write readiness**. It continues
+to return 200 while a store is recovering, closed or failed. Readiness is
+store-specific: authenticated `GET /databases/{id}/readyz`, or `/readyz` in
+legacy single-store mode. A managed root `/readyz` requires database selection;
+there is no aggregate assertion that every registered store is writable.
+Unknown database IDs retain the normal 404 response.
+
+The readiness body contains `state`, `read_available`, `write_ready`,
+`storage_failure_latched`, `durability_qualified`, and the existing `backend`,
+`mock`, `durability_validation` identity fields. The same object appears as
+`health` in scoped `/databases/{id}/capabilities` and legacy `/capabilities`.
+Managed root `/capabilities` has `health: null`; it advertises installed features,
+not current store admission. Scoped capabilities return 200 even when the store
+is unavailable, so clients can inspect health without attempting a write.
+
+| State | New reads | New writes | Readiness HTTP status |
+| --- | --- | --- | --- |
+| `recovering` | No | No | 503 |
+| `ready` | Yes with a storage reader | Yes | 200 |
+| `recovery_required` | No | No | 503 |
+| `storage_failed` | Yes with a storage reader | No | 503 |
+| `unavailable` | Only if a reader is installed | No | 503 |
+| `stopping` | No | No | 503 |
+| `closed` | No | No | 503 |
+
+Opening and reconciliation report `recovering`. An unresolved commit,
+corruption, failed recovery, or registry admission fence reports
+`recovery_required`. A durable file-I/O write latch reports `storage_failed`
+when recovery has otherwise succeeded: confirmed reads remain available, but
+new writes need shutdown and reopen. Reconciliation does **not** clear the
+latch. The latch flag remains independently visible on an engine during
+recovery and shutdown. Closed managed databases no longer retain an engine,
+so their snapshot has no in-memory latch. Lifecycle draining reports `stopping`
+before waiting for active calls. Health observation never performs catalog/file
+I/O or waits for a writer or lifecycle operation.
+
+Availability is a point-in-time observation, not a reservation. A later call
+still checks admission and can fail due to resource limits, contention, or a
+newly detected fault. `read_available` describes new scans, not all metadata
+lookups or previously retained cursors; recovery outcome lookup keeps its
+existing contract. Synchronous C++ factories return an engine only after
+startup recovery succeeds; the managed HTTP lifecycle exposes runtime database
+opening progress. At initial process startup, registered databases are opened
+before the HTTP listener starts, so probes cannot connect during that phase.
+
+`backend=local` and `mock=false` do not imply power-loss qualification.
+`durability_validation=designed` and `durability_qualified=false` remain explicit
+for both local and mock backends. Neither a successful build, backend selection,
+recovery, nor a passing test changes qualification. No evidence-backed qualified
+environment is currently advertised. The disposable mock exposes `/readyz` for
+its in-memory operations with `backend=mock`, `mock=true`; its readiness does
+not promise persistent storage. Executable examples for every state are in
+`fixtures/http/health-states.json`, with the `storeHealth` schema in
+`fixtures/http/v0.schema.json`.
 
 ## Requests and results
 

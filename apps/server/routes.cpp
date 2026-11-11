@@ -104,7 +104,7 @@ std::optional<bool> ArrowAccepted(std::string_view text)
 
 bool IsApiPath(std::string_view path)
 {
-    return path == "/databases" || path.starts_with("/databases/") || path == "/capabilities" ||
+    return path == "/databases" || path.starts_with("/databases/") || path == "/capabilities" || path == "/readyz" ||
         path == "/collections" || path == "/collections:resolve" || path.starts_with("/collections/");
 }
 TResponse JsonResponse(const TJson& value)
@@ -238,8 +238,15 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
         }
         return StaticFile(path);
     }
+    if (request.Method == "GET" && path == "/readyz") {
+        Require(query.empty(), "unknown query parameter");
+        Require(static_cast<bool>(Engine_), "select a database using /databases/{id}", "DATABASE_REQUIRED");
+        const auto health = Engine_->GetHealth();
+        return ReadinessResponse(health);
+    }
     if (request.Method == "GET" && path == "/capabilities") {
         return JsonResponse({{"api_version", "v0"},
+            {"health", Engine_ ? EncodeHealth(Engine_->GetHealth()) : TJson(nullptr)},
             {"backend", "local"},
             {"mock", false},
             {"durability_validation", "designed"},
@@ -280,6 +287,18 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
         if (parts.size() == 2 && request.Method == "GET") {
             Require(query.empty(), "unknown query parameter");
             return JsonResponse(Databases_->Get(parts[1]));
+        }
+        if (parts.size() == 3 && request.Method == "GET" && (parts[2] == "readyz" || parts[2] == "capabilities")) {
+            Require(query.empty(), "unknown query parameter");
+            const auto health = Databases_->Health(parts[1]);
+            if (parts[2] == "readyz") {
+                return ReadinessResponse(health);
+            }
+            auto response = RoutePrepared(request, "/capabilities", query, body);
+            auto value = TJson::parse(response.Body);
+            value["health"] = EncodeHealth(health);
+            value["features"]["database_management"] = false;
+            return JsonResponse(value);
         }
         if (parts.size() == 3 && request.Method == "POST" &&
             (parts[2] == "open" || parts[2] == "close" || parts[2] == "reconcile" || parts[2] == "discard"))

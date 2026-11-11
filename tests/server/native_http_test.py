@@ -86,6 +86,26 @@ class NativeHTTP(unittest.TestCase):
         self.assertEqual(self.api('/collections', body), info)
         return '/collections/' + cid
 
+    def test_store_readiness_is_distinct_from_process_liveness(self):
+        base = '/databases/' + self.store_id
+        health = self.api(base + '/readyz')
+        self.assertEqual(health['state'], 'ready')
+        self.assertTrue(health['read_available'])
+        self.assertTrue(health['write_ready'])
+        self.assertFalse(health['storage_failure_latched'])
+        self.assertFalse(health['durability_qualified'])
+        self.assertEqual(self.api(base + '/capabilities')['health'], health)
+        self.assertIsNone(self.api('/capabilities')['health'])
+        self.assertEqual(self.request(base + '/readyz', token=None)[0], 401)
+        self.api(base + '/close', {})
+        closed = self.api(base + '/readyz', status=503)
+        self.assertEqual(closed['state'], 'closed')
+        self.assertFalse(closed['read_available'])
+        self.assertFalse(closed['write_ready'])
+        self.assertEqual(self.api('/healthz')['status'], 'live')
+        self.api(base + '/open', {})
+        self.assertEqual(self.api(base + '/readyz')['state'], 'ready')
+
     def test_database_lifecycle_and_isolation(self):
         first = self.api('/databases/' + self.store_id)
         self.assertEqual(first['state'], 'open')
@@ -143,6 +163,10 @@ class NativeHTTP(unittest.TestCase):
         try:
             unknown = self.api(path + '/append', body, status=503)
             self.assertEqual(unknown['outcome'], 'commit_unknown')
+            health = self.api('/databases/' + self.store_id + '/readyz', status=503)
+            self.assertEqual(health['state'], 'recovery_required')
+            self.assertFalse(health['read_available'])
+            self.assertFalse(health['write_ready'])
             lookup = path + '/operations/' + body['operation_id']
             self.assertEqual(self.api(lookup, status=503)['outcome'], 'commit_unknown')
             status, _, _ = self.request('/databases/' + self.store_id + '/reconcile', {})
@@ -445,6 +469,12 @@ class NativeHTTP(unittest.TestCase):
                 dict(definite, recovery_required=True),
             ):
                 self.assertFalse(create_validator.is_valid(invalid), invalid)
+            health_validator = validator(dict(wire_schema, **{'$ref': '#/$defs/storeHealth'}))
+            health_fixtures = json.loads((Path(__file__).resolve().parents[2] / 'fixtures/http/health-states.json').read_text())
+            for health_fixture in health_fixtures:
+                health_validator.validate(health_fixture['response'])
+                invalid = dict(health_fixture['response'], durability_qualified=True)
+                self.assertFalse(health_validator.is_valid(invalid))
             identifier = fixture['collection_id']
             recovery = {
                 'store_id': self.store_id, 'collection_id': identifier,

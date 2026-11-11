@@ -45,7 +45,18 @@ public:
 class StorageBackend
 {
 public:
+    struct Health
+    {
+        bool read_available = false;
+        bool write_available = true;
+        bool write_failure_latched = false;
+    };
     virtual ~StorageBackend() = default;
+    // Concurrent, bounded observation only: no file I/O or writer/cache locks.
+    virtual Health GetHealth() const
+    {
+        return {};
+    }
     virtual Result<std::unique_ptr<StagedCreate>>
     PrepareCreate(const StoreInfo& store, const CreateCollectionRequest& request, std::string_view attempt_id) = 0;
     // Pre-binding admission against the exact committed base that the

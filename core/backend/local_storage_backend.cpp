@@ -455,6 +455,12 @@ TLocalStorageBackend::TLocalStorageBackend(StoreInfo store,
     , Catalog_(std::make_shared<TInertCatalog>())
 { }
 
+StorageBackend::Health TLocalStorageBackend::GetHealth() const
+{
+    const bool latched = Dirs_->Latch()->IsSet();
+    return {true, !latched, latched};
+}
+
 Result<std::shared_ptr<TLocalStorageBackend>>
 TLocalStorageBackend::Open(const std::filesystem::path& root, const StoreInfo& store, TLocalStorageOptions options)
 {

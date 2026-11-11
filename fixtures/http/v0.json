@@ -40,6 +40,19 @@
     },
     {
       "method": "GET",
+      "path": "/databases/{database_id}/readyz",
+      "core": "Engine::GetHealth / service lifecycle admission",
+      "status": 200,
+      "response_fields": {
+        "state": "string",
+        "read_available": "boolean",
+        "write_ready": "boolean",
+        "durability_qualified": "boolean"
+      },
+      "response_schema": "storeHealth"
+    },
+    {
+      "method": "GET",
       "path": "/databases",
       "core": "Service registry",
       "status": 200,

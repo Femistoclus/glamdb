@@ -20,6 +20,7 @@ struct TResponse
     std::string ContentType = "application/json";
     std::map<std::string, std::string> Headers{};
 };
+TResponse ReadinessResponse(const StoreHealth& health);
 TRequest ParseHeaders(std::string_view bytes);
 std::string SerializeResponseHead(const TResponse& response);
 TResponse

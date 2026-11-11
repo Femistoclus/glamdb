@@ -51,6 +51,8 @@ public:
     static Result<std::shared_ptr<TLocalStorageBackend>>
     Open(const std::filesystem::path& root, const StoreInfo& store, TLocalStorageOptions options = {});
 
+    Health GetHealth() const override;
+
     Result<std::unique_ptr<StagedCreate>>
     PrepareCreate(const StoreInfo& store, const CreateCollectionRequest& request, std::string_view attempt_id) override;
     Status CheckAppendAdmissible(const StoreInfo& store,
