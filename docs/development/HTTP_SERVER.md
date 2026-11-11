@@ -387,7 +387,11 @@ Transient accept failures retry with backoff. Header limit: 16 KiB; request/resp
 16 MiB; append: 10000 rows. JSON parsing allows 160 nesting levels for compound
 predicates. Event limits bound the single-pass parser and accommodate 10,000 rows
 of the full 64-field append schema (1,300,100 parser events). These transport
-bounds are not a qualified process-memory or storage budget.
+bounds are not a qualified process-memory or storage budget. The same pass keeps
+append `rows` as compact parser nodes (no per-row DOM) that become Arrow columns
+once the collection schema is known, and JSON scan pages are written directly
+from Arrow columns; `tests/server/json_codec_test.cpp` pins both to the previous
+DOM codecs' batches, bytes and errors, and `glamdb_json_codec_bench` measures them.
 
 The [shared resource budget matrix](RESOURCE_BUDGETS.md) specifies which limits
 are per request, store or service and who reserves/releases them. A

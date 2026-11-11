@@ -164,6 +164,9 @@ if(TARGET glamdb_transport)
     target_link_libraries(glamdb_transport_test PRIVATE glamdb_transport glamdb_build_options GTest::gtest_main)
     gtest_discover_tests(glamdb_transport_test TEST_PREFIX glamdb.transport.
         PROPERTIES LABELS "unit;http" TIMEOUT 120)
+    # Manual codec micro-benchmark; not a CTest case.
+    add_executable(glamdb_json_codec_bench server/json_codec_bench.cpp)
+    target_link_libraries(glamdb_json_codec_bench PRIVATE glamdb_transport glamdb_build_options)
 endif()
 
 if(TARGET glamdb_routes)
