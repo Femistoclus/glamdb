@@ -163,6 +163,8 @@ test('unknown append survives database switching and reconciliation with its ori
             status: 503,
             contentType: 'application/json',
             body: JSON.stringify({
+                // Deliberately incomplete: report the protocol failure and keep
+                // the original identity available for authoritative lookup.
                 outcome: 'commit_unknown',
                 recovery_required: true,
                 error: { code: 'OUTCOME_UNKNOWN', message: 'Receipt lost after commit' },
@@ -176,6 +178,7 @@ test('unknown append survives database switching and reconciliation with its ori
         .fill('[{"key":"exactly-once","label":"retained","amount":"1"}]');
     await dialog.getByRole('button', { name: 'Append rows', exact: true }).click();
     await expect(dialog.getByText('Outcome unresolved · keep this operation ID')).toBeVisible();
+    await expect(dialog.locator('#modal-error')).toContainText('recovery context');
     await dialog.getByRole('button', { name: 'Close dialog' }).click();
     await page.getByRole('button', { name: 'Databases', exact: true }).click();
     await page.getByLabel('Database name').fill('another_pending_workspace');

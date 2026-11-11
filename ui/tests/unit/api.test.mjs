@@ -2,7 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { brotliCompressSync, gzipSync } from 'node:zlib';
+import { readFileSync } from 'node:fs';
 import { WorkbenchAPI, APIError } from '../../assets/api.js';
+
+const fixture = JSON.parse(
+    readFileSync(new URL('../../../fixtures/http/outcomes-v0.json', import.meta.url)),
+);
+const unknown = fixture.cases.find((value) => value.name === 'unknown_publication').response;
+const appendPath = `/collections/${fixture.collection_id}/append`;
+const appendBody = { operation_id: fixture.appends.a.operation_id, rows: fixture.appends.a.rows };
 
 async function withHTTPResponse({ body, headers = {}, status = 200 }, run) {
     const server = createServer((request, response) => {
@@ -55,13 +63,13 @@ test('unknown outcome remains unresolved even with HTTP503', async () => {
         'http://localhost',
         'token',
         async () =>
-            new Response(JSON.stringify({ outcome: 'commit_unknown', recovery_required: true }), {
+            new Response(JSON.stringify(unknown), {
                 status: 503,
             }),
     );
-    const result = await client.json('/collections/a/append', {
+    const result = await client.json(appendPath, {
         method: 'POST',
-        body: { rows: [] },
+        body: appendBody,
         allowOutcome: true,
     });
     assert.equal(result.outcome, 'commit_unknown');
@@ -106,20 +114,18 @@ for (const [encoding, compress] of [
     });
 
     test(`real Fetch preserves an unknown append outcome in a ${encoding} response`, async () => {
-        const body = compress(
-            Buffer.from(JSON.stringify({ outcome: 'commit_unknown', recovery_required: true })),
-        );
+        const body = compress(Buffer.from(JSON.stringify(unknown)));
         await withHTTPResponse(
             { body, headers: { 'Content-Encoding': encoding }, status: 503 },
             async (base) => {
                 const client = new WorkbenchAPI(base, 'token');
                 assert.deepEqual(
-                    await client.json('/collections/a/append', {
+                    await client.json(appendPath, {
                         method: 'POST',
-                        body: { rows: [] },
+                        body: appendBody,
                         allowOutcome: true,
                     }),
-                    { outcome: 'commit_unknown', recovery_required: true },
+                    unknown,
                 );
             },
         );

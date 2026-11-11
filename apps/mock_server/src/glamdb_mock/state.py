@@ -168,11 +168,21 @@ class MockStore:
             **MOCK,
         }
 
-    def _unknown(self, operation_id):
+    def _unknown(self, collection, operation_id, digest, base, published=None):
+        error = {"code": "RECOVERY_REQUIRED", "message": "development scenario awaits explicit mock resolution",
+                 "retry_hint": "SameIdAfterReconcile"}
         return {
             "outcome": "commit_unknown", "phase": "reconciling",
             "operation_id": operation_id, "recovery_required": True, **MOCK,
-            "error": {"code": "RECOVERY_REQUIRED", "message": "development scenario awaits explicit mock resolution", "retry_hint": "find_original_operation"},
+            "error": error,
+            "recovery": {
+                "store_id": self.store_id, "collection_id": collection.collection_id,
+                "operation_id": operation_id, "payload_hash": digest, "hash_version": 1,
+                "base": base, "attempt_id": str(uuid4()),
+                "candidate_snapshot_id": published["snapshot_id"] if published else None,
+                "candidate_metadata_location": published["identity"]["metadata_location"] if published else None,
+                "first_error": dict(error), "publication_started": published is not None, "lookup_blocked": False,
+            },
         }
 
     def _failure(self, operation_id, code, message):
@@ -244,14 +254,15 @@ class MockStore:
             self.state_bytes += operation_reservation
             return response, 503
         self.state_bytes += operation_reservation + row_reservation
+        base = self.identity(collection, collection.snapshots[-1] if collection.snapshots else None)
         if scenario == "commit_unknown":
-            response = self._unknown(operation_id)
+            response = self._unknown(collection, operation_id, digest, base)
             collection.operations[operation_id] = Operation(digest, rows, response, 503)
             collection.pending_operation = operation_id
             return response, 503
         response, status = self._commit(collection, operation_id, digest, rows)
         if scenario == "lost_response":
-            return self._unknown(operation_id), 503
+            return self._unknown(collection, operation_id, digest, base, response["result"]), 503
         return response, status
 
     def resolve(self, collection, operation_id, outcome):

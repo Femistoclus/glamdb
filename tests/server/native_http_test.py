@@ -475,6 +475,25 @@ class NativeHTTP(unittest.TestCase):
                 health_validator.validate(health_fixture['response'])
                 invalid = dict(health_fixture['response'], durability_qualified=True)
                 self.assertFalse(health_validator.is_valid(invalid))
+            outcomes = json.loads((Path(__file__).resolve().parents[2] / 'fixtures/http/outcomes-v0.json').read_text())
+            cases = {case['name']: case for case in outcomes['cases']}
+            for case in cases.values():
+                kind = 'createOutcome' if case['kind'] == 'create' else 'appendOutcome'
+                with self.subTest(outcome_fixture=case['name']):
+                    validator(dict(wire_schema, **{'$ref': '#/$defs/' + kind})).validate(case['response'])
+            for invalid in outcomes['invalid_recovery']:
+                if 'remove' not in invalid:
+                    continue
+                case = cases[invalid['case']]
+                response = json.loads(json.dumps(case['response']))
+                parts = invalid['remove'].strip('/').split('/')
+                target = response
+                for part in parts[:-1]:
+                    target = target[part]
+                del target[parts[-1]]
+                kind = 'createOutcome' if case['kind'] == 'create' else 'appendOutcome'
+                with self.subTest(outcome_fixture=invalid['name']):
+                    self.assertFalse(validator(dict(wire_schema, **{'$ref': '#/$defs/' + kind})).is_valid(response))
             identifier = fixture['collection_id']
             recovery = {
                 'store_id': self.store_id, 'collection_id': identifier,
@@ -554,6 +573,61 @@ class NativeHTTP(unittest.TestCase):
                 import pyarrow as pa
                 table = pa.Table.from_batches(list(stream), schema=stream.schema)
                 self.assertEqual(table.to_pylist()[0]['n'], 9223372036854775807)
+
+    def test_shared_outcome_fixtures_with_native_storage_and_sdk(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'sdk/python/src'))
+        try:
+            from glamdb_sdk import Client, Schema
+            from glamdb_sdk.codec import encode_rows
+            import pyarrow as pa
+        except ImportError:
+            if os.environ.get('GLAMDB_REQUIRE_NATIVE_CLIENTS') == '1':
+                raise
+            self.skipTest('SDK dependencies are tested in the workbench environment')
+
+        fixture = json.loads((Path(__file__).resolve().parents[2] / 'fixtures/http/outcomes-v0.json').read_text())
+        cid, schema = fixture['collection_id'], Schema.from_dict(fixture['schema'])
+        path = '/collections/' + cid
+        original = None
+        with Client(f'http://127.0.0.1:{self.port}', TOKEN, database_id=self.store_id) as client:
+            created = client.create_collection(fixture['exact_name'], schema, collection_id=cid)
+            self.assertEqual(created.outcome, 'committed')
+            for name in fixture['retry_sequence']:
+                request = fixture['appends'][name]
+                prepared = client.prepare_append(cid, request['rows'], operation_id=request['operation_id'], schema=schema)
+                self.assertEqual(prepared.payload_hash, request['payload_hash'])
+                outcome = client.append(prepared)
+                self.assertEqual(outcome.outcome, 'committed')
+                self.assertEqual(outcome.result['payload_hash'], request['payload_hash'])
+                self.assertEqual(outcome.result['rows_appended'], str(len(request['rows'])))
+                if name == 'a':
+                    if original is None:
+                        original = outcome
+                    else:
+                        self.assertEqual(outcome, original)
+                else:
+                    self.assertEqual(outcome.result['parent_snapshot_id'], original.result['snapshot_id'])
+                    latest = outcome.result['snapshot_id']
+            self.assertCountEqual(encode_rows(schema, client.scan_json(cid).rows), fixture['expected_latest_rows'])
+            self.assertCountEqual(encode_rows(schema, client.scan_json(cid, snapshot_id=original.result['snapshot_id']).rows),
+                             fixture['appends']['a']['rows'])
+            self.assertEqual(client.scan_json(cid, snapshot_id=None).rows, [])
+            with client.scan_batches(cid) as stream:
+                table = pa.Table.from_batches(list(stream), schema=stream.schema)
+                self.assertCountEqual(encode_rows(schema, table.to_pylist()), fixture['expected_latest_rows'])
+        self.assertEqual(self.api(path + '/scan', {})['snapshot_id'], latest)
+        self.assertCountEqual(self.api(path + '/scan', {})['rows'], fixture['expected_latest_rows'])
+        self.assertEqual(len(list(Path(self.root).rglob('*.parquet'))), 2)
+        self.assertTrue((Path(self.root) / 'catalog.sqlite').is_file())
+        self.stop()
+        self.start()
+        with Client(f'http://127.0.0.1:{self.port}', TOKEN, database_id=self.store_id) as client:
+            request = fixture['appends']['a']
+            self.assertEqual(client.find_append_outcome(cid, request['operation_id']), original)
+            self.assertEqual(client.append(cid, request['rows'], operation_id=request['operation_id'], schema=schema), original)
+            self.assertCountEqual(encode_rows(schema, client.scan_json(cid).rows), fixture['expected_latest_rows'])
+        self.assertEqual(self.api(path + '/scan', {})['snapshot_id'], latest)
+        self.assertEqual(len(list(Path(self.root).rglob('*.parquet'))), 2)
 
     def test_owner_invalid_json_disconnect_and_shutdown(self):
         owner = subprocess.run([SERVER, '--data-dir', self.data_dir, '--port', '0'],

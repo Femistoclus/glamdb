@@ -79,7 +79,12 @@ even when omitted from projection. An empty projection preserves cardinality;
 
 Append returns `outcome:"committed"` with `result`,
 `outcome:"definitely_not_committed"` with `error`, or
-`outcome:"commit_unknown"` with `operation_id,recovery_required`.
+`outcome:"commit_unknown"` with `operation_id,recovery_required` and a complete
+`recovery` context: store/collection/operation IDs, canonical hash/version, base
+identity, attempt UUID, nullable candidate snapshot/metadata, first error and
+publication/lookup flags. Mock metadata locations retain their `mock://` scheme.
+The [shared outcome fixtures](../../fixtures/http/README.md) check this shape
+through both client parsers; incomplete recovery is a protocol error.
 The first two are terminal. A committed mock result includes original IDs,
 snapshot ID, exact creation time, `receipt_version:1`, `hash_version:1`,
 canonical `payload_hash`, row counts and `durable:false`. Physical byte/file
