@@ -18,9 +18,10 @@ can create/open an empty catalog, and collection creation and scans report
 `DEPENDENCY_UNAVAILABLE`. Opening a populated store
 requires the storage validator. Coordinator test doubles are confined to
 `tests/`; they produce no real Parquet or Avro data. The separate storage
-component tests do exercise real Parquet, Avro and JSON files. There is no HTTP
-server, payload journal, background job queue, backup or automatic file
-deletion in this MVP.
+component tests do exercise real Parquet, Avro and JSON files. The
+[native HTTP server](HTTP_SERVER.md) adapts this same facade outside the embedded
+component. Payload journaling, background jobs, whole-store backup and general
+automatic file cleanup remain outside this MVP.
 
 ## Persistence and retry rules
 
@@ -101,6 +102,12 @@ bytes per key. Writer wait is at most five seconds; append deadline at most
 not measured simultaneous RSS or full-storage capacity guarantees. All limits,
 including the catalog limits, are validated before `CreateStore` creates the
 root, so a rejected configuration leaves the root and store UUID reusable.
+
+See the [shared resource budget contract](RESOURCE_BUDGETS.md) for the limit
+matrix, reservation/release ownership, retained-buffer lifetimes and protected
+completion/recovery requirements. The owned-input estimate does not cover HTTP
+decoding, all writer allocations or scan buffers; the current checks are
+store-local rather than a shared process-memory governor.
 
 ## Storage backend integration
 

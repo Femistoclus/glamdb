@@ -578,6 +578,12 @@ TEST(EngineBootstrap, PublicFactoriesWithoutStorageFailClosed)
         (*created)->CreateCollection({test::collection_id, "events", SchemaSpec{{{"n", FieldType::Int64, true}}}});
     EXPECT_EQ(collection.disposition, CommitDisposition::DefinitelyNotCommitted);
     EXPECT_EQ(test::Present(collection.error).code, "DEPENDENCY_UNAVAILABLE");
+    const auto append = (*created)->AppendDurable({test::collection_id, test::operation_id, {}, {test::Batch()}});
+    EXPECT_EQ(append.disposition, CommitDisposition::DefinitelyNotCommitted);
+    EXPECT_EQ(append.phase, CommitPhase::Validation);
+    EXPECT_EQ(test::Present(append.error).code, "DEPENDENCY_UNAVAILABLE");
+    EXPECT_FALSE(append.result);
+    EXPECT_FALSE(append.recovery);
     const auto scan = (*created)->Scan({.collection_id = test::collection_id});
     ASSERT_FALSE(scan);
     // The scanner is not built, so no collection lookup is needed to refuse.

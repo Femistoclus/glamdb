@@ -25,8 +25,15 @@ Tests cover real files, injected failures and fresh-process recovery.
 A storage backend connecting these primitives to the coordinator and a minimal
 scanner (`Engine::Scan`) are implemented and tested through `glamdb_vertical`;
 see [SCANNER.md](docs/development/SCANNER.md).
+The [installed public API consumer](docs/development/BUILDING.md#build-and-install)
+checks real A/B appends, fixed-view scans, persisted receipts and retries after
+reopening in a new process, with a separate storage-disabled contour.
 See the [coordinator guide](docs/development/COORDINATOR.md)
 and [storage guide](docs/development/STORAGE_MODULE.md) for supported boundaries.
+The [shared resource budget matrix](docs/development/RESOURCE_BUDGETS.md) names
+limit units, owners and enforcement points, including retained buffers and
+completion/recovery reserves. It separates existing local checks from aggregate
+memory and device reservations still required for a bounded process.
 Power-loss and load qualification are deferred.
 
 Available now: independent golden fixtures, a typed SQL-NULL reference oracle,

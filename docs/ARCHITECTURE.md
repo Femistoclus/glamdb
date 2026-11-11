@@ -172,14 +172,18 @@ Data, metadata, and control memory have separate shared budgets. Arrow's pool
 does not account for every STL, Avro, JSON, SQLite, codec, or upstream writer
 allocation. Lazy file planning does not bound materialized table metadata or
 retained snapshot history. Account for buffers held by callers as well as work
-still executing inside the engine.
+still executing inside the engine. The [shared resource budget contract](development/RESOURCE_BUDGETS.md)
+defines units, owners, reservation/release lifetimes, completion/recovery reserves
+and limit errors. Its matrices distinguish current checks from the aggregate
+memory and per-device reservations still required to enforce this architecture.
 
-The initial candidate workload caps ordinary append input at 16 MiB of canonical
-decoded data and 10,000 rows, with one new Parquet file and one snapshot. Its
-candidate store ceilings include 4,096 retained snapshots and 4,096 operation
-bindings/outcomes, including failed operations. These are qualification inputs,
-not yet supported limits; metadata, file counts, disk reservations, concurrency,
-and combined memory usage also require bounded profiles and measurements.
+The synchronous append profile caps ordinary append input at 16 MiB of canonical
+decoded data and 10,000 rows, with one new Parquet file and one snapshot. Current
+store-wide checks include 4,096 retained snapshots and 4,096 operation
+bindings/outcomes, including failed operations. These development limits do not
+qualify combined memory usage or storage capacity. Canonical bytes, owned-input
+estimates, physical Arrow/writer allocations and HTTP payload bytes have separate
+checks; no one of them bounds process memory across stores.
 
 Small appends therefore do not imply large-scale ingestion: 1 TiB at 16 MiB per
 append needs at least 65,536 operations, exceeding the candidate history cap.

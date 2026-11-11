@@ -20,6 +20,17 @@ lease has created or validated `root/` and `warehouse/`
 (`EngineFactory::CreateWith/OpenWith`). The internal factories that take a
 ready backend remain for coordinator tests.
 
+The installed consumer uses these public factories and only installed headers
+and CMake targets. Its independent write/reopen processes append A/B, compare
+latest/A/initial views with literal duplicate/NULL rows, and verify every
+persisted receipt field and idempotent retry. The runner passes the build's
+storage expectation explicitly: a missing production backend cannot pass the
+storage-enabled contour. A storage-disabled package must report
+`DEPENDENCY_UNAVAILABLE` for create, append and scan before and after reopen;
+append checks availability before collection lookup or operation binding.
+This real-file baseline is separate from the in-memory mock scan suite and
+does not qualify physical power-loss durability.
+
 - **Create:** `MakeTableProfile` maps the fixed `SchemaSpec` (field IDs 1..N).
   The backend creates the collection directories, binds a `CreateCollection`
   attempt, writes `metadata/00000-<attempt>.metadata.json` through the durable
@@ -152,6 +163,9 @@ Not implemented: file/row-group pruning, compound predicates (`And`, `Or`,
 runtime memory leases and quotas,
 page CRC verification, per-device physical/inode budgets and in-flight
 reservations, and measured attempt-volume/capacity qualification.
+The [shared resource budget contract](RESOURCE_BUDGETS.md) defines the required
+memory accounting lifetime for retained buffers and the process/store ownership
+of reader, writer, metadata and recovery reservations.
 
 ## Validation status
 
