@@ -34,7 +34,9 @@ The [shared resource budget matrix](docs/development/RESOURCE_BUDGETS.md) names
 limit units, owners and enforcement points, including retained buffers and
 completion/recovery reserves. It separates existing local checks from aggregate
 memory and device reservations still required for a bounded process.
-Power-loss and load qualification are deferred.
+Power-loss, capacity and ingestion qualification (G4) are **NOT RUN**. The
+[roadmap status](docs/ROADMAP.md#current-status) separates implemented code
+from executed evidence for each gate.
 
 Available now: independent golden fixtures, a typed SQL-NULL reference oracle,
 receipt/fault-evidence tools, a network Python SDK, and a configurable pink

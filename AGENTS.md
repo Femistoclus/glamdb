@@ -76,7 +76,10 @@ and an explicit KV collection mode. Additional native metadata/explain APIs and
 object storage remain later extensions. Compaction, snapshot expiration,
 garbage collection, asynchronous admission, replication, multiple writers, and
 schema evolution are outside the initial append scope. Consult
-[docs/ROADMAP.md](docs/ROADMAP.md) when assessing feature scope.
+[docs/ROADMAP.md](docs/ROADMAP.md) when assessing feature scope; its current
+status table separates implemented code from executed evidence per gate and
+keeps G4 power-loss qualification **NOT RUN**. Update that table when a change
+adds or removes gate evidence.
 
 ## Architecture and correctness boundaries
 

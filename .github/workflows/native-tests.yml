@@ -42,8 +42,7 @@ jobs:
 
       - name: Install LLVM 18 and build tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci-apt-install.sh \
             clang-18 clang-format-18 clang-tidy-18 llvm-18 \
             libc++-18-dev libc++abi-18-dev libclang-rt-18-dev \
             cmake ninja-build make pkg-config zlib1g-dev libssl-dev
