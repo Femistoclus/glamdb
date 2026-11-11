@@ -35,7 +35,13 @@ from `VerifyReachable` or a previously confirmed publication.
    `WriteDataFile`; their buffers must remain unchanged until it returns. The
    writer validates bounded input against the loaded table schema and derives
    metrics from its properties. It does not perform the coordinator's copy or
-   canonical-hash step.
+   canonical-hash step. The pinned Parquet writer closes a buffered row group
+   at exactly `write.parquet.max-row-group-rows` consecutive rows, across input
+   batches. The writer picks the largest such count for which every resulting
+   group's summed row estimates plus one 4-byte offset per string field stay
+   within `MaxRowGroupBytes`; one wide row no longer sizes every group, and
+   uniform rows keep the previous largest-row quotient. Variable-size groups
+   would need a row-group flush hook in the Iceberg Parquet wrapper.
 3. Create an attempt and hold its `BindAttempt` scope across data writing,
    `StageAppend`, metadata writing, and publication checking. The attempt owns
    sticky errors, budgets, file state, durable receipts, and format verification.
