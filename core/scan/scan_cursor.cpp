@@ -515,14 +515,21 @@ private:
         }
         // The same strict footer check as recovery: field IDs, names,
         // repetition, physical/logical types and row counts per row group.
+        // The reader uses this verified footer instead of decoding it again.
         TBufferInputFile buffered({.Location = file.Path, .Bytes = bytes});
-        (void)TakeIceberg(NGlamDB::NStorage::CheckParquet(buffered, *FileSchema_, {file.SizeBytes, file.RecordCount}),
+        auto footer = TakeIceberg(
+            NGlamDB::NStorage::ReadParquetFooter(buffered, *FileSchema_, {file.SizeBytes, file.RecordCount}),
             "CORRUPTION",
             "verify Parquet file");
         DecodeParquet("open Parquet file", [&] {
             auto buffer = std::make_shared<TLeaseBuffer>(arrow::Buffer::FromString(std::move(bytes)), bytesMemory);
             auto source = std::make_shared<arrow::io::BufferReader>(std::move(buffer));
-            auto reader = TakeArrow(parquet::arrow::OpenFile(source, Pool_.get()), "CORRUPTION", "open Parquet file");
+            auto reader =
+                TakeArrow(parquet::arrow::FileReader::Make(Pool_.get(),
+                              parquet::ParquetFileReader::Open(source, parquet::ReaderProperties(Pool_.get()), footer),
+                              parquet::default_arrow_reader_properties()),
+                    "CORRUPTION",
+                    "open Parquet file");
             reader->set_batch_size(BatchRows_);
             std::vector<int> rowGroups(static_cast<size_t>(reader->num_row_groups()));
             std::iota(rowGroups.begin(), rowGroups.end(), 0);
