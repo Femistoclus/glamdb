@@ -847,7 +847,28 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         if (unresolved) {
             return UnresolvedAppend(*unresolved, payload_hash);
         }
-        if (!writer_lock.try_lock()) {
+        if (writer_lock.try_lock()) {
+            // The writer holder is an admitted call as well. Count it before
+            // its outcome lookup: a definite refusal after the lookup could
+            // contradict a queued call with the same ID that later publishes.
+            bool full = false;
+            {
+                std::lock_guard lock(impl->state_mutex);
+                full = impl->pending_calls >= impl->limits.max_pending_calls;
+                if (!full) {
+                    ++impl->pending_calls;
+                    admission.owner = impl;
+                }
+            }
+            if (full) {
+                writer_lock.unlock();
+                return impl->ResolveUnadmitted(request,
+                    payload_hash,
+                    {"RESOURCE_EXHAUSTED",
+                        "pending budget is full; original operation outcome was not resolved",
+                        RetryHint::SameIdAfterReconcile});
+            }
+        } else {
             bool full = false;
             {
                 std::lock_guard lock(impl->state_mutex);
@@ -931,13 +952,6 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         {
             std::lock_guard lock(impl->state_mutex);
             impl->CheckHealthy(expected_generation);
-            if (!admission.owner) {
-                Require(impl->pending_calls < impl->limits.max_pending_calls,
-                    "RESOURCE_EXHAUSTED",
-                    "pending budget is full");
-                ++impl->pending_calls;
-                admission.owner = impl;
-            }
             Require(reservation <= static_cast<size_t>(impl->limits.max_owned_input_bytes) - impl->owned_input_bytes,
                 "RESOURCE_EXHAUSTED",
                 "owned input budget is full");

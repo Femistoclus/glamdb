@@ -64,6 +64,10 @@ deletion in this MVP.
   validates retained storage in both directions, and commits a real fence
   increment before resolving unfinished bindings. It never replays payloads.
   Missing/corrupt committed state fails closed.
+- The pending-call budget counts every admitted append, including the call
+  that holds the writer; that call is counted when it acquires the writer,
+  before its outcome lookup, so it is never refused definitely while a queued
+  call with the same ID can still publish.
 - Writer timeout or pending-call exhaustion first attempts a nonblocking lookup
   of an authoritative terminal outcome. It never reads through a tentative
   catalog transaction. If the lookup cannot resolve the original operation,
