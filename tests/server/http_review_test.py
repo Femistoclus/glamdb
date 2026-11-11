@@ -2,9 +2,12 @@
 import http.client
 import json
 import socket
+import ssl
 import time
 import unittest
+import uuid
 from native_http_test import NativeHTTP, TOKEN
+from tls_proxy import tls_proxy
 
 
 class HTTPReview(NativeHTTP):
@@ -117,6 +120,104 @@ class HTTPReview(NativeHTTP):
             response = http.client.HTTPResponse(stream)
             response.begin()
             self.assertEqual(response.status, 200, response.read())
+
+    def test_body_timeouts_release_ordinary_admission(self):
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            def upload():
+                stream = stack.enter_context(socket.create_connection(('127.0.0.1', self.port), timeout=5))
+                stream.sendall((f'POST /assets/unused HTTP/1.1\r\nHost: local\r\n'
+                    'Content-Length: 2\r\nExpect: 100-continue\r\n\r\n').encode())
+                head = b''
+                while not head.endswith(b'\r\n\r\n'):
+                    chunk = stream.recv(1)
+                    self.assertTrue(chunk, 'listener closed before an admission response')
+                    head += chunk
+                return stream, head
+
+            streams = []
+            for _ in range(12):
+                stream, head = upload()
+                self.assertIn(b' 100 ', head)
+                streams.append(stream)
+            self.assertIn(b' 100 ', upload()[1])
+            for stream in streams:
+                response = http.client.HTTPResponse(stream)
+                response.begin()
+                self.assertEqual(response.status, 408, response.read())
+            self.assertIn(b' 100 ', upload()[1])
+
+    def test_https_proxy_preserves_native_access_and_input_limits(self):
+        collection = self.collection()
+        base = '/databases/' + self.store_id
+        with tls_proxy(self.port, self.tmp.name) as (port, context):
+            def request(path, body=None, token=TOKEN, headers=None):
+                connection = http.client.HTTPSConnection('localhost', port, context=context, timeout=15)
+                try:
+                    fields = {'Content-Type': 'application/json'}
+                    if token is not None:
+                        fields['Authorization'] = 'Bearer ' + token
+                    fields.update(headers or {})
+                    connection.request('GET' if body is None and headers is None else 'POST', path,
+                        None if body is None else json.dumps(body), fields)
+                    response = connection.getresponse()
+                    data = response.read()
+                    self.assertNotIn(TOKEN.encode(), data)
+                    self.assertNotIn(b'wrong-secret', data)
+                    self.assertEqual(response.getheader('Cache-Control'), 'no-store')
+                    return response.status, json.loads(data)
+                finally:
+                    connection.close()
+
+            with self.assertRaises(ssl.SSLCertVerificationError):
+                untrusted = http.client.HTTPSConnection('localhost', port, timeout=5)
+                try:
+                    untrusted.request('GET', '/healthz')
+                finally:
+                    untrusted.close()
+            for path in ('/capabilities', '/databases', base, base + '/readyz',
+                         base + collection + '/schema', '/%64atabases'):
+                for token in (None, 'wrong-secret'):
+                    with self.subTest(path=path, token=token):
+                        self.assertEqual(request(path, token=token)[0], 401)
+            self.assertEqual(request('/capabilities?access_token=' + TOKEN, token=None)[0], 401)
+            self.assertEqual(request('/databases', token=None,
+                headers={'X-Forwarded-User': 'admin', 'Content-Length': '0'})[0], 401)
+            for headers, status in (
+                ({'Content-Length': str(16 * 1024 * 1024 + 1)}, 413),
+                ({'Content-Length': '2', 'Content-Encoding': 'gzip'}, 400),
+                ({'Transfer-Encoding': 'chunked'}, 400),
+                ({'Content-Length': '2', 'Transfer-Encoding': 'chunked'}, 400),
+            ):
+                with self.subTest(headers=headers):
+                    # No body is sent: native rejection must precede Continue/decode.
+                    self.assertEqual(request(base + '/open', headers=dict(headers,
+                        Expect='100-continue'))[0], status)
+            operation = str(uuid.uuid4())
+            append = base + collection + '/append'
+            body = {'operation_id': operation, 'rows': [{'key': 'limit'}] * 10001}
+            self.assertEqual(request(append, body)[0], 400)
+            body['rows'] = [{'key': 'accepted'}]
+            status, receipt = request(append, body)
+            self.assertEqual(status, 200, receipt)
+            self.assertEqual(receipt['outcome'], 'committed')
+            self.assertEqual(request(base + collection + '/operations/' + operation)[1], receipt)
+            self.assertEqual(request(base + collection + '/scan', {})[1]['rows'][0]['key'], 'accepted')
+            # Native session quotas still apply behind the proxy.
+            cursors = []
+            for _ in range(8):
+                status, opened = request(base + collection + '/scan/open', {})
+                self.assertEqual(status, 200, opened)
+                cursors.append(opened['cursor'])
+            self.assertEqual(request(base + collection + '/scan/open', {})[0], 429)
+            for cursor in cursors:
+                self.assertEqual(request(base + collection + '/scan/cancel', {'cursor': cursor})[0], 200)
+            self.assertEqual(request(base + collection + '/scan', {})[0], 200)
+        self.proc.terminate()
+        out, err = self.proc.communicate(timeout=20)
+        self.assertEqual(self.proc.returncode, 0, out + err)
+        self.assertNotIn(TOKEN, out + err)
+        self.assertNotIn('wrong-secret', out + err)
 
     def test_media_negotiation_and_canonical_dispatch(self):
         path = '/databases/' + self.store_id

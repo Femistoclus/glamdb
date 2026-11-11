@@ -3,6 +3,7 @@
 
 #include <asio.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <cstdio>
@@ -16,6 +17,17 @@ namespace glamdb::NServer {
 using namespace NTransport;
 namespace {
 using TTcp = asio::ip::tcp;
+bool IsControlBody(const TRequest& request)
+{
+    const auto [path, query] = ParseTarget(request.Target);
+    (void)query;
+    const auto split = path.starts_with("/databases/") ? path.find('/', 11) : std::string::npos;
+    const auto suffix = split == std::string::npos ? path : path.substr(split);
+    return path == "/databases" ||
+        (split != std::string::npos &&
+            (suffix == "/open" || suffix == "/close" || suffix == "/reconcile" || suffix == "/discard")) ||
+        (suffix.starts_with("/collections/") && suffix.ends_with("/scan/cancel"));
+}
 class TSession;
 struct TCallQueue
 {
@@ -46,7 +58,7 @@ struct TState
     std::map<std::string, size_t> HeaderPeers;
     std::deque<std::shared_ptr<TSession>> BodyWaiters;
     std::chrono::milliseconds Timeout;
-    size_t Headers = 0, Bodies = 0;
+    size_t Headers = 0, Bodies = 0, OrdinaryBodies = 0;
     bool BodyPumping = false;
 };
 
@@ -272,13 +284,17 @@ private:
         Input_.erase(0, size);
         Require(Input_.size() <= Request_.ContentLength, "pipelining is unsupported");
         if (Request_.ContentLength != 0) {
-            if (State_.Bodies >= 16) {
+            ControlBody_ = IsControlBody(Request_);
+            if (State_.Bodies >= 16 || (!ControlBody_ && State_.OrdinaryBodies >= 12)) {
                 State_.BodyWaiters.push_back(shared_from_this());
                 WaitingBody_ = true;
                 ReadDeadline();
                 return;
             }
             ++State_.Bodies;
+            if (!ControlBody_) {
+                ++State_.OrdinaryBodies;
+            }
             BodyAdmitted_ = true;
         }
         BeginBody();
@@ -315,6 +331,9 @@ private:
         }
         if (BodyAdmitted_) {
             --State_.Bodies;
+            if (!ControlBody_) {
+                --State_.OrdinaryBodies;
+            }
             BodyAdmitted_ = false;
         }
         try {
@@ -517,7 +536,8 @@ private:
     TCallQueue* Queue_ = nullptr;
     std::chrono::steady_clock::time_point ReadExpires_, QueueExpires_;
     std::atomic<bool> WorkerFailed_{false}, WorkerDone_{false};
-    bool ReadingHeaders_ = false, BodyAdmitted_ = false, Processing_ = false, Writing_ = false, Closed_ = false;
+    bool ReadingHeaders_ = false, BodyAdmitted_ = false, ControlBody_ = false;
+    bool Processing_ = false, Writing_ = false, Closed_ = false;
     bool Queued_ = false, Active_ = false, BodyComplete_ = false, HeaderProbe_ = false, WaitingBody_ = false;
     bool WorkerStarted_ = false;
 };
@@ -554,11 +574,21 @@ void TState::PumpBodies()
         }
     } reset{BodyPumping};
     while (Bodies < 16 && !BodyWaiters.empty()) {
-        const auto session = BodyWaiters.front();
-        BodyWaiters.pop_front();
+        // Ordinary uploads cannot hold up controls when only reserved readers remain.
+        const auto eligible = std::find_if(BodyWaiters.begin(), BodyWaiters.end(), [&](const auto& session) {
+            return session->ControlBody_ || OrdinaryBodies < 12;
+        });
+        if (eligible == BodyWaiters.end()) {
+            break;
+        }
+        const auto session = *eligible;
+        BodyWaiters.erase(eligible);
         session->WaitingBody_ = false;
         if (!session->Closed_ && !session->Writing_) {
             ++Bodies;
+            if (!session->ControlBody_) {
+                ++OrdinaryBodies;
+            }
             session->BodyAdmitted_ = true;
             session->Guard([&] {
                 session->BeginBody();

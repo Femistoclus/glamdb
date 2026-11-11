@@ -12,7 +12,9 @@ import uuid
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from pathlib import Path
+from tls_proxy import tls_proxy
 
 DRIVER = sys.argv.pop(1)
 TOKEN = 'fault-test-token'
@@ -149,6 +151,74 @@ class NativeFaultHTTP(unittest.TestCase):
         finally:
             for stream in streams:
                 stream.close()
+
+    def test_slow_uploads_preserve_control_body_capacity(self):
+        self.check_control_body_capacity(self.port)
+
+    def test_https_slow_uploads_preserve_control_body_capacity(self):
+        with tls_proxy(self.port, self.tmp.name) as (port, context):
+            self.check_control_body_capacity(port, context)
+
+    def check_control_body_capacity(self, port, context=None):
+        path = self.collection()
+        cursor = self.api(path + '/scan/open', {})['cursor']
+        with ExitStack() as stack:
+            def read_head(stream):
+                head = b''
+                while not head.endswith(b'\r\n\r\n'):
+                    chunk = stream.recv(1)
+                    self.assertTrue(chunk, 'listener closed before an admission response')
+                    head += chunk
+                return head
+
+            def upload(target, token=TOKEN, wait=True):
+                stream = stack.enter_context(socket.create_connection(('127.0.0.1', port), timeout=5))
+                if context is not None:
+                    stream = stack.enter_context(context.wrap_socket(stream, server_hostname='localhost'))
+                authorization = '' if token is None else f'Authorization: Bearer {token}\r\n'
+                stream.sendall((f'POST {target} HTTP/1.1\r\nHost: local\r\n{authorization}'
+                    'Content-Type: application/json\r\nContent-Length: 2\r\nExpect: 100-continue\r\n\r\n').encode())
+                return stream, read_head(stream) if wait else b''
+
+            def waiting(target, token=TOKEN):
+                stream, _ = upload(target, token, wait=False)
+                stream.settimeout(0.1)
+                with self.assertRaises(socket.timeout):
+                    stream.recv(1)
+                stream.settimeout(5)
+                return stream
+
+            ordinary = []
+            for _ in range(12):
+                stream, head = upload(path + '/append')
+                self.assertIn(b' 100 ', head)
+                ordinary.append(stream)
+            queued_ordinary = waiting(path + '/append')
+            # Public paths cannot borrow authenticated control capacity.
+            queued_public = waiting('/assets/close', token=None)
+            self.assertIn(b' 401 ', upload(self.base + '/open', token='wrong')[1])
+            self.assertEqual(self.api('/healthz')['status'], 'live')
+            self.api(path + '/scan/%63ancel', {'cursor': cursor})
+            self.api(self.base + '/reconcile', {})
+
+            protected = []
+            for target in (self.base + '/open', self.base + '/%6fpen',
+                           self.base.replace('/databases/', '/%64atabases/') + '/open', self.base + '/open'):
+                stream, head = upload(target)
+                self.assertIn(b' 100 ', head)
+                protected.append(stream)
+            queued_control = waiting(self.base + '/open')
+            # A freed reserved reader must bypass the ordinary queue head.
+            protected[0].sendall(b'{}')
+            response = http.client.HTTPResponse(protected[0])
+            response.begin()
+            self.assertEqual(response.status, 200, response.read())
+            self.assertIn(b' 100 ', read_head(queued_control))
+            # Disconnects release ordinary readers to waiting ordinary bodies.
+            ordinary[0].close()
+            self.assertIn(b' 100 ', read_head(queued_ordinary))
+            ordinary[1].close()
+            self.assertIn(b' 100 ', read_head(queued_public))
 
     def test_discards_waiting_on_close_do_not_starve_control_requests(self):
         path = self.collection()

@@ -360,9 +360,15 @@ run on the I/O thread. Core retains its single serialized writer.
 
 Ordinary header allowances are 64 globally and 32 per peer; excess accepted
 connections have a 100 ms header probe so complete requests can still progress.
-At most 16 request bodies are read at once; additional authenticated headers wait
-within the connection ceiling and original read deadline. Body slots release when
-reading finishes; retained queued bodies use the separate byte limits above.
+At most 16 request bodies are read at once, including at most 12 ordinary uploads.
+The remaining four readers are reserved for authenticated database
+create/open/close/reconcile/discard and scan cancellation; these control bodies
+can also use other free readers. Public/static POSTs cannot spend the reserve.
+Additional headers wait within the connection ceiling and original read deadline;
+eligible control bodies can pass ordinary waiters when only reserved capacity is
+available. Authentication and body reservation precede `100 Continue`. Body slots
+release when reading finishes, on disconnect, timeout or shutdown; retained
+queued bodies use the separate byte limits above.
 There are 96 total connections, including overload responses;
 at the final ceiling, accept pauses and checks for capacity every 100 ms. Excess
 connections wait in the kernel backlog instead of being accepted and reset. The
@@ -395,6 +401,29 @@ Use ordinary buffered JSON requests. The server defaults to 127.0.0.1:8080.
 reverse proxy for remote access. There is one bearer identity, no user/RBAC layer.
 The token comes only from `GLAMDB_TOKEN`, never a URL, log, config response or UI
 storage. API responses are uncached. CORS is disabled; the UI uses the same origin.
+
+### Remote access through TLS
+
+Keep the native listener on `127.0.0.1` and expose only the TLS reverse proxy.
+Configure the proxy with the deployment certificate and key, forward
+`Authorization` unchanged, and retain native bearer authentication on every API
+request. `X-Forwarded-*` headers grant no access. The single bearer identity can
+administer every managed database; a scan cursor is additionally bound to its
+database, collection and representation. A cursor alone never authenticates.
+
+Set proxy header/body/concurrency limits and timeouts as well as the native
+limits. If the proxy accepts chunked uploads, buffer them under its own finite
+byte cap and forward an HTTP/1.1 Content-Length request. The native listener
+rejects Transfer-Encoding and compressed request bodies before reading or
+decompressing them, so neither can bypass its 16 MiB input cap. A proxy that
+decompresses requests must independently cap decompressed bytes before forwarding.
+Buffering and native limits bound different resources.
+
+Use an HTTPS base URL and a trusted CA for CLI/SDK clients; verification must
+cover both the certificate chain and hostname. Keep tokens out of URLs and proxy
+access/error logs; do not log authorization headers or request bodies. The
+native server emits its listening address but does not log request headers,
+targets or bodies, and authentication errors contain no supplied credentials.
 
 SIGINT/SIGTERM stop accepting, close incomplete requests, cancel scan sessions and
 reject new scans before draining workers. Cancellation reaches core cursors without
@@ -436,6 +465,15 @@ restart and process crashes, missing-store preservation, real HTTP, exact scalar
 repeat-ID conflicts, fixed snapshots, lost-response lookup, reopen, owner locking,
 request framing/auth/limits and UI assets. Mock/client suites remain separate.
 Passing these tests does not qualify physical power-loss durability.
+
+`glamdb.http_review` also forwards exact request bytes through a disposable TLS
+terminator into the native server. It checks certificate verification, bearer
+rejection (including URL/proxy-header substitutes), compressed/chunked/oversized
+input, row and scan-session limits, and credential-free errors/logs. The
+`glamdb.native_http_fault` suite checks ordinary/total body admission boundaries,
+protected control progress, encoded routes and reservation release over HTTP and
+verified HTTPS. Its SQLite VFS fault controls are test-only; these admission
+cases use the production listener and storage without injecting a fault.
 
 The deterministic `glamdb.http_lifecycle` test uses a test-only backend barrier
 to disconnect and deliver SIGTERM during publication, verifies that the server

@@ -48,6 +48,10 @@ idle expiry and explicit cancellation. Each admitted cursor reserves its maximum
 replay page before consuming rows. Separate HTTP reader, publisher, lifecycle and
 control pools use bounded fair per-database queues with deadlines and cancellation.
 Outcome lookups refuse tentative catalog reads without waiting on publication.
+HTTP body admission reserves four of sixteen readers from ordinary uploads for
+authenticated database lifecycle and scan cancellation, including through a TLS
+proxy; public/static POSTs cannot spend that reserve. Excess bodies wait within
+the connection ceiling and their original read deadline.
 The network CLI also builds independently with OpenSSL; optional offline commands
 are in `apps/admin` and never required for server initialization.
 Collection routes are scoped by `/databases/{id}`; optional legacy
