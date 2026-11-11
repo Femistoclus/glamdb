@@ -12,9 +12,8 @@
 namespace NGlamDB::NIO {
 namespace {
 
-std::vector<std::byte> RandomBytes(std::size_t size, std::uint32_t seed)
+std::vector<std::byte> RandomBytes(std::size_t size, std::mt19937 random)
 {
-    std::mt19937 random(seed);
     std::vector<std::byte> bytes(size);
     for (auto& byte : bytes) {
         byte = static_cast<std::byte>(random());
@@ -25,7 +24,7 @@ std::vector<std::byte> RandomBytes(std::size_t size, std::uint32_t seed)
 // The dispatched compression (hardware where available) equals the portable one.
 TEST(TSha256BlocksTest, DispatchedCompressionMatchesPortable)
 {
-    const auto data = RandomBytes(64 * 1031, 7);
+    const auto data = RandomBytes(std::size_t{64} * 1031, std::mt19937(7));
     for (const std::size_t blocks : {0, 1, 2, 3, 4, 5, 15, 16, 17, 255, 1031}) {
         std::array<std::uint32_t, 8>
             portable{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
@@ -40,7 +39,7 @@ TEST(TSha256BlocksTest, DispatchedCompressionMatchesPortable)
 // Streaming with arbitrary chunk boundaries equals hashing the whole input.
 TEST(TSha256BlocksTest, ChunkedUpdatesMatchOneShotDigests)
 {
-    const auto data = RandomBytes(4099, 11);
+    const auto data = RandomBytes(4099, std::mt19937(11));
     std::mt19937 random(13);
     for (std::size_t size = 0; size <= data.size(); size += size < 300 ? 1 : 97) {
         const std::span whole(data.data(), size);

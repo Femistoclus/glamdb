@@ -64,7 +64,7 @@ ErrorDetail StorageError(std::error_code error, EStoragePath path, std::string_v
 }
 
 ErrorDetail
-StorageError(const iceberg::Error& error, EStoragePath path, std::string_view context, std::string_view fallback)
+StorageError(const iceberg::Error& error, std::string_view context, EStoragePath path, std::string_view fallback)
 {
     const std::string_view message(error.message);
     std::string_view code = fallback;

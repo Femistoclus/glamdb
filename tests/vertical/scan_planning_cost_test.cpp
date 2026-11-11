@@ -70,16 +70,16 @@ TEST(ScanPlanningCost, SmallScanDoesNotReadEveryManifest)
             << (outcome.error ? outcome.error->code + ": " + outcome.error->message : std::string());
     }
 
-    for (const std::optional<int64_t> limit : {std::optional<int64_t>(0), std::optional<int64_t>(1)}) {
-        SCOPED_TRACE("limit=" + std::to_string(*limit));
+    for (const int64_t limit : {0, 1}) {
+        SCOPED_TRACE("limit=" + std::to_string(limit));
         const auto before = ManifestOpens(*faults);
         const auto cursor = engine->Scan({.collection_id = test::collection_id, .limit = limit});
         ASSERT_TRUE(cursor) << cursor.error().code << ": " << cursor.error().message;
         const auto first = (*cursor)->Next();
         ASSERT_TRUE(first) << first.error().message;
-        EXPECT_EQ(*first == nullptr, *limit == 0);
+        EXPECT_EQ(*first == nullptr, limit == 0);
         const auto opened = ManifestOpens(*faults) - before;
-        EXPECT_LE(opened, 2U) << "manifests opened by a limit=" << *limit << " scan after " << Appends << " appends";
+        EXPECT_LE(opened, 2U) << "manifests opened by a limit=" << limit << " scan after " << Appends << " appends";
     }
 
     ASSERT_TRUE(engine->Shutdown(1000ms));

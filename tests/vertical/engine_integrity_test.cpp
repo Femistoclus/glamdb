@@ -1,6 +1,7 @@
 // Engine/storage integrity: concurrent corruption reports, fail-closed
 // classification and retry verification over the real storage backend.
 
+#include "tests/support/checked.h"
 #include "tests/support/fault_fs.h"
 #include "tests/vertical/vertical_support.h"
 
@@ -30,11 +31,12 @@ protected:
     void TearDown() override
     {
         if (Engine_) {
-            Engine_->Shutdown(1000ms);
+            // Corruption tests can intentionally leave recovery unable to complete.
+            [[maybe_unused]] const auto shutdown = Engine_->Shutdown(1000ms);
         }
     }
 
-    void CreateTwoCollections(detail::TLocalStorageOptions options = {})
+    void CreateTwoCollections(const detail::TLocalStorageOptions& options = {})
     {
         auto created =
             detail::EngineFactory::CreateWith({test::store_id, Root_.string()}, THookBackend::Factory(Hooks_, options));
@@ -109,7 +111,7 @@ TEST_F(EngineIntegrityTest, CorruptionAfterPrepareAbortsPublication)
     const auto outcome = writer.get();
     EXPECT_EQ(outcome.disposition, CommitDisposition::DefinitelyNotCommitted);
     ASSERT_TRUE(outcome.error);
-    EXPECT_EQ(outcome.error->code, "RECOVERY_REQUIRED");
+    EXPECT_EQ(test::Present(outcome.error).code, "RECOVERY_REQUIRED");
     const auto blocked = Engine_->GetCollection(SecondCollection);
     ASSERT_FALSE(blocked);
     EXPECT_EQ(blocked.error().code, "RECOVERY_REQUIRED");
@@ -120,7 +122,7 @@ TEST_F(EngineIntegrityTest, CorruptionAfterPrepareAbortsPublication)
     const auto lookup = Engine_->FindAppendOutcome(SecondCollection, SecondOperation);
     ASSERT_TRUE(lookup);
     ASSERT_TRUE(lookup->has_value());
-    EXPECT_EQ((*lookup)->disposition, CommitDisposition::DefinitelyNotCommitted);
+    EXPECT_EQ(test::Present(*lookup).disposition, CommitDisposition::DefinitelyNotCommitted);
 }
 
 // Corruption completed inside the outer catalog transaction, before the
@@ -150,7 +152,7 @@ TEST_F(EngineIntegrityTest, CorruptionBeforeGuardDecisionAbortsPublication)
     const auto outcome = AppendSecond();
     EXPECT_EQ(outcome.disposition, CommitDisposition::DefinitelyNotCommitted);
     ASSERT_TRUE(outcome.error);
-    EXPECT_EQ(outcome.error->code, "RECOVERY_REQUIRED");
+    EXPECT_EQ(test::Present(outcome.error).code, "RECOVERY_REQUIRED");
 
     Hooks_->BeforeVerifyClosure = nullptr;
     WriteBytes(dataFile, saved);
@@ -196,11 +198,11 @@ TEST_F(EngineIntegrityTest, CorruptionAfterGuardBeforeCommitSurfacesAfterPublica
     Hooks_->AfterPublish = nullptr;
     WriteBytes(dataFile, saved);
     ASSERT_TRUE(Engine_->Reconcile());
-    EXPECT_EQ(Engine_->GetCollection(SecondCollection)->current_snapshot_id, outcome.result->snapshot_id);
+    EXPECT_EQ(Engine_->GetCollection(SecondCollection)->current_snapshot_id, test::Present(outcome.result).snapshot_id);
     const auto lookup = Engine_->FindAppendOutcome(SecondCollection, SecondOperation);
     ASSERT_TRUE(lookup);
     ASSERT_TRUE(lookup->has_value());
-    EXPECT_EQ((*lookup)->disposition, CommitDisposition::Committed);
+    EXPECT_EQ(test::Present(*lookup).disposition, CommitDisposition::Committed);
 }
 
 // ---- Fail-closed classification of warehouse layout violations ----
@@ -216,7 +218,7 @@ TEST_F(EngineIntegrityTest, SymlinkInWarehouseFailsClosedBeforeBinding)
     const auto rejected = AppendSecond();
     EXPECT_EQ(rejected.disposition, CommitDisposition::DefinitelyNotCommitted);
     ASSERT_TRUE(rejected.error);
-    EXPECT_EQ(rejected.error->code, "CORRUPTION");
+    EXPECT_EQ(test::Present(rejected.error).code, "CORRUPTION");
     EXPECT_EQ(CountRegularFiles(Root_ / "warehouse"), before);
     EXPECT_EQ(Engine_->ListCollections().error().code, "RECOVERY_REQUIRED");
 
@@ -281,6 +283,9 @@ TEST_F(EngineIntegrityTest, RetryAfterDeletedParquetFailsClosed)
     CreateTwoCollections();
     CommitFirst();
     const auto original = Engine_->FindAppendOutcome(test::collection_id, FirstOperation);
+    ASSERT_TRUE(original);
+    ASSERT_TRUE(original->has_value());
+    ASSERT_TRUE(test::Present(*original).result.has_value());
     const auto dataFile = OnlyDataFile(test::collection_id);
     const auto saved = ReadBytes(dataFile);
     std::filesystem::remove(dataFile);
@@ -288,14 +293,15 @@ TEST_F(EngineIntegrityTest, RetryAfterDeletedParquetFailsClosed)
     const auto retry = Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
     EXPECT_EQ(retry.disposition, CommitDisposition::CommitUnknown);
     ASSERT_TRUE(retry.error);
-    EXPECT_EQ(retry.error->code, "CORRUPTION");
+    EXPECT_EQ(test::Present(retry.error).code, "CORRUPTION");
     EXPECT_EQ(Engine_->GetCollection(test::collection_id).error().code, "RECOVERY_REQUIRED");
 
     WriteBytes(dataFile, saved);
     ASSERT_TRUE(Engine_->Reconcile());
     const auto again = Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
     ASSERT_EQ(again.disposition, CommitDisposition::Committed);
-    EXPECT_EQ(again.result->snapshot_id, (*original)->result->snapshot_id);
+    ASSERT_TRUE(again.result.has_value());
+    EXPECT_EQ(test::Present(again.result).snapshot_id, test::Present(test::Present(*original).result).snapshot_id);
 }
 
 TEST_F(EngineIntegrityTest, RetryAfterSameLengthGarbageRootFailsClosed)
@@ -312,7 +318,7 @@ TEST_F(EngineIntegrityTest, RetryAfterSameLengthGarbageRootFailsClosed)
     const auto retry = Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
     EXPECT_EQ(retry.disposition, CommitDisposition::CommitUnknown);
     ASSERT_TRUE(retry.error);
-    EXPECT_EQ(retry.error->code, "CORRUPTION");
+    EXPECT_EQ(test::Present(retry.error).code, "CORRUPTION");
 
     WriteBytes(roots.front(), saved);
     ASSERT_TRUE(Engine_->Reconcile());
@@ -336,7 +342,7 @@ TEST_F(EngineIntegrityTest, CreateRetryAfterCorruptManifestFailsClosed)
     const auto retry = Engine_->CreateCollection({test::collection_id, "events-a", Schema});
     EXPECT_EQ(retry.disposition, CommitDisposition::CommitUnknown);
     ASSERT_TRUE(retry.error);
-    EXPECT_EQ(retry.error->code, "CORRUPTION");
+    EXPECT_EQ(test::Present(retry.error).code, "CORRUPTION");
 
     WriteBytes(manifests.front(), saved);
     ASSERT_TRUE(Engine_->Reconcile());
@@ -391,7 +397,8 @@ std::string SameLengthParquet(const arrow::Table& table, size_t length)
     return bytes;
 }
 
-std::shared_ptr<arrow::Table> ReplaceColumn(const arrow::Table& table, int index, std::shared_ptr<arrow::Array> array)
+std::shared_ptr<arrow::Table>
+ReplaceColumn(const arrow::Table& table, int index, const std::shared_ptr<arrow::Array>& array)
 {
     auto replaced = table.SetColumn(index, table.schema()->field(index), std::make_shared<arrow::ChunkedArray>(array));
     EXPECT_TRUE(replaced.ok()) << replaced.status().ToString();
@@ -526,6 +533,7 @@ TEST_F(EngineIntegrityTest, MultiRowGroupLimitStopsMidBatch)
     options.Writer.MaxRowGroupBytes = 4 + 3 * 40;
     CreateTwoCollections(options);
     std::vector<TInputRow> rows;
+    rows.reserve(9);
     for (int index = 0; index < 9; ++index) {
         rows.push_back({"key-0" + std::to_string(index), index, 1.0, true, index});
     }
@@ -595,7 +603,7 @@ TEST_F(EngineIntegrityTest, RootByteQuotaRejectsBeforeBinding)
     const auto rejected = Engine_->AppendDurable({test::collection_id, SecondOperation, {}, {Batch(SecondRows)}});
     EXPECT_EQ(rejected.disposition, CommitDisposition::DefinitelyNotCommitted);
     ASSERT_TRUE(rejected.error);
-    EXPECT_EQ(rejected.error->code, "RESOURCE_EXHAUSTED");
+    EXPECT_EQ(test::Present(rejected.error).code, "RESOURCE_EXHAUSTED");
     EXPECT_EQ(CountRegularFiles(Root_ / "warehouse"), before);
     const auto lookup = Engine_->FindAppendOutcome(test::collection_id, SecondOperation);
     ASSERT_TRUE(lookup);
@@ -610,13 +618,14 @@ TEST_F(EngineIntegrityTest, WriterFileLimitAfterBindingIsResourceExhausted)
     const auto failed = Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
     EXPECT_EQ(failed.disposition, CommitDisposition::DefinitelyNotCommitted);
     ASSERT_TRUE(failed.error);
-    EXPECT_EQ(failed.error->code, "RESOURCE_EXHAUSTED") << failed.error->message;
-    EXPECT_EQ(failed.error->retry_hint, RetryHint::OperatorAction);
+    EXPECT_EQ(test::Present(failed.error).code, "RESOURCE_EXHAUSTED") << test::Present(failed.error).message;
+    EXPECT_EQ(test::Present(failed.error).retry_hint, RetryHint::OperatorAction);
     const auto recorded = Engine_->FindAppendOutcome(test::collection_id, FirstOperation);
     ASSERT_TRUE(recorded) << recorded.error().message;
     ASSERT_TRUE(recorded->has_value());
-    EXPECT_EQ((*recorded)->error->code, "RESOURCE_EXHAUSTED");
-    EXPECT_EQ((*recorded)->error->retry_hint, RetryHint::OperatorAction);
+    ASSERT_TRUE(test::Present(*recorded).error.has_value());
+    EXPECT_EQ(test::Present(test::Present(*recorded).error).code, "RESOURCE_EXHAUSTED");
+    EXPECT_EQ(test::Present(test::Present(*recorded).error).retry_hint, RetryHint::OperatorAction);
     EXPECT_TRUE(Engine_->ListCollections());
 }
 
@@ -639,13 +648,13 @@ TEST_F(EngineIntegrityTest, LatchedWriteFailureAllowsReconcileShutdownAndReopen)
     const auto failed = Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
     EXPECT_EQ(failed.disposition, CommitDisposition::DefinitelyNotCommitted);
     ASSERT_TRUE(failed.error);
-    EXPECT_EQ(failed.error->code, "IO_ERROR");
+    EXPECT_EQ(test::Present(failed.error).code, "IO_ERROR");
 
     const auto latched = Engine_->AppendDurable({test::collection_id, ThirdOperation, {}, {Batch(FirstRows)}});
     EXPECT_EQ(latched.disposition, CommitDisposition::DefinitelyNotCommitted);
     ASSERT_TRUE(latched.error);
-    EXPECT_EQ(latched.error->code, "IO_ERROR");
-    EXPECT_EQ(latched.error->retry_hint, RetryHint::OperatorAction);
+    EXPECT_EQ(test::Present(latched.error).code, "IO_ERROR");
+    EXPECT_EQ(test::Present(latched.error).retry_hint, RetryHint::OperatorAction);
     const auto unbound = Engine_->FindAppendOutcome(test::collection_id, ThirdOperation);
     ASSERT_TRUE(unbound);
     EXPECT_FALSE(unbound->has_value());

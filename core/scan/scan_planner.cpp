@@ -28,7 +28,7 @@ template <class T>
 T Take(iceberg::Result<T> result, std::string_view code, std::string_view context)
 {
     if (!result) {
-        throw Failure(StorageError(result.error(), EStoragePath::Read, context, code));
+        throw Failure(StorageError(result.error(), context, EStoragePath::Read, code));
     }
     return std::move(*result);
 }

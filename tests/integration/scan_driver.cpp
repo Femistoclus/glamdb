@@ -220,8 +220,8 @@ try {
         if (!a.result || !b.result) {
             Die("append");
         }
-        std::cout << "{\"s1\":\"" << a.result->snapshot_id << "\",\"s2\":\"" << b.result->snapshot_id << "\"}"
-                  << std::endl;
+        std::cout << "{\"s1\":\"" << a.result->snapshot_id << "\",\"s2\":\"" << b.result->snapshot_id << "\"}" << '\n'
+                  << std::flush;
         _exit(0); // No Shutdown: the next process must recover from disk alone.
     }
     if (mode == "prepared-crash") {
@@ -248,11 +248,11 @@ try {
                   << ",\"s1\":" << Rows(*engine, SnapshotSelector::Id(std::stoll(argv[3])))
                   << ",\"s2\":" << Rows(*engine, SnapshotSelector::Id(std::stoll(argv[4])))
                   << ",\"empty\":" << Rows(*engine, SnapshotSelector::InitialEmpty())
-                  << ",\"crashed\":" << (lookup ? Outcome(*lookup) : std::string("null")) << "}" << std::endl;
+                  << ",\"crashed\":" << (lookup ? Outcome(*lookup) : std::string("null")) << "}" << '\n';
     } else if (mode == "append-more") {
         const auto retry = engine->AppendDurable({CollectionId, OperationC, {}, {Batch(RowsC)}});
         const auto next = engine->AppendDurable({CollectionId, OperationD, {}, {Batch(RowsD)}});
-        std::cout << "{\"retry\":" << Outcome(retry) << ",\"next\":" << Outcome(next) << "}" << std::endl;
+        std::cout << "{\"retry\":" << Outcome(retry) << ",\"next\":" << Outcome(next) << "}" << '\n';
     } else {
         return 2;
     }

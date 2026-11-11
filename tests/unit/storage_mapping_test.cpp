@@ -102,6 +102,7 @@ TEST(StorageMapping, RecordBatchByteEstimateBoundsArrowBuffers)
     check({full, nulls, full});
     check({Row{std::string(1U << 20, 'x'), false, int64_t{-1}, -2.0, TimestampUs{-5}}});
     std::vector<Row> many;
+    many.reserve(10000);
     for (int index = 0; index < 10000; ++index) {
         many.push_back(index % 3 == 0
                 ? nulls

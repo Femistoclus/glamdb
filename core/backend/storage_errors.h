@@ -4,6 +4,7 @@
 
 #include <iceberg/result.h>
 
+#include <cstdint>
 #include <string_view>
 #include <system_error>
 
@@ -12,7 +13,7 @@ namespace glamdb::detail {
 // Where a storage failure was observed. Every path read on the Read side comes
 // from committed metadata, so malformed or missing persisted state there is
 // corruption. Preflight inspects the warehouse tree before an operation binds.
-enum class EStoragePath {
+enum class EStoragePath : std::uint8_t {
     Read,
     Write,
     Preflight,
@@ -27,6 +28,6 @@ ErrorDetail StorageError(std::error_code error, EStoragePath path, std::string_v
 // corruption failures with the CAPACITY:/CORRUPTION: message prefixes.
 // `fallback` is used when neither the prefix nor the kind is decisive.
 ErrorDetail
-StorageError(const iceberg::Error& error, EStoragePath path, std::string_view context, std::string_view fallback);
+StorageError(const iceberg::Error& error, std::string_view context, EStoragePath path, std::string_view fallback);
 
 } // namespace glamdb::detail

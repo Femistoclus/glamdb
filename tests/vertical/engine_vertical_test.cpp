@@ -1,3 +1,4 @@
+#include "tests/support/checked.h"
 #include "tests/vertical/vertical_support.h"
 
 #include <arrow/c/bridge.h>
@@ -280,7 +281,7 @@ TEST_F(EngineVerticalTest, CursorDetectedCorruptionClosesReadiness)
     const auto blocked = Append(SecondOperation, SecondRows);
     EXPECT_EQ(blocked.disposition, CommitDisposition::CommitUnknown);
     ASSERT_TRUE(blocked.error);
-    EXPECT_EQ(blocked.error->code, "RECOVERY_REQUIRED");
+    EXPECT_EQ(test::Present(blocked.error).code, "RECOVERY_REQUIRED");
     Engine_.reset();
 }
 
@@ -361,8 +362,8 @@ TEST_F(EngineVerticalTest, PreBindingWriterRowLimitDoesNotConsumeOperationId)
     const auto rejected = Engine_->AppendDurable({WideCollection, FirstOperation, {}, {oversizedBatch}});
     EXPECT_EQ(rejected.disposition, CommitDisposition::DefinitelyNotCommitted);
     ASSERT_TRUE(rejected.error);
-    EXPECT_EQ(rejected.error->code, "RESOURCE_EXHAUSTED");
-    EXPECT_EQ(rejected.error->retry_hint, RetryHint::FixInput);
+    EXPECT_EQ(test::Present(rejected.error).code, "RESOURCE_EXHAUSTED");
+    EXPECT_EQ(test::Present(rejected.error).retry_hint, RetryHint::FixInput);
 
     const auto lookup = Engine_->FindAppendOutcome(WideCollection, FirstOperation);
     ASSERT_TRUE(lookup);
@@ -422,7 +423,7 @@ TEST_F(EngineVerticalTest, MultiCollectionStoreCapacityEnforcedAcrossCommitsAndR
     const auto second = engine->AppendDurable({SecondCollection, SecondOperation, {}, {Batch(SecondRows)}});
     EXPECT_EQ(second.disposition, CommitDisposition::DefinitelyNotCommitted);
     ASSERT_TRUE(second.error);
-    EXPECT_EQ(second.error->code, "RESOURCE_EXHAUSTED");
+    EXPECT_EQ(test::Present(second.error).code, "RESOURCE_EXHAUSTED");
     const auto secondLookup = engine->FindAppendOutcome(SecondCollection, SecondOperation);
     ASSERT_TRUE(secondLookup);
     EXPECT_FALSE(secondLookup->has_value());

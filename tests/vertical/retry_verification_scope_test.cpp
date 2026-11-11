@@ -3,6 +3,7 @@
 // not other collections or every retained manifest list; a failed outcome
 // references no storage and reads none.
 
+#include "tests/support/checked.h"
 #include "tests/support/fault_fs.h"
 #include "tests/vertical/vertical_support.h"
 
@@ -91,7 +92,7 @@ TEST_F(BackendRetryScopeTest, RetryOfCommittedAppendDoesNotVerifyOtherCollection
     const auto retry = Append(test::collection_id, B1Operation(0), FirstRows);
     ASSERT_EQ(retry.disposition, CommitDisposition::Committed);
     ASSERT_TRUE(retry.result && first.result);
-    EXPECT_EQ(retry.result->snapshot_id, first.result->snapshot_id);
+    EXPECT_EQ(test::Present(retry.result).snapshot_id, test::Present(first.result).snapshot_id);
 
     const auto foreign = "/warehouse/" + std::string(SecondCollection) + "/";
     std::size_t foreignReads = 0;
@@ -136,13 +137,13 @@ TEST_F(BackendRetryScopeTest, RetryOfFailedAppendReadsNoWarehouseFile)
     const auto failed = Append(test::collection_id, B1Operation(2), SecondRows, stale);
     ASSERT_EQ(failed.disposition, CommitDisposition::DefinitelyNotCommitted);
     ASSERT_TRUE(failed.error);
-    ASSERT_EQ(failed.error->code, "PRECONDITION_FAILED");
+    ASSERT_EQ(test::Present(failed.error).code, "PRECONDITION_FAILED");
 
     const auto mark = Faults_->Events().size();
     const auto retry = Append(test::collection_id, B1Operation(2), SecondRows, stale);
     ASSERT_EQ(retry.disposition, CommitDisposition::DefinitelyNotCommitted);
     ASSERT_TRUE(retry.error);
-    EXPECT_EQ(retry.error->code, "PRECONDITION_FAILED");
+    EXPECT_EQ(test::Present(retry.error).code, "PRECONDITION_FAILED");
     EXPECT_TRUE(OpenedSince(mark).empty());
 }
 

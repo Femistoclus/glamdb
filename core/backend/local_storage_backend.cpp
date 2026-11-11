@@ -60,7 +60,7 @@ template <class T>
 T TakeIceberg(iceberg::Result<T> result, std::string_view code, std::string_view context)
 {
     if (!result) {
-        auto detail = StorageError(result.error(), EStoragePath::Write, context, code);
+        auto detail = StorageError(result.error(), context, EStoragePath::Write, code);
         if (detail.code == code && result.error().kind == iceberg::ErrorKind::kInvalidArgument) {
             detail.code = "INVALID_ARGUMENT";
             detail.retry_hint = RetryHint::FixInput;
@@ -73,7 +73,7 @@ T TakeIceberg(iceberg::Result<T> result, std::string_view code, std::string_view
 void CheckIceberg(const iceberg::Status& status, std::string_view code, std::string_view context)
 {
     if (!status) {
-        throw Failure(StorageError(status.error(), EStoragePath::Write, context, code));
+        throw Failure(StorageError(status.error(), context, EStoragePath::Write, code));
     }
 }
 
@@ -83,7 +83,7 @@ template <class T>
 T TakeRetained(iceberg::Result<T> result, std::string_view context)
 {
     if (!result) {
-        throw Failure(StorageError(result.error(), EStoragePath::Read, context, "CORRUPTION"));
+        throw Failure(StorageError(result.error(), context, EStoragePath::Read, "CORRUPTION"));
     }
     return std::move(*result);
 }
@@ -111,7 +111,7 @@ TakeUsage(NIO::TResult<NStorage::TStorageUsage> result, std::string_view code, s
     if (!result) {
         Fail(code, context, result.Error().message());
     }
-    return std::move(result).Value();
+    return result.Value();
 }
 
 void CheckUsage(std::error_code error, std::string_view code, std::string_view context)
@@ -449,7 +449,7 @@ TLocalStorageBackend::TLocalStorageBackend(StoreInfo store,
     std::shared_ptr<NIO::TStoreDirs> dirs,
     std::shared_ptr<NStorage::TDurableLocalFileIO> fileIO)
     : Store_(std::move(store))
-    , Options_(options)
+    , Options_(std::move(options))
     , Dirs_(std::move(dirs))
     , FileIO_(std::move(fileIO))
     , Catalog_(std::make_shared<TInertCatalog>())
@@ -680,6 +680,8 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
     });
 }
 
+// The StorageBackend override fixes the two string identity parameters.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 void TLocalStorageBackend::ConfirmPublication(std::string_view collectionID, std::string_view metadataLocation)
 {
     std::lock_guard lock(Mutex_);

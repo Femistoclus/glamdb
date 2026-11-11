@@ -58,7 +58,7 @@ iceberg::TableMetadata MetadataWithSnapshots(int count)
         metadata.snapshot_log.push_back({snapshot->timestamp_ms, snapshot->snapshot_id});
         parent = snapshot->snapshot_id;
     }
-    metadata.current_snapshot_id = count > 0 ? *parent : iceberg::kInvalidSnapshotId;
+    metadata.current_snapshot_id = parent.value_or(iceberg::kInvalidSnapshotId);
     metadata.last_updated_ms = iceberg::TimePointMsFromUnixMs(1700000000000LL + count);
     return metadata;
 }
@@ -91,7 +91,7 @@ TEST(IcebergMetadataJsonCost, SerializationIsLinearInRetainedSnapshots)
         largeBytes,
         large,
         large / small,
-        1000.0 * large / (largeBytes / 1024.0));
+        1000.0 * large / (static_cast<double>(largeBytes) / 1024.0));
     // The output is linear in n (bytes ratio ~2); linear serialization keeps the time ratio near 2.
     EXPECT_LT(large / small, 3.0) << "doubling the history must not quadruple root serialization time";
 }

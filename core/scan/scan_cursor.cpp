@@ -67,7 +67,7 @@ template <class T>
 T TakeIceberg(iceberg::Result<T> result, std::string_view code, std::string_view context)
 {
     if (!result) {
-        throw Failure(StorageError(result.error(), EStoragePath::Read, context, code));
+        throw Failure(StorageError(result.error(), context, EStoragePath::Read, code));
     }
     return std::move(*result);
 }
@@ -412,13 +412,15 @@ private:
         for (const auto field : ReadFields_) {
             ValidateColumn(Context_.Collection.schema.fields[field], *Column(batch, field));
         }
-        std::optional<std::vector<int64_t>> selected;
-        if (Predicate_.Kind == Predicate::Kind::Compare) {
-            auto rows = Take(SelectRows(Predicate_, *Column(batch, Predicate_.FieldIndex)));
-            if (static_cast<int64_t>(rows.size()) != batch.num_rows()) {
-                selected = std::move(rows);
+        const auto selected = [&]() -> std::optional<std::vector<int64_t>> {
+            if (Predicate_.Kind == Predicate::Kind::Compare) {
+                auto rows = Take(SelectRows(Predicate_, *Column(batch, Predicate_.FieldIndex)));
+                if (static_cast<int64_t>(rows.size()) != batch.num_rows()) {
+                    return rows;
+                }
             }
-        }
+            return std::nullopt;
+        }();
         auto count = selected ? static_cast<int64_t>(selected->size()) : batch.num_rows();
         if (Remaining_) {
             count = std::min(count, *Remaining_);

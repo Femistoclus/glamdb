@@ -7,6 +7,7 @@
 //   --gtest_also_run_disabled_tests --gtest_filter='*TerminalRetryCost*'
 
 #include "storage/engine.h"
+#include "tests/support/checked.h"
 
 #include "core/api/binary.h"
 #include "core/api/codec.h"
@@ -159,7 +160,7 @@ TEST_F(TerminalRetryScopeTest, IdempotentRetryDoesNotReverifyUnrelatedCollection
     const auto failed = engine->AppendDurable(failed_request);
     ASSERT_EQ(failed.disposition, CommitDisposition::DefinitelyNotCommitted);
     ASSERT_TRUE(failed.error.has_value());
-    ASSERT_EQ(failed.error->code, "PRECONDITION_FAILED");
+    ASSERT_EQ(test::Present(failed.error).code, "PRECONDITION_FAILED");
 
     // Unrelated history in collection B.
     for (unsigned index = 0; index < 16; ++index) {

@@ -194,7 +194,7 @@ protected:
     }
 
     std::shared_ptr<iceberg::TableMetadata>
-    Append(const iceberg::TableMetadata& base, const std::string& root, std::shared_ptr<iceberg::DataFile> file)
+    Append(const iceberg::TableMetadata& base, const std::string& root, const std::shared_ptr<iceberg::DataFile>& file)
     {
         const iceberg::TableIdentifier ident{.ns = iceberg::Namespace{.levels = {"columnar"}}, .name = "events"};
         auto table = iceberg::Table::Make(ident,
@@ -207,7 +207,7 @@ protected:
         EXPECT_TRUE(transaction.has_value());
         auto append = (*transaction)->NewFastAppend();
         EXPECT_TRUE(append.has_value());
-        (*append)->AppendFile(std::move(file));
+        (*append)->AppendFile(file);
         EXPECT_TRUE((*append)->Commit().has_value());
         return std::make_shared<iceberg::TableMetadata>((*transaction)->current());
     }
@@ -431,7 +431,7 @@ TEST(StorageErrorClassification, IcebergErrors)
 {
     using iceberg::ErrorKind;
     const auto code = [](ErrorKind kind, std::string message, EStoragePath path) {
-        return StorageError(iceberg::Error{kind, std::move(message)}, path, "ctx", "IO_ERROR").code;
+        return StorageError(iceberg::Error{kind, std::move(message)}, "ctx", path, "IO_ERROR").code;
     };
     for (const auto kind : {ErrorKind::kInvalid,
              ErrorKind::kInvalidArgument,
