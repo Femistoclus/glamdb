@@ -10,6 +10,7 @@ import {
     wireRows,
     prepareMutation,
     supportsFeature,
+    storageNotice,
     validateQueryCapabilities,
 } from './model.js';
 
@@ -40,7 +41,8 @@ let connectionController = null,
     databaseSelectionGeneration = 0,
     toastTimer = null,
     themeStamp = '',
-    configTimer = null;
+    configTimer = null,
+    serverHealth = null;
 const labels = (name, fallback = name) => state.theme?.labels?.[name] ?? fallback;
 const collectionPath = () => `/collections/${encodeURIComponent(state.collectionId)}`;
 const viewQuery = () =>
@@ -155,7 +157,17 @@ function login() {
     <form id="connect-form"><label class="field">Server URL<input name="base" type="url" value="${e(state.base)}" required autocomplete="url"></label>
     <label class="field">Access token<input name="token" type="password" required autocomplete="off" placeholder="Your bearer token"></label>
     <button class="button primary" type="submit"><span data-label="connect_button">${e(labels('connect_button'))}</span>${icon('arrow')}</button></form>
-    <p class="login-error" id="login-error" role="alert"></p><p class="login-footnote">Local demo? Use the token from your GLAMDB_TOKEN environment.<br>Mock data is disposable. No storage durability is claimed.</p></div></section></main>`;
+    <p class="login-error" id="login-error" role="alert"></p><p class="login-footnote">Use the token from the server's GLAMDB_TOKEN environment.<br><span id="login-storage">${e(storageNotice(serverHealth))}</span></p></div></section></main>`;
+}
+async function loadHealth() {
+    try {
+        const response = await fetch('/healthz', { cache: 'no-store' });
+        if (response.ok) serverHealth = await response.json();
+    } catch {
+        // Unavailable health keeps the neutral storage notice.
+    }
+    const notice = $('#login-storage');
+    if (notice) notice.textContent = storageNotice(serverHealth);
 }
 
 async function databaseWorkspace(database = null) {
@@ -768,7 +780,7 @@ async function createForm(form) {
             );
         } catch (error) {
             if (state.api !== api) return;
-            if ([400, 401, 403, 409, 413, 415, 422, 429].includes(error.status)) {
+            if ([400, 401, 403, 409, 413, 415, 422, 429, 507].includes(error.status)) {
                 state.creation = null;
                 throw error;
             }
@@ -1197,7 +1209,10 @@ async function bootstrap() {
             state.api = new BrowserDemoAPI(await response.json());
             state.capabilities = await state.api.json('/capabilities');
             await refreshWorkspace();
-        } else login();
+        } else {
+            login();
+            loadHealth();
+        }
         configTimer = setInterval(() => loadTheme(), 2000);
     } catch (error) {
         $('#app').innerHTML =

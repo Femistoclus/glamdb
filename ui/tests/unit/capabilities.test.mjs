@@ -1,6 +1,25 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { supportsFeature, validateQueryCapabilities } from '../../assets/model.js';
+import { storageNotice, supportsFeature, validateQueryCapabilities } from '../../assets/model.js';
+
+test('login storage notice follows the serving backend health', () => {
+    const mock = { status: 'ok', backend: 'mock', mock: true, durability_validation: 'designed' };
+    const native = {
+        status: 'live',
+        backend: 'local',
+        mock: false,
+        durability_validation: 'designed',
+    };
+    assert.equal(storageNotice(mock), 'Mock data is disposable. No storage durability is claimed.');
+    assert.equal(
+        storageNotice(native),
+        'Persistent local storage. Power-loss durability is not yet qualified.',
+    );
+    const neutral = 'Storage durability depends on the server you connect to.';
+    for (const health of [null, undefined, {}, [], { ...native, durability_validation: 'other' }])
+        assert.equal(storageNotice(health), neutral);
+    assert.equal(storageNotice({ ...native, backend: 'object_store' }), neutral);
+});
 
 test('missing native metadata stays unavailable while legacy mock remains compatible', () => {
     assert.equal(supportsFeature({ backend: 'local', features: { files: false } }, 'files'), false);

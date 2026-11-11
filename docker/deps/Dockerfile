@@ -2,7 +2,7 @@ FROM glamdb-dev:clang18
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        libc++-18-dev libc++abi-18-dev make pkg-config strace zlib1g-dev \
+        libc++-18-dev libc++abi-18-dev libssl-dev make pkg-config strace zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CXXFLAGS=-stdlib=libc++

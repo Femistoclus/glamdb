@@ -66,10 +66,13 @@ class DatabaseLimits(unittest.TestCase):
         self.assertEqual(database['limits'], limits)
         base = '/databases/' + database['database_id']
         first = self.collection(base, 'one')
-        self.collection(base, 'two', 429)
+        # Exhausted catalog capacity needs operator action: 507, not a 429 retry signal.
+        rejected = self.collection(base, 'two', 507)
+        self.assertEqual(rejected['error']['code'], 'RESOURCE_EXHAUSTED')
+        self.assertEqual(rejected['error']['retry_hint'], 'OperatorAction')
         append = base + '/collections/' + first['collection_id'] + '/append'
         self.api(append, {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'one'}]})
-        self.api(append, {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'two'}]}, 429)
+        self.api(append, {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'two'}]}, 507)
         self.assertEqual(self.api('/databases', {'name': 'limited'})['limits'], limits)
         self.api('/databases', {'name': 'limited', 'limits': {'max_collections': 2}}, 409)
         self.api(base + '/open', {'limits': {'max_collections': 2}}, 429)

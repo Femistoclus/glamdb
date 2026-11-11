@@ -47,10 +47,7 @@ favicon; artwork paths and sizes remain runtime theme settings.
 
 **[Open the public demo](https://nnrpi.github.io/glamdb/)** — anyone can try it.
 
-For persistent data, start `glamdb --data-dir /absolute/data/path` with
-`GLAMDB_TOKEN` set, then create and manage databases in the workbench or API.
-No offline initialization is required. Follow the
-[native server quickstart](docs/development/HTTP_SERVER.md).
+For persistent data, [run the native server locally](#run-locally).
 Launch the disposable mock workbench (Python 3.13 and Node 22+):
 
 ```sh
@@ -68,12 +65,75 @@ See the [workbench guide](docs/development/WORKBENCH.md),
 [adapter contract](docs/development/HTTP_MOCK_CONTRACT.md), and
 [validation report](docs/development/WORKBENCH_VALIDATION.md).
 
-Build/test the native C++ core separately on Linux with its pinned dependencies:
+## Run locally
+
+The native server `glamdb` keeps databases in `--data-dir` (an absolute path with
+an existing parent) and serves the workbench from `--ui-root`. Its bearer token
+comes only from `GLAMDB_TOKEN`. Creating collections and appending need at least
+max(1 GiB, 5% of the data filesystem) plus 512 MiB free, otherwise they fail with
+HTTP 507 `RESOURCE_EXHAUSTED`.
+
+On Linux (GCC 14+ or Clang 18+, CMake 3.28+, Ninja, OpenSSL and zlib headers),
+build the pinned dependencies once (30–60 minutes), then the server and CLI:
 
 ```sh
 git submodule update --init --recursive
-cmake --preset deps-local
-cmake --build --preset deps-local --parallel 2
+cmake --preset deps-local && cmake --build --preset deps-local --parallel 2
+cmake --preset release && cmake --build --preset release --target glamdb_server glamdb_cli
+export GLAMDB_TOKEN=$(openssl rand -hex 16)
+./build/release/apps/server/glamdb --data-dir "$HOME/glamdb-data" --ui-root "$PWD/ui"
+```
+
+On macOS, build and run the same Linux binaries in Docker
+([Colima setup](docs/development/BUILDING.md#linux-tests-with-docker); give its VM
+enough disk). The server listens on all container interfaces, published to host loopback:
+
+```sh
+git submodule update --init --recursive
+./scripts/build-deps-in-docker.sh   # once: images and the dependency volume
+docker run --rm -v "$PWD:/src:ro" -v glamdb-build:/build \
+  --mount type=volume,src=glamdb-deps-clang18,dst=/prefix,readonly,volume-subpath=install \
+  -w /src glamdb-deps:clang18 sh -c 'cmake --preset release -B /build -DCMAKE_PREFIX_PATH=/prefix &&
+    cmake --build /build --parallel 2 --target glamdb_server glamdb_cli'
+export GLAMDB_TOKEN=$(openssl rand -hex 16)
+docker run --rm --name glamdb -e GLAMDB_TOKEN -p 127.0.0.1:8080:8080 \
+  -v "$PWD/ui:/ui:ro" -v glamdb-build:/build:ro -v glamdb-data:/data glamdb-deps:clang18 \
+  /build/apps/server/glamdb --data-dir /data/glamdb --listen 0.0.0.0 --ui-root /ui
+```
+
+Open **http://127.0.0.1:8080** and enter the token (`echo $GLAMDB_TOKEN`). Data
+survives restarts. From another shell with the same `GLAMDB_TOKEN` exported
+(int64 values are decimal strings):
+
+```sh
+curl -sS http://127.0.0.1:8080/healthz; echo   # public liveness, "mock":false
+api() { curl -sS -H "Authorization: Bearer $GLAMDB_TOKEN" -H 'Content-Type: application/json' "http://127.0.0.1:8080$@"; echo; }
+api /capabilities
+api /databases -d '{"name":"demo","database_id":"11111111-1111-4111-8111-111111111111"}'
+D=/databases/11111111-1111-4111-8111-111111111111
+api $D/collections -d '{"collection_id":"22222222-2222-4222-8222-222222222222","name":"events",
+  "schema":{"fields":[{"name":"key","type":"string","nullable":false},{"name":"n","type":"int64","nullable":true}]}}'
+C=$D/collections/22222222-2222-4222-8222-222222222222
+api $C/append -d '{"operation_id":"33333333-3333-4333-8333-333333333333","rows":[{"key":"a","n":"1"},{"key":"b"}]}'
+api $C/scan -d '{}'
+```
+
+`glamdb-cli request --path ROUTE [--body FILE]` calls the same routes:
+
+```sh
+./build/release/apps/cli/glamdb-cli request --path /databases
+docker exec -e GLAMDB_TOKEN glamdb /build/apps/cli/glamdb-cli request --path /databases   # macOS
+```
+
+See the [server guide](docs/development/HTTP_SERVER.md) for all routes and the
+[CLI guide](apps/cli/README.md) for HTTPS and Arrow output.
+
+## Build and test
+
+With the pinned dependencies from [Run locally](#run-locally), build and test
+the native C++ core on Linux:
+
+```sh
 cmake --preset local
 cmake --build --preset local
 ctest --preset local
@@ -87,8 +147,8 @@ without the full dependency prefix. To include the engine and storage adapters:
 ./scripts/test-storage-in-docker.sh asan-ubsan
 ```
 
-The full build installs `glamdb::core` and public headers. Storage adapters are
-enabled with `GLAMDB_BUILD_STORAGE=ON`; `GLAMDB_IO_ONLY=ON` provides a separate
+The full build installs `glamdb::core` and public headers. Storage adapters
+(`GLAMDB_BUILD_STORAGE`) are on by default; `GLAMDB_IO_ONLY=ON` provides a separate
 lightweight build. See the build guide for Docker setup.
 
 - [Project structure](docs/PROJECT_STRUCTURE.md)

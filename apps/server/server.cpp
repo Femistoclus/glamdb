@@ -44,7 +44,7 @@ public:
             action();
         } catch (const TFailure& error) {
             try {
-                Write(ErrorResponse(ErrorStatus(error.Detail.code),
+                Write(ErrorResponse(ErrorStatus(error.Detail),
                     error.Detail.code,
                     error.Detail.message,
                     error.Detail.retry_hint));

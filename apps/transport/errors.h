@@ -82,4 +82,15 @@ inline TErrorPolicy ErrorPolicy(std::string_view code)
     }
     return {500, OperatorAction};
 }
+// Core RESOURCE_EXHAUSTED covers both bounded admission (busy writer, pending
+// budget), where the same ID may later succeed, and exhausted capacity marked
+// OperatorAction (free-space reserves, store/catalog limits, allocation), where
+// no retry can. Capacity is 507 like CAPACITY_EXCEEDED, never a 429 retry signal.
+inline int ErrorStatus(const ErrorDetail& error)
+{
+    if (error.code == "RESOURCE_EXHAUSTED" && error.retry_hint == RetryHint::OperatorAction) {
+        return 507;
+    }
+    return ErrorPolicy(error.code).Status;
+}
 } // namespace glamdb::NTransport
