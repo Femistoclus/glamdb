@@ -4,6 +4,7 @@
 
 #include <iceberg/manifest/manifest_list.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -32,6 +33,18 @@ iceberg::Result<TBaseState> CheckAppendClosure(const std::shared_ptr<iceberg::Fi
     const std::vector<iceberg::ManifestFile>& previousManifests,
     const std::shared_ptr<NIO::TIOAttempt>& attempt,
     const TStorageLimits& limits);
+
+// Verifies one retained append without walking the whole history: the root
+// parses with the supported profile, `snapshotID` is retained, its transition
+// from the parent snapshot is a valid append, and its manifest list, new
+// manifest and data file are intact. Returns the root state (usage covers the
+// root only).
+iceberg::Result<TBaseState> VerifyRetainedSnapshot(const std::shared_ptr<iceberg::FileIO>& fileIO,
+    const std::string& rootLocation,
+    const std::string& storeID,
+    const std::string& collectionID,
+    std::int64_t snapshotID,
+    const TStorageLimits& limits = {});
 
 iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileIO>& fileIO,
     const std::string& rootLocation,

@@ -69,6 +69,8 @@ std::string_view Name(EIOOp op)
             return "Close";
         case EIOOp::Publish:
             return "Publish";
+        case EIOOp::Unlink:
+            return "Unlink";
     }
     throw std::invalid_argument("Unknown IO operation");
 }
@@ -271,6 +273,25 @@ TResult<THandle> TFaultFS::OpenDir(const THandle& parent, std::string_view name)
     return State_->Open(EIOOp::OpenDir, path, {}, [&] {
         return State_->Underlying.OpenDir(tracked->Inner, name);
     });
+}
+
+std::error_code TFaultFS::Unlink(const THandle& parent, std::string_view name)
+{
+    std::lock_guard lock(State_->Mutex);
+    auto tracked = State_->Get(parent);
+    if (!tracked) {
+        return State_->InvalidHandle(EIOOp::Unlink);
+    }
+    const auto path = (std::filesystem::path(tracked->Path) / name).generic_string();
+    return State_
+        ->Call<bool>(EIOOp::Unlink,
+            path,
+            {},
+            [&](auto) -> TResult<bool> {
+                auto error = State_->Underlying.Unlink(tracked->Inner, name);
+                return error ? TResult<bool>(error) : TResult<bool>(true);
+            })
+        .Error();
 }
 
 std::error_code TFaultFS::MakeDir(const THandle& parent, std::string_view name)

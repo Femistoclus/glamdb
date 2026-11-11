@@ -53,11 +53,15 @@ class _ResponseReader(io.RawIOBase):
         return self.bytes_read
 
     def readinto(self, buffer: Any) -> int:
-        value = self.read(len(buffer))
+        value = memoryview(self.read_buffer(len(buffer)))
         buffer[:len(value)] = value
         return len(value)
 
     def read(self, size: int = -1) -> bytes:
+        return bytes(self.read_buffer(size))
+
+    def read_buffer(self, size: int = -1) -> pa.Buffer:
+        """Read into one preallocated buffer; pyarrow consumes it without copying."""
         try:
             if self.closed:
                 raise ValueError("read from closed Arrow source")
@@ -65,8 +69,9 @@ class _ResponseReader(io.RawIOBase):
                 raise IntegrityError("Arrow read exceeds configured allocation bound")
             self.budget.check()
             if size == 0:
-                return b""
-            pieces = []
+                return pa.py_buffer(b"")
+            out = bytearray(size)
+            view = memoryview(out)
             total = 0
             while total < size:
                 self.budget.check()
@@ -82,21 +87,24 @@ class _ResponseReader(io.RawIOBase):
                     if not self._pending:
                         continue
                 count = min(size - total, len(self._pending))
-                pieces.append(self._pending[:count].tobytes())
+                view[total:total + count] = self._pending[:count]
                 self._pending = self._pending[count:]
                 total += count
-            value = b"".join(pieces)
+            view.release()
+            if total < size:
+                del out[total:]
             self.budget.check()
-            self._digest.update(value)
-            self.bytes_read += len(value)
-            if value:
+            self._digest.update(out)
+            self.bytes_read += total
+            if total:
+                value = bytes(out) if total == 4 else None
                 if self._first_read:
                     self._legacy_framing = size == 4 and value != _CONTINUATION
                     self._first_read = False
                 self.eos_seen = (size == 4 and value == _ZERO_LENGTH
                                  and (self._prefix or self._legacy_framing))
                 self._prefix = size == 4 and value == _CONTINUATION
-            return value
+            return pa.py_buffer(out)
         except httpx.HTTPError as exc:
             self.failure = translate_transport(exc, self.budget)
             raise self.failure from exc

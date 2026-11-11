@@ -26,6 +26,7 @@
 #include <iceberg/update/fast_append.h>
 
 #include <algorithm>
+#include <new>
 
 namespace glamdb::detail {
 namespace {
@@ -371,6 +372,29 @@ TEST_F(ScanMockTest, MissingOrMalformedManifestIsCorruption)
     const auto missing = PlanScan(IO_, Base_, SnapshotSelector::Latest());
     ASSERT_FALSE(missing);
     EXPECT_EQ(missing.error().code, "CORRUPTION");
+}
+
+// Data manifests are read on demand by Next(): an allocation failure there is
+// resource pressure, as it is while planning, never INTERNAL or CORRUPTION.
+TEST_F(ScanMockTest, AllocationFailureReadingAManifestAtNextIsResourceExhausted)
+{
+    std::vector<ErrorDetail> reported;
+    const auto cursor = Open({}, [&](const ErrorDetail& error) {
+        reported.push_back(error);
+    });
+    ASSERT_TRUE(cursor);
+    IO_->OnRead = [](const std::string& path) {
+        if (path.ends_with(".avro") && path.find("/snap-") == std::string::npos) {
+            throw std::bad_alloc();
+        }
+    };
+    const auto batch = cursor->Next();
+    IO_->OnRead = nullptr;
+    ASSERT_FALSE(batch);
+    EXPECT_EQ(batch.error().code, "RESOURCE_EXHAUSTED") << batch.error().message;
+    for (const auto& error : reported) {
+        EXPECT_NE(error.code, "CORRUPTION") << error.message;
+    }
 }
 
 // ---- Error classification table (see SCANNER.md) ----

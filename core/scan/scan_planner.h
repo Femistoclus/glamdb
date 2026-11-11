@@ -2,6 +2,8 @@
 
 #include "storage/scan.h"
 
+#include <iceberg/manifest/manifest_list.h>
+
 #include <memory>
 #include <optional>
 #include <string>
@@ -9,6 +11,8 @@
 
 namespace iceberg {
 class FileIO;
+class PartitionSpec;
+class Schema;
 } // namespace iceberg
 
 namespace glamdb::detail {
@@ -27,9 +31,27 @@ struct TScanPlan
     std::vector<TScanFile> Files;
 };
 
-// Resolves the selector once against the committed root of `base` and lists the
-// live data files of that snapshot from its manifests. Warehouse directories
-// are never listed, so orphan and unpublished files are not visible.
+// The selected snapshot's manifests; their data files are listed on demand.
+struct TScanManifests
+{
+    // nullopt is the initial empty view.
+    std::optional<int64_t> SnapshotID;
+    std::shared_ptr<iceberg::Schema> Schema;
+    std::vector<std::shared_ptr<iceberg::PartitionSpec>> Specs;
+    std::vector<iceberg::ManifestFile> Manifests;
+};
+
+// Resolves the selector once against the committed root of `base` and reads
+// that snapshot's manifest list. Warehouse directories are never listed, so
+// orphan and unpublished files are not visible.
+Result<TScanManifests>
+PlanManifests(const std::shared_ptr<iceberg::FileIO>& io, const BaseIdentity& base, const SnapshotSelector& selector);
+
+// The live data files of one planned manifest.
+Result<std::vector<TScanFile>>
+ManifestFiles(const std::shared_ptr<iceberg::FileIO>& io, const TScanManifests& plan, size_t index);
+
+// PlanManifests followed by every manifest's files.
 Result<TScanPlan>
 PlanScan(const std::shared_ptr<iceberg::FileIO>& io, const BaseIdentity& base, const SnapshotSelector& selector);
 

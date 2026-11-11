@@ -197,26 +197,35 @@ def encode_rows(schema: Schema, rows: Iterable[Mapping[str, Any]]) -> list[dict[
 
 
 def decode_rows(schema: Schema, rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    raw_rows = list(rows)
-    for row in raw_rows:
-        if not isinstance(row, Mapping):
-            raise ValidationError("wire row must be an object")
+    """Validate and decode wire rows in one pass: each value is parsed once."""
+    names = {f.name for f in schema.fields}
+    result = []
+    for row in rows:
+        if not isinstance(row, Mapping) or set(row) - names:
+            raise ValidationError("wire row must be an object with only schema fields")
+        decoded: dict[str, Any] = {}
+        sized: dict[str, Any] = {}
         for field in schema.fields:
             value = row.get(field.name)
             if value is None:
-                continue
-            if field.type == "int64" and not isinstance(value, str):
-                raise ValidationError("wire int64 must be a decimal string")
-            if field.type == "timestamp_us_utc" and (not isinstance(value, str) or value != format_timestamp(value)):
-                raise ValidationError("wire timestamp must be six-digit UTC RFC3339 text")
-    encoded = encode_rows(schema, raw_rows)
-    for row in encoded:
-        for field in schema.fields:
-            value = row[field.name]
-            if value is None:
-                continue
-            if field.type == "int64":
-                row[field.name] = int(value)
+                # Missing and NULL alike: encode_scalar enforces nullability.
+                decoded[field.name] = sized[field.name] = encode_scalar(field, None)
+            elif field.type == "int64":
+                if not isinstance(value, str):
+                    raise ValidationError("wire int64 must be a decimal string")
+                decoded[field.name] = int64(value)
+                sized[field.name] = 0
             elif field.type == "timestamp_us_utc":
-                row[field.name] = _EPOCH + timedelta(microseconds=timestamp_us(value))
-    return encoded
+                if not isinstance(value, str):
+                    raise ValidationError("wire timestamp must be six-digit UTC RFC3339 text")
+                micros = timestamp_us(value)
+                if format_timestamp(micros) != value:
+                    raise ValidationError("wire timestamp must be six-digit UTC RFC3339 text")
+                decoded[field.name] = _EPOCH + timedelta(microseconds=micros)
+                sized[field.name] = 0
+            else:
+                decoded[field.name] = sized[field.name] = encode_scalar(field, value)
+        if _canonical_row_size(schema, sized) > 2 * 1024 * 1024:
+            raise ValidationError("row exceeds 2 MiB canonical decoded bytes")
+        result.append(decoded)
+    return result

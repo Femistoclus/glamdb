@@ -21,6 +21,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <deque>
+#include <iterator>
 #include <mutex>
 #include <new>
 #include <numeric>
@@ -209,7 +211,7 @@ public:
     TScanCursor(TScanContext context,
         std::shared_ptr<iceberg::Schema> fileSchema,
         std::shared_ptr<arrow::Schema> outputSchema,
-        TScanPlan plan,
+        TScanManifests plan,
         TBoundPredicate predicate,
         std::vector<size_t> outputFields,
         std::vector<size_t> readFields,
@@ -273,7 +275,8 @@ private:
     const std::shared_ptr<iceberg::Schema> FileSchema_;
     const std::shared_ptr<arrow::Schema> OutputSchema_;
     const ScanInfo Info_;
-    const TScanPlan Plan_;
+    // Manifests are read on demand, so a limited scan opens only what it needs.
+    const TScanManifests Plan_;
     const TBoundPredicate Predicate_;
     // Schema field indices in output order, and every field read from files.
     const std::vector<size_t> OutputFields_;
@@ -283,7 +286,8 @@ private:
     std::mutex Mutex_;
     std::atomic<bool> Cancelled_{false};
     std::optional<ErrorDetail> Failed_;
-    size_t NextFile_ = 0;
+    size_t NextManifest_ = 0;
+    std::deque<TScanFile> PendingFiles_;
     // A RecordBatchReader must not outlive its FileReader; members are
     // destroyed in reverse order.
     std::unique_ptr<parquet::arrow::FileReader> FileReader_;
@@ -312,10 +316,19 @@ private:
         while (!Remaining_ || *Remaining_ > 0) {
             CheckActive();
             if (!BatchReader_) {
-                if (NextFile_ >= Plan_.Files.size()) {
+                while (PendingFiles_.empty() && NextManifest_ < Plan_.Manifests.size()) {
+                    CheckActive();
+                    auto files = Take(ManifestFiles(Context_.FileIO, Plan_, NextManifest_++));
+                    PendingFiles_.insert(PendingFiles_.end(),
+                        std::make_move_iterator(files.begin()),
+                        std::make_move_iterator(files.end()));
+                }
+                if (PendingFiles_.empty()) {
                     break;
                 }
-                OpenFile(Plan_.Files[NextFile_++]);
+                const auto file = std::move(PendingFiles_.front());
+                PendingFiles_.pop_front();
+                OpenFile(file);
             }
             std::shared_ptr<arrow::RecordBatch> batch;
             DecodeParquet("read Parquet batch", [&] {
@@ -463,7 +476,7 @@ Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanReq
                 BoundedDiagnostic("collection schema profile: " + profile.error().message),
                 RetryHint::OperatorAction});
         }
-        auto plan = Take(PlanScan(context.FileIO, context.Base, request.selector));
+        auto plan = Take(PlanManifests(context.FileIO, context.Base, request.selector));
         return std::make_shared<TScanCursor>(std::move(context),
             std::move(profile->Schema),
             arrow::schema(std::move(fields)),

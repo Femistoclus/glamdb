@@ -20,7 +20,8 @@ enum class EIOOp : std::uint8_t {
     SyncFile,
     SyncDir,
     Close,
-    Publish
+    Publish,
+    Unlink
 };
 
 struct TIOEvent
@@ -70,6 +71,7 @@ public:
     std::error_code SyncFile(const NIO::THandle& file) override;
     std::error_code SyncDir(const NIO::THandle& directory) override;
     std::error_code Close(const NIO::THandle& handle) override;
+    std::error_code Unlink(const NIO::THandle& parent, std::string_view name) override;
 
 private:
     struct TState;

@@ -201,6 +201,17 @@ std::error_code TPosixLocalFS::MakeDir(const THandle& parent, std::string_view n
     });
 }
 
+std::error_code TPosixLocalFS::Unlink(const THandle& parent, std::string_view name)
+{
+    if (!ValidLeaf(name)) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+    const std::string leaf(name);
+    return WithHandle(parent, true, [&](int fd) {
+        return ::unlinkat(fd, leaf.c_str(), 0) == 0 ? std::error_code{} : LastError();
+    });
+}
+
 TResult<THandle> TPosixLocalFS::CreateExclusive(const THandle& parent, std::string_view name, const TIOTag&)
 {
     if (!ValidLeaf(name)) {
@@ -300,17 +311,24 @@ TResult<TSpaceInfo> TPosixLocalFS::StatFs(const THandle& directory)
 
 TResult<std::uint64_t> TPosixLocalFS::MeasureTree(const THandle& directory, std::uint64_t limit)
 {
-    return WithHandle(directory, true, [&](int fd) -> TResult<std::uint64_t> {
-        const auto scan = ::openat(fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-        if (scan < 0) {
+    // Only duplicate the directory under the handle lock: the walk itself runs
+    // on the private descriptor, so concurrent opens through the same handle
+    // (scan readers) do not wait for a whole-tree traversal.
+    const auto scan = WithHandle(directory, true, [](int fd) -> TResult<int> {
+        const auto duplicate = ::openat(fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (duplicate < 0) {
             return LastError();
         }
-        std::uint64_t total = 0;
-        if (const auto error = MeasureDirectory(scan, nullptr, 0, total, limit)) {
-            return error;
-        }
-        return total;
+        return duplicate;
     });
+    if (!scan) {
+        return scan.Error();
+    }
+    std::uint64_t total = 0;
+    if (const auto error = MeasureDirectory(scan.Value(), nullptr, 0, total, limit)) {
+        return error;
+    }
+    return total;
 }
 
 std::error_code TPosixLocalFS::SyncFile(const THandle& file)
@@ -358,6 +376,11 @@ std::string_view TPosixLocalFS::Profile() noexcept
 TResult<std::uint64_t> ILocalFS::MeasureTree(const THandle&, std::uint64_t)
 {
     return std::errc::not_supported;
+}
+
+std::error_code ILocalFS::Unlink(const THandle&, std::string_view)
+{
+    return std::make_error_code(std::errc::not_supported);
 }
 
 }

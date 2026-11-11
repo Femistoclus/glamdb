@@ -64,6 +64,11 @@ public:
     { }
     virtual void InvalidateCache()
     { }
+    // A committed append superseded this base's root, and no reader can still be
+    // resolving it. Recovery and scans read only the current root, so the
+    // backend may remove the file; failure leaves an ordinary orphan.
+    virtual void RetireRoot(const BaseIdentity&)
+    { }
     // Independent, bidirectional validation: each committed receipt matches
     // exactly one retained snapshot/tag, every tag has that committed receipt,
     // Bound/Failed have none; validate UUID/schema/ancestry and reachable
@@ -72,6 +77,18 @@ public:
     virtual Status VerifyRetained(const StoreInfo& store,
         std::span<const CollectionView> collections,
         std::span<const OperationRecord> operations) = 0;
+    // An idempotent retry of a committed append: verify that this receipt is
+    // still backed by retained storage (its collection's committed root, the
+    // receipt's snapshot and that snapshot's files) without re-verifying
+    // unrelated history. `operations` are the collection's operation records.
+    // The default verifies the collection's whole retained state.
+    virtual Status VerifyCommittedAppend(const StoreInfo& store,
+        const CollectionView& collection,
+        std::span<const OperationRecord> operations,
+        const AppendResult&)
+    {
+        return VerifyRetained(store, std::span(&collection, 1), operations);
+    }
     // Independent read-only view for scans; it never joins a writer attempt.
     virtual Result<std::shared_ptr<iceberg::FileIO>> ReadOnlyFileIO()
     {

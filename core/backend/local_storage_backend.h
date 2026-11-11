@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -63,9 +64,14 @@ public:
         std::chrono::steady_clock::time_point deadline) override;
     void ConfirmPublication(std::string_view collectionID, std::string_view metadataLocation) override;
     void InvalidateCache() override;
+    void RetireRoot(const BaseIdentity& superseded) override;
     Status VerifyRetained(const StoreInfo& store,
         std::span<const CollectionView> collections,
         std::span<const OperationRecord> operations) override;
+    Status VerifyCommittedAppend(const StoreInfo& store,
+        const CollectionView& collection,
+        std::span<const OperationRecord> operations,
+        const AppendResult& receipt) override;
     Result<std::shared_ptr<iceberg::FileIO>> ReadOnlyFileIO() override;
 
     // A verified candidate is tentative until the outer COMMIT is confirmed or
@@ -89,6 +95,10 @@ private:
     std::mutex Mutex_;
     std::map<std::string, TCollectionState, std::less<>> Collections_;
     bool VerifiedGeneration_ = false;
+    // Warehouse bytes measured by the admission preflight of the append that
+    // is about to be prepared. Binding writes only the catalog, so
+    // PrepareAppend reuses them instead of walking the warehouse again.
+    std::optional<std::uint64_t> AdmittedWarehouseBytes_;
 
     TLocalStorageBackend(StoreInfo store,
         TLocalStorageOptions options,
@@ -96,6 +106,10 @@ private:
         std::shared_ptr<NGlamDB::NStorage::TDurableLocalFileIO> fileIO);
 
     void CheckStore(const StoreInfo& store) const;
+    // Root identity, warehouse limit and free-space reserve before a write.
+    // `remember` keeps the measured warehouse bytes for the same append's
+    // PrepareAppend; `reuse` consumes them instead of walking again.
+    std::error_code CheckWriteCapacity(bool remember, bool reuse);
     // The caller holds Mutex_. Usage and cached bases are authoritative only
     // after VerifyRetained; InvalidateCache revokes them.
     void RequireVerified() const;

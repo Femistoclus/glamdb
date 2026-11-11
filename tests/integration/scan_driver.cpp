@@ -173,11 +173,24 @@ public:
     {
         Inner_->InvalidateCache();
     }
+
+    void RetireRoot(const BaseIdentity& superseded) override
+    {
+        Inner_->RetireRoot(superseded);
+    }
     Status VerifyRetained(const StoreInfo& store,
         std::span<const detail::CollectionView> collections,
         std::span<const detail::OperationRecord> operations) override
     {
         return Inner_->VerifyRetained(store, collections, operations);
+    }
+
+    Status VerifyCommittedAppend(const StoreInfo& store,
+        const detail::CollectionView& collection,
+        std::span<const detail::OperationRecord> operations,
+        const AppendResult& receipt) override
+    {
+        return Inner_->VerifyCommittedAppend(store, collection, operations, receipt);
     }
     Result<std::shared_ptr<iceberg::FileIO>> ReadOnlyFileIO() override
     {

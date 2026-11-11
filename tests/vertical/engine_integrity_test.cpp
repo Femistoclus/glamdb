@@ -262,9 +262,11 @@ TEST_F(EngineIntegrityTest, FifoReplacingManifestIsCorruption)
     std::filesystem::remove(manifests.front());
     ASSERT_EQ(::mkfifo(manifests.front().c_str(), 0600), 0);
 
+    // Manifests are read on demand: the failure surfaces at open or first Next().
     const auto scan = Engine_->Scan({.collection_id = test::collection_id});
-    ASSERT_FALSE(scan);
-    EXPECT_EQ(scan.error().code, "CORRUPTION");
+    const auto failure = scan ? (*scan)->Next() : std::unexpected(scan.error());
+    ASSERT_FALSE(failure);
+    EXPECT_EQ(failure.error().code, "CORRUPTION");
     EXPECT_EQ(Engine_->ListCollections().error().code, "RECOVERY_REQUIRED");
 
     std::filesystem::remove(manifests.front());

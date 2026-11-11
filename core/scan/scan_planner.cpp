@@ -110,7 +110,7 @@ void CheckRoot(const iceberg::TableMetadata& metadata, const BaseIdentity& base)
         "only the initial unpartitioned Iceberg v2 schema is supported");
 }
 
-void AppendFiles(const iceberg::TableMetadata& metadata,
+void AppendFiles(const TScanManifests& plan,
     const std::shared_ptr<iceberg::FileIO>& io,
     const iceberg::ManifestFile& manifest,
     std::vector<TScanFile>& files)
@@ -118,14 +118,16 @@ void AppendFiles(const iceberg::TableMetadata& metadata,
     if (manifest.content != iceberg::ManifestContent::kData) {
         Unsupported("delete manifests are not supported");
     }
-    auto schema = Take(metadata.Schema(), "CORRUPTION", "table schema");
-    auto spec = Take(metadata.PartitionSpecById(manifest.partition_spec_id), "CORRUPTION", "partition spec");
-    if (!spec->IsUnpartitioned()) {
+    const auto spec = std::ranges::find_if(plan.Specs, [&](const auto& item) {
+        return item && item->spec_id() == manifest.partition_spec_id;
+    });
+    Require(spec != plan.Specs.end(), "CORRUPTION", "partition spec");
+    if (!(*spec)->IsUnpartitioned()) {
         Unsupported("partitioned manifests are not supported");
     }
     const auto bytes = ReadPersisted(io, manifest.manifest_path, manifest.manifest_length, "read manifest");
     auto reader = DecodePersisted("open manifest", [&] {
-        return Take(iceberg::ManifestReader::Make(manifest, bytes, schema, spec), "IO_ERROR", "open manifest");
+        return Take(iceberg::ManifestReader::Make(manifest, bytes, plan.Schema, *spec), "IO_ERROR", "open manifest");
     });
     const auto entries = DecodePersisted("read manifest", [&] {
         return Take(reader->LiveEntries(), "IO_ERROR", "read manifest");
@@ -147,8 +149,8 @@ void AppendFiles(const iceberg::TableMetadata& metadata,
 
 } // namespace
 
-Result<TScanPlan>
-PlanScan(const std::shared_ptr<iceberg::FileIO>& io, const BaseIdentity& base, const SnapshotSelector& selector)
+Result<TScanManifests>
+PlanManifests(const std::shared_ptr<iceberg::FileIO>& io, const BaseIdentity& base, const SnapshotSelector& selector)
 {
     try {
         Require(io != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
@@ -159,24 +161,23 @@ PlanScan(const std::shared_ptr<iceberg::FileIO>& io, const BaseIdentity& base, c
                 "IO_ERROR",
                 "read committed root");
         CheckRoot(*metadata, base);
-        TScanPlan plan;
+        TScanManifests plan;
         const auto snapshot = SelectSnapshot(*metadata, selector);
         if (!snapshot) {
             return plan;
         }
         plan.SnapshotID = snapshot->snapshot_id;
+        plan.Schema = Take(metadata->Schema(), "CORRUPTION", "table schema");
+        plan.Specs = metadata->partition_specs;
         const auto listBytes = ReadPersisted(io, snapshot->manifest_list, std::nullopt, "read manifest list");
         const auto list = DecodePersisted("open manifest list", [&] {
             return Take(iceberg::ManifestListReader::Make(snapshot->manifest_list, listBytes),
                 "IO_ERROR",
                 "open manifest list");
         });
-        const auto manifests = DecodePersisted("read manifest list", [&] {
+        plan.Manifests = DecodePersisted("read manifest list", [&] {
             return Take(list->Files(), "IO_ERROR", "read manifest list");
         });
-        for (const auto& manifest : manifests) {
-            AppendFiles(*metadata, io, manifest, plan.Files);
-        }
         return plan;
     } catch (const Failure& error) {
         return std::unexpected(error.detail);
@@ -186,6 +187,43 @@ PlanScan(const std::shared_ptr<iceberg::FileIO>& io, const BaseIdentity& base, c
     } catch (const std::exception& error) {
         return std::unexpected(ErrorDetail{"INTERNAL", BoundedDiagnostic(error.what()), RetryHint::OperatorAction});
     }
+}
+
+Result<std::vector<TScanFile>>
+ManifestFiles(const std::shared_ptr<iceberg::FileIO>& io, const TScanManifests& plan, size_t index)
+{
+    try {
+        Require(io != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
+        Require(index < plan.Manifests.size(), "INTERNAL", "manifest index is out of range");
+        std::vector<TScanFile> files;
+        AppendFiles(plan, io, plan.Manifests[index], files);
+        return files;
+    } catch (const Failure& error) {
+        return std::unexpected(error.detail);
+    } catch (const std::bad_alloc& error) {
+        return std::unexpected(
+            ErrorDetail{"RESOURCE_EXHAUSTED", BoundedDiagnostic(error.what()), RetryHint::OperatorAction});
+    } catch (const std::exception& error) {
+        return std::unexpected(ErrorDetail{"INTERNAL", BoundedDiagnostic(error.what()), RetryHint::OperatorAction});
+    }
+}
+
+Result<TScanPlan>
+PlanScan(const std::shared_ptr<iceberg::FileIO>& io, const BaseIdentity& base, const SnapshotSelector& selector)
+{
+    auto manifests = PlanManifests(io, base, selector);
+    if (!manifests) {
+        return std::unexpected(manifests.error());
+    }
+    TScanPlan plan{manifests->SnapshotID, {}};
+    for (size_t index = 0; index < manifests->Manifests.size(); ++index) {
+        auto files = ManifestFiles(io, *manifests, index);
+        if (!files) {
+            return std::unexpected(files.error());
+        }
+        plan.Files.insert(plan.Files.end(), files->begin(), files->end());
+    }
+    return plan;
 }
 
 } // namespace glamdb::detail

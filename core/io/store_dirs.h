@@ -5,6 +5,8 @@
 
 namespace NGlamDB::NIO {
 
+class TStoreUri;
+
 struct TCollectionDirs
 {
     THandle Collection;
@@ -22,6 +24,8 @@ public:
 
     TResult<TCollectionDirs> CreateCollection(std::string_view collectionId);
     TResult<TCollectionDirs> OpenCollection(std::string_view collectionId) const;
+    // Removes the metadata file named by a logical location of this store.
+    std::error_code RemoveMetadataFile(const TStoreUri& location) const;
     std::error_code CheckIdentity() const;
 
     const std::shared_ptr<ILocalFS>& Fs() const noexcept;

@@ -42,10 +42,22 @@ ready backend remain for coordinator tests.
   collection root (manifest lists, manifests, data file lengths and Parquet
   footers), its schema, a one-to-one mapping between retained snapshots and
   committed receipts, and the aggregate multi-collection store usage against
-  `TStorageLimits::Store`. It runs on open, `Reconcile()` and every idempotent
-  retry of a committed create or append, so a retry never returns a committed
-  outcome over missing or corrupt files. Missing or inconsistent committed
-  state is `CORRUPTION`, which closes readiness.
+  `TStorageLimits::Store`. It runs on open, `Reconcile()` and every identical
+  create retry. An idempotent retry of a committed append runs
+  `VerifyCommittedAppend` instead: the collection's committed root, the
+  receipt's snapshot (its transition from the parent, manifest list, new
+  manifest and Parquet footer) and the receipt fields, so the retry never
+  returns a committed outcome over missing or corrupt files of that append
+  without re-reading unrelated history. A retry of a failed outcome reads no
+  storage. Missing or inconsistent committed state is `CORRUPTION`, which
+  closes readiness.
+- After a committed append the backend removes the superseded root
+  (`RetireRoot`). The engine defers it while a scan that resolved that root is
+  still planning; a root that cannot be removed remains an orphan. Removal
+  runs only on the writer (after the next committed append, or at shutdown):
+  capacity preflight walks the warehouse on the writer, and a root unlinked
+  mid-walk would fail that walk as corruption. A finishing scan only ends its
+  lease.
 - Corruption reports and publication are ordered by the engine's commit gate.
   The writer takes it immediately before the guard's final health decision and
   holds it through the outer `COMMIT`; a reader that detects corruption takes
@@ -108,8 +120,12 @@ joins a writer attempt or holds a SQLite read transaction.
 
 - `SnapshotSelector`: `Latest` (resolved at open), `Id`, `InitialEmpty`.
   `ScanInfo.selector_resolved` reports `Id(snapshot)` or `InitialEmpty`.
-- Planning reads the committed root, the selected manifest list and live
-  manifest entries. Warehouse directories are never listed. Delete manifests,
+- Opening a scan reads the committed root and the selected manifest list; the
+  cursor reads each manifest's live entries only when it needs the next data
+  file, so `limit = 0` reads no manifest and a small limit reads only the
+  manifests it consumes. A malformed manifest therefore surfaces from
+  `Next()` (still `CORRUPTION`, closing readiness). Warehouse directories are
+  never listed. Delete manifests,
   partitioned specs and non-Parquet files are `UNSUPPORTED_TABLE_FEATURE`.
 - `Predicate` supports `True` and one comparison (`Eq`, `Ne`, `Lt`, `Le`, `Gt`,
   `Ge`) of a field with a literal of exactly the field type. A NULL cell is
@@ -132,7 +148,8 @@ joins a writer attempt or holds a SQLite read transaction.
   closes engine readiness. Read failures are errors, never EOS.
 
 Not implemented: file/row-group pruning, compound predicates (`And`, `Or`,
-`Not`, `In`, `IsNull`), streaming planning, runtime memory leases and quotas,
+`Not`, `In`, `IsNull`), reuse of the backend's parsed root by scans,
+runtime memory leases and quotas,
 page CRC verification, per-device physical/inode budgets and in-flight
 reservations, and measured attempt-volume/capacity qualification.
 

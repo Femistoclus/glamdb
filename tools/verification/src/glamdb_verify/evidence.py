@@ -147,10 +147,17 @@ class AckLedger:
                 os.fsync(stream.fileno())
         # A visible ledger may come from creation interrupted before parent sync.
         _sync_directory(self.path.parent)
-        self.receipts = self._read()
+        self._load(self.path.read_bytes())
+
+    def _load(self, content: bytes):
+        self.receipts = self._parse(content)
+        self._identities = {_identity(item) for item in self.receipts}
+        self._verified = content
 
     def _read(self):
-        content = self.path.read_bytes()
+        return self._parse(self.path.read_bytes())
+
+    def _parse(self, content: bytes):
         if not content.endswith(b"\n"):
             raise ValueError("truncated ACK ledger")
         try:
@@ -175,17 +182,23 @@ class AckLedger:
 
     def record(self, receipt: dict):
         receipt = validate_receipt(receipt)
-        self.receipts = self._read()
-        if _identity(receipt) in {_identity(item) for item in self.receipts}:
+        content = self.path.read_bytes()
+        if content != self._verified:
+            # Another writer, truncation or tampering: re-validate the whole ledger.
+            self._load(content)
+        if _identity(receipt) in self._identities:
             raise ValueError("duplicate ACK operation")
         record = {"sequence": len(self.receipts) + 1, "receipt": receipt, "receipt_sha256": hashlib.sha256(canonical_receipt(receipt)).hexdigest()}
         flags = os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(self.path, flags)
         with os.fdopen(descriptor, "ab") as stream:
-            stream.write(_encode_record(record))
+            encoded = _encode_record(record)
+            stream.write(encoded)
             stream.flush()
             os.fsync(stream.fileno())
         self.receipts.append(receipt)
+        self._identities.add(_identity(receipt))
+        self._verified += encoded
 
 
 class DisposableRun:

@@ -167,6 +167,18 @@ TResult<TCollectionDirs> TStoreDirs::OpenCollection(std::string_view collectionI
     return Collection(collectionId, false);
 }
 
+std::error_code TStoreDirs::RemoveMetadataFile(const TStoreUri& location) const
+{
+    if (location.Kind() != EFileKind::Metadata) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+    const auto directories = Collection(location.CollectionId(), false);
+    if (!directories) {
+        return directories.Error();
+    }
+    return Fs_->Unlink(directories.Value().Metadata, location.Leaf());
+}
+
 std::error_code TStoreDirs::CheckIdentity() const
 {
     // Evidence that the path no longer names this store blocks writes until

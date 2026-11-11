@@ -57,6 +57,8 @@ struct ILocalFS
     virtual TResult<TFileStat> Stat(const THandle& handle) = 0;
     virtual TResult<TSpaceInfo> StatFs(const THandle& directory) = 0;
     virtual TResult<std::uint64_t> MeasureTree(const THandle&, std::uint64_t);
+    // Removes one regular-file entry; used only for superseded metadata roots.
+    virtual std::error_code Unlink(const THandle& parent, std::string_view name);
     virtual std::error_code SyncFile(const THandle& file) = 0;
     virtual std::error_code SyncDir(const THandle& directory) = 0;
     virtual std::error_code Close(const THandle& handle) = 0;
@@ -75,6 +77,7 @@ public:
     TResult<TFileStat> Stat(const THandle& handle) override;
     TResult<TSpaceInfo> StatFs(const THandle& directory) override;
     TResult<std::uint64_t> MeasureTree(const THandle& directory, std::uint64_t limit) override;
+    std::error_code Unlink(const THandle& parent, std::string_view name) override;
     std::error_code SyncFile(const THandle& file) override;
     std::error_code SyncDir(const THandle& directory) override;
     std::error_code Close(const THandle& handle) override;

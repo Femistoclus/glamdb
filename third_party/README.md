@@ -79,7 +79,20 @@ file I/O, writer and scanner work. See the
   buffer ownership requirements.
 
 If an interface needs a patch, keep it narrow, pin the affected revision, and
-repeat the relevant experiment. Preserve the required semantics rather than
+repeat the relevant experiment. Patches live in
+`cmake/dependencies/patches/<dependency>/` with the pinned revision and the
+reason in their header; `cmake/dependencies/PrepareSource.cmake` copies the
+submodule into the build tree and applies them, so the submodule stays clean.
+The CI dependency cache key covers these files. Current patches:
+`iceberg-cpp/0001-build-json-lists-and-maps-linearly.patch` (table metadata
+JSON serialization was quadratic in retained snapshots). The same change is
+upstream as
+[`36e0d1a`](https://github.com/apache/iceberg-cpp/commit/36e0d1a791f8868bb827986ae48199cced0be52f)
+([apache/iceberg-cpp#1111](https://github.com/apache/iceberg-cpp/pull/1111)),
+which is after v0.4.0 and not yet released. Delete the patch in the change
+that moves the pin to a revision containing that commit: the patch no longer
+applies there, so the dependency build fails until it is removed.
+Preserve the required semantics rather than
 silently changing catalog type or weakening the commit boundary. Record the
 SQLite source/build/VFS and complete toolchain with integration results; the
 direct dependency lock alone is not that evidence.

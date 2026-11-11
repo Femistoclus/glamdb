@@ -3,15 +3,19 @@
 #include "core/api/binary.h"
 
 #include <arrow/api.h>
+
 #include <cmath>
+#include <memory>
 #include <unordered_map>
+#include <vector>
 
 namespace glamdb::detail {
 namespace {
 
-std::vector<int> MapFields(const SchemaSpec& schema, const arrow::RecordBatch& batch)
+// `validated`: Inspect already ran ValidateFull on this batch in the same call.
+std::vector<int> MapFields(const SchemaSpec& schema, const arrow::RecordBatch& batch, bool validated = false)
 {
-    Require(batch.num_columns() <= static_cast<int>(schema.fields.size()) && batch.ValidateFull().ok(),
+    Require(batch.num_columns() <= static_cast<int>(schema.fields.size()) && (validated || batch.ValidateFull().ok()),
         "INVALID_ARGUMENT",
         "invalid Arrow batch");
     std::unordered_map<std::string, int> names;
@@ -67,6 +71,18 @@ struct Shape
     size_t decoded_bytes = 0;
 };
 
+// Boxes each mapped column once per batch: RecordBatch::column() locks and
+// copies a shared_ptr on every call, which per-cell loops must not repeat.
+std::vector<std::shared_ptr<arrow::Array>> Arrays(const arrow::RecordBatch& batch, const std::vector<int>& columns)
+{
+    std::vector<std::shared_ptr<arrow::Array>> arrays;
+    arrays.reserve(columns.size());
+    for (const int column : columns) {
+        arrays.push_back(column < 0 ? nullptr : batch.column(column));
+    }
+    return arrays;
+}
+
 Shape Inspect(const SchemaSpec& schema, const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches)
 {
     const auto fingerprint = SchemaFingerprint(schema);
@@ -81,17 +97,17 @@ Shape Inspect(const SchemaSpec& schema, const std::vector<std::shared_ptr<arrow:
             "INVALID_ARGUMENT",
             "append requires at most 10000 rows");
         shape.rows += static_cast<size_t>(batch->num_rows());
-        const auto columns = MapFields(schema, *batch);
+        const auto arrays = Arrays(*batch, MapFields(schema, *batch));
         for (int64_t row = 0; row < batch->num_rows(); ++row) {
             size_t bytes = schema.fields.size();
-            for (size_t field = 0; field < columns.size(); ++field) {
-                const int column = columns[field];
-                if (column < 0 || batch->column(column)->IsNull(row)) {
+            for (size_t field = 0; field < arrays.size(); ++field) {
+                const auto* array = arrays[field].get();
+                if (array == nullptr || array->IsNull(row)) {
                     Require(schema.fields[field].nullable, "INVALID_ARGUMENT", "NULL in required Arrow field");
                     continue;
                 }
                 if (schema.fields[field].type == FieldType::String) {
-                    const auto& strings = static_cast<const arrow::StringArray&>(*batch->column(column));
+                    const auto& strings = static_cast<const arrow::StringArray&>(*array);
                     const auto length = strings.value_length(row);
                     Require(length <= (schema.fields[field].name == "key" ? 1024 : 1024 * 1024),
                         "INVALID_ARGUMENT",
@@ -169,16 +185,15 @@ Result<std::string> FingerprintBatches(const SchemaSpec& schema,
             hash.Update(encoded.bytes);
         };
         for (const auto& batch : batches) {
-            const auto columns = MapFields(schema, *batch);
+            const auto arrays = Arrays(*batch, MapFields(schema, *batch, true));
             for (int64_t row = 0; row < batch->num_rows(); ++row) {
-                for (size_t field = 0; field < columns.size(); ++field) {
-                    const int column = columns[field];
-                    if (column < 0 || batch->column(column)->IsNull(row)) {
+                for (size_t field = 0; field < arrays.size(); ++field) {
+                    if (arrays[field] == nullptr || arrays[field]->IsNull(row)) {
                         number(uint8_t{0});
                         continue;
                     }
                     number(uint8_t{1});
-                    const auto& array = *batch->column(column);
+                    const auto& array = *arrays[field];
                     switch (schema.fields[field].type) {
                         case FieldType::String: {
                             const auto value = static_cast<const arrow::StringArray&>(array).GetView(row);
@@ -232,14 +247,13 @@ Result<NormalizedInput> NormalizeBatches(const SchemaSpec& schema,
         std::vector<Row> rows;
         rows.reserve(shape.rows);
         for (const auto& batch : batches) {
-            const auto columns = MapFields(schema, *batch);
+            const auto arrays = Arrays(*batch, MapFields(schema, *batch, true));
             for (int64_t index = 0; index < batch->num_rows(); ++index) {
                 Row row;
                 row.reserve(schema.fields.size());
-                for (size_t field = 0; field < columns.size(); ++field) {
-                    row.push_back(columns[field] < 0
-                            ? Cell(std::monostate{})
-                            : Read(*batch->column(columns[field]), index, schema.fields[field].type));
+                for (size_t field = 0; field < arrays.size(); ++field) {
+                    row.push_back(arrays[field] == nullptr ? Cell(std::monostate{})
+                                                           : Read(*arrays[field], index, schema.fields[field].type));
                 }
                 rows.push_back(std::move(row));
             }

@@ -121,9 +121,11 @@ TEST_F(ScanReadErrorClassificationTest, TransientManifestReadFailureIsNotCorrupt
     // "snap-<id>-<attempt>-<uuid>.avro" and never end with "-m<digit>.avro".
     Faults_->AddRule({EIOOp::PRead, "*-m[0-9].avro", 1, 1, std::make_error_code(std::errc::io_error), std::nullopt});
 
+    // Manifests are read on demand: the failure surfaces at open or first Next().
     const auto scan = Engine_->Scan({.collection_id = test::collection_id});
-    ASSERT_FALSE(scan);
-    EXPECT_NE(scan.error().code, "CORRUPTION") << scan.error().message;
+    const auto failure = scan ? (*scan)->Next() : std::unexpected(scan.error());
+    ASSERT_FALSE(failure);
+    EXPECT_NE(failure.error().code, "CORRUPTION") << failure.error().message;
     const auto listed = Engine_->ListCollections();
     EXPECT_TRUE(listed) << (listed ? std::string() : listed.error().code);
     if (!listed) {

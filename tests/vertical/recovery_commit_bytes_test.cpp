@@ -79,6 +79,8 @@ TEST(BackendRecoveryLimitsTest, ReopenAcceptsHistoryPublishedUnderTheSameCommitB
 {
     test::TempDir temporary;
     const auto root = temporary.path / "store";
+    const auto metadata = root / "warehouse" / test::collection_id / "metadata";
+    std::uint64_t rootA = 0;
     {
         auto created = detail::EngineFactory::CreateWith({test::store_id, root.string()}, LimitedFactory({}));
         ASSERT_TRUE(created) << created.error().message;
@@ -87,23 +89,23 @@ TEST(BackendRecoveryLimitsTest, ReopenAcceptsHistoryPublishedUnderTheSameCommitB
             CommitDisposition::Committed);
         ASSERT_EQ(engine->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(WideKeyRows())}}).disposition,
             CommitDisposition::Committed);
+        // The next commit removes this superseded root; record the size its guard charged.
+        const auto firstRoot = OnlyFileWithPrefix(metadata, "00001-");
+        ASSERT_FALSE(firstRoot.empty());
+        rootA = static_cast<std::uint64_t>(std::filesystem::file_size(firstRoot));
         const std::vector<TInputRow> narrow{{"a", 1, 0.5, true, 1}, {"b", 2, 0.5, true, 2}};
         ASSERT_EQ(engine->AppendDurable({test::collection_id, SecondOperation, {}, {Batch(narrow)}}).disposition,
             CommitDisposition::Committed);
         ASSERT_TRUE(engine->Shutdown(1000ms));
     }
 
-    const auto metadata = root / "warehouse" / test::collection_id / "metadata";
-    const auto firstRoot = OnlyFileWithPrefix(metadata, "00001-");
     const auto secondRoot = OnlyFileWithPrefix(metadata, "00002-");
-    ASSERT_FALSE(firstRoot.empty());
     ASSERT_FALSE(secondRoot.empty());
     const auto lists = ManifestListLeaves(ReadBytes(secondRoot));
     ASSERT_EQ(lists.size(), 2U);
     const auto size = [&](const std::string& leaf) {
         return static_cast<std::uint64_t>(std::filesystem::file_size(metadata / leaf));
     };
-    const auto rootA = static_cast<std::uint64_t>(std::filesystem::file_size(firstRoot));
     const auto rootB = static_cast<std::uint64_t>(std::filesystem::file_size(secondRoot));
     const auto manifestA = size(ManifestOf(lists[0]));
     const auto listA = size(lists[0]);
