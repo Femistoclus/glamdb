@@ -184,7 +184,8 @@ iceberg::Result<TBaseState> CheckAppendClosureImpl(const std::shared_ptr<iceberg
     const std::vector<iceberg::ManifestFile>& previousManifests,
     const std::shared_ptr<NIO::TIOAttempt>& attempt,
     const TStorageLimits& limits,
-    TRecoveryVisited* visited)
+    TRecoveryVisited* visited,
+    bool commitRoot)
 {
     return CatchIcebergExceptions([&]() -> iceberg::Result<TBaseState> {
         if (!fileIO || !candidate.Metadata) {
@@ -244,9 +245,13 @@ iceberg::Result<TBaseState> CheckAppendClosureImpl(const std::shared_ptr<iceberg
             }
             delta = total.Value();
         }
+        // Only the commit that wrote the candidate root is charged for it.
+        // Recovery replays history against the final root, whose size older
+        // commits never wrote; their manifest and list must still fit.
+        const auto rootBytes = commitRoot ? candidate.Usage.RootBytes : 0;
         if (delta.DataFiles != 1 || delta.ManifestBytes > limits.CommitBytes ||
             listBytes > limits.CommitBytes - delta.ManifestBytes ||
-            candidate.Usage.RootBytes > limits.CommitBytes - delta.ManifestBytes - listBytes)
+            rootBytes > limits.CommitBytes - delta.ManifestBytes - listBytes)
         {
             return iceberg::ValidationFailed("CAPACITY: Append exceeds file or accumulator limits.");
         }
@@ -269,7 +274,7 @@ iceberg::Result<TBaseState> CheckAppendClosure(const std::shared_ptr<iceberg::Fi
     const std::shared_ptr<NIO::TIOAttempt>& attempt,
     const TStorageLimits& limits)
 {
-    return CheckAppendClosureImpl(fileIO, std::move(candidate), previousManifests, attempt, limits, nullptr);
+    return CheckAppendClosureImpl(fileIO, std::move(candidate), previousManifests, attempt, limits, nullptr, true);
 }
 
 iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileIO>& fileIO,
@@ -341,7 +346,8 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
                     state.CurrentManifests,
                     {},
                     limits,
-                    visited.get()));
+                    visited.get(),
+                    index + 1 == original->snapshots.size()));
             if (next->snapshots.size() > 1) {
                 next->snapshots.erase(next->snapshots.begin());
                 next->snapshot_log.erase(next->snapshot_log.begin());
