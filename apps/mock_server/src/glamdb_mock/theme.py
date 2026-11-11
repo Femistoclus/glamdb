@@ -33,9 +33,9 @@ def load_theme(path: Path) -> dict:
         value = json.loads(raw)
     except (ValueError, UnicodeError) as error:
         raise ThemeError("theme config must be valid UTF-8 JSON") from error
-    if not isinstance(value, dict) or set(value) != _SECTIONS or type(value["version"]) is not int or value["version"] != 1:
+    if not isinstance(value, dict) or not _SECTIONS <= set(value) or set(value) - (_SECTIONS | {"editor"}) or type(value["version"]) is not int or value["version"] != 1:
         raise ThemeError("theme config requires version 1 and the documented sections")
-    for section in _SECTIONS - {"version"}:
+    for section in set(value) - {"version"}:
         entries = value[section]
         if not isinstance(entries, dict) or len(entries) > 128:
             raise ThemeError(f"{section} must be a plain object with at most 128 entries")
@@ -48,6 +48,8 @@ def load_theme(path: Path) -> dict:
                 valid = isinstance(item, str) and _FONT.fullmatch(item)
             elif section == "sizing":
                 valid = isinstance(item, str) and _SIZE.fullmatch(item)
+            elif section == "editor":
+                valid = key == "query_max_rows" and type(item) is int and 1 <= item <= 10000
             elif section == "decoration":
                 valid = key in {"sparkles", "bows", "kisses", "motion"} and type(item) is bool
             elif section == "brand" and key in {"wordmark", "mark"}:

@@ -63,6 +63,8 @@ jobs:
             .venv/bin/python -m pip install --disable-pip-version-check \
               --require-hashes --only-binary=:all: --no-deps -r tools/workload/requirements.txt
             .venv/bin/python -m pip install --no-deps --no-build-isolation -e tools/workload
+            .venv/bin/python -m pip install --disable-pip-version-check \
+              --require-hashes --only-binary=:all: --no-deps -r tools/acceptance/requirements.txt
           fi
 
       - name: Set up Node for native browser acceptance
@@ -112,3 +114,18 @@ jobs:
       - name: Verify standalone network CLI and native browser
         if: matrix.profile == 'normal'
         run: bash scripts/check-native-http.sh build/ci-normal build/ci-normal-client/glamdb-cli
+
+      - name: Retain native reports and sanitized browser evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-${{ matrix.profile }}-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            artifacts/native-${{ matrix.profile }}/*.log
+            artifacts/native-${{ matrix.profile }}/*junit.xml
+            artifacts/native-${{ matrix.profile }}/system-workspace/report.json
+            artifacts/native-${{ matrix.profile }}/system-workspace/browser-*/*.png
+            artifacts/native-${{ matrix.profile }}/system-workspace/browser-*/trace.zip
+            artifacts/native-${{ matrix.profile }}/system-workspace/browser-*/*.arrow

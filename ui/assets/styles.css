@@ -962,6 +962,60 @@ tr.clickable {
 .metadata-row code {
     font-size: 11px;
 }
+.file-details {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 0;
+    gap: 18px;
+}
+.file-identity code {
+    min-width: 0;
+    max-width: 80%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.file-summary {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 18px;
+    padding: 12px;
+    background: var(--color-powder);
+    border-radius: var(--size-radius-small);
+}
+.file-summary dt {
+    font-size: 10px;
+    color: var(--color-muted);
+}
+.file-summary dd {
+    margin: 3px 0 0;
+    overflow-wrap: anywhere;
+    font: 12px var(--font-mono);
+}
+.file-details-section h3 {
+    font: 600 12px var(--font-body);
+    margin-bottom: 8px;
+}
+.file-details-section th,
+.file-details-section td {
+    padding: 8px;
+    height: auto;
+    font-size: 11px;
+}
+.file-field-table td:nth-child(2) {
+    max-width: 135px;
+}
+.file-bound {
+    display: block;
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 10px;
+}
+.file-field-table small {
+    display: block;
+    font-size: 9px;
+}
 .stage {
     display: flex;
     gap: 13px;

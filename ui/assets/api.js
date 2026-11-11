@@ -235,3 +235,49 @@ export class WorkbenchAPI {
         }
     }
 }
+
+// A root's current head can differ from the snapshot selected by this response.
+export function validateViewMetadata(payload, { collectionId, snapshotId, mock = false }) {
+    if (!mock && payload?.mock === true)
+        throw new Error('Mock metadata returned by a native backend');
+    if (!payload?.identity || payload.identity.collection_id !== collectionId)
+        throw new Error('Metadata returned a different collection');
+    if (snapshotId !== undefined) {
+        const selected =
+            mock && Object.hasOwn(payload.identity, 'snapshot_id')
+                ? payload.identity.snapshot_id
+                : Object.hasOwn(payload, 'snapshot_id')
+                  ? payload.snapshot_id
+                  : payload.identity.snapshot_id;
+        if (selected === undefined || (selected ?? 'initial') !== snapshotId)
+            throw new Error('Metadata returned a different snapshot');
+    }
+    return payload;
+}
+export async function readMetadataPages(api, path, { signal, view } = {}) {
+    const items = [],
+        seen = new Set();
+    let cursor = null,
+        identity;
+    for (let pages = 0; pages < 100; pages++) {
+        signal?.throwIfAborted();
+        const separator = path.includes('?') ? '&' : '?';
+        const page = await api.json(
+            `${path}${separator}page_size=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,
+            { signal },
+        );
+        if (view) validateViewMetadata(page, view);
+        if (!Array.isArray(page.items)) throw new Error('Invalid metadata listing');
+        const currentIdentity = JSON.stringify(page.identity ?? null);
+        if (identity !== undefined && identity !== currentIdentity)
+            throw new Error('Metadata identity changed between pages');
+        identity = currentIdentity;
+        items.push(...page.items);
+        cursor = page.next_cursor;
+        if (cursor == null) return items;
+        if (typeof cursor !== 'string' || !cursor) throw new Error('Invalid metadata cursor');
+        if (seen.has(cursor)) throw new Error('Metadata cursor repeated');
+        seen.add(cursor);
+    }
+    throw new Error('Metadata listing is too large for this workbench');
+}

@@ -93,5 +93,8 @@
     "write_title": "Write rows",
     "write_copy": "Fill the fields. JSON is created for you.",
     "advanced_batch": "Batch editor"
+  },
+  "editor": {
+    "query_max_rows": 10000
   }
 }

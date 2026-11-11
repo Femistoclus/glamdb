@@ -230,7 +230,19 @@ export function prepareMutation(previous, body, idFactory = () => crypto.randomU
 }
 
 export function supportsFeature(capabilities, feature) {
-    return capabilities?.features?.[feature] ?? capabilities?.backend !== 'local';
+    return capabilities?.features?.[feature] ?? capabilities?.mock === true;
+}
+// The default preview remains 1,000 rows; this is its adjustable upper bound.
+export function queryMaxRows(capabilities, theme) {
+    const bounded = (value) => (Number.isSafeInteger(value) && value >= 1 ? value : 10000);
+    return Math.min(
+        10000,
+        bounded(theme?.editor?.query_max_rows),
+        bounded(capabilities?.limits?.scan_page_rows),
+        capabilities?.browser_demo === true || capabilities?.backend === 'browser-demo'
+            ? 1000
+            : 10000,
+    );
 }
 // Pre-login storage notice from public /healthz; unknown or missing health makes no claim.
 export function storageNotice(health) {
@@ -255,4 +267,183 @@ export function validateQueryCapabilities(capabilities, body) {
         if (predicate.arg) visit(predicate.arg);
     };
     visit(body.predicate);
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const TYPES = new Set(['string', 'int64', 'float64', 'bool', 'timestamp_us_utc']);
+function requirePending(condition, message = 'Invalid pending request file') {
+    if (!condition) throw new Error(message);
+}
+function pendingObject(value, keys) {
+    requirePending(value && typeof value === 'object' && !Array.isArray(value));
+    requirePending(Object.keys(value).every((key) => keys.includes(key)));
+}
+function pendingSchema(schema) {
+    pendingObject(schema, ['fields', 'schema_id']);
+    requirePending(
+        Array.isArray(schema.fields) && schema.fields.length > 0 && schema.fields.length <= 64,
+    );
+    const names = new Set(),
+        ids = new Set();
+    schema.fields.forEach((field, index) => {
+        pendingObject(field, ['name', 'type', 'nullable', 'field_id']);
+        requirePending(
+            typeof field.name === 'string' &&
+                field.name.length > 0 &&
+                !field.name.includes('\0') &&
+                new TextEncoder().encode(field.name).length <= 128,
+        );
+        requirePending(
+            !names.has(field.name) && TYPES.has(field.type) && typeof field.nullable === 'boolean',
+        );
+        const id = field.field_id ?? index + 1;
+        requirePending(Number.isInteger(id) && id > 0 && id < 2 ** 31 && !ids.has(id));
+        names.add(field.name);
+        ids.add(id);
+    });
+    if (schema.schema_id !== undefined)
+        requirePending(
+            Number.isInteger(schema.schema_id) &&
+                schema.schema_id >= 0 &&
+                schema.schema_id < 2 ** 31,
+        );
+    return schema;
+}
+export function schemaSignature(schema) {
+    return JSON.stringify(
+        pendingSchema(schema).fields.map((field, index) => ({
+            name: field.name,
+            type: field.type,
+            nullable: field.nullable,
+            field_id: field.field_id ?? index + 1,
+        })),
+    );
+}
+function pendingScope(scope) {
+    pendingObject(scope, ['server_url', 'database_id', 'store_id', 'backend', 'mock']);
+    const url = new URL(scope.server_url);
+    requirePending(
+        ['http:', 'https:'].includes(url.protocol) &&
+            !url.username &&
+            !url.password &&
+            !url.search &&
+            !url.hash,
+    );
+    requirePending(
+        typeof scope.backend === 'string' &&
+            scope.backend.length > 0 &&
+            typeof scope.mock === 'boolean',
+    );
+    for (const id of [scope.database_id, scope.store_id])
+        requirePending(id === null || (typeof id === 'string' && UUID.test(id)));
+    return { ...scope, server_url: url.href.replace(/\/$/, '') };
+}
+function validatePending(value) {
+    pendingObject(value, ['format', 'version', 'scope', 'request']);
+    requirePending(value.format === 'glamdb-pending-request' && value.version === 1);
+    const scope = pendingScope(value.scope),
+        request = value.request;
+    pendingObject(request, ['kind', 'collection_id', 'operation_id', 'schema', 'body']);
+    requirePending(typeof request.collection_id === 'string' && UUID.test(request.collection_id));
+    requirePending(['append', 'create'].includes(request.kind));
+    const body = request.body;
+    if (request.kind === 'create') {
+        requirePending(
+            !Object.hasOwn(request, 'operation_id') && !Object.hasOwn(request, 'schema'),
+        );
+        pendingObject(body, ['collection_id', 'name', 'schema']);
+        requirePending(
+            body.collection_id === request.collection_id &&
+                typeof body.name === 'string' &&
+                /^[a-z][a-z0-9_]{0,62}$/.test(body.name),
+        );
+        pendingSchema(body.schema);
+    } else {
+        requirePending(typeof request.operation_id === 'string' && UUID.test(request.operation_id));
+        pendingSchema(request.schema);
+        pendingObject(body, ['rows', 'expected_snapshot']);
+        wireRows(request.schema, body.rows);
+        if (Object.hasOwn(body, 'expected_snapshot') && body.expected_snapshot !== null) {
+            const snapshot = body.expected_snapshot;
+            requirePending(typeof snapshot === 'string' && INTEGER.test(snapshot));
+            requirePending(BigInt(snapshot) >= -(1n << 63n) && BigInt(snapshot) < 1n << 63n);
+        }
+    }
+    return { ...value, scope };
+}
+// Export only request data, never the API client, token, response or tab state.
+export function exportPending(scope, kind, draft) {
+    requirePending(!draft.terminal, 'Only a pending request can be exported');
+    const request =
+        kind === 'create'
+            ? { kind, collection_id: draft.body.collection_id, body: structuredClone(draft.body) }
+            : {
+                  kind,
+                  collection_id: draft.collectionId,
+                  operation_id: draft.operationId,
+                  schema: structuredClone(draft.schema),
+                  body: structuredClone(draft.body),
+              };
+    return validatePending({
+        format: 'glamdb-pending-request',
+        version: 1,
+        scope: structuredClone(scope),
+        request,
+    });
+}
+export function importPending(value, currentScope) {
+    const validated = validatePending(value),
+        expected = pendingScope(currentScope);
+    for (const key of ['server_url', 'database_id', 'backend', 'mock'])
+        requirePending(
+            validated.scope[key] === expected[key],
+            'Pending request belongs to a different server, database or backend',
+        );
+    if (validated.scope.store_id !== null)
+        requirePending(
+            validated.scope.store_id === expected.store_id,
+            'Pending request store identity does not match',
+        );
+    const request = validated.request,
+        body = structuredClone(request.body);
+    if (request.kind === 'create')
+        return {
+            kind: 'create',
+            draft: { body, fingerprint: JSON.stringify({ name: body.name, schema: body.schema }) },
+        };
+    return {
+        kind: 'append',
+        draft: {
+            operationId: request.operation_id,
+            collectionId: request.collection_id,
+            schema: structuredClone(request.schema),
+            body,
+            fingerprint: JSON.stringify(body),
+            terminal: false,
+            outcome: 'unresolved',
+        },
+    };
+}
+
+// Recovery files include the request, schema, scope and pretty-print whitespace.
+// Their independent cap must not depend on an API response or request-body limit.
+const PENDING_FILE_MAX_BYTES = 32 * 1024 * 1024;
+function checkPendingFileSize(bytes) {
+    requirePending(
+        Number.isSafeInteger(bytes) && bytes >= 0 && bytes <= PENDING_FILE_MAX_BYTES,
+        'Choose a recovery JSON file within the 32 MiB recovery file limit',
+    );
+}
+export function serializePendingFile(scope, kind, draft) {
+    const text = JSON.stringify(exportPending(scope, kind, draft), null, 2);
+    checkPendingFileSize(new TextEncoder().encode(text).byteLength);
+    return text;
+}
+export async function readPendingFile(file, currentScope) {
+    requirePending(file, 'Choose a recovery JSON file');
+    // Reject large files before allocating their text or parsing their JSON.
+    checkPendingFileSize(file.size);
+    const text = await file.text();
+    checkPendingFileSize(new TextEncoder().encode(text).byteLength);
+    return importPending(JSON.parse(text), currentScope);
 }

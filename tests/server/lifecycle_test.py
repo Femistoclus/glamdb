@@ -1,5 +1,6 @@
 """Asio lifecycle with a deterministic core publication barrier (test backend)."""
 import json
+import os
 from pathlib import Path
 import select
 import socket
@@ -7,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 
-with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+with tempfile.TemporaryDirectory(dir=str(Path(os.environ.get('GLAMDB_TEST_TMPDIR', '/tmp')).resolve())) as directory:
     process = subprocess.Popen([sys.argv[1], str(Path(directory) / 'store')],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:

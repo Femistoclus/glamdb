@@ -49,16 +49,20 @@ Available now: independent golden fixtures, a typed SQL-NULL reference oracle,
 receipt/fault-evidence tools, a network Python SDK, and a configurable pink
 browser workbench. The [native HTTP server](docs/development/HTTP_SERVER.md)
 connects them to persistent storage and serves the same UI. It supports typed
-create/append/scan operations, JSON and Arrow, with explicit capabilities for
-unavailable metadata/explain APIs. A separate **disposable in-memory mock**
+create/append/scan operations, JSON and Arrow, selected-view statistics, retained
+snapshot history, actual file/row-group details and explain through explicit capabilities. A separate **disposable in-memory mock**
 remains available for development. Its data files,
 snapshots and commits are synthetic and disappear on restart.
 
 The embedded C++ facade also exposes [native metadata](docs/development/METADATA.md):
 capabilities, receipt-backed snapshot history, selected-view statistics,
 snapshot-bound file and row-group details, fixed-view collection/history/file
-pages, scan explain and execution profiles.
-HTTP metadata/explain adapters remain pending.
+pages, scan explain and execution profiles. The HTTP, SDK and workbench adapters use this
+same facade, including precise int64 identities and unknown/null measurements.
+
+Run the [installed cross-client acceptance recipe](docs/development/NATIVE_ACCEPTANCE.md)
+for one persistent 1,000 + 10-row store, browser views, restart/exact retry,
+physical Parquet/Avro inspection and quiesced whole-store backup/restore.
 
 The workbench also has a **public browser demo** requiring no token or Python
 server. Each page instance owns its sample data; visitors can create/append,

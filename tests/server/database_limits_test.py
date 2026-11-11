@@ -20,7 +20,7 @@ DEFAULTS = {'max_operations': 4096, 'max_collections': 8, 'max_catalog_bytes': 2
 
 class DatabaseLimits(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(dir='/tmp')
+        self.tmp = tempfile.TemporaryDirectory(dir=str(Path(os.environ.get('GLAMDB_TEST_TMPDIR', '/tmp')).resolve()))
         self.addCleanup(self.tmp.cleanup)
         self.directory = str(Path(self.tmp.name).resolve() / 'service')
         self.proc = None

@@ -1,7 +1,16 @@
 const HEX = /^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
 const FONT = /^[a-z0-9\s,'"-]{1,180}$/i;
 const DIMENSION = /^(?:0|\d+(?:\.\d+)?(?:px|rem|em|%))$/;
-const SECTIONS = ['version', 'brand', 'colors', 'typography', 'sizing', 'decoration', 'labels'];
+const SECTIONS = [
+    'version',
+    'brand',
+    'colors',
+    'typography',
+    'sizing',
+    'decoration',
+    'labels',
+    'editor',
+];
 const BRAND_ASSET = /^assets\/brand\/[a-zA-Z0-9_-]+\.(?:png|svg|webp)$/;
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 function assert(condition, message) {
@@ -13,8 +22,21 @@ export function validateTheme(config) {
         Object.keys(config).every((key) => SECTIONS.includes(key)),
         'Unknown theme section',
     );
-    for (const section of SECTIONS.slice(1))
+    for (const section of SECTIONS.slice(1).filter((section) => section !== 'editor'))
         assert(object(config[section]), `Missing theme ${section}`);
+    if (config.editor !== undefined) {
+        assert(
+            object(config.editor) &&
+                Object.keys(config.editor).every((key) => key === 'query_max_rows'),
+            'Unknown editor setting',
+        );
+        const maximum = config.editor.query_max_rows;
+        assert(
+            maximum === undefined ||
+                (Number.isSafeInteger(maximum) && maximum >= 1 && maximum <= 10000),
+            'Editor query_max_rows must be an integer from 1 to 10000',
+        );
+    }
     for (const [key, value] of Object.entries(config.colors))
         assert(
             /^[a-z][a-z0-9_]*$/.test(key) && typeof value === 'string' && HEX.test(value),

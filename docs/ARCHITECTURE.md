@@ -2,7 +2,8 @@
 
 This document describes the intended engine and its correctness boundaries.
 The current checkout implements the catalog, coordinator, production file
-backend and fixed-view scanner. A native HTTP adapter exposes their public API. See the
+backend and fixed-view scanner. A native HTTP adapter exposes their public API, including fixed-view metadata,
+verified file details and explain. See the
 [coordinator guide](development/COORDINATOR.md) for tested behavior and the
 [roadmap](ROADMAP.md) for acceptance gates. The SDK and workbench can use the [native HTTP server](development/HTTP_SERVER.md)
 or the separate [disposable mock](development/HTTP_MOCK_CONTRACT.md). Neither
@@ -220,6 +221,15 @@ independent store-ownership lease. Copy identities, the catalog, and all retaine
 reachable files; check checksums and synchronize the destination. Hold source
 ownership through copy and verification. Test reopening at a different physical
 root with the original volume unavailable and the same logical store identity.
+The tested offline helper uses `glamdb-admin quiesce-store`: SQLite is closed,
+while the retained engine owns its independent directory lease until the copying
+process releases stdin. Copying includes all regular store files (including
+orphans), rejects links/special files, verifies SHA-256, synchronizes files and
+directories and publishes `store.ready` last. A competing process is refused
+during copying. The [system recipe](development/NATIVE_ACCEPTANCE.md) verifies
+successful and failed outcomes and current/historical/initial reads at another
+root while the original root is unavailable. This is a local quiesced procedure,
+not online backup or physical power-loss qualification.
 A live copy of only `catalog.sqlite` is not a backup of the store.
 
 Durability claims apply only to the

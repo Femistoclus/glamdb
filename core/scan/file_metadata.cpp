@@ -267,6 +267,7 @@ TFileDetails ReadFileDetails(const TScanContext& context, std::string_view fileI
                                             *plan.Schema,
                                             {selected->file_size_in_bytes, selected->record_count}),
             "read selected Parquet footer");
+        result.FooterBytes = footer->size();
         result.RowGroups = DescribeRowGroups(*footer, result.File);
     } catch (const parquet::ParquetException& error) {
         throw Failure({"CORRUPTION", BoundedDiagnostic(error.what()), RetryHint::OperatorAction});

@@ -148,6 +148,15 @@ case "$stage" in
       (cd "$readonly_dir" && export TMPDIR="$readonly_dir" && run_tests "$build" mock -L mock \
         && exit "$result") || result=1
       chmod 0755 "$readonly_dir" && rmdir "$readonly_dir"
+      # The public recipe must run against installed binaries and assets, one
+      # persistent store and all three clients. Missing native setup is fatal.
+      if cmake --install "$build" --prefix "$logs/installed" \
+          && "$python" tools/acceptance/run.py --prefix "$logs/installed" \
+              --workspace "$logs/system-workspace"; then
+        :
+      else
+        result=1
+      fi
     fi
     # Discover standalone CMake test projects; no CI list of individual tests.
     for project in probes/*/CMakeLists.txt; do

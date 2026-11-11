@@ -9,6 +9,41 @@ append, pre-binding rejection, registered failure, unknown publication, blocked
 lookup, lost create, and A/B/retry-A. A definite failure and an unknown outcome
 both use HTTP 503 in these vectors; status alone cannot resolve an operation.
 
+`metadata-v0.json` pins native selected-view statistics, file inventory and
+footer fields independently of production serializers. Its large decimal
+values and optional bounds are synthetic wire vectors, not physical-file
+evidence. The SDK preserves every field, and the native metadata test validates
+the vectors and missing-identity negatives against `v0.schema.json`.
+
+Metadata responses keep the confirmed root in `identity` and the selected view
+in top-level `snapshot_id`; historical views can differ from
+`identity.current_snapshot_id`. Counts and byte sizes use decimal int64 strings,
+and unavailable metrics or footer exactness remain null. File lists enumerate
+committed manifest membership and leave `physical_file_exists` null; details
+set it true only after a successful verified Parquet footer read. Native file
+IDs are the public facade's opaque 64-character hexadecimal values. File paths
+remain null because the public file DTO does not expose them; callers cannot
+supply paths in the file-details route.
+
+Manifest metrics retain Iceberg single-value binary bounds; row-group metrics
+retain Parquet plain bounds. Adapters decode supported scalars using the public
+fixed schema while preserving hexadecimal bytes and `bound_encoding`. They
+leave exactness, distinct counts and Bloom presence null when the facade does
+not report them. Column/offset index presence remains distinct from execution
+support. `footer_statistics` reuses the sole row group's observations for a
+single-group file and stays null for multiple groups; each group's actual
+fields remain available in `row_groups[].field_metrics`.
+
+Snapshots and files accept `snapshot_id=latest|initial|<decimal int64>` and
+`page_size=1..1000`. Continuations retain the original view and are bound to
+database, collection, route kind, selector spelling and page size. They are
+ephemeral, replayable until expiry, cleared on database lifecycle changes, and
+cannot survive a server restart. Admission limits are 64 retained inventories,
+eight per database, 16 MiB serialized inventory per request and 64 MiB aggregate
+serialized inventory plus cursor bookkeeping; idle and total lifetimes are
+60 and 300 seconds. Collection pagination remains unsupported and is advertised
+separately from `features.metadata_pagination`.
+
 Requests contain duplicate rows, NULL, int64 `9007199254740993` and
 `-9223372036854775808`, and exact six-digit UTC timestamps. Canonical v1 schema
 and append preimages were written independently; their literal SHA-256 values
@@ -36,6 +71,10 @@ Consumers:
   applicable negative cases through `WorkbenchAPI` and checks exact row values.
 - `NativeHTTP.test_route_schema_fixtures` checks literal responses and missing
   fields against the versioned JSON Schema when `GLAMDB_VALIDATE_SCHEMAS=1`.
+- `tests/server/native_metadata_test.py` checks actual scoped and legacy native
+  statistics, receipt history, selected file membership, precise typed Parquet
+  footer metrics, explain, SDK reads, cursor scope/capacity, invalid identities
+  and restart. `MetadataPages` exercises expiry without long socket-test waits.
 - `apps/mock_server/tests/test_outcome_conformance.py` exercises real mock state
   and SDK parsing with the shared requests. Mock locations remain `mock://`;
   mock state has no physical publication or durability guarantee.

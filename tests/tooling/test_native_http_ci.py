@@ -93,17 +93,25 @@ class NativeAcceptanceRunner(unittest.TestCase):
     def test_native_flags_reach_ctest_for_every_profile(self):
         self.env['GLAMDB_NATIVE_PYTHON'] = str(self.fake('python'))
         self.fake('ctest')
+        self.fake('cmake')
         for profile in ('normal', 'asan', 'ubsan', 'msan', 'tsan', 'lsan'):
             with self.subTest(profile=profile):
                 self.log.write_text('')
                 result = self.run_script('ci-native.sh', profile, 'test')
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                ctests = self.records()[1:]
+                records = self.records()
+                ctests = [record for record in records if Path(record['args'][0]).name == 'ctest']
                 self.assertTrue(ctests)
                 for ctest in ctests:
                     self.assertEqual(Path(ctest['args'][0]).name, 'ctest')
                     self.assertEqual(ctest['required'], '1')
                     self.assertEqual(ctest['schemas'], '1')
+                systems = [record for record in records if record['args'][1:2] == ['tools/acceptance/run.py']]
+                self.assertEqual(len(systems), 1 if profile == 'normal' else 0)
+                for system in systems:
+                    self.assertNotIn('--no-browser', system['args'])
+                    self.assertEqual(system['required'], '1')
+                    self.assertEqual(system['schemas'], '1')
 
     def test_cli_failure_blocks_browser_in_acceptance_runner(self):
         self.test_native_browser_receives_real_server_and_standalone_client()

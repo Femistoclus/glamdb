@@ -172,6 +172,8 @@ TEST_F(TFileMetadataTest, MatchesIndependentManifestAndMultiRowGroupFooterInspec
     EXPECT_EQ(file.CompressedBytes, static_cast<int64_t>(std::filesystem::file_size(path)));
     const auto parquet = parquet::ParquetFileReader::OpenFile(path.string());
     const auto footer = parquet->metadata();
+    EXPECT_EQ(details->FooterBytes, static_cast<int64_t>(footer->size()));
+    EXPECT_GT(details->FooterBytes, 0);
     ASSERT_EQ(footer->num_row_groups(), 3);
     ASSERT_EQ(details->RowGroups.size(), 3U);
     for (int ordinal = 0; ordinal < footer->num_row_groups(); ++ordinal) {

@@ -119,7 +119,9 @@ and reference-host recovery time still require qualification.
 checks source identity/size and source close, and finalizes the target durably.
 The caller must hold an offline snapshot/lock and prepare a durable destination
 directory. The primitive does not orchestrate a whole-store backup or publish
-backup readiness.
+backup readiness. The separate [whole-store acceptance/backup tool](NATIVE_ACCEPTANCE.md)
+uses closed SQLite plus an independent retained directory lease; it is not a
+property of the collection-copy primitive.
 
 Warehouse accounting uses the larger of logical size and allocated blocks for
 regular files, plus directory blocks; hard links are conservatively counted per

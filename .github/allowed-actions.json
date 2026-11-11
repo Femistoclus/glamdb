@@ -5,7 +5,8 @@
     "actions/setup-python@*",
     "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
     "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
-    "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
+    "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+    "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
   ],
   "verified_allowed": false
 }

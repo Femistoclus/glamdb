@@ -60,3 +60,16 @@ test('brand assets are configurable local paths and reject remote or traversing 
         assert.throws(() => validateTheme(config));
     }
 });
+
+test('optional editor query limit is backward compatible and accepts only bounded integers', () => {
+    assert.doesNotThrow(() => validateTheme(fixture()));
+    const configured = fixture();
+    configured.editor = { query_max_rows: 10000 };
+    assert.equal(validateTheme(configured).editor.query_max_rows, 10000);
+    for (const invalid of [0, 10001, true, 1.5, '10000', null]) {
+        const config = fixture();
+        config.editor = { query_max_rows: invalid };
+        assert.throws(() => validateTheme(config));
+    }
+    assert.throws(() => validateTheme({ ...fixture(), editor: { extra: 1 } }));
+});

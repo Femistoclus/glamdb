@@ -130,9 +130,19 @@ candidate was read. Open profiles are partial. Cancellation is observable
 before another `Next()`; terminal complete/failed states are retained through
 shutdown. Custom cursors may leave unsupported counters unavailable.
 
-No persistent format changes, snapshot expiration, directory inventory, HTTP
-routes, SDK/UI integration or durability qualification are introduced here.
-The existing HTTP metadata/explain routes still return `501`.
+[HTTP metadata routes](HTTP_SERVER.md) adapt these methods into the existing
+SDK/workbench types. Counts/identities use decimal strings; unavailable values
+remain null with explicit metric kinds. File details distinguish descriptor
+metadata from verified actual bytes. Presence of an index does not imply scan
+pruning. Root leases cover footer inspection through concurrent append cleanup.
+No snapshot expiration, directory-based inventory, format change or durability
+qualification is introduced.
+
+Metadata history/file pages retain the first resolved view. Opaque tokens bind
+to database, collection, kind, original selector and page size; tampering,
+expiry, lifecycle invalidation and changed read admission fail explicitly.
+The [installed acceptance guide](NATIVE_ACCEPTANCE.md) independently verifies
+Parquet/Avro, API membership, reopen and whole-store restore.
 
 Validation uses real dependencies in `NativeMetadata`, metadata cases in
 `ScanReadErrorClassificationTest` and `SupersededRootTest`, and the installed

@@ -1,6 +1,63 @@
-# Workbench validation record — 2026-11-10
+# Workbench validation record — 2026-11-11
 
-## Review corrections
+## Native workbench and request recovery — 2026-11-11
+
+Executed against the native C++ service and separately against the explicit
+mock/static-demo profiles:
+
+- **PASS — 127 Node tests**, including real Fetch transports, selected-view
+  metadata identity/cursor guards, explicit native/mock separation, token-free
+  pending request round trips, exact int64 bounds and optional editor settings.
+- **PASS — 63 Python mock tests**, including 18 theme cases. Old themes without
+  `editor` remain valid; `editor.query_max_rows` accepts integers 1..10000 and
+  rejects booleans, other types and unknown settings.
+- **PASS — 39 mock/static-demo Chromium scenarios.** The five native-only cases
+  are explicitly excluded in this profile. Recovery cases use their own
+  disposable mock child and retain the normal collection budget.
+- **PASS — five native Chromium scenarios**, with `backend=local`, `mock=false`
+  and real stats/history/files/explain capabilities. They cover all seven data
+  views, browser reload, database close/open, latest/A/initial rows and files
+  (2/1/0), precise values, published operation IDs and authoritative lookups,
+  out-of-order selections, reconciliation and unknown writes. A lost committed
+  receipt is exported, imported after reload and retried with the original
+  request; the collection remains one row, one snapshot and one file.
+- **PASS — UI Prettier and whitespace checks.**
+
+The native profile exposed a normal-path admission failure: four parallel
+metadata requests exceeded the two per-database data-call slots. Metadata now
+loads sequentially. Creation and append outcomes remain terminal if metadata
+refresh fails. Import restores original UUIDs/schema/rows/preconditions without
+submitting a write; a definite creation failure unlocks the form, and resolved
+creation drafts stop appearing in cached database recovery lists.
+
+The actual native screenshot audit exposed file details hidden behind long raw
+JSON. The dialog now leads with row/file/footer counts and selected snapshot,
+row groups and tables of field IDs, types and bounds; complete JSON is collapsed. Desktop
+and 390px mobile screenshots were visually inspected. A full-visibility browser
+assertion catches the mobile grid overflow that a document-width check missed.
+Artifacts are under `artifacts/e2e-native-results/` as
+`native-file-details-desktop.png` and `native-file-details-mobile.png`.
+
+Connected result limits keep the 1000 default and allow up to 10000, bounded by
+`limits.scan_page_rows` and optional `editor.query_max_rows`. Browser tests send
+an actual 1010 request and verify runtime clamping to 512 without losing drafts.
+The static demo retains its 1000 maximum. Regressions for the new flows were
+observed failing before their fixes.
+
+Commands: `npm --prefix ui test`, `npm --prefix ui run format:check`,
+`npm --prefix ui run test:e2e`, and the explicit native profile documented in
+[WORKBENCH.md](WORKBENCH.md). Python used
+`python -m pytest apps/mock_server/tests -q`. Native browser setup used an
+isolated temporary child root and separate ports, with the locally available
+Chromium executable selected through `GLAMDB_BROWSER_PATH`.
+
+This isolated browser profile does not perform a service-process restart,
+whole-store restore or physical-chain inspection. Those belong to the shared
+native acceptance workflow. Browser reload, orderly reopen and footer reads do
+not qualify physical power-loss durability. The records below retain their
+original dates and scope.
+
+## Review corrections — 2026-11-10
 
 All five findings from [review 5843480730](https://github.com/glamourdb/glamdb/pull/4#pullrequestreview-5843480730)
 have focused regression coverage:

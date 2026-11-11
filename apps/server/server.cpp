@@ -462,7 +462,8 @@ private:
             (path == "/databases" || (path.starts_with("/databases/") && split == std::string::npos) ||
                 !suffix.starts_with("/collections") || suffix.find("/operations/") != std::string::npos ||
                 suffix.ends_with("/scan/cancel"));
-        const bool writer = Request_.Method == "POST" && suffix.find("/scan") == std::string::npos;
+        const bool writer =
+            Request_.Method == "POST" && suffix.find("/scan") == std::string::npos && !suffix.ends_with("/explain");
         auto& queue = lifecycle ? State_.Lifecycle
             : control           ? State_.Control
             : writer            ? State_.Writers

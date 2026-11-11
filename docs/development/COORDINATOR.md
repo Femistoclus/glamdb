@@ -20,8 +20,10 @@ requires the storage validator. Coordinator test doubles are confined to
 `tests/`; they produce no real Parquet or Avro data. The separate storage
 component tests do exercise real Parquet, Avro and JSON files. The
 [native HTTP server](HTTP_SERVER.md) adapts this same facade outside the embedded
-component. Payload journaling, background jobs, whole-store backup and general
-automatic file cleanup remain outside this MVP.
+component. Payload journaling, background jobs and general automatic file cleanup
+remain outside this MVP. A separate [quiesced backup tool](NATIVE_ACCEPTANCE.md)
+closes SQLite while retaining store ownership; it does not add a coordinator
+writer, background job or online backup protocol.
 
 ## Persistence and retry rules
 

@@ -1,6 +1,7 @@
 #include "apps/transport/codec.h"
 
 #include <cstdio>
+#include <type_traits>
 
 namespace glamdb::NTransport {
 namespace {
@@ -56,6 +57,23 @@ TJson EncodeRow(const arrow::RecordBatch& batch, int64_t row)
     return item;
 }
 } // namespace
+TJson EncodeCell(const Cell& cell)
+{
+    return std::visit(
+        [](const auto& value) -> TJson {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, std::monostate>) {
+                return nullptr;
+            } else if constexpr (std::is_same_v<T, int64_t>) {
+                return std::to_string(value);
+            } else if constexpr (std::is_same_v<T, TimestampUs>) {
+                return FormatTimestamp(value.value);
+            } else {
+                return value;
+            }
+        },
+        cell);
+}
 TJson EncodeRows(const arrow::RecordBatch& batch)
 {
     auto rows = TJson::array();

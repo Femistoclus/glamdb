@@ -36,6 +36,8 @@ std::shared_ptr<arrow::RecordBatch> ParseRows(const SchemaSpec& schema, const TJ
 ScanRequest ParseScan(std::string collectionID, const SchemaSpec& schema, const TJson& body);
 TJson EncodeSchema(const arrow::Schema& schema);
 TJson EncodeRows(const arrow::RecordBatch& batch);
+// Scalar metadata bounds use the same exact int64/timestamp wire values as rows.
+TJson EncodeCell(const Cell& cell);
 // Append rows to an unfinished JSON array (initially "["). Returns consumed
 // rows; leaves an oversized next row for the next page. The first row may
 // exceed the soft target, but never the hard response-envelope allowance.

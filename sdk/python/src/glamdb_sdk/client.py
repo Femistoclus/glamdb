@@ -326,24 +326,53 @@ class Client:
 
     def stats(self, collection_id: str | UUID, *, snapshot_id: Any = ANY, deadline: float | None = None) -> dict[str, Any]:
         cid, path = self._path(collection_id, "stats")
-        return self._read(path, params=self._selector(snapshot_id), deadline=deadline, collection_id=cid)
+        return self._metadata(self._read(path, params=self._selector(snapshot_id), deadline=deadline, collection_id=cid), cid, snapshot_id)
+
+    @staticmethod
+    def _metadata(value: dict[str, Any], collection_id: str, snapshot_id: Any) -> dict[str, Any]:
+        identity = value.get("identity")
+        if identity is None and value.get("mock") is not False:
+            return value
+        if not isinstance(identity, dict) or identity.get("collection_id") != collection_id:
+            raise ProtocolError("metadata collection identity does not match the request", raw=value)
+        # The current root head can differ from the historical view. Modern
+        # native responses make that selection explicit; legacy mock identities
+        # keep the selected snapshot inside identity.snapshot_id.
+        if value.get("mock") is True and "snapshot_id" in identity:
+            selected = identity["snapshot_id"]
+        elif "snapshot_id" in value:
+            selected = value["snapshot_id"]
+        elif "snapshot_id" in identity and value.get("mock") is not False:
+            selected = identity["snapshot_id"]
+        else:
+            raise ProtocolError("metadata selected snapshot is missing", raw=value)
+        try:
+            if selected is not None and (not isinstance(selected, str) or str(int64(selected)) != selected):
+                raise ValidationError("snapshot must be a canonical decimal string")
+        except ValidationError as error:
+            raise ProtocolError("invalid metadata selected snapshot", raw=value) from error
+        if snapshot_id is not ANY:
+            expected = None if snapshot_id is None else str(int64(snapshot_id))
+            if selected != expected:
+                raise ProtocolError("metadata selected snapshot does not match the request", raw=value)
+        return value
 
     def snapshots(self, collection_id: str | UUID, *, page_size: int = 100, cursor: str | None = None,
                   snapshot_id: Any = ANY, deadline: float | None = None) -> Page:
         cid, path = self._path(collection_id, "snapshots")
-        return self._page(self._read(path, params=self._page_params(page_size, cursor, snapshot_id), deadline=deadline, collection_id=cid))
+        return self._page(self._metadata(self._read(path, params=self._page_params(page_size, cursor, snapshot_id), deadline=deadline, collection_id=cid), cid, snapshot_id))
 
     def files(self, collection_id: str | UUID, *, page_size: int = 100, cursor: str | None = None,
               snapshot_id: Any = ANY, deadline: float | None = None) -> Page:
         cid, path = self._path(collection_id, "files")
-        return self._page(self._read(path, params=self._page_params(page_size, cursor, snapshot_id), deadline=deadline, collection_id=cid))
+        return self._page(self._metadata(self._read(path, params=self._page_params(page_size, cursor, snapshot_id), deadline=deadline, collection_id=cid), cid, snapshot_id))
 
     def file(self, collection_id: str | UUID, file_id: str, *, snapshot_id: Any = ANY,
              deadline: float | None = None) -> dict[str, Any]:
         if not isinstance(file_id, str) or not file_id:
             raise ValidationError("file_id must be a nonempty opaque string")
         cid, path = self._path(collection_id, "files/" + quote(file_id, safe=""))
-        return self._read(path, params=self._selector(snapshot_id), deadline=deadline, collection_id=cid)
+        return self._metadata(self._read(path, params=self._selector(snapshot_id), deadline=deadline, collection_id=cid), cid, snapshot_id)
 
     def create_collection(self, name: str, schema: Schema | Mapping[str, Any], *, collection_id: str | UUID,
                           deadline: float | None = None) -> CreateOutcome:
@@ -555,7 +584,7 @@ class Client:
         status, value = self._json("POST", path, budget, body=self._scan_body(projection, predicate, snapshot_id, limit))
         if status != 200:
             self._http_error(status, value, budget)
-        return value
+        return self._metadata(value, cid, snapshot_id)
 
     def scan_json(self, collection_id: str | UUID, *, projection: Iterable[str] | None = None,
                   predicate: Predicate | Mapping[str, Any] | None = None, snapshot_id: Any = ANY,

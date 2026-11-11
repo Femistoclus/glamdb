@@ -121,6 +121,10 @@ if(TARGET glamdb_server)
     if(GLAMDB_TEST_CLI_EXECUTABLE)
         set(glamdb_test_cli "${GLAMDB_TEST_CLI_EXECUTABLE}")
     endif()
+    add_test(NAME glamdb.native_metadata COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/server/native_metadata_test.py"
+        "$<TARGET_FILE:glamdb_server>" "${glamdb_test_cli}" "${PROJECT_SOURCE_DIR}/ui")
+    set_tests_properties(glamdb.native_metadata PROPERTIES LABELS "integration;http;metadata" TIMEOUT 180)
     add_test(NAME glamdb.native_http COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/server/native_http_test.py"
         "$<TARGET_FILE:glamdb_server>" "${glamdb_test_cli}" "${PROJECT_SOURCE_DIR}/ui")
@@ -161,7 +165,7 @@ if(TARGET glamdb_routes)
     add_test(NAME glamdb.native_http_fault COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/server/native_fault_test.py" "$<TARGET_FILE:glamdb_native_fault_driver>")
     set_tests_properties(glamdb.native_http_fault PROPERTIES LABELS "integration;http;fault" TIMEOUT 180)
-    add_executable(glamdb_routes_test server/admission_test.cpp server/routes_test.cpp server/scan_sessions_test.cpp server/databases_test.cpp server/database_limits_test.cpp support/fake_storage.cpp support/journal_fault_vfs.cpp)
+    add_executable(glamdb_routes_test server/admission_test.cpp server/routes_test.cpp server/metadata_pages_test.cpp server/scan_sessions_test.cpp server/databases_test.cpp server/database_limits_test.cpp support/fake_storage.cpp support/journal_fault_vfs.cpp)
     target_link_libraries(glamdb_routes_test PRIVATE glamdb_routes glamdb_build_options GTest::gtest_main
         SQLite::SQLite3 iceberg::iceberg_sql_catalog_static)
     gtest_discover_tests(glamdb_routes_test TEST_PREFIX glamdb.routes.

@@ -165,6 +165,20 @@ Read methods are `capabilities`, `list_collections`, `resolve_collection`,
 retain the server's page. Reuse the opaque cursor with exactly the same
 parameters, selector and page size; do not resolve latest again between pages.
 
+## Native selected-view metadata
+
+These methods also operate against the native C++ service. `stats` and `explain`
+retain root identity separately from the resolved selected view; the SDK checks
+collection/selector consistency. `snapshot_id=None` selects initial empty,
+`ANY` or omission selects latest, and a precise integer selects a retained view.
+Native file IDs are opaque and usable only in a view containing that file.
+`file` includes actual footer field IDs, typed bounds and row groups. Missing
+physical measurements remain null; metadata/index presence is not pruning.
+History and file cursors are finite, scoped and expiring. Reuse their original
+parameters; a rejected token is not permission to silently restart at latest.
+The [installed cross-client recipe](../../docs/development/NATIVE_ACCEPTANCE.md)
+checks this SDK alongside CLI and UI on the same persistent data and restored copy.
+
 ## Streaming and transport ownership
 
 Always use `with client.scan_batches(...) as stream:` or call `stream.close()`.

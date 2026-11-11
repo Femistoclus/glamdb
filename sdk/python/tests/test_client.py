@@ -169,7 +169,8 @@ def test_scan_json_decodes_exact_values_and_explain_shares_fixed_request():
     def handler(request):
         sent.append((request.url.path, json.loads(request.content)))
         if request.url.path.endswith("explain"):
-            return reply({"identity": {"current_snapshot_id": "5"}, "synthetic": True})
+            return reply({"identity": {"collection_id": CID, "current_snapshot_id": "5"},
+                          "snapshot_id": "5", "synthetic": True})
         return reply({"schema": SCHEMA.to_dict(), "snapshot_id": "5", "rows": [{"key": "a", "n": "9007199254740993"}],
                       "profile": {"synthetic": True}, "identity": {"current_snapshot_id": "5"}})
     with client_with(handler) as client:

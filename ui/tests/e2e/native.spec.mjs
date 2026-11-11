@@ -1,12 +1,56 @@
 import { test, expect } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
 
 test.skip(!process.env.GLAMDB_NATIVE_SERVER, 'native server profile only');
-test('native typed write scan and metadata fallbacks', async ({ page }) => {
-    const errors = [];
-    page.on('pageerror', (error) => errors.push(error.message));
+test.afterEach(async ({ request }) => {
+    // The disposable server is shared; release engine reservations between scenarios.
+    const headers = { Authorization: 'Bearer e2e-only-local-token' };
+    const response = await request.get('/databases', { headers });
+    expect(response.ok()).toBe(true);
+    const { items } = await response.json();
+    for (const database of items) {
+        if (database.state !== 'open') continue;
+        const closed = await request.post(`/databases/${database.database_id}/close`, {
+            headers,
+            data: {},
+        });
+        expect(closed.ok()).toBe(true);
+        expect((await closed.json()).state).toBe('closed');
+    }
+});
+async function connect(page) {
     await page.goto('/');
     await page.getByLabel('Access token').fill('e2e-only-local-token');
     await page.getByRole('button', { name: 'Open my workspace' }).click();
+    await expect(page.getByRole('heading', { name: 'Your databases' })).toBeVisible();
+}
+async function useDatabase(page, name) {
+    await page
+        .getByRole('row')
+        .filter({ hasText: name })
+        .getByRole('button', { name: 'Use database', exact: true })
+        .click();
+    await expect(page.locator('.workspace-tag strong')).toHaveText(name);
+}
+async function navigate(page, name) {
+    await page.locator('nav').getByRole('button', { name, exact: true }).click();
+}
+
+test('native typed write and every metadata view survive browser reload', async ({
+    page,
+}, info) => {
+    const errors = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    const capabilities = await (
+        await page.request.get('/capabilities', {
+            headers: { Authorization: 'Bearer e2e-only-local-token' },
+        })
+    ).json();
+    expect(capabilities.backend).toBe('local');
+    expect(capabilities.mock).toBe(false);
+    for (const feature of ['stats', 'snapshots', 'files', 'explain'])
+        expect(capabilities.features[feature]).toBe(true);
+    await connect(page);
     await expect(
         page.getByText('No databases yet. Create your first database above.'),
     ).toBeVisible();
@@ -17,7 +61,10 @@ test('native typed write scan and metadata fallbacks', async ({ page }) => {
     await page.getByRole('button', { name: 'Create collection' }).click();
     await expect(page.getByRole('dialog')).not.toBeVisible();
     await expect(page.locator('.breadcrumb strong')).toHaveText('native_browser');
-    await page.locator('nav').getByRole('button', { name: 'Data studio', exact: true }).click();
+    await navigate(page, 'Data studio');
+    await expect(page.getByLabel('Result limit')).toHaveValue('1000');
+    await expect(page.getByLabel('Result limit')).toHaveAttribute('max', '10000');
+    await page.getByLabel('Result limit').fill('1010');
     const write = page.locator('#write-form');
     await write.getByLabel('key row 1', { exact: true }).fill('persisted-browser-row');
     await write.getByLabel('label row 1', { exact: true }).fill('native');
@@ -25,32 +72,142 @@ test('native typed write scan and metadata fallbacks', async ({ page }) => {
     await write.getByLabel('amount row 1', { exact: true }).fill('9223372036854775807');
     await write.getByRole('button', { name: 'Append rows', exact: true }).click();
     await expect(write.getByText('Append committed', { exact: true })).toBeVisible();
-    await page.locator('#run-query').click();
-    await expect(page.getByText('persisted-browser-row', { exact: true })).toBeVisible();
-    await page.locator('nav').getByRole('button', { name: 'Overview', exact: true }).click();
-    await page.getByRole('button', { name: 'Count rows', exact: true }).click();
-    await expect(page.locator('.metrics .metric').first().locator('strong')).toHaveText('1');
-    await expect(page.getByRole('button', { name: 'Count rows', exact: true })).toBeVisible();
-    await page.locator('nav').getByRole('button', { name: 'Snapshots', exact: true }).click();
+    const operationId = await write.locator('#write-outcome code').textContent();
+    await expect(page.locator('#snapshot-selector option')).toHaveCount(3);
+    const snapshotA = await page.locator('#snapshot-selector option').last().getAttribute('value');
+    await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
+    await page
+        .getByRole('dialog')
+        .getByLabel('Rows · JSON array')
+        .fill('[{"key":"second-browser-row","label":"B","amount":"2"}]');
+    await page
+        .getByRole('dialog')
+        .getByRole('button', { name: 'Append rows', exact: true })
+        .click();
     await expect(
-        page.getByRole('heading', { name: 'Observed in this session', exact: true }),
+        page.getByRole('dialog').getByText('Append committed', { exact: true }),
+    ).toBeVisible();
+    await page.getByRole('button', { name: 'Close dialog' }).click();
+    await page.locator('#run-query').click();
+    await expect(
+        page.getByRole('table', { name: 'Query results' }).locator('tbody tr'),
+    ).toHaveCount(2);
+    await expect(page.getByText('persisted-browser-row', { exact: true })).toBeVisible();
+    await navigate(page, 'Overview');
+    await expect(page.locator('.metrics .metric').first().locator('strong')).toHaveText('2');
+    await expect(page.getByRole('button', { name: 'Count rows', exact: true })).toHaveCount(0);
+    await navigate(page, 'Snapshots');
+    await expect(
+        page.getByRole('heading', { name: 'Snapshot history', exact: true }),
     ).toBeVisible();
     await expect(
         page.getByRole('table', { name: 'Snapshot history' }).locator('tbody tr'),
-    ).toHaveCount(1);
-    await page.locator('nav').getByRole('button', { name: 'Storage', exact: true }).click();
+    ).toHaveCount(2);
+    await navigate(page, 'Storage');
+    await expect(page.getByRole('table', { name: 'Data files' }).locator('tbody tr')).toHaveCount(
+        2,
+    );
+    await page.getByRole('button', { name: 'Inspect', exact: true }).first().click();
+    const details = page.getByRole('dialog');
     await expect(
-        page.getByRole('table', { name: 'Storage receipts' }).locator('tbody tr'),
+        details.getByRole('table', { name: 'Parquet row groups' }).locator('tbody tr'),
     ).toHaveCount(1);
-    await page.locator('nav').getByRole('button', { name: 'Explain', exact: true }).click();
-    await expect(page.getByText('This server does not yet expose this capability.')).toBeVisible();
+    await expect(
+        details.getByRole('table', { name: 'Parquet field statistics' }).locator('tbody tr'),
+    ).toHaveCount(3);
+    await expect(details.locator('.file-summary')).toContainText('Footer bytes');
+    await expect(
+        details
+            .getByRole('table', { name: 'Parquet field statistics' })
+            .getByRole('row')
+            .filter({ hasText: 'amount' }),
+    ).toContainText('int64');
+    await expect(details.locator('details.raw-metadata')).not.toHaveAttribute('open', '');
+    await expect(details.locator('pre')).toContainText('"synthetic": false');
+    await expect(details.locator('pre')).toContainText('"row_groups": [');
+    await expect(details.locator('pre')).toContainText('"physical_file_exists": true');
+    const lower = await details
+        .getByRole('table', { name: 'Parquet field statistics' })
+        .getByRole('row')
+        .filter({ hasText: 'amount' })
+        .getByRole('cell')
+        .nth(4)
+        .locator('code')
+        .textContent();
+    expect(['2', '9223372036854775807']).toContain(lower);
+    await page.screenshot({ path: info.outputPath('native-file-details-desktop.png') });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(details.locator('.file-summary')).toBeInViewport({ ratio: 1 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+    );
+    await page.screenshot({ path: info.outputPath('native-file-details-mobile.png') });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await details.getByRole('button', { name: 'Close dialog' }).click();
+    await navigate(page, 'Explain');
+    await page.getByRole('button', { name: 'Refresh plan', exact: true }).click();
+    const plan = page.locator('.panel').filter({
+        has: page.getByRole('heading', { name: 'Query plan', exact: true }),
+    });
+    await expect(plan.getByText('Native scan', { exact: true })).toBeVisible();
+    await expect(page.locator('.mock-banner')).toHaveCount(0);
+    await page.reload();
+    await page.getByLabel('Access token').fill('e2e-only-local-token');
+    await page.getByRole('button', { name: 'Open my workspace' }).click();
+    await useDatabase(page, 'browser_database');
+    await expect(page.locator('.metrics .metric').first().locator('strong')).toHaveText('2');
+    await navigate(page, 'Snapshots');
+    await expect(
+        page.getByRole('table', { name: 'Snapshot history' }).locator('tbody tr'),
+    ).toHaveCount(2);
+    await navigate(page, 'Storage');
+    await expect(page.getByRole('table', { name: 'Data files' }).locator('tbody tr')).toHaveCount(
+        2,
+    );
+    await page.locator('#snapshot-selector').selectOption(snapshotA);
+    await expect(page.getByRole('table', { name: 'Data files' }).locator('tbody tr')).toHaveCount(
+        1,
+    );
+    await navigate(page, 'Overview');
+    await expect(page.locator('.metrics .metric').first().locator('strong')).toHaveText('1');
+    await page.locator('#snapshot-selector').selectOption('initial');
+    await expect(page.locator('.metrics .metric').first().locator('strong')).toHaveText('0');
+    await navigate(page, 'Storage');
+    await expect(page.getByRole('table', { name: 'Data files' }).locator('tbody tr')).toHaveCount(
+        0,
+    );
+    await page.locator('#snapshot-selector').selectOption('latest');
+    await expect(page.getByRole('table', { name: 'Data files' }).locator('tbody tr')).toHaveCount(
+        2,
+    );
+    await navigate(page, 'Schema');
+    await expect(
+        page.getByRole('table', { name: 'Collection schema' }).locator('tbody tr'),
+    ).toHaveCount(3);
+    await navigate(page, 'Operations');
+    await expect(
+        page.getByRole('table', { name: 'Published snapshot operations' }).locator('tbody tr'),
+    ).toHaveCount(2);
+    await expect(page.getByRole('table', { name: 'Published snapshot operations' })).toContainText(
+        operationId,
+    );
+    await page.getByRole('button', { name: 'Look up outcome', exact: true }).first().click();
+    await expect(page.getByRole('dialog').locator('pre')).toContainText('"outcome": "committed"');
+    await page.getByRole('button', { name: 'Close dialog' }).click();
+    await expect(
+        page.getByText('No appends submitted in this browser session.', { exact: false }),
+    ).toBeVisible();
+    await page.getByLabel('Operation ID').fill(operationId);
+    await page.getByRole('button', { name: 'Look up operation', exact: true }).click();
+    await expect(page.getByRole('dialog').locator('pre')).toContainText('"outcome": "committed"');
+    await page.getByRole('button', { name: 'Close dialog' }).click();
     await page.getByRole('button', { name: 'Databases', exact: true }).click();
     const row = page.getByRole('row').filter({ hasText: 'browser_database' });
     await row.getByRole('button', { name: 'Close database' }).click();
     await expect(row.getByRole('cell', { name: 'closed', exact: true })).toBeVisible();
     await row.getByRole('button', { name: 'Open database' }).click();
     await expect(page.locator('.breadcrumb strong')).toHaveText('native_browser');
-    await page.locator('nav').getByRole('button', { name: 'Data studio', exact: true }).click();
+    await navigate(page, 'Data studio');
     await page.locator('#run-query').click();
     await expect(page.getByText('persisted-browser-row', { exact: true })).toBeVisible();
     let release, seen;
@@ -215,11 +372,15 @@ test('unknown append survives database switching and reconciliation with its ori
     });
     await row.getByRole('button', { name: 'Use database' }).click();
     await page.locator('nav').getByRole('button', { name: 'Operations', exact: true }).click();
-    await expect(page.getByText(operationId, { exact: true })).toBeVisible();
+    await expect(
+        page.locator('.operations-card').getByText(operationId, { exact: true }),
+    ).toBeVisible();
     await page.getByRole('button', { name: 'Reconcile database', exact: true }).click();
     await page.getByRole('button', { name: 'Check outcome', exact: true }).click();
     await expect(page.locator('.operations-card strong')).toHaveText('committed');
-    await expect(page.getByText(operationId, { exact: true })).toBeVisible();
+    await expect(
+        page.locator('.operations-card').getByText(operationId, { exact: true }),
+    ).toBeVisible();
     expect(writes).toBe(1);
     expect(opens).toBe(0);
     await page.getByLabel('Operation ID').fill(operationId);
@@ -231,4 +392,114 @@ test('unknown append survives database switching and reconciliation with its ori
     await page.locator('nav').getByRole('button', { name: 'Data studio', exact: true }).click();
     await page.locator('#run-query').click();
     await expect(page.getByText('exactly-once', { exact: true })).toBeVisible();
+});
+
+test('native lost receipt exports and imports after reload without changing the frozen request', async ({
+    page,
+}) => {
+    const errors = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    await connect(page);
+    await page.getByLabel('Database name').fill('reload_pending_database');
+    await page.getByRole('button', { name: 'Create database', exact: true }).click();
+    await page.getByRole('button', { name: 'New collection', exact: true }).first().click();
+    await page.getByLabel('Collection name').fill('reload_pending_collection');
+    await page.getByRole('button', { name: 'Create collection', exact: true }).click();
+    await expect(page.getByRole('dialog')).not.toBeVisible();
+    const bodies = [];
+    page.on('request', (request) => {
+        if (new URL(request.url()).pathname.endsWith('/append'))
+            bodies.push(request.postDataJSON());
+    });
+    await page.route('**/databases/*/collections/*/append', async (route) => {
+        await route.fetch();
+        await route.abort('failed');
+    });
+    const write = page.locator('#write-form');
+    await write.getByLabel('key row 1', { exact: true }).fill('native-recovery-row');
+    await write.getByLabel('label row 1', { exact: true }).fill('original payload');
+    await write.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await expect(write.getByText('Outcome unresolved · keep this operation ID')).toBeVisible();
+    await page.getByRole('button', { name: 'Pending requests', exact: true }).click();
+    const downloaded = page.waitForEvent('download');
+    await page
+        .getByRole('dialog')
+        .getByRole('button', { name: 'Export pending request', exact: true })
+        .click();
+    const recovery = await readFile(await (await downloaded).path());
+    const exported = JSON.parse(recovery);
+    expect(recovery.toString()).not.toContain('e2e-only-local-token');
+    expect(exported.scope.backend).toBe('local');
+    expect(exported.scope.mock).toBe(false);
+    expect(exported.scope.store_id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(exported.request.operation_id).toBe(bodies[0].operation_id);
+    await page.unrouteAll({ behavior: 'wait' });
+    await page.reload();
+    await page.getByLabel('Access token').fill('e2e-only-local-token');
+    await page.getByRole('button', { name: 'Open my workspace' }).click();
+    await useDatabase(page, 'reload_pending_database');
+    await page.getByRole('button', { name: 'Pending requests', exact: true }).click();
+    await page.getByLabel('Recovery JSON file').setInputFiles({
+        name: 'native-pending.json',
+        mimeType: 'application/json',
+        buffer: recovery,
+    });
+    await page.getByRole('button', { name: 'Import pending request', exact: true }).click();
+    await expect(page.getByRole('dialog')).not.toBeVisible();
+    await expect(write.locator('#write-outcome code')).toHaveText(bodies[0].operation_id);
+    expect(bodies).toHaveLength(1);
+    await write.getByRole('button', { name: 'Retry same operation', exact: true }).click();
+    await expect(write.getByText('Append committed', { exact: true })).toBeVisible();
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).toEqual(bodies[0]);
+    await navigate(page, 'Overview');
+    await expect(page.locator('.metrics .metric').first().locator('strong')).toHaveText('1');
+    await navigate(page, 'Storage');
+    await expect(page.getByRole('table', { name: 'Data files' }).locator('tbody tr')).toHaveCount(
+        1,
+    );
+    await navigate(page, 'Snapshots');
+    await expect(
+        page.getByRole('table', { name: 'Snapshot history' }).locator('tbody tr'),
+    ).toHaveCount(1);
+    expect(errors).toEqual([]);
+});
+
+test('native creation resolution clears cached pending requests after a database switch', async ({
+    page,
+}) => {
+    await connect(page);
+    await page.getByLabel('Database name').fill('create_resolution_database');
+    await page.getByRole('button', { name: 'Create database', exact: true }).click();
+    let originalId;
+    await page.route('**/databases/*/collections', async (route) => {
+        if (route.request().method() !== 'POST') return route.continue();
+        originalId = route.request().postDataJSON().collection_id;
+        await route.fetch();
+        await route.abort('failed');
+    });
+    await page.route('**/databases/*/collections:resolve?*', (route) =>
+        route.fulfill({
+            status: 503,
+            contentType: 'application/json',
+            body: JSON.stringify({ error: { message: 'resolution temporarily unavailable' } }),
+        }),
+    );
+    await page.getByRole('button', { name: 'New collection', exact: true }).first().click();
+    await page.getByLabel('Collection name').fill('resolved_collection');
+    await page.getByRole('button', { name: 'Create collection', exact: true }).click();
+    await expect(page.locator('#modal-error')).toContainText('Creation is unresolved');
+    await page.getByRole('button', { name: 'Close dialog' }).click();
+    await page.getByRole('button', { name: 'Databases', exact: true }).click();
+    await useDatabase(page, 'create_resolution_database');
+    await page.unrouteAll({ behavior: 'wait' });
+    await page.getByRole('button', { name: 'New collection', exact: true }).first().click();
+    await expect(page.getByLabel('Collection name')).toHaveValue('resolved_collection');
+    await page.getByRole('button', { name: 'Create collection', exact: true }).click();
+    await expect(page.getByRole('dialog')).not.toBeVisible();
+    await expect(page.locator('.collection-list button')).toHaveCount(1);
+    await expect(page.locator('.collection-list button')).toHaveAttribute('data-id', originalId);
+    await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
+    await expect(page.getByLabel('Access token')).toBeVisible();
+    await expect(page.getByRole('dialog')).not.toBeVisible();
 });

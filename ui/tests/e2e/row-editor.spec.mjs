@@ -185,17 +185,30 @@ test('typed form freezes an unknown write and resolves it without submitting a s
 test('runtime labels and editor spacing update without losing write drafts', async ({ page }) => {
     await newCollection(page);
     await page.getByLabel('key row 1', { exact: true }).fill('retained draft');
+    await expect(page.getByLabel('Result limit')).toHaveValue('1000');
+    await expect(page.getByLabel('Result limit')).toHaveAttribute('max', '10000');
+    await page.getByLabel('Result limit').fill('1010');
+    let queryLimit;
+    await page.route('**/collections/*/scan', async (route) => {
+        queryLimit = route.request().postDataJSON().limit;
+        await route.continue();
+    });
+    await page.locator('#run-query').click();
+    await expect.poll(() => queryLimit).toBe(1010);
     await page.route('**/workbench/config', async (route) => {
         const response = await route.fetch();
         const config = await response.json();
         config.labels.read_title = 'Read with a bow';
         config.labels.write_title = 'Write with sparkle';
         config.sizing.editor_gap = '25px';
+        config.editor = { query_max_rows: 512 };
         await route.fulfill({ response, json: config });
     });
     await expect(page.locator('#read-title')).toHaveText('Read with a bow');
     await expect(page.locator('#write-title')).toHaveText('Write with sparkle');
     await expect(page.locator('.data-editors')).toHaveCSS('column-gap', '25px');
+    await expect(page.getByLabel('Result limit')).toHaveAttribute('max', '512');
+    await expect(page.getByLabel('Result limit')).toHaveValue('512');
     await expect(page.getByLabel('key row 1', { exact: true })).toHaveValue('retained draft');
 });
 

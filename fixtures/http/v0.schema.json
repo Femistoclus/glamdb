@@ -892,7 +892,11 @@
           "const": "v0"
         },
         "backend": {
-          "const": "local"
+          "enum": [
+            "local",
+            "unavailable",
+            "custom"
+          ]
         },
         "mock": {
           "const": false
@@ -933,6 +937,24 @@
               "type": "null"
             }
           ]
+        },
+        "store_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "durability_qualified": {
+          "type": "boolean"
+        },
+        "file_pruning": {
+          "type": "boolean"
+        },
+        "row_group_pruning": {
+          "type": "boolean"
+        },
+        "page_pruning": {
+          "type": "boolean"
+        },
+        "bloom_pruning": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -1252,6 +1274,933 @@
         "durability_validation"
       ],
       "additionalProperties": false
+    },
+    "statistics": {
+      "type": "object",
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "snapshot_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "backend": {
+          "const": "local"
+        },
+        "mock": {
+          "const": false
+        },
+        "synthetic": {
+          "const": false
+        },
+        "durability_validation": {
+          "const": "designed"
+        },
+        "rows": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data_files": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "compressed_data_bytes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "logical_bytes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "root_metadata_bytes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retained_snapshots": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "byte_measurement": {
+          "const": "committed_data_file_descriptors"
+        },
+        "metric_kinds": {
+          "type": "object",
+          "additionalProperties": {
+            "enum": [
+              "unavailable",
+              "metadata",
+              "estimate",
+              "measured"
+            ]
+          }
+        }
+      },
+      "required": [
+        "identity",
+        "snapshot_id",
+        "backend",
+        "mock",
+        "synthetic",
+        "durability_validation",
+        "rows",
+        "data_files",
+        "compressed_data_bytes",
+        "logical_bytes",
+        "root_metadata_bytes",
+        "retained_snapshots",
+        "byte_measurement",
+        "metric_kinds"
+      ],
+      "additionalProperties": true
+    },
+    "snapshotMetadata": {
+      "type": "object",
+      "properties": {
+        "snapshot_id": {
+          "$ref": "#/$defs/int64"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parent_snapshot_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created_at_us": {
+          "$ref": "#/$defs/int64"
+        },
+        "rows_added": {
+          "$ref": "#/$defs/int64"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "receipt": {
+          "$ref": "#/$defs/receipt"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "parent_id",
+        "parent_snapshot_id",
+        "created_at_us",
+        "rows_added",
+        "operation_id",
+        "receipt"
+      ],
+      "additionalProperties": true
+    },
+    "fileMetadata": {
+      "type": "object",
+      "properties": {
+        "file_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "path": {
+          "type": "null"
+        },
+        "content": {
+          "const": "data"
+        },
+        "record_count": {
+          "$ref": "#/$defs/int64"
+        },
+        "compressed_bytes": {
+          "$ref": "#/$defs/int64"
+        },
+        "field_metrics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/manifestField"
+          }
+        },
+        "synthetic": {
+          "const": false
+        },
+        "physical_file_exists": {
+          "type": "null"
+        },
+        "backend": {
+          "const": "local"
+        },
+        "mock": {
+          "const": false
+        }
+      },
+      "required": [
+        "file_id",
+        "path",
+        "content",
+        "record_count",
+        "compressed_bytes",
+        "field_metrics",
+        "synthetic",
+        "physical_file_exists",
+        "backend",
+        "mock"
+      ],
+      "additionalProperties": true
+    },
+    "snapshotsPage": {
+      "type": "object",
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "snapshot_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "backend": {
+          "const": "local"
+        },
+        "mock": {
+          "const": false
+        },
+        "synthetic": {
+          "const": false
+        },
+        "durability_validation": {
+          "const": "designed"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/snapshotMetadata"
+          }
+        },
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "identity",
+        "snapshot_id",
+        "backend",
+        "mock",
+        "synthetic",
+        "durability_validation",
+        "items",
+        "next_cursor"
+      ],
+      "additionalProperties": true
+    },
+    "filesPage": {
+      "type": "object",
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "snapshot_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "backend": {
+          "const": "local"
+        },
+        "mock": {
+          "const": false
+        },
+        "synthetic": {
+          "const": false
+        },
+        "durability_validation": {
+          "const": "designed"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/fileMetadata"
+          }
+        },
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "identity",
+        "snapshot_id",
+        "backend",
+        "mock",
+        "synthetic",
+        "durability_validation",
+        "items",
+        "next_cursor"
+      ],
+      "additionalProperties": true
+    },
+    "footerField": {
+      "type": "object",
+      "properties": {
+        "field_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "string",
+            "bool",
+            "int64",
+            "float64",
+            "timestamp_us_utc"
+          ]
+        },
+        "nullable": {
+          "type": "boolean"
+        },
+        "null_count": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "distinct_count": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lower_bound": {
+          "$ref": "#/$defs/cell"
+        },
+        "upper_bound": {
+          "$ref": "#/$defs/cell"
+        },
+        "lower_bound_exact": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "upper_bound_exact": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "compressed_bytes": {
+          "$ref": "#/$defs/int64"
+        },
+        "uncompressed_bytes": {
+          "$ref": "#/$defs/int64"
+        },
+        "indexes": {
+          "type": "object",
+          "properties": {
+            "page": {
+              "type": "boolean"
+            },
+            "bloom": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "column": {
+              "type": "boolean"
+            },
+            "offset": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "page",
+            "bloom"
+          ],
+          "additionalProperties": true
+        },
+        "lower_bound_hex": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(?:[0-9a-f]{2})*$"
+        },
+        "upper_bound_hex": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(?:[0-9a-f]{2})*$"
+        },
+        "bound_encoding": {
+          "const": "parquet-plain"
+        }
+      },
+      "required": [
+        "field_id",
+        "name",
+        "type",
+        "nullable",
+        "null_count",
+        "distinct_count",
+        "lower_bound",
+        "upper_bound",
+        "lower_bound_exact",
+        "upper_bound_exact",
+        "compressed_bytes",
+        "uncompressed_bytes",
+        "indexes"
+      ],
+      "additionalProperties": true
+    },
+    "rowGroup": {
+      "type": "object",
+      "properties": {
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "record_count": {
+          "$ref": "#/$defs/int64"
+        },
+        "compressed_bytes": {
+          "$ref": "#/$defs/int64"
+        },
+        "uncompressed_bytes": {
+          "$ref": "#/$defs/int64"
+        },
+        "field_metrics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/footerField"
+          }
+        },
+        "synthetic": {
+          "const": false
+        }
+      },
+      "required": [
+        "ordinal",
+        "record_count",
+        "compressed_bytes",
+        "uncompressed_bytes",
+        "field_metrics",
+        "synthetic"
+      ],
+      "additionalProperties": true
+    },
+    "fileDetails": {
+      "type": "object",
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "snapshot_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "backend": {
+          "const": "local"
+        },
+        "mock": {
+          "const": false
+        },
+        "synthetic": {
+          "const": false
+        },
+        "durability_validation": {
+          "const": "designed"
+        },
+        "file_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "path": {
+          "type": "null"
+        },
+        "content": {
+          "const": "data"
+        },
+        "record_count": {
+          "$ref": "#/$defs/int64"
+        },
+        "compressed_bytes": {
+          "$ref": "#/$defs/int64"
+        },
+        "field_metrics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/manifestField"
+          }
+        },
+        "physical_file_exists": {
+          "const": true
+        },
+        "footer_bytes": {
+          "$ref": "#/$defs/int64"
+        },
+        "row_groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/rowGroup"
+          }
+        },
+        "footer_statistics": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/footerField"
+          }
+        },
+        "indexes": {
+          "type": "object",
+          "properties": {
+            "page": {
+              "type": "boolean"
+            },
+            "bloom": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "column": {
+              "type": "boolean"
+            },
+            "offset": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "page",
+            "bloom"
+          ],
+          "additionalProperties": true
+        },
+        "execution_capabilities": {
+          "type": "object",
+          "properties": {
+            "file_pruning": {
+              "const": false
+            },
+            "row_group_pruning": {
+              "const": false
+            },
+            "page_pruning": {
+              "const": false
+            },
+            "bloom_pruning": {
+              "const": false
+            }
+          },
+          "required": [
+            "file_pruning",
+            "row_group_pruning",
+            "page_pruning",
+            "bloom_pruning"
+          ],
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "identity",
+        "snapshot_id",
+        "backend",
+        "mock",
+        "synthetic",
+        "durability_validation",
+        "file_id",
+        "path",
+        "content",
+        "record_count",
+        "compressed_bytes",
+        "field_metrics",
+        "physical_file_exists",
+        "footer_bytes",
+        "row_groups",
+        "footer_statistics",
+        "indexes",
+        "execution_capabilities"
+      ],
+      "additionalProperties": true
+    },
+    "explanation": {
+      "type": "object",
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "snapshot_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "backend": {
+          "const": "local"
+        },
+        "mock": {
+          "const": false
+        },
+        "synthetic": {
+          "const": false
+        },
+        "durability_validation": {
+          "const": "designed"
+        },
+        "schema": {
+          "$ref": "#/$defs/schema"
+        },
+        "read_columns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "output_columns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "predicate": {
+          "$ref": "#/$defs/predicate"
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "batch_rows": {
+          "$ref": "#/$defs/int64"
+        },
+        "plan": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "candidates": {
+          "type": "object"
+        },
+        "estimates": {
+          "type": "object",
+          "properties": {
+            "rows_before_filter": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/int64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "data_files": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/int64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "output_rows": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/int64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "compressed_bytes": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/int64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "output_rows_kind": {
+              "enum": [
+                "unavailable",
+                "estimate",
+                "metadata",
+                "measured"
+              ]
+            },
+            "synthetic": {
+              "const": false
+            }
+          },
+          "required": [
+            "rows_before_filter",
+            "data_files",
+            "output_rows",
+            "compressed_bytes",
+            "output_rows_kind",
+            "synthetic"
+          ],
+          "additionalProperties": true
+        },
+        "actual_io": {
+          "type": "null"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/capabilities"
+        }
+      },
+      "required": [
+        "identity",
+        "snapshot_id",
+        "backend",
+        "mock",
+        "synthetic",
+        "durability_validation",
+        "schema",
+        "read_columns",
+        "output_columns",
+        "predicate",
+        "limit",
+        "batch_rows",
+        "plan",
+        "candidates",
+        "estimates",
+        "actual_io",
+        "capabilities"
+      ],
+      "additionalProperties": true
+    },
+    "manifestField": {
+      "type": "object",
+      "properties": {
+        "field_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "string",
+            "bool",
+            "int64",
+            "float64",
+            "timestamp_us_utc"
+          ]
+        },
+        "nullable": {
+          "type": "boolean"
+        },
+        "null_count": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "distinct_count": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lower_bound": {
+          "$ref": "#/$defs/cell"
+        },
+        "upper_bound": {
+          "$ref": "#/$defs/cell"
+        },
+        "lower_bound_exact": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "upper_bound_exact": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "compressed_bytes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "uncompressed_bytes": {
+          "type": "null"
+        },
+        "value_count": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nan_count": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lower_bound_hex": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(?:[0-9a-f]{2})*$"
+        },
+        "upper_bound_hex": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(?:[0-9a-f]{2})*$"
+        },
+        "bound_encoding": {
+          "const": "iceberg-single-value"
+        }
+      },
+      "required": [
+        "field_id",
+        "name",
+        "type",
+        "nullable",
+        "null_count",
+        "distinct_count",
+        "lower_bound",
+        "upper_bound",
+        "lower_bound_exact",
+        "upper_bound_exact",
+        "compressed_bytes",
+        "uncompressed_bytes",
+        "value_count",
+        "nan_count",
+        "lower_bound_hex",
+        "upper_bound_hex",
+        "bound_encoding"
+      ],
+      "additionalProperties": true
     }
   }
 }

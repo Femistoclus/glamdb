@@ -97,6 +97,22 @@ class CiNativeRunnerTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertFalse((self.root / "build").exists())
 
+    def test_normal_runs_documented_system_acceptance_from_installed_prefix(self):
+        log = self.record_commands("cmake", "ctest")
+        python = self.root / ".venv/bin/python"
+        python.write_text("#!/usr/bin/env python3\nimport json,sys\n"
+            f"with open({str(log)!r}, 'a') as out: print(json.dumps(['python',*sys.argv[1:]]),file=out)\n")
+        result = self.run_script("normal", "test")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        commands = [json.loads(line) for line in log.read_text().splitlines()]
+        installs = [command for command in commands if command[:2] == ["cmake", "--install"]]
+        self.assertEqual(len(installs), 1)
+        runs = [command for command in commands if command[:2] == ["python", "tools/acceptance/run.py"]]
+        self.assertEqual(len(runs), 1)
+        self.assertNotIn("--no-browser", runs[0])
+        self.assertEqual(runs[0][runs[0].index("--prefix") + 1],
+            str(self.root / "artifacts/native-normal/installed"))
+
     def test_build_failure_keeps_exit_code_and_diagnostic_log(self):
         cmake = self.root / "bin/cmake"
         cmake.write_text('#!/bin/sh\nprintf "%s\\n" "compiler failure details" >&2\nexit 17\n')

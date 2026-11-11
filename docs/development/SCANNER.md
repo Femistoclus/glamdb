@@ -224,3 +224,13 @@ commands, counts and the remaining qualification limits.
 Value validation reads only decoded columns of the projection and predicate;
 latent corruption in unread columns or unread data pages is not detected by
 `VerifyReachable`, which checks footers rather than every page.
+
+## Selected-view metadata integration
+
+`Engine::ListFiles`/`GetFileDetails` reuse committed manifest planning and confirmed-root
+leases. Inventory never lists warehouse directories; details validate actual
+immutable Parquet bytes, field IDs, typed footer statistics and row groups.
+These observations do not enable file/page/Bloom pruning. HTTP metadata, SDK
+and workbench use the same facade. The [installed system recipe](NATIVE_ACCEPTANCE.md)
+checks latest=1,010, historical A=1,000, initial=0, JSON/Arrow/EOS and retained
+batches, then repeats them after restart and source-independent restore.

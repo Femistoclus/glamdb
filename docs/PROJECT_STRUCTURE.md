@@ -170,3 +170,8 @@ ignored output directories. See [BUILDING.md](development/BUILDING.md),
 Independent Python suites live in `tests/verification/`, `sdk/python/tests/`,
 `apps/mock_server/tests/` and `tests/integration/test_network_sdk.py`; browser
 tests live in `ui/tests/`. Their results do not qualify the full native storage integration.
+
+`tools/acceptance/` contains the installed persistent cross-client recipe, native
+quiesce/backup orchestrator, independent Parquet/Avro inspector and sanitized
+Chromium evidence capture. `tests/system/` covers its owned-path and trace
+boundaries; normal native CI invokes the documented real-service recipe.

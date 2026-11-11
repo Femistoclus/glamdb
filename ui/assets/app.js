@@ -1,5 +1,6 @@
 import { writeEditor, readEditorRows, previewRows, lockWriteForm } from './editor.js';
-import { WorkbenchAPI } from './api.js';
+import { WorkbenchAPI, readMetadataPages, validateViewMetadata } from './api.js';
+import { fileDetails } from './file-details.js';
 import { applyTheme, validateTheme, brandAsset } from './theme.js';
 import {
     escapeHTML as e,
@@ -13,7 +14,11 @@ import {
     sessionSnapshots,
     sessionRowCount,
     prepareMutation,
+    serializePendingFile,
+    readPendingFile,
+    schemaSignature,
     supportsFeature,
+    queryMaxRows,
     storageNotice,
     validateQueryCapabilities,
 } from './model.js';
@@ -109,6 +114,15 @@ function countSnapshotRows(snapshot) {
     return snapshot.rows_added ?? snapshot.rows_appended ?? '—';
 }
 
+function syncQueryLimit() {
+    const maximum = queryMaxRows(state.capabilities, state.theme);
+    state.limit = Math.min(state.limit, maximum);
+    const input = $('#query-form input[name="limit"]');
+    if (input) {
+        input.max = String(maximum);
+        if (input.value !== '' && Number(input.value) > maximum) input.value = String(maximum);
+    }
+}
 async function loadTheme(force = false) {
     try {
         const response = await fetch(
@@ -122,6 +136,7 @@ async function loadTheme(force = false) {
             state.theme = config;
             themeStamp = stamp;
             applyTheme(config);
+            syncQueryLimit();
             updateThemeText();
         }
         $('#theme-warning').hidden = true;
@@ -199,6 +214,7 @@ async function databaseWorkspace(database = null) {
         const capabilities = await api.json('/capabilities', { signal: controller.signal });
         if (state.api !== api || controller.signal.aborted) return;
         state.capabilities = capabilities;
+        syncQueryLimit();
         if (database) await refreshWorkspace();
         else await databaseList();
     } catch (error) {
@@ -283,7 +299,7 @@ function chrome() {
     <div class="collection-list">${state.collections.map((item) => `<button data-action="select-collection" data-id="${e(item.collection_id)}" class="${state.collectionId === item.collection_id ? 'selected' : ''}">${icon('table')}<span>${e(item.name)}</span></button>`).join('')}</div>
     <div class="sidebar-footer">${icon('kiss', 'decor-kiss')}<p data-label="footer">${e(labels('footer'))}</p></div></aside>
     <div class="workspace"><header class="topbar"><div class="breadcrumb"><button class="icon-button menu-toggle" data-action="menu" aria-label="Toggle navigation">${icon('menu')}</button><span>Workspace</span>${icon('chevron')}<strong>${e(currentCollection()?.name ?? 'Your collections')}</strong></div>
-    <div class="top-actions">${state.managed ? '<button class="text-button" data-action="databases">Databases</button>' : ''}<button class="text-button docs-button" data-action="about">Quick guide</button><button class="icon-button" data-action="refresh" aria-label="Refresh workspace">${icon('refresh')}</button><button class="text-button" data-action="disconnect">${publicDemo ? 'Reset demo' : 'Disconnect'}</button><span class="avatar" aria-label="Workspace avatar">${state.theme.brand.mark ? `<img data-brand-logo="mark" class="brand-mark" src="${e(brandAsset(state.theme, 'mark'))}" alt="">` : 'G'}</span></div></header>
+    <div class="top-actions">${state.managed ? '<button class="text-button" data-action="databases">Databases</button>' : ''}${publicDemo ? '' : '<button class="text-button" data-action="pending-requests">Pending requests</button>'}<button class="text-button docs-button" data-action="about">Quick guide</button><button class="icon-button" data-action="refresh" aria-label="Refresh workspace">${icon('refresh')}</button><button class="text-button" data-action="disconnect">${publicDemo ? 'Reset demo' : 'Disconnect'}</button><span class="avatar" aria-label="Workspace avatar">${state.theme.brand.mark ? `<img data-brand-logo="mark" class="brand-mark" src="${e(brandAsset(state.theme, 'mark'))}" alt="">` : 'G'}</span></div></header>
     <main id="main-content" class="main">${state.capabilities?.mock ? `<div class="mock-banner">${icon('sparkle')}<span data-label="${publicDemo ? 'public_demo_notice' : 'mock_notice'}">${e(labels(publicDemo ? 'public_demo_notice' : 'mock_notice'))}</span></div>` : ''}<div id="view"></div>
     <footer class="page-footer"><span>GlamDB · <span data-brand="tagline">${e(state.theme.brand.tagline)}</span></span><span>Append mode · duplicate keys preserved ${icon('sparkle', 'decor-sparkle')}</span></footer></main></div></div>`;
     renderView();
@@ -389,8 +405,9 @@ function readQuery() {
         state.limit = Number(form.elements.limit.value);
     }
     if (!state.projection.length) throw new Error('Choose at least one output column');
-    if (!Number.isInteger(state.limit) || state.limit < 0 || state.limit > 1000)
-        throw new Error('Use a limit between 0 and 1000 in the browser');
+    const maximum = queryMaxRows(state.capabilities, state.theme);
+    if (!Number.isInteger(state.limit) || state.limit < 0 || state.limit > maximum)
+        throw new Error(`Use a limit between 0 and ${maximum} in the browser`);
     const body = {
         projection: state.projection,
         predicate: buildPredicate(state.clauses, state.join, state.negate, fields()),
@@ -442,7 +459,7 @@ function dataView() {
                     )}</select><input name="value" aria-label="Filter value ${i + 1}" value="${e(c.value)}" placeholder="A value, in its original type"><button type="button" class="icon-button" data-action="remove-condition" data-index="${i}" aria-label="Remove condition ${i + 1}">${icon('close')}</button></div>`,
         )
         .join('')}
-    <button type="button" class="text-button" data-action="add-condition" ${!composite && state.clauses.length ? 'disabled title="This server supports one comparison per query"' : ''}>+ Add a condition</button></div><div class="query-footer"><label>Result limit<input name="limit" type="number" min="0" max="1000" value="${state.limit}"></label><div class="button-row"><button type="button" class="button" data-action="explain-query" ${supportsFeature(state.capabilities, 'explain') ? '' : 'disabled title="Unavailable on this server"'}>${icon('sparkle')}Explain</button><button type="submit" class="button primary" id="run-query">${icon('arrow')}<span data-label="run_query">${e(labels('run_query'))}</span></button></div></div><details class="editor-json"><summary>Query JSON</summary><pre id="query-json" class="json-block">${e(queryPreview())}</pre><button type="button" class="text-button" data-action="download-query-json">Download JSON</button></details></form></div></section>${writePanel()}</div>
+    <button type="button" class="text-button" data-action="add-condition" ${!composite && state.clauses.length ? 'disabled title="This server supports one comparison per query"' : ''}>+ Add a condition</button></div><div class="query-footer"><label>Result limit<input name="limit" type="number" min="0" max="${queryMaxRows(state.capabilities, state.theme)}" value="${state.limit}"></label><div class="button-row"><button type="button" class="button" data-action="explain-query" ${supportsFeature(state.capabilities, 'explain') ? '' : 'disabled title="Unavailable on this server"'}>${icon('sparkle')}Explain</button><button type="submit" class="button primary" id="run-query">${icon('arrow')}<span data-label="run_query">${e(labels('run_query'))}</span></button></div></div><details class="editor-json"><summary>Query JSON</summary><pre id="query-json" class="json-block">${e(queryPreview())}</pre><button type="button" class="text-button" data-action="download-query-json">Download JSON</button></details></form></div></section>${writePanel()}</div>
     ${state.result ? resultTable() : `<div class="notice" style="margin-top:20px">Ready when you are. Your result will appear here, with its exact snapshot identity.</div>`}`;
 }
 function queryPreview() {
@@ -560,7 +577,7 @@ function explainView() {
         return `${heading('Query plans', 'This server does not yet expose this capability.')}<div class="notice">Your data remains available in Data studio.</div>`;
     return `${heading('A peek behind the query.', 'Plan estimates and executed measurements stay separate.')}<section class="panel"><div class="panel-header"><h2>Query plan</h2><button class="button small" data-action="explain-current">${icon('refresh')}Refresh plan</button></div><div class="panel-body">${
         state.plan
-            ? `<div class="button-row" style="margin-bottom:18px">${badge('Fixed snapshot', 'pink')}${badge(state.capabilities?.mock ? 'Reference mock scan' : 'Native scan')}${badge('Page/Bloom execution unsupported')}</div>${[
+            ? `<div class="button-row" style="margin-bottom:18px">${badge('Fixed snapshot', 'pink')}${badge(state.capabilities?.mock ? 'Reference mock scan' : 'Native scan')}${badge('Page/Bloom execution unsupported')}</div><dl class="metadata-list"><dt>Selected snapshot</dt><dd class="mono">${e(state.plan.snapshot_id ?? state.plan.identity?.snapshot_id ?? 'Initial empty view')}</dd><dt>Read columns</dt><dd>${e(state.plan.read_columns?.join(', ') ?? 'Unknown')}</dd><dt>Output columns</dt><dd>${e(state.plan.output_columns?.join(', ') ?? 'Unknown')}</dd><dt>Rows before filtering</dt><dd>${number(state.plan.estimates?.rows_before_filter)}</dd></dl>${[
                   ['Resolve snapshot', 'A single immutable identity is selected before reading.'],
                   ['Read projection', 'Read output columns and any additional predicate fields.'],
                   ['Filter rows', 'Exact SQL three-valued NULL logic; only TRUE survives.'],
@@ -578,6 +595,10 @@ function explainView() {
 }
 function operationsView() {
     const ops = state.operations.filter((op) => op.collectionId === state.collectionId);
+    const published =
+        state.capabilities?.mock === false && supportsFeature(state.capabilities, 'snapshots')
+            ? state.snapshots.filter((snapshot) => typeof snapshot.operation_id === 'string')
+            : null;
     return `${heading('Keep your operations close.', 'An unknown outcome is unresolved. A timeout is not a rollback.')}${state.managed ? '<p><button class="button" data-action="reconcile-workspace">Reconcile database</button></p>' : ''}<section class="panel"><div class="panel-header"><h2>This session's appends</h2>${badge('Synchronous API')}</div>${
         ops.length
             ? ops
@@ -589,7 +610,20 @@ function operationsView() {
                   )
                   .join('')
             : '<p class="result-empty">No appends submitted in this browser session. Server outcomes are queried by operation ID.</p>'
-    }</section><section class="panel"><div class="panel-body"><form id="operation-lookup-form" class="button-row"><label class="field">Operation ID<input name="operation" required autocomplete="off" placeholder="Original operation UUID"></label><button class="button" type="submit" ${state.collectionId ? '' : 'disabled'}>Look up operation</button></form><p class="small muted">Look up an original ID in this collection. This does not submit or retry a write.</p></div></section>`;
+    }</section>${
+        published
+            ? `<section class="panel"><div class="panel-header"><h2>Published snapshot operations</h2>${badge('Server history')}</div><p class="panel-body small muted">Original operation IDs from retained server snapshots. Look up the authoritative outcome without submitting a write.</p><div class="table-wrap"><table aria-label="Published snapshot operations"><thead><tr><th>Operation ID</th><th>Snapshot</th><th></th></tr></thead><tbody>${published
+                  .slice()
+                  .reverse()
+                  .map(
+                      (snapshot) =>
+                          `<tr><td class="mono">${e(snapshot.operation_id)}</td><td class="mono">${e(snapshot.snapshot_id)}</td><td><button class="button small" data-action="lookup-operation" data-id="${e(snapshot.operation_id)}">Look up outcome</button></td></tr>`,
+                  )
+                  .join(
+                      '',
+                  )}</tbody></table></div>${published.length ? '' : '<p class="result-empty">No append has been published yet.</p>'}</section>`
+            : ''
+    }<section class="panel"><div class="panel-body"><form id="operation-lookup-form" class="button-row"><label class="field">Operation ID<input name="operation" required autocomplete="off" placeholder="Original operation UUID"></label><button class="button" type="submit" ${state.collectionId ? '' : 'disabled'}>Look up operation</button></form><p class="small muted">Look up an original ID in this collection. This does not submit or retry a write.</p></div></section>`;
 }
 function styleView() {
     const c = state.theme;
@@ -615,20 +649,8 @@ function styleView() {
         )}</div><div class="button-row" style="margin-top:24px"><button class="button" data-action="reset-theme">Reset preview</button><button class="button primary" data-action="download-theme">${icon('download')}Download theme.json</button></div></div></section><div class="notice" style="margin-top:20px">Permanent changes: edit <code>ui/config/theme.json</code> (or your server's --theme-file). This page reloads valid changes automatically. Preview changes above are local to this tab until reset. No core rebuild, frontend build or server restart is required.</div>`;
 }
 
-async function allPages(path, signal, api = state.api) {
-    const items = [];
-    let cursor = null;
-    for (let pages = 0; pages < 100; pages++) {
-        const separator = path.includes('?') ? '&' : '?';
-        const page = await api.json(
-            `${path}${separator}page_size=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,
-            { signal },
-        );
-        items.push(...(page.items ?? []));
-        cursor = page.next_cursor;
-        if (!cursor) return items;
-    }
-    throw new Error('Metadata listing is too large for this workbench');
+async function allPages(path, signal, api = state.api, view) {
+    return readMetadataPages(api, path, { signal, view });
 }
 async function refreshSelection() {
     if (!state.collectionId) {
@@ -654,19 +676,46 @@ async function refreshSelection() {
     const selected =
         state.snapshotId === null ? (info.current_snapshot_id ?? 'initial') : state.snapshotId;
     const suffix = `?snapshot_id=${encodeURIComponent(selected)}`;
-    const [schema, stats, snapshots, filesResult] = await Promise.all([
-        api.json(`/collections/${encodeURIComponent(id)}/schema`, { signal }),
-        supportsFeature(state.capabilities, 'stats')
-            ? api.json(`/collections/${encodeURIComponent(id)}/stats${suffix}`, { signal })
-            : null,
-        supportsFeature(state.capabilities, 'snapshots')
-            ? allPages(`/collections/${encodeURIComponent(id)}/snapshots`, signal, api)
-            : [],
-        supportsFeature(state.capabilities, 'files')
-            ? allPages(`/collections/${encodeURIComponent(id)}/files${suffix}`, signal, api)
-            : [],
-    ]);
+    // Native admission allows two data calls per database. Read metadata one
+    // request at a time, leaving capacity for a query or outcome resolution.
+    const schema = await api.json(`/collections/${encodeURIComponent(id)}/schema`, { signal });
     if (!current()) return;
+    const stats = supportsFeature(state.capabilities, 'stats')
+        ? await api.json(`/collections/${encodeURIComponent(id)}/stats${suffix}`, { signal })
+        : null;
+    if (!current()) return;
+    const snapshots = supportsFeature(state.capabilities, 'snapshots')
+        ? await allPages(
+              `/collections/${encodeURIComponent(id)}/snapshots`,
+              signal,
+              api,
+              publicDemo
+                  ? undefined
+                  : { collectionId: id, mock: state.capabilities?.mock === true },
+          )
+        : [];
+    if (!current()) return;
+    const filesResult = supportsFeature(state.capabilities, 'files')
+        ? await allPages(
+              `/collections/${encodeURIComponent(id)}/files${suffix}`,
+              signal,
+              api,
+              publicDemo
+                  ? undefined
+                  : {
+                        collectionId: id,
+                        snapshotId: selected,
+                        mock: state.capabilities?.mock === true,
+                    },
+          )
+        : [];
+    if (!current()) return;
+    if (stats)
+        validateViewMetadata(stats, {
+            collectionId: id,
+            snapshotId: selected,
+            mock: state.capabilities?.mock === true,
+        });
     state.collection = info;
     state.resolvedSnapshot = selected;
     state.schema = schema.schema ?? schema;
@@ -793,7 +842,8 @@ async function runQuery() {
 async function explainQuery(fromForm) {
     if (!supportsFeature(state.capabilities, 'explain'))
         throw new Error('Explain is unavailable on this server');
-    const epoch = state.epoch;
+    const epoch = state.epoch,
+        api = state.api;
     const body = fromForm
         ? readQuery()
         : {
@@ -807,7 +857,12 @@ async function explainQuery(fromForm) {
         body,
         signal: viewController?.signal,
     });
-    if (epoch !== state.epoch) return;
+    if (epoch !== state.epoch || api !== state.api) return;
+    validateViewMetadata(result, {
+        collectionId: state.collectionId,
+        mock: state.capabilities?.mock === true,
+        ...(state.snapshotId === null ? {} : { snapshotId: state.snapshotId }),
+    });
     state.plan = result;
     state.tab = 'explain';
     chrome();
@@ -843,7 +898,7 @@ function openCreate() {
           ];
     showModal(
         'A new collection, just for you.',
-        `<form id="create-form"><label class="field">Collection name<input name="name" placeholder="my_collection" pattern="[a-z][a-z0-9_]{0,62}" required autofocus><small>Lowercase letters, numbers and underscores. Schema stays fixed.</small></label><div style="margin-top:20px"><label>Columns</label><div id="schema-editor"></div><button type="button" class="text-button" data-action="add-field">+ Add column</button></div><p class="modal-error" id="modal-error" role="alert"></p><div class="modal-actions"><button type="button" class="button" data-action="close-modal">Cancel</button><button class="button primary" type="submit">Create collection${icon('arrow')}</button></div></form>`,
+        `<form id="create-form"><label class="field">Collection name<input name="name" placeholder="my_collection" pattern="[a-z][a-z0-9_]{0,62}" required autofocus><small>Lowercase letters, numbers and underscores. Schema stays fixed.</small></label><div style="margin-top:20px"><label>Columns</label><div id="schema-editor"></div><button type="button" class="text-button" data-action="add-field">+ Add column</button></div><div id="create-outcome" role="status"></div><p class="modal-error" id="modal-error" role="alert"></p><div class="modal-actions"><button type="button" class="button" data-action="close-modal">Cancel</button>${state.creation ? '<button type="button" class="button" data-action="export-pending" data-kind="create">Export pending request</button>' : ''}<button class="button primary" type="submit">Create collection${icon('arrow')}</button></div></form>`,
     );
     renderCreationFields();
     if (state.creation) {
@@ -860,21 +915,20 @@ function freezeCreationForm(form) {
     ))
         input.disabled = true;
 }
+function releaseCreationForm(form) {
+    for (const input of form.querySelectorAll('input')) input.readOnly = false;
+    for (const input of form.querySelectorAll(
+        'select,input[type=checkbox],button[data-action="add-field"],button[data-action="remove-field"]',
+    ))
+        input.disabled = false;
+    form.querySelector('[data-action="export-pending"]')?.remove();
+}
 function verifyCreated(created, body) {
-    const signature = (list) =>
-        JSON.stringify(
-            list.map((field, index) => ({
-                name: field.name,
-                type: field.type,
-                nullable: field.nullable,
-                field_id: field.field_id ?? index + 1,
-            })),
-        );
     if (
         created.collection_id !== body.collection_id ||
         created.name !== body.name ||
         !Array.isArray(created.schema?.fields) ||
-        signature(created.schema.fields) !== signature(body.schema.fields)
+        schemaSignature(created.schema) !== schemaSignature(body.schema)
     )
         throw new Error(
             'Resolved collection identity or schema differs from the original create request. Keep its UUID for recovery.',
@@ -886,35 +940,48 @@ async function createForm(form) {
     setBusy(button, true);
     const api = state.api,
         epoch = state.epoch;
-    let draft;
+    let draft, created;
     try {
-        const content = {
-            name: form.elements.name.value,
-            schema: { fields: readCreationFields() },
-        };
-        const fingerprint = JSON.stringify(content);
-        if (state.creation && state.creation.fingerprint !== fingerprint)
-            throw new Error('Resolve the original create before changing its name or schema');
+        const content = state.creation
+            ? { name: state.creation.body.name, schema: state.creation.body.schema }
+            : { name: form.elements.name.value, schema: { fields: readCreationFields() } };
         draft = state.creation ?? {
-            fingerprint,
+            fingerprint: JSON.stringify(content),
             body: { collection_id: crypto.randomUUID(), ...content },
+            scope: recoveryScope(),
         };
         state.creation = draft;
-        let created;
         try {
-            created = verifyCreated(
-                await api.json('/collections', { method: 'POST', body: draft.body }),
-                draft.body,
-            );
+            const received = await api.json('/collections', {
+                method: 'POST',
+                body: draft.body,
+                allowOutcome: true,
+            });
+            if (received.outcome === 'definitely_not_committed') {
+                const error = new Error(
+                    received.error?.message ?? 'Collection definitely not created',
+                );
+                error.definite = true;
+                throw error;
+            }
+            if (received.outcome === 'commit_unknown')
+                throw new Error(received.error?.message ?? 'Creation requires recovery');
+            created = verifyCreated(received.info ?? received.result ?? received, draft.body);
         } catch (error) {
             if (state.api !== api) return;
-            if ([400, 401, 403, 409, 413, 415, 422, 429, 507].includes(error.status)) {
-                state.creation = null;
+            if (
+                error.definite ||
+                [400, 401, 403, 409, 413, 415, 422, 429, 507].includes(error.status)
+            ) {
+                draft.terminal = true;
+                draft.outcome = 'definitely_not_committed';
+                if (state.creation === draft) state.creation = null;
+                releaseCreationForm(form);
                 throw error;
             }
             freezeCreationForm(form);
-            // An unavailable POST response is not evidence of absence. Resolve exact
-            // name and verify the original UUID/schema before publishing success.
+            // An unavailable response is not proof of absence. Resolve the exact
+            // original UUID and schema, or keep the complete request for retry.
             try {
                 created = verifyCreated(
                     await api.json(
@@ -923,24 +990,185 @@ async function createForm(form) {
                     draft.body,
                 );
             } catch {
+                ensurePendingExport(form, 'create');
                 throw new Error(
                     `Creation is unresolved (${error.message}). Retry the same request; UUID ${draft.body.collection_id}.`,
                 );
             }
         }
         if (state.api !== api) return;
+        draft.terminal = true;
+        draft.outcome = 'committed';
         if (state.creation === draft) state.creation = null;
-        const collections = await allPages('/collections', connectionController?.signal, api);
-        if (state.api !== api) return;
-        state.collections = collections;
-        if (form.isConnected && epoch === state.epoch) {
-            $('#modal').close();
-            state.tab = 'data';
-            await selectCollection(created.collection_id);
-        } else chrome();
-        toast('A new collection. A fresh possibility.');
+        state.collections = [
+            ...state.collections.filter((item) => item.collection_id !== created.collection_id),
+            created,
+        ];
+        if (form.isConnected) {
+            $('#create-outcome').innerHTML =
+                `<div class="op-outcome"><strong>Collection created</strong><code>${e(created.collection_id)}</code></div>`;
+            freezeCreationForm(form);
+            button.textContent = 'Created';
+            button.disabled = true;
+            form.querySelector('[data-action="export-pending"]')?.remove();
+        }
+        try {
+            const collections = await allPages('/collections', connectionController?.signal, api);
+            if (state.api !== api) return;
+            state.collections = collections;
+            if (form.isConnected && epoch === state.epoch) {
+                state.tab = 'data';
+                await selectCollection(created.collection_id);
+                $('#modal').close();
+            } else chrome();
+            toast('Collection created. Ready for your rows.');
+        } catch (error) {
+            if (state.api !== api) return;
+            if (form.isConnected)
+                form.querySelector('#modal-error').textContent =
+                    `Collection created. Metadata refresh failed: ${error.message}. Use Refresh workspace to load it.`;
+            toast('Collection created. Metadata refresh failed; refresh the workspace to load it.');
+        }
     } catch (error) {
-        if (form.isConnected) form.querySelector('#modal-error').textContent = error.message;
+        if (state.api === api && form.isConnected)
+            form.querySelector('#modal-error').textContent = error.message;
+    } finally {
+        setBusy(button, false);
+        if (created) button.disabled = true;
+    }
+}
+function recoveryScope() {
+    return {
+        server_url: new URL(state.base).href.replace(/\/$/, ''),
+        database_id: state.database?.database_id ?? null,
+        store_id:
+            state.database?.store?.store_id ??
+            state.capabilities?.store_id ??
+            state.stats?.identity?.store_id ??
+            null,
+        backend: state.capabilities?.backend ?? 'unknown',
+        mock: state.capabilities?.mock === true,
+    };
+}
+function pendingEntries(allDatabases = false) {
+    const entries = [],
+        seen = new Set();
+    const append = (draft, kind) => {
+        if (!draft || draft.terminal) return;
+        const key = kind === 'create' ? draft.body.collection_id : draft.operationId;
+        if (seen.has(key)) return;
+        seen.add(key);
+        entries.push({ kind, draft });
+    };
+    const addState = (drafts) => {
+        append(drafts.creation, 'create');
+        drafts.operations?.forEach((draft) => append(draft, 'append'));
+        append(drafts.mutation, 'append');
+    };
+    addState(state);
+    if (allDatabases) for (const [, drafts] of state.databaseDrafts ?? []) addState(drafts);
+    return entries;
+}
+function ensurePendingExport(form, kind, id = '') {
+    if (!publicDemo && !form.querySelector('[data-action="export-pending"]'))
+        form.insertAdjacentHTML(
+            'beforeend',
+            `<button type="button" class="button small" data-action="export-pending" data-kind="${kind}" data-id="${e(id)}">Export pending request</button>`,
+        );
+}
+function exportRecovery(kind, id) {
+    const entry = pendingEntries(true).find(
+        (entry) =>
+            entry.kind === kind &&
+            (kind === 'create'
+                ? !id || entry.draft.body.collection_id === id
+                : entry.draft.operationId === id),
+    );
+    if (!entry) throw new Error('This request is already terminal or is no longer in this tab');
+    const { draft } = entry;
+    const exported = serializePendingFile(draft.scope ?? recoveryScope(), kind, draft);
+    download(
+        `glamdb-pending-${kind === 'create' ? draft.body.collection_id : draft.operationId}.json`,
+        exported,
+        'application/json',
+    );
+}
+function openRecovery(disconnecting = false) {
+    const entries = pendingEntries(disconnecting);
+    showModal(
+        disconnecting ? 'Keep your pending requests' : 'Pending requests',
+        `
+        <p>Export unresolved requests before reload or disconnect. After reconnecting to the same database, import the file, then check its outcome or retry the original request.</p>
+        <p class="small muted">Recovery files contain the original schema and row data, without the access token. Export and import allow up to 32 MiB per file. Importing does not submit a write.</p>
+        ${entries.length ? entries.map(({ kind, draft }) => `<div class="operations-card"><div><strong>${kind === 'create' ? 'Create collection' : 'Append rows'}</strong><p class="mono">${e(kind === 'create' ? draft.body.collection_id : draft.operationId)}</p></div><button class="button small" data-action="export-pending" data-kind="${kind}" data-id="${e(kind === 'create' ? draft.body.collection_id : draft.operationId)}">Export pending request</button></div>`).join('') : '<p class="result-empty">No unresolved requests in this database.</p>'}
+        <form id="recovery-form"><label class="field">Recovery JSON file<input type="file" name="recovery" accept="application/json,.json" required></label><p id="modal-error" class="modal-error" role="alert"></p><div class="modal-actions"><button class="button" type="submit">Import pending request</button>${disconnecting ? '<button class="button" type="button" data-action="disconnect-clear">Disconnect and clear</button>' : ''}</div></form>`,
+    );
+}
+async function importRecovery(form) {
+    const api = state.api,
+        epoch = state.epoch,
+        scope = recoveryScope();
+    const button = form.querySelector('[type=submit]');
+    setBusy(button, true);
+    try {
+        const file = form.elements.recovery.files[0];
+        const { kind, draft } = await readPendingFile(file, scope);
+        draft.scope = scope;
+        if (kind === 'append') {
+            const schema = await api.json(
+                `/collections/${encodeURIComponent(draft.collectionId)}/schema`,
+                { signal: connectionController?.signal },
+            );
+            if (schemaSignature(schema.schema ?? schema) !== schemaSignature(draft.schema))
+                throw new Error('Collection schema differs from the original pending request');
+            if (api !== state.api || epoch !== state.epoch) return;
+            const existing = state.operations.find(
+                (item) => item.operationId === draft.operationId,
+            );
+            const pending = pendingForCollection(draft.collectionId);
+            if (existing?.terminal)
+                throw new Error('This operation already has a terminal outcome in this tab');
+            if (
+                (existing &&
+                    (existing.fingerprint !== draft.fingerprint ||
+                        existing.collectionId !== draft.collectionId)) ||
+                (pending && pending.operationId !== draft.operationId)
+            )
+                throw new Error(
+                    'Resolve the existing pending request before importing different content',
+                );
+            const selectedEpoch = state.epoch + 1;
+            await selectCollection(draft.collectionId);
+            if (
+                api !== state.api ||
+                state.epoch !== selectedEpoch ||
+                state.collectionId !== draft.collectionId
+            )
+                return;
+            const operation = existing ?? draft;
+            if (!existing) saveOutcome(operation, { outcome: 'unresolved' });
+            state.mutation = operation;
+            state.writeOperationId = operation.operationId;
+            state.tab = 'data';
+            $('#modal').close();
+            chrome();
+        } else {
+            if (api !== state.api || epoch !== state.epoch) return;
+            if (
+                state.creation &&
+                (state.creation.body.collection_id !== draft.body.collection_id ||
+                    state.creation.fingerprint !== draft.fingerprint)
+            )
+                throw new Error(
+                    'Resolve the existing pending creation before importing a different request',
+                );
+            state.creation = state.creation ?? draft;
+            openCreate();
+        }
+        toast('Original request imported. Check its outcome or retry with the same ID.');
+    } catch (error) {
+        if (api === state.api && form.isConnected)
+            form.querySelector('#modal-error').textContent = error.message;
     } finally {
         setBusy(button, false);
     }
@@ -1019,6 +1247,8 @@ function showAppendOutcome(operation, payload) {
                   ? 'Definitely not committed'
                   : 'Outcome unresolved · keep this operation ID';
         node.innerHTML = `<div class="op-outcome"><strong>${e(title)}</strong><code>${e(operation.operationId)}</code>${payload.result ? `<p>Snapshot ${e(payload.result.snapshot_id)}</p>` : ''}<p class="small muted">${e(payload.error?.message ?? (payload.recovery_required ? 'Recovery is required before a new mutation.' : ''))}</p></div>`;
+        if (!operation.terminal) ensurePendingExport(form, 'append', operation.operationId);
+        else form.querySelector('[data-action="export-pending"]')?.remove();
         if (form.id === 'write-form') {
             if (operation.terminal && !form.querySelector('[data-action="new-write"]'))
                 form.insertAdjacentHTML(
@@ -1061,8 +1291,10 @@ async function appendForm(form) {
                 : form.id === 'write-form'
                   ? formRows(state.schema, readEditorRows(form))
                   : wireRows(state.schema, JSON.parse(form.elements.rows.value));
-        operation = prepareMutation(previous, { rows });
+        operation = previous ?? prepareMutation(null, { rows });
         operation.collectionId = collectionId;
+        operation.schema ??= structuredClone(state.schema);
+        operation.scope ??= recoveryScope();
         state.mutation = operation;
         if (form.id === 'write-form') {
             state.writeOperationId = operation.operationId;
@@ -1095,12 +1327,31 @@ async function appendForm(form) {
             saveOutcome(operation, { outcome: 'transport_unknown' });
             showAppendOutcome(operation, { outcome: 'commit_unknown', recovery_required: true });
             button.textContent = 'Retry same operation';
-            form.elements.rows.readOnly = true;
+            if (form.elements.rows) form.elements.rows.readOnly = true;
+            else lockWriteForm(form);
         }
         if (form.isConnected)
             form.querySelector('#modal-error, #write-error').textContent = error.message;
     } finally {
         if (!operation?.terminal) setBusy(button, false);
+    }
+}
+async function lookupOperation(id) {
+    const api = state.api,
+        epoch = state.epoch,
+        collectionId = state.collectionId;
+    try {
+        const outcome = await api.json(
+            `/collections/${encodeURIComponent(collectionId)}/operations/${encodeURIComponent(id)}`,
+            {
+                allowOutcome: true,
+                signal: connectionController?.signal,
+            },
+        );
+        if (api === state.api && epoch === state.epoch)
+            showModal('Operation outcome', `<pre class="json-block">${json(outcome)}</pre>`);
+    } catch (error) {
+        if (api === state.api && epoch === state.epoch) throw error;
     }
 }
 async function resolveOperation(id) {
@@ -1155,10 +1406,13 @@ async function inspectFile(id) {
             { signal: controller?.signal },
         );
         if (!current()) return;
-        showModal(
-            'A closer look.',
-            `<p class="muted small">${data.synthetic ? 'Synthetic mock descriptor · no physical file exists.' : 'Metadata for the selected immutable file.'}</p><pre class="json-block">${json(data)}</pre>`,
-        );
+        if (!publicDemo)
+            validateViewMetadata(data, {
+                collectionId,
+                snapshotId: selector,
+                mock: state.capabilities?.mock === true,
+            });
+        showModal('A closer look.', fileDetails(data, selector));
     } catch (error) {
         if (current()) throw error;
     }
@@ -1186,6 +1440,7 @@ document.addEventListener('submit', async (event) => {
             'append-form',
             'write-form',
             'operation-lookup-form',
+            'recovery-form',
         ].includes(event.target.id)
     )
         return;
@@ -1209,6 +1464,7 @@ document.addEventListener('submit', async (event) => {
                 });
                 if (state.api !== api || controller.signal.aborted) return;
                 state.capabilities = capabilities;
+                syncQueryLimit();
                 if (capabilities.features?.database_management) await databaseWorkspace();
                 else await refreshWorkspace();
             } catch (error) {
@@ -1223,15 +1479,9 @@ document.addEventListener('submit', async (event) => {
         else if (form.id === 'query-form') await runQuery();
         else if (form.id === 'append-form' || form.id === 'write-form') await appendForm(form);
         else if (form.id === 'create-form') await createForm(form);
-        else if (form.id === 'operation-lookup-form') {
-            const epoch = state.epoch;
-            const outcome = await api.json(
-                `${collectionPath()}/operations/${encodeURIComponent(form.elements.operation.value.trim())}`,
-                { allowOutcome: true, signal: connectionController?.signal },
-            );
-            if (state.api === api && state.epoch === epoch && form.isConnected)
-                showModal('Operation outcome', `<pre class="json-block">${json(outcome)}</pre>`);
-        }
+        else if (form.id === 'recovery-form') await importRecovery(form);
+        else if (form.id === 'operation-lookup-form')
+            await lookupOperation(form.elements.operation.value.trim());
     } catch (error) {
         if (state.api === api) report(error);
     }
@@ -1255,9 +1505,18 @@ document.addEventListener('click', async (event) => {
                 location.reload();
                 return;
             }
+            if (pendingEntries(true).length) openRecovery(true);
+            else {
+                resetSession();
+                login();
+            }
+        } else if (action === 'disconnect-clear') {
             resetSession();
             login();
-        } else if (action === 'refresh') {
+        } else if (action === 'pending-requests') openRecovery();
+        else if (action === 'export-pending')
+            exportRecovery(target.dataset.kind, target.dataset.id);
+        else if (action === 'refresh') {
             await refreshWorkspace();
             if (state.api === api) toast('Workspace refreshed.');
         } else if (action === 'select-collection') await selectCollection(target.dataset.id);
@@ -1331,6 +1590,7 @@ document.addEventListener('click', async (event) => {
             );
         } else if (action === 'export-arrow') await exportArrow();
         else if (action === 'file') await inspectFile(target.dataset.id);
+        else if (action === 'lookup-operation') await lookupOperation(target.dataset.id);
         else if (action === 'resolve-operation') await resolveOperation(target.dataset.id);
         else if (action === 'resolve-pending')
             await resolveOperation($('#append-form').dataset.operationId);
@@ -1407,6 +1667,7 @@ async function bootstrap() {
             if (!response.ok) throw new Error('Demo data is unavailable');
             state.api = new BrowserDemoAPI(await response.json());
             state.capabilities = await state.api.json('/capabilities');
+            syncQueryLimit();
             await refreshWorkspace();
         } else {
             login();

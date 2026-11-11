@@ -437,3 +437,13 @@ artifact reference with the change. Keep commands and this status description
 current as targets and suites are added.
 
 See [E0 validation](E0_VALIDATION.md) for the executed scaffold checks and scope.
+
+## Installed shared-store system recipe
+
+The normal native CI contour also installs the service/CLI/admin/UI prefix and
+runs [native acceptance](NATIVE_ACCEPTANCE.md), without a mock or browser skip.
+Its persistent A=1,000/B=10 fixture checks exact CLI/SDK/UI rows and Arrow, restart
+retry, physical Parquet/Avro membership and quiesced whole-store restore.
+The extra test-only Avro reader is hash-pinned in `tools/acceptance/requirements.txt`.
+Selected reports, screenshots, downloaded Arrow and sanitized traces are retained
+by the pinned official upload Action; private tokens/raw traces are excluded.

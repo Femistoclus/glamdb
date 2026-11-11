@@ -18,6 +18,12 @@ async function nav(page, name) {
     await page.locator('nav').getByRole('button', { name, exact: true }).click();
 }
 
+async function disconnect(page) {
+    await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
+    const clear = page.getByRole('button', { name: 'Disconnect and clear', exact: true });
+    if (await clear.isVisible()) await clear.click();
+}
+
 test('reconnect uses a new session without previous rows snapshot or query', async ({ page }) => {
     let secondSession = false;
     const secondRequests = [];
@@ -52,7 +58,7 @@ test('reconnect uses a new session without previous rows snapshot or query', asy
     await page.getByLabel('Filter value 1').fill('dream-001');
     await page.getByRole('button', { name: 'Run query', exact: true }).click();
     await expect(page.getByRole('cell', { name: 'dream-001', exact: true })).toBeVisible();
-    await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
+    await disconnect(page);
     await expect(page.getByLabel('Access token')).toHaveValue('');
     secondSession = true;
     await page.getByLabel('Access token').fill('second-session-only-token');
@@ -118,7 +124,7 @@ for (const change of ['collection', 'snapshot', 'connection']) {
                     page.getByRole('table', { name: 'Data files' }).locator('tbody tr'),
                 ).toHaveCount(0);
             } else {
-                await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
+                await disconnect(page);
                 await page.getByLabel('Access token').fill(token);
                 await page.getByRole('button', { name: 'Open my workspace' }).click();
                 await expect(
@@ -186,7 +192,7 @@ test('a late post-create listing cannot restore the previous session', async ({ 
         await page.getByRole('button', { name: 'Create collection', exact: true }).click();
         await captured;
         await page.getByRole('button', { name: 'Close dialog' }).click();
-        await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
+        await disconnect(page);
         secondSession = true;
         await page.getByLabel('Access token').fill('second-session-only-token');
         await page.getByRole('button', { name: 'Open my workspace' }).click();
@@ -242,7 +248,7 @@ test('a late create rejection cannot clear the next session pending identity', a
         await page.getByRole('button', { name: 'Create collection', exact: true }).click();
         await captured;
         await page.getByRole('button', { name: 'Close dialog' }).click();
-        await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
+        await disconnect(page);
         await page.getByLabel('Access token').fill(token);
         await page.getByRole('button', { name: 'Open my workspace' }).click();
         await expect(page.getByRole('heading', { name: 'A little overview' })).toBeVisible();
@@ -299,7 +305,7 @@ test('disconnect cancels the previous session Arrow export without a download', 
     try {
         await page.getByRole('button', { name: 'Arrow', exact: true }).click();
         await captured;
-        await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
+        await disconnect(page);
         await expect(page.getByLabel('Access token')).toHaveValue('');
         await expect.poll(() => page.evaluate(() => window.exportAborted)).toBe(true);
         release();
@@ -357,7 +363,7 @@ test('an old operation error cannot show private text after disconnect', async (
     try {
         await page.getByRole('button', { name: 'Check outcome', exact: true }).click();
         await captured;
-        await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
+        await disconnect(page);
         release();
         await expect.poll(() => page.evaluate(() => window.operationFinished)).toBe(1);
         await expect(page.locator('#toast')).toBeEmpty();

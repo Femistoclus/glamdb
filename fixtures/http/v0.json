@@ -315,53 +315,77 @@
     {
       "method": "GET",
       "path": "/databases/{database_id}/collections/{collection_id}/stats",
-      "core": "proposed Engine::Stats",
-      "status": 501,
+      "core": "Engine::GetStatistics / Engine::ListSnapshots",
+      "status": 200,
       "response_fields": {
-        "error": "object"
+        "identity": "object",
+        "snapshot_id": "string",
+        "rows": "string",
+        "data_files": "string",
+        "compressed_data_bytes": "string",
+        "logical_bytes": "null"
       },
-      "response_schema": "error"
+      "response_schema": "statistics"
     },
     {
       "method": "GET",
       "path": "/databases/{database_id}/collections/{collection_id}/snapshots",
-      "core": "proposed Engine::ListSnapshots",
-      "status": 501,
+      "core": "Engine::ListSnapshots",
+      "status": 200,
       "response_fields": {
-        "error": "object"
+        "identity": "object",
+        "snapshot_id": "string",
+        "items": "array",
+        "next_cursor": "null"
       },
-      "response_schema": "error"
+      "response_schema": "snapshotsPage"
     },
     {
       "method": "GET",
       "path": "/databases/{database_id}/collections/{collection_id}/files",
-      "core": "proposed Engine::ListFiles",
-      "status": 501,
+      "core": "Engine::ListFiles",
+      "status": 200,
       "response_fields": {
-        "error": "object"
+        "identity": "object",
+        "snapshot_id": "string",
+        "items": "array",
+        "next_cursor": "null"
       },
-      "response_schema": "error"
+      "response_schema": "filesPage",
+      "capture": {
+        "file_id": "items.0.file_id"
+      }
     },
     {
       "method": "GET",
-      "path": "/databases/{database_id}/collections/{collection_id}/files/example",
-      "core": "proposed Engine::FileDetails",
-      "status": 501,
+      "path": "/databases/{database_id}/collections/{collection_id}/files/{file_id}",
+      "core": "Engine::GetFile",
+      "status": 200,
       "response_fields": {
-        "error": "object"
+        "identity": "object",
+        "snapshot_id": "string",
+        "file_id": "string",
+        "record_count": "string",
+        "row_groups": "array",
+        "footer_statistics": "array"
       },
-      "response_schema": "error"
+      "response_schema": "fileDetails"
     },
     {
       "method": "POST",
       "path": "/databases/{database_id}/collections/{collection_id}/explain",
-      "core": "proposed Engine::Explain",
-      "status": 501,
+      "core": "Engine::ExplainScan",
+      "status": 200,
       "response_fields": {
-        "error": "object"
+        "identity": "object",
+        "snapshot_id": "string",
+        "read_columns": "array",
+        "output_columns": "array",
+        "estimates": "object",
+        "actual_io": "null"
       },
       "request": {},
-      "response_schema": "error",
+      "response_schema": "explanation",
       "request_schema": "scan"
     },
     {

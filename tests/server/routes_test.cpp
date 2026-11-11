@@ -10,6 +10,29 @@
 #include <gtest/gtest.h>
 
 namespace glamdb::NServer {
+TEST(NativeRoutes, CapabilitiesReflectThePublicFacade)
+{
+    test::TempDir temporary;
+    const auto root = temporary.path / "store";
+    auto backend = std::make_shared<test::FakeStorage>(root);
+    auto engine = NTransport::Unwrap(detail::EngineFactory::Create({test::store_id, root.string()}, backend));
+    TRoutes routes(engine, {}, "secret");
+    const auto response = routes.Handle({"GET", "/capabilities", {{"authorization", "Bearer secret"}}, {}});
+    ASSERT_EQ(response.Status, 200);
+    const auto value = NTransport::ParseJson(response.Body);
+    const auto expected = engine->GetCapabilities();
+    EXPECT_EQ(value["store_id"], test::store_id);
+    EXPECT_EQ(value["features"]["append"], expected.append);
+    EXPECT_EQ(value["features"]["scan"], expected.scan);
+    EXPECT_EQ(value["features"]["stats"], expected.metadata);
+    EXPECT_EQ(value["features"]["snapshots"], expected.metadata);
+    EXPECT_EQ(value["features"]["files"], expected.metadata);
+    EXPECT_EQ(value["features"]["explain"], expected.metadata);
+    EXPECT_EQ(value["file_pruning"], expected.file_pruning);
+    EXPECT_EQ(value["row_group_pruning"], expected.row_group_pruning);
+    EXPECT_FALSE(value["durability_qualified"].get<bool>());
+}
+
 TEST(NativeRoutes, OutcomeLookupRetainsUnknownRecoveryContext)
 {
     test::JournalFaultVfs vfs;

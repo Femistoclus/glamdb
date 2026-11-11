@@ -1,6 +1,7 @@
 """Managed HTTP + real storage; deterministic SQLite VFS faults, not power-loss simulation."""
 import http.client
 import json
+import os
 import select
 import socket
 import struct
@@ -22,7 +23,7 @@ TOKEN = 'fault-test-token'
 
 class NativeFaultHTTP(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix='glamdb-http-fault-', dir='/tmp')
+        self.tmp = tempfile.TemporaryDirectory(prefix='glamdb-http-fault-', dir=str(Path(os.environ.get('GLAMDB_TEST_TMPDIR', '/tmp')).resolve()))
         self.addCleanup(self.tmp.cleanup)
         self.directory = Path(self.tmp.name) / 'server'
         self.start()
@@ -289,6 +290,27 @@ class NativeFaultHTTP(unittest.TestCase):
             finally:
                 self.arm('release', 0, False)
             self.assertEqual(append.result(timeout=10)['outcome'], 'committed')
+
+    def test_explain_is_admitted_as_a_read_while_publication_is_blocked(self):
+        path = self.collection()
+        original = self.api(path + '/append',
+            {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'original'}]})
+        self.arm('pause', 2, False)
+        with ThreadPoolExecutor(max_workers=1) as workers:
+            append = workers.submit(self.api, path + '/append',
+                {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'paused'}]})
+            self.wait_for_publication()
+            try:
+                explained = self.api(path + '/explain', {})
+                self.assertEqual(explained['snapshot_id'], original['result']['snapshot_id'])
+                self.assertEqual(explained['estimates']['rows_before_filter'], '1')
+            finally:
+                self.arm('release', 0, False)
+            committed = append.result(timeout=10)
+            self.assertEqual(committed['outcome'], 'committed')
+        explained = self.api(path + '/explain', {})
+        self.assertEqual(explained['snapshot_id'], committed['result']['snapshot_id'])
+        self.assertEqual(explained['estimates']['rows_before_filter'], '2')
 
     def test_readiness_during_open_recovery_and_reconciliation(self):
         self.api(self.base + '/close', {})

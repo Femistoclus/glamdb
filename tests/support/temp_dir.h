@@ -12,7 +12,9 @@ class TempDir
 public:
     TempDir()
     {
-        std::string pattern = "/tmp/glamdb-test-XXXXXX";
+        const char* selected = std::getenv("GLAMDB_TEST_TMPDIR");
+        const auto parent = std::filesystem::canonical(selected != nullptr ? selected : "/tmp");
+        std::string pattern = (parent / "glamdb-test-XXXXXX").string();
         const char* created = mkdtemp(pattern.data());
         if (created == nullptr) {
             throw std::runtime_error("mkdtemp failed");

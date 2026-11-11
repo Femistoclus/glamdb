@@ -1,0 +1,228 @@
+{
+  "version": "v0",
+  "evidence_kind": "literal_wire_fixture",
+  "physical_file_validated": false,
+  "collection_id": "00112233-4455-6677-8899-aabbccddeeff",
+  "selector": "9007199254740993",
+  "cases": [
+    {
+      "method": "stats",
+      "response_schema": "statistics",
+      "response": {
+        "identity": {
+          "store_id": "01234567-89ab-cdef-0123-456789abcdef",
+          "collection_id": "00112233-4455-6677-8899-aabbccddeeff",
+          "table_uuid": "11111111-2222-4333-8444-555555555555",
+          "metadata_location": "store://01234567-89ab-cdef-0123-456789abcdef/warehouse/00112233-4455-6677-8899-aabbccddeeff/metadata/root.metadata.json",
+          "current_snapshot_id": "9223372036854775807",
+          "schema_id": 0,
+          "spec_id": 0
+        },
+        "snapshot_id": "9007199254740993",
+        "backend": "local",
+        "mock": false,
+        "synthetic": false,
+        "durability_validation": "designed",
+        "rows": "9007199254740993",
+        "data_files": "1",
+        "compressed_data_bytes": "4096",
+        "logical_bytes": null,
+        "root_metadata_bytes": null,
+        "retained_snapshots": "2",
+        "byte_measurement": "committed_data_file_descriptors",
+        "metric_kinds": {
+          "rows": "metadata",
+          "data_files": "metadata",
+          "compressed_data_bytes": "metadata",
+          "logical_bytes": "unavailable",
+          "root_metadata_bytes": "unavailable"
+        }
+      }
+    },
+    {
+      "method": "files",
+      "response_schema": "filesPage",
+      "response": {
+        "identity": {
+          "store_id": "01234567-89ab-cdef-0123-456789abcdef",
+          "collection_id": "00112233-4455-6677-8899-aabbccddeeff",
+          "table_uuid": "11111111-2222-4333-8444-555555555555",
+          "metadata_location": "store://01234567-89ab-cdef-0123-456789abcdef/warehouse/00112233-4455-6677-8899-aabbccddeeff/metadata/root.metadata.json",
+          "current_snapshot_id": "9223372036854775807",
+          "schema_id": 0,
+          "spec_id": 0
+        },
+        "snapshot_id": "9007199254740993",
+        "backend": "local",
+        "mock": false,
+        "synthetic": false,
+        "durability_validation": "designed",
+        "items": [
+          {
+            "file_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "path": null,
+            "content": "data",
+            "record_count": "9007199254740993",
+            "compressed_bytes": "4096",
+            "field_metrics": [
+              {
+                "field_id": 2,
+                "name": "n",
+                "type": "int64",
+                "nullable": true,
+                "null_count": "1",
+                "distinct_count": null,
+                "lower_bound": "-9223372036854775808",
+                "upper_bound": "9007199254740993",
+                "lower_bound_exact": null,
+                "upper_bound_exact": null,
+                "lower_bound_hex": "0000000000000080",
+                "upper_bound_hex": "0100000000002000",
+                "bound_encoding": "iceberg-single-value",
+                "compressed_bytes": "256",
+                "uncompressed_bytes": null,
+                "value_count": "9007199254740993",
+                "nan_count": null
+              }
+            ],
+            "synthetic": false,
+            "physical_file_exists": null,
+            "backend": "local",
+            "mock": false,
+            "format": "parquet"
+          }
+        ],
+        "next_cursor": null
+      }
+    },
+    {
+      "method": "file",
+      "file_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "response_schema": "fileDetails",
+      "response": {
+        "identity": {
+          "store_id": "01234567-89ab-cdef-0123-456789abcdef",
+          "collection_id": "00112233-4455-6677-8899-aabbccddeeff",
+          "table_uuid": "11111111-2222-4333-8444-555555555555",
+          "metadata_location": "store://01234567-89ab-cdef-0123-456789abcdef/warehouse/00112233-4455-6677-8899-aabbccddeeff/metadata/root.metadata.json",
+          "current_snapshot_id": "9223372036854775807",
+          "schema_id": 0,
+          "spec_id": 0
+        },
+        "snapshot_id": "9007199254740993",
+        "backend": "local",
+        "mock": false,
+        "synthetic": false,
+        "durability_validation": "designed",
+        "file_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "path": null,
+        "content": "data",
+        "record_count": "9007199254740993",
+        "compressed_bytes": "4096",
+        "field_metrics": [
+          {
+            "field_id": 2,
+            "name": "n",
+            "type": "int64",
+            "nullable": true,
+            "null_count": "1",
+            "distinct_count": null,
+            "lower_bound": "-9223372036854775808",
+            "upper_bound": "9007199254740993",
+            "lower_bound_exact": null,
+            "upper_bound_exact": null,
+            "lower_bound_hex": "0000000000000080",
+            "upper_bound_hex": "0100000000002000",
+            "bound_encoding": "iceberg-single-value",
+            "compressed_bytes": "256",
+            "uncompressed_bytes": null,
+            "value_count": "9007199254740993",
+            "nan_count": null
+          }
+        ],
+        "physical_file_exists": true,
+        "footer_bytes": "128",
+        "row_groups": [
+          {
+            "ordinal": 0,
+            "record_count": "9007199254740993",
+            "compressed_bytes": "256",
+            "uncompressed_bytes": "512",
+            "field_metrics": [
+              {
+                "field_id": 2,
+                "name": "n",
+                "type": "int64",
+                "nullable": true,
+                "null_count": "1",
+                "distinct_count": null,
+                "lower_bound": "-9223372036854775808",
+                "upper_bound": "9007199254740993",
+                "lower_bound_exact": null,
+                "upper_bound_exact": null,
+                "compressed_bytes": "256",
+                "uncompressed_bytes": "512",
+                "indexes": {
+                  "page": false,
+                  "bloom": null,
+                  "column": false,
+                  "offset": false
+                },
+                "lower_bound_hex": "0000000000000080",
+                "upper_bound_hex": "0100000000002000",
+                "bound_encoding": "parquet-plain",
+                "value_count": "9007199254740993",
+                "data_page_offset": "4",
+                "dictionary_page_offset": null,
+                "compression": "zstd"
+              }
+            ],
+            "synthetic": false
+          }
+        ],
+        "footer_statistics": [
+          {
+            "field_id": 2,
+            "name": "n",
+            "type": "int64",
+            "nullable": true,
+            "null_count": "1",
+            "distinct_count": null,
+            "lower_bound": "-9223372036854775808",
+            "upper_bound": "9007199254740993",
+            "lower_bound_exact": null,
+            "upper_bound_exact": null,
+            "compressed_bytes": "256",
+            "uncompressed_bytes": "512",
+            "indexes": {
+              "page": false,
+              "bloom": null,
+              "column": false,
+              "offset": false
+            },
+            "lower_bound_hex": "0000000000000080",
+            "upper_bound_hex": "0100000000002000",
+            "bound_encoding": "parquet-plain",
+            "value_count": "9007199254740993",
+            "data_page_offset": "4",
+            "dictionary_page_offset": null,
+            "compression": "zstd"
+          }
+        ],
+        "indexes": {
+          "page": false,
+          "bloom": null,
+          "column": false,
+          "offset": false
+        },
+        "execution_capabilities": {
+          "file_pruning": false,
+          "row_group_pruning": false,
+          "page_pruning": false,
+          "bloom_pruning": false
+        },
+        "format": "parquet"
+      }
+    }
+  ]
+}
