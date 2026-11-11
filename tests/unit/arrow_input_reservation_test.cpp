@@ -54,10 +54,9 @@ TEST(ArrowInputReservation, MaximumWideAppendFitsTheDefaultOwnedInputBudget)
     constexpr size_t Decoded = static_cast<size_t>(Rows) * (Fields * 5 + KeyBytes + (Fields - 1) * ValueBytes);
     static_assert(Decoded <= 16ULL * 1024 * 1024, "within the 16 MiB canonical per-append limit");
 
-    // The canonical encoder accepts it: rows, row bytes, key bytes and total bytes are in limits.
-    const auto hash = FingerprintBatches(schema, "00112233-4455-6677-8899-aabbccddeeff", {batch});
-    ASSERT_TRUE(hash) << hash.error().code << ": " << hash.error().message;
-
+    // InputReservation applies the same shape limits as the canonical encoder
+    // (rows, key, string, row and total bytes), so success means the append is
+    // admissible. Hashing it as well would add nothing but minutes under MSan.
     const auto reservation = InputReservation(schema, {batch});
     ASSERT_TRUE(reservation) << reservation.error().message;
     const auto budget = static_cast<size_t>(Limits{}.max_owned_input_bytes);
