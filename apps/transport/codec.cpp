@@ -508,7 +508,6 @@ ScanRequest ParseScan(std::string collectionID, const SchemaSpec& schema, const 
     if (body.contains("projection") && !body["projection"].is_null()) {
         const auto& rawProjection = body["projection"];
         Require(rawProjection.is_array(), "projection must be an array of field names");
-        Require(!rawProjection.empty(), "zero-column projection is unavailable", "UNSUPPORTED_OPERATION");
         std::vector<std::string> fields;
         fields.reserve(rawProjection.size());
         for (const auto& item : rawProjection) {

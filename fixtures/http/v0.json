@@ -211,7 +211,9 @@
       "path": "/databases/{database_id}/collections/{collection_id}/scan/open",
       "core": "Engine::Scan (fixed-view cursor)",
       "status": 200,
-      "request": {},
+      "request": {
+        "projection": []
+      },
       "request_schema": "scan",
       "response_schema": "scanOpened",
       "response_fields": {

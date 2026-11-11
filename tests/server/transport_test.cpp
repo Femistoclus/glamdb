@@ -119,7 +119,7 @@ TEST(Transport, RejectsUnknownFieldsAndUnsupportedQueries)
     const SchemaSpec schema{{{"key", FieldType::String, false}}};
     EXPECT_FALSE(ParseScan("id", schema, ParseJson(R"({"projection":null})")).projection.has_value());
     EXPECT_THROW(ParseRows(schema, ParseJson(R"([{"key":"x","extra":1}])")), TFailure);
-    EXPECT_THROW(ParseScan("id", schema, ParseJson(R"({"projection":[]})")), TFailure);
+    EXPECT_THROW(ParseScan("id", schema, ParseJson(R"({"projection":["missing"]})")), TFailure);
     EXPECT_THROW(ParseScan("id", schema, ParseJson(R"({"predicate":{"op":"or","args":[]}})")), TFailure);
     EXPECT_THROW(ParseScan("id", schema, ParseJson(R"({"limit":true})")), TFailure);
     EXPECT_THROW(ParseScan("id", schema, ParseJson(R"({"limit":-1})")), TFailure);
@@ -419,11 +419,18 @@ TEST(Transport, ParsesCompoundPredicatesAndEnforcesLimitsAndErrorCodes)
         400,
         "INVALID_ARGUMENT");
 
-    // Unknown op at depth <= 64 and empty projection -> 501 UNSUPPORTED_OPERATION.
+    // Unknown op at depth <= 64 -> 501 UNSUPPORTED_OPERATION.
     expectFailure(R"({"predicate":{"op":"xor","args":[{"op":"true"}]}})", 501, "UNSUPPORTED_OPERATION");
     expectFailure(R"({"predicate":{"op":"and","args":[{"op":"like","field":"key","value":"a%"}]}})",
         501,
         "UNSUPPORTED_OPERATION");
-    expectFailure(R"({"projection":[]})", 501, "UNSUPPORTED_OPERATION");
+}
+TEST(Transport, EmptyProjectionPreservesRowCardinality)
+{
+    const SchemaSpec schema{{{"key", FieldType::String, false}}};
+    const auto request = ParseScan("id", schema, ParseJson(R"({"projection":[]})"));
+    EXPECT_EQ(request.projection, std::make_optional(std::vector<std::string>{}));
+    const auto batch = arrow::RecordBatch::Make(arrow::schema({}), 3, arrow::ArrayVector{});
+    EXPECT_EQ(EncodeRows(*batch), TJson::array({TJson::object(), TJson::object(), TJson::object()}));
 }
 } // namespace glamdb::NTransport

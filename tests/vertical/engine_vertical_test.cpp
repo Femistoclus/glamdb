@@ -230,6 +230,78 @@ TEST_F(EngineVerticalTest, CompoundPredicatesAcrossSnapshotsDuplicatesAndBatchSi
         Sorted({"other"}));
 }
 
+TEST_F(EngineVerticalTest, EmptyProjectionKeepsItsSchemaAndFixedView)
+{
+    const auto initial = Open({.projection = std::vector<std::string>{}});
+    ASSERT_NE(initial, nullptr);
+    EXPECT_EQ(initial->Info().output_schema->num_fields(), 0);
+    EXPECT_EQ(initial->Info().selector_resolved, SnapshotSelector::InitialEmpty());
+
+    const auto first = Committed(FirstOperation, FirstRows);
+    const auto fixed = Open({.projection = std::vector<std::string>{}, .batch_rows = 2});
+    const auto zero = Open({.projection = std::vector<std::string>{}, .limit = 0});
+    ASSERT_NE(fixed, nullptr);
+    ASSERT_NE(zero, nullptr);
+    const auto info = fixed->Info();
+    EXPECT_EQ(info.output_schema->num_fields(), 0);
+    EXPECT_EQ(info.selector_resolved, SnapshotSelector::Id(first.snapshot_id));
+    EXPECT_EQ(zero->Info().output_schema->num_fields(), 0);
+    EXPECT_EQ(zero->Info().selector_resolved, info.selector_resolved);
+
+    Committed(SecondOperation, SecondRows);
+    EXPECT_TRUE(Drain(*initial).empty());
+    EXPECT_TRUE(Drain(*zero).empty());
+    EXPECT_EQ(zero->Profile().data_files_read.value, 0);
+    EXPECT_EQ(Drain(*fixed, 2), std::vector<std::string>(3));
+    EXPECT_EQ(fixed->Info().output_schema, info.output_schema);
+    EXPECT_EQ(fixed->Info().identity, info.identity);
+    EXPECT_EQ(fixed->Info().selector_resolved, info.selector_resolved);
+    EXPECT_EQ(Read({.projection = std::vector<std::string>{}}), std::vector<std::string>(5));
+    EXPECT_EQ(Read({.selector = SnapshotSelector::Id(first.snapshot_id), .projection = std::vector<std::string>{}}),
+        std::vector<std::string>(3));
+    EXPECT_EQ(Read({.projection = std::vector<std::string>{}, .limit = 4}), std::vector<std::string>(4));
+}
+
+TEST_F(EngineVerticalTest, EmptyProjectionFiltersTypedBoundaryRowsWithoutExposingColumns)
+{
+    const std::vector<TInputRow> rows{
+        {"dup", 9007199254740993LL, 0.5, true, -62135596800000000LL},
+        {"dup", 9007199254740993LL, 0.5, true, -62135596800000000LL},
+        {"é", std::nullopt, std::nullopt, std::nullopt, std::nullopt},
+        {"ключ", 9223372036854775807LL, -1.5, false, 253402300799999999LL},
+        {"end", -9223372036854775807LL - 1, 2.5, true, 0},
+    };
+    Committed(FirstOperation, rows);
+    const auto predicate = Predicate::Or({
+        Predicate::And({
+            Predicate::In("value", {int64_t{9007199254740993LL}, std::nullopt}),
+            Predicate::Compare("at", CompareOp::Le, TimestampUs{-62135596800000000LL}),
+            Predicate::IsNotNull("score"),
+            Predicate::Compare("flag", CompareOp::Eq, true),
+        }),
+        Predicate::And({Predicate::IsNull("value"), Predicate::Not(Predicate::IsNotNull("at"))}),
+        Predicate::And({
+            Predicate::Compare("key", CompareOp::Ge, std::string("é")),
+            Predicate::Compare("at", CompareOp::Ge, TimestampUs{253402300799999999LL}),
+        }),
+    });
+    EXPECT_EQ(Read({.predicate = predicate}),
+        Sorted({"dup|9007199254740993|0.500000|true|ts:-62135596800000000",
+            "dup|9007199254740993|0.500000|true|ts:-62135596800000000",
+            "é|null|null|null|null",
+            "ключ|9223372036854775807|-1.500000|false|ts:253402300799999999"}));
+    for (const int64_t batchRows : {1, 2, 65536}) {
+        const auto cursor =
+            Open({.projection = std::vector<std::string>{}, .predicate = predicate, .batch_rows = batchRows});
+        ASSERT_NE(cursor, nullptr);
+        EXPECT_EQ(cursor->Info().output_schema->num_fields(), 0);
+        EXPECT_EQ(Drain(*cursor, batchRows), std::vector<std::string>(4));
+    }
+    EXPECT_TRUE(Read(
+        {.projection = std::vector<std::string>{}, .predicate = Predicate::Not(Predicate::In("value", {std::nullopt}))})
+                    .empty());
+}
+
 TEST_F(EngineVerticalTest, InvalidCompoundPredicatesPreserveReadinessAndFilteredBuffersRetainStoreLease)
 {
     Committed(FirstOperation, FirstRows);
@@ -290,7 +362,7 @@ TEST_F(EngineVerticalTest, RejectsInvalidScans)
     EXPECT_EQ(code({.collection_id = "not-a-uuid"}), "INVALID_ARGUMENT");
     EXPECT_EQ(code({.collection_id = test::table_uuid}), "COLLECTION_NOT_FOUND");
     ScanRequest request{.collection_id = test::collection_id};
-    request.projection = std::vector<std::string>{};
+    request.projection = std::vector<std::string>{"missing"};
     EXPECT_EQ(code(request), "INVALID_ARGUMENT");
     request.projection = std::vector<std::string>{"key", "key"};
     EXPECT_EQ(code(request), "INVALID_ARGUMENT");

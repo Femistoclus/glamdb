@@ -52,7 +52,8 @@ Available now: independent golden fixtures, a typed SQL-NULL reference oracle,
 receipt/fault-evidence tools, a network Python SDK, and a configurable pink
 browser workbench. The [native HTTP server](docs/development/HTTP_SERVER.md)
 connects them to persistent storage and serves the same UI. It supports typed
-create/append/scan operations, JSON and Arrow, selected-view statistics, retained
+create/append/scan operations, compound predicates and zero-column projections
+in JSON and Arrow, selected-view statistics, retained
 snapshot history, actual file/row-group details and explain through explicit capabilities. A separate **disposable in-memory mock**
 remains available for development. Its data files,
 snapshots and commits are synthetic and disappear on restart.

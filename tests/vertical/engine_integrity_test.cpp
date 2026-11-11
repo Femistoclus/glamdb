@@ -577,6 +577,27 @@ TEST_F(EngineIntegrityTest, MultiRowGroupLimitStopsMidBatch)
         keys.insert(keys.end(), rendered.begin(), rendered.end());
     }
     EXPECT_EQ(keys, (std::vector<std::string>{"key-00", "key-01", "key-02", "key-03"}));
+    for (const int64_t expectedRows : {4, 9}) {
+        const auto zeroColumns = Engine_->Scan({.collection_id = test::collection_id,
+            .projection = std::vector<std::string>{},
+            .limit = expectedRows,
+            .batch_rows = 2});
+        ASSERT_TRUE(zeroColumns) << zeroColumns.error().message;
+        int64_t count = 0;
+        while (true) {
+            const auto batch = (*zeroColumns)->Next();
+            ASSERT_TRUE(batch) << batch.error().message;
+            if (!*batch) {
+                break;
+            }
+            EXPECT_EQ((*batch)->num_columns(), 0);
+            EXPECT_TRUE((*batch)->ValidateFull().ok());
+            EXPECT_GT((*batch)->num_rows(), 0);
+            EXPECT_LE((*batch)->num_rows(), 2);
+            count += (*batch)->num_rows();
+        }
+        EXPECT_EQ(count, expectedRows);
+    }
 }
 
 // ---- Capacity before and after binding ----

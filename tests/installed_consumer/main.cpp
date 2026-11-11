@@ -150,6 +150,21 @@ void CheckViews(glamdb::Engine& engine, int64_t snapshotA, int64_t snapshotB)
                              .batch_rows = 1}),
         "compound filtered scan");
     CheckRows(*filtered, {{"dup", 1}, {"dup", 1}}, glamdb::SnapshotSelector::Id(snapshotB));
+    auto countOnly = Take(engine.Scan({.collection_id = CollectionId,
+                              .projection = std::vector<std::string>{},
+                              .predicate = CompoundDupPredicate(),
+                              .batch_rows = 1}),
+        "zero-column filtered scan");
+    Check(countOnly->Info().output_schema->num_fields() == 0 &&
+            countOnly->Info().selector_resolved == glamdb::SnapshotSelector::Id(snapshotB),
+        "zero-column schema and fixed view before Next");
+    int64_t count = 0;
+    while (const auto batch = Take(countOnly->Next(), "zero-column next")) {
+        Check(batch->num_columns() == 0 && batch->num_rows() == 1 && batch->ValidateFull().ok(),
+            "zero-column batches preserve cardinality");
+        count += batch->num_rows();
+    }
+    Check(count == 2, "zero-column scan preserves duplicate matches");
     const auto capabilities = engine.GetCapabilities();
     Check(capabilities.backend == glamdb::BackendKind::LocalStorage && capabilities.metadata && capabilities.scan &&
             capabilities.append && !capabilities.file_pruning && !capabilities.row_group_pruning &&

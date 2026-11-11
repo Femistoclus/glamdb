@@ -46,6 +46,84 @@ class ScanHTTP(NativeHTTP):
         }
         self.assertEqual(self.api(path + '/scan', {'projection': ['key'], 'predicate': compound})['rows'], [{'key': 'a'}])
 
+    def test_scan_zero_column_projection(self):
+        import pyarrow as pa
+        path = self.collection()
+        empty = self.api(path + '/scan', {'projection': []})
+        self.assertEqual(empty['schema']['fields'], [])
+        self.assertEqual(empty['rows'], [])
+        self.assertIsNone(empty['snapshot_id'])
+        self.api(path + '/append', {'operation_id': str(uuid.uuid4()), 'rows': [
+            {'key': 'dup', 'n': '9007199254740993'},
+            {'key': 'dup', 'n': '9007199254740993'},
+            {'key': 'é', 'n': None},
+        ]})
+        snapshot = self.api(path + '/scan', {'limit': 0})['snapshot_id']
+        opened = self.api(path + '/scan/open', {'projection': [], 'batch_rows': 1})
+        self.assertEqual(opened['schema']['fields'], [])
+        self.assertEqual(opened['snapshot_id'], snapshot)
+        self.api(path + '/append', {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'later', 'n': '2'}]})
+        fixed = self.api(path + '/scan', {'cursor': opened['cursor']})
+        self.assertEqual(fixed['rows'], [{}, {}, {}])
+        self.assertEqual(fixed['snapshot_id'], snapshot)
+        predicate = {'op': 'or', 'args': [
+            {'op': 'in', 'field': 'n', 'values': ['9007199254740993', None]},
+            {'op': 'not', 'arg': {'op': 'is_not_null', 'field': 'n'}},
+        ]}
+        for options, count in [({}, 4), ({'limit': 0}, 0), ({'limit': 2}, 2),
+                               ({'snapshot_id': 'initial'}, 0), ({'snapshot_id': snapshot}, 3),
+                               ({'predicate': predicate}, 3)]:
+            with self.subTest(options=options):
+                body = {'projection': [], 'batch_rows': 1, **options}
+                page = self.api(path + '/scan', body)
+                self.assertEqual(page['schema']['fields'], [])
+                self.assertEqual(page['rows'], [{}] * count)
+                self.assertEqual(page['profile']['rows_returned'], str(count))
+                status, headers, data = self.request(path + '/scan', body,
+                                                    accept='application/vnd.apache.arrow.stream')
+                self.assertEqual(status, 200, data)
+                with pa.ipc.open_stream(data) as reader:
+                    self.assertEqual(len(reader.schema), 0)
+                    self.assertEqual(sum(batch.num_rows for batch in reader), count)
+                self.assertEqual(headers['X-GlamDB-Snapshot-Id'], page['snapshot_id'] or 'initial')
+
+    def test_scan_zero_column_pagination_and_sdk(self):
+        from glamdb_sdk import Client
+        path = self.collection()
+        self.api(path + '/append', {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'dup'}] * 10000})
+        self.api(path + '/append', {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'é'}]})
+        opened = self.api(path + '/scan/open', {'projection': [], 'batch_rows': 1})
+        request = {'cursor': opened['cursor']}
+        first = self.api(path + '/scan', request)
+        self.assertEqual(first['rows'], [{}] * 10000)
+        self.assertEqual(first, self.api(path + '/scan', request))
+        last = self.api(path + '/scan', {'cursor': first['next_cursor']})
+        self.assertEqual(last['rows'], [{}])
+        self.assertIsNone(last['next_cursor'])
+        import pyarrow as pa
+        accept = 'application/vnd.apache.arrow.stream'
+        status, _, data = self.request(path + '/scan/open', {'projection': [], 'batch_rows': 1}, accept=accept)
+        self.assertEqual(status, 200, data)
+        request = {'cursor': json.loads(data)['cursor']}
+        status, headers, data = self.request(path + '/scan', request, accept=accept)
+        self.assertEqual(status, 200, data)
+        with pa.ipc.open_stream(data) as reader:
+            self.assertEqual(len(reader.schema), 0)
+            self.assertEqual(sum(batch.num_rows for batch in reader), 10000)
+        self.assertEqual(self.request(path + '/scan', request, accept=accept)[2], data)
+        status, headers, data = self.request(path + '/scan', {'cursor': headers['X-GlamDB-Next-Cursor']}, accept=accept)
+        self.assertEqual(status, 200, data)
+        with pa.ipc.open_stream(data) as reader:
+            self.assertEqual(sum(batch.num_rows for batch in reader), 1)
+        self.assertNotIn('X-GlamDB-Next-Cursor', headers)
+        with Client('http://127.0.0.1:' + str(self.port), 'native-test-secret', database_id=self.store_id) as client:
+            cid = path.rsplit('/', 1)[1]
+            self.assertEqual(sum(len(page.rows) for page in client.scan_pages(cid, projection=[])), 10001)
+            with client.scan_batches(cid, projection=[]) as scan:
+                self.assertEqual(len(scan.schema), 0)
+                self.assertEqual(sum(batch.num_rows for batch in scan), 10001)
+                self.assertEqual(scan.integrity, 'verified')
+
     def test_scan_duplicate_pages_replay_cancel(self):
         path = self.collection()
         for _ in range(11):

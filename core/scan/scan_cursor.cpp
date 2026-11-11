@@ -196,7 +196,6 @@ std::vector<size_t> ResolveProjection(const SchemaSpec& schema, const std::optio
         std::iota(fields.begin(), fields.end(), size_t{0});
         return fields;
     }
-    RequireInput(!names->empty(), "projection must select at least one field");
     for (const auto& name : *names) {
         const auto it = std::ranges::find_if(schema.fields, [&](const auto& field) {
             return field.name == name;

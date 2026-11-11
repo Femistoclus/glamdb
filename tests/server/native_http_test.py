@@ -263,6 +263,7 @@ class NativeHTTP(unittest.TestCase):
         caps = self.api('/capabilities')
         self.assertFalse(caps['mock'])
         self.assertEqual(caps['backend'], 'local')
+        self.assertTrue(caps['features']['zero_column_projection'])
         self.assertEqual(
             caps['predicate_ops'],
             ['true', 'eq', 'ne', 'lt', 'le', 'gt', 'ge', 'in', 'is_null', 'is_not_null', 'and', 'or', 'not'],
@@ -471,6 +472,13 @@ class NativeHTTP(unittest.TestCase):
             from jsonschema import Draft202012Validator
             Draft202012Validator.check_schema(wire_schema)
             validator = Draft202012Validator
+            scan_validator = validator(dict(wire_schema, **{'$ref': '#/$defs/scan'}))
+            scan_validator.validate({'projection': []})
+            for kind in ('scanResult', 'scanOpened', 'explanation'):
+                schema_ref = wire_schema['$defs'][kind]['properties']['schema']
+                validator(dict(wire_schema, **schema_ref)).validate({'fields': []})
+            schema_validator = validator(dict(wire_schema, **{'$ref': '#/$defs/schema'}))
+            self.assertFalse(schema_validator.is_valid({'fields': []}))
             error = {'code': 'IO_ERROR', 'message': 'lost commit', 'retry_hint': 'SameIdAfterReconcile'}
             create_validator = validator(dict(wire_schema, **{'$ref': '#/$defs/createOutcome'}))
             definite = {'outcome': 'definitely_not_committed', 'phase': 'validation', 'error': error}

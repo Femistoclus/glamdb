@@ -146,6 +146,11 @@ joins a writer attempt or holds a SQLite read transaction.
 
 - `SnapshotSelector`: `Latest` (resolved at open), `Id`, `InitialEmpty`.
   `ScanInfo.selector_resolved` reports `Id(snapshot)` or `InitialEmpty`.
+- Omitted projection selects every field; an empty projection selects no
+  columns while preserving matching row cardinality, duplicates and limits.
+  Filter-only fields remain hidden. `ScanInfo` fixes the output schema and view
+  before `Next()`, including empty views and zero limits. Without projected or
+  filter fields, verified Parquet row-group counts supply batch cardinality.
 - Native scans pin the confirmed generation's [verified membership index](SCAN_INDEX.md).
   Opening and repeated planning read no root, manifest list or manifest.
   `limit = 0` opens no data file. Recovery and publication derive the index
@@ -219,6 +224,17 @@ commands, counts and the remaining qualification limits.
 | `TScanLifetimeTest` (real files and production backend) | PASS in normal and ASan/UBSan/LSan builds: batch/array/buffer/slice/C Data retention, final-release reopen, deterministic cancel/shutdown barriers before batch/EOS, empty and zero-limit views |
 | `ScanMockTest` (in-memory FileIO, real Arrow/Parquet) | PASS in normal and ASan/UBSan/LSan builds: extracted-buffer FileIO/owner retention, decoded/filtered Arrow pool accounting and compound predicates |
 | Full-repo `tidy-check`, full sanitizer presets, TSan, power-loss qualification | NOT RUN in this change |
+
+
+Zero-column projection was revalidated after integration with official main
+`9b4d30a`: the local Debug build and full CTest suite passed (695 passed, three
+child-process helper skips and one existing disabled benchmark). The full Python
+suite passed 716 tests, and the workbench unit suite passed 131. Native HTTP
+checks include empty-output JSON/Arrow pagination and replay, plus `/explain`
+wire-schema validation for initial, historical and latest views with hidden
+predicate fields. The explain regression failed on the nonempty-schema constraint
+before the contract fix and passed afterward. Sanitizer profiles and browser E2E
+were not rerun for this integration.
 
 Value validation reads only decoded columns of the projection and predicate;
 latent corruption in unread columns or unread data pages is not detected by

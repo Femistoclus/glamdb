@@ -51,6 +51,27 @@ class NativeMetadataHTTP(NativeHTTP):
             {'key': 'later', 'n': '-9223372036854775808', 'ts': '1969-12-31T23:59:59.999999Z'}]})['result']
         return path, a, b
 
+    def test_zero_column_explain_matches_the_wire_schema(self):
+        from jsonschema import Draft202012Validator
+        root = Path(__file__).resolve().parents[2]
+        wire = json.loads((root / 'fixtures/http/v0.schema.json').read_text())
+        validator = Draft202012Validator(wire | {'$ref': '#/$defs/explanation'})
+        path, a, b = self.seed()
+        for selector, snapshot in [({'snapshot_id': 'initial'}, None),
+                                   ({'snapshot_id': a['snapshot_id']}, a['snapshot_id']),
+                                   ({}, b['snapshot_id'])]:
+            with self.subTest(selector=selector):
+                explained = self.api(path + '/explain', {
+                    'projection': [], **selector,
+                    'predicate': {'op': 'is_null', 'field': 'n'},
+                })
+                self.assertEqual(explained['snapshot_id'], snapshot)
+                self.assertEqual(explained['schema']['fields'], [])
+                self.assertEqual(explained['output_columns'], [])
+                self.assertEqual(explained['read_columns'], ['n'])
+                self.assertTrue(explained['capabilities']['features']['zero_column_projection'])
+                validator.validate(explained)
+
     def test_selected_statistics_history_explain_and_precise_footer(self):
         path, a, b = self.seed()
         scoped = self.api('/databases/' + self.store_id + '/capabilities')

@@ -311,6 +311,57 @@ TEST_F(ScanMockTest, ReturnsExactRowsProjectionAndNulls)
     EXPECT_EQ(*eos, nullptr);
 }
 
+TEST_F(ScanMockTest, EmptyProjectionPreservesCardinalityAndSchema)
+{
+    struct TCase
+    {
+        ScanRequest Request;
+        int64_t Rows;
+    };
+    const std::vector<TCase> cases{
+        {{}, 6},
+        {{.selector = SnapshotSelector::Id(Snap1_)}, 4},
+        {{.selector = SnapshotSelector::InitialEmpty()}, 0},
+        {{.limit = 0}, 0},
+        {{.limit = 3}, 3},
+        {{.predicate = Predicate::Not(Predicate::True())}, 0},
+        {{.predicate = Predicate::Or({Predicate::In("count", {int64_t{3}, std::nullopt}), Predicate::IsNull("count")})},
+            3},
+    };
+    for (auto [request, expectedRows] : cases) {
+        SCOPED_TRACE(expectedRows);
+        request.projection = std::vector<std::string>{};
+        request.batch_rows = 2;
+        const auto cursor = Open(request);
+        ASSERT_NE(cursor, nullptr);
+        const auto info = cursor->Info();
+        ASSERT_NE(info.output_schema, nullptr);
+        EXPECT_EQ(info.output_schema->num_fields(), 0);
+        EXPECT_EQ(info.identity, Base_);
+        EXPECT_EQ(info.selector_resolved,
+            request.selector.kind == SnapshotSelectorKind::Latest ? SnapshotSelector::Id(Snap2_) : request.selector);
+        int64_t rows = 0;
+        while (true) {
+            const auto batch = cursor->Next();
+            ASSERT_TRUE(batch) << batch.error().message;
+            if (!*batch) {
+                break;
+            }
+            EXPECT_TRUE((*batch)->ValidateFull().ok());
+            EXPECT_EQ((*batch)->num_columns(), 0);
+            EXPECT_TRUE((*batch)->schema()->Equals(*info.output_schema));
+            EXPECT_GT((*batch)->num_rows(), 0);
+            EXPECT_LE((*batch)->num_rows(), 2);
+            rows += (*batch)->num_rows();
+        }
+        EXPECT_EQ(rows, expectedRows);
+        EXPECT_EQ(cursor->Info().output_schema, info.output_schema);
+        EXPECT_EQ(cursor->Info().identity, info.identity);
+        EXPECT_EQ(cursor->Info().selector_resolved, info.selector_resolved);
+        EXPECT_EQ(cursor->Profile().rows_returned.value, expectedRows);
+    }
+}
+
 TEST_F(ScanMockTest, CancelInsideReadIsDeterministic)
 {
     const auto cursor = Open({.selector = SnapshotSelector::Id(Snap1_)});

@@ -262,8 +262,9 @@ fractional digits, normalized to UTC with six digits, years 0001–9999.
 
 Scan: `{projection?,predicate?,snapshot_id?,limit?,batch_rows?}`. Omission selects
 latest once; null or `"initial"` selects the initial empty view. Historical IDs
-are decimal strings. Omitted/null projection defaults to all columns; zero-column projection
-is unavailable. Predicates are `null`/`{op:"true"}`, comparisons
+are decimal strings. Omitted/null projection defaults to all columns; `[]`
+returns zero columns with matching row cardinality in JSON and Arrow pages.
+JSON rows are empty objects. Predicates are `null`/`{op:"true"}`, comparisons
 `{op:"eq|ne|lt|le|gt|ge",field,value}` (where `value` is a correctly typed
 literal or `null`), `{op:"in",field,values:[...]}` (typed literals and/or
 `null`), `{op:"is_null|is_not_null",field}`, or recursive boolean trees

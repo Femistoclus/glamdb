@@ -368,6 +368,13 @@ TEST(ScanPredicate, WideConjunctionAcrossMultipleEvaluationStrips)
 
     const auto selected = Eval(Predicate::And(std::move(args)), *batchRes);
     EXPECT_EQ(selected, (std::vector<int64_t>{998, 999, 1000, 1001}));
+    EXPECT_EQ(
+        Eval(Predicate::And({
+                 Predicate::Compare("count", CompareOp::Ge, int64_t{2047}),
+                 Predicate::In("count", {int64_t{2047}, int64_t{2048}, int64_t{4095}, int64_t{4096}, int64_t{4499}}),
+             }),
+            *batchRes),
+        (std::vector<int64_t>{2047, 2048, 4095, 4096, 4499}));
 }
 
 TEST(ScanPredicate, DeepTreeAndDagDestructionIsStackSafe)

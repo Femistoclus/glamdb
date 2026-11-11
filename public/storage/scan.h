@@ -97,7 +97,8 @@ struct ScanRequest
 {
     std::string collection_id{};
     SnapshotSelector selector{};
-    // nullopt selects every field in schema order.
+    // nullopt selects every field in schema order. An empty vector returns
+    // zero-column batches with the matching row count.
     std::optional<std::vector<std::string>> projection{};
     Predicate predicate = Predicate::True();
     std::optional<int64_t> limit{};
