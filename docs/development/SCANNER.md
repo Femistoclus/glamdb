@@ -67,9 +67,12 @@ require free-space reserves (see `TStorageLimits`). Orphan files from failed
 attempts remain.
 
 A failed durable write sets the backend's write latch for this engine
-instance. It blocks further writes with `IO_ERROR`/`OperatorAction` before
-binding; verification, scans, `Reconcile()` and `Shutdown()` remain available.
-Shut down and reopen the store to write again.
+instance, as does identity evidence from the store-root probe (a replaced,
+missing or redirected root). Transient resource errors of that probe, such as
+descriptor or memory exhaustion, fail only the current call. The latch blocks
+further writes with `IO_ERROR`/`OperatorAction` before binding; verification,
+scans, `Reconcile()` and `Shutdown()` remain available. Shut down and reopen
+the store to write again.
 
 ### Error classification
 
