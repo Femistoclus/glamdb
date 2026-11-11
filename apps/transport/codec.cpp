@@ -1,6 +1,7 @@
 #include "apps/transport/codec.h"
 #include "core/api/canonical.h"
 
+#include <array>
 #include <charconv>
 #include <cmath>
 #include <cstdio>
@@ -448,6 +449,20 @@ TJson EncodeError(const ErrorDetail& error)
         {{"code", error.code},
             {"message", detail::BoundedDiagnostic(error.message)},
             {"retry_hint", hints.at(static_cast<size_t>(error.retry_hint))}}}};
+}
+
+TJson EncodeHealth(const StoreHealth& health)
+{
+    const std::array
+        names{"recovering", "ready", "recovery_required", "storage_failed", "unavailable", "stopping", "closed"};
+    return {{"state", names.at(static_cast<size_t>(health.state))},
+        {"read_available", health.read_available},
+        {"write_ready", health.write_ready},
+        {"storage_failure_latched", health.storage_failure_latched},
+        {"durability_qualified", health.durability_qualified},
+        {"backend", "local"},
+        {"mock", false},
+        {"durability_validation", "designed"}};
 }
 
 int ErrorStatus(std::string_view code)

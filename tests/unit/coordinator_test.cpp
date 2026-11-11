@@ -43,6 +43,45 @@ protected:
     }
 };
 
+TEST_F(CoordinatorTest, HealthObservesRecoveryFailureAndShutdownWithoutWriterWait)
+{
+    EXPECT_EQ(engine->GetHealth().state, StoreState::Ready);
+    EXPECT_TRUE(engine->GetHealth().write_ready);
+    EXPECT_FALSE(engine->GetHealth().read_available); // this backend has no scanner
+    EXPECT_FALSE(engine->GetHealth().durability_qualified);
+    backend->on_verify = [&] {
+        const auto health = engine->GetHealth();
+        EXPECT_EQ(health.state, StoreState::Recovering);
+        EXPECT_FALSE(health.read_available);
+        EXPECT_FALSE(health.write_ready);
+    };
+    ASSERT_TRUE(engine->Reconcile());
+    backend->on_verify = {};
+    backend->throw_verifier = true;
+    EXPECT_FALSE(engine->Reconcile());
+    EXPECT_EQ(engine->GetHealth().state, StoreState::RecoveryRequired);
+    EXPECT_FALSE(engine->GetHealth().write_ready);
+    backend->throw_verifier = false;
+    ASSERT_TRUE(engine->Reconcile());
+    EXPECT_TRUE(engine->GetHealth().write_ready);
+    ASSERT_TRUE(engine->Shutdown(std::chrono::seconds(1)));
+    EXPECT_EQ(engine->GetHealth().state, StoreState::Closed);
+    EXPECT_FALSE(engine->GetHealth().write_ready);
+    EXPECT_FALSE(engine->GetHealth().read_available);
+}
+
+TEST(CoordinatorHealth, MissingBackendDoesNotAdvertiseStorageAvailability)
+{
+    test::TempDir temporary;
+    const auto opened = detail::EngineFactory::Create({test::store_id, (temporary.path / "empty").string()}, nullptr);
+    ASSERT_TRUE(opened);
+    const auto health = (*opened)->GetHealth();
+    EXPECT_EQ(health.state, StoreState::Unavailable);
+    EXPECT_FALSE(health.read_available);
+    EXPECT_FALSE(health.write_ready);
+    EXPECT_FALSE(health.durability_qualified);
+}
+
 class RetryAdmissionTest
     : public CoordinatorTest
     , public testing::WithParamInterface<std::tuple<bool, int>>
@@ -411,6 +450,8 @@ TEST_F(CoordinatorTest, ActiveLookupAndShutdownTimeoutDoNotInventFailure)
     const auto shutdown = engine->Shutdown(std::chrono::milliseconds(1));
     EXPECT_FALSE(shutdown);
     EXPECT_EQ(shutdown.error().code, "DEADLINE_EXCEEDED");
+    EXPECT_EQ(engine->GetHealth().state, StoreState::Stopping);
+    EXPECT_FALSE(engine->GetHealth().write_ready);
     release.set_value();
     const auto result = write.get();
     EXPECT_EQ(result.disposition, CommitDisposition::DefinitelyNotCommitted);
@@ -444,6 +485,8 @@ TEST_F(CoordinatorTest, ShutdownCannotTurnAPublishingRetryIntoADefiniteFailure)
     EXPECT_EQ(waiting, std::future_status::timeout);
     ASSERT_FALSE(shutdown);
     EXPECT_EQ(shutdown.error().code, "DEADLINE_EXCEEDED");
+    EXPECT_EQ(engine->GetHealth().state, StoreState::Stopping);
+    EXPECT_FALSE(engine->GetHealth().write_ready);
     ASSERT_EQ(original.disposition, CommitDisposition::Committed);
     for (const auto& outcome : {waited, closing}) {
         EXPECT_EQ(outcome.disposition, CommitDisposition::CommitUnknown);

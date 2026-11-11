@@ -1,16 +1,19 @@
 """Decoding one Arrow IPC message keeps a single Python copy of its body (read_buffer is zero-copy)."""
 import hashlib
+import json
 import tracemalloc
 
 import httpx
 import pyarrow as pa
+import pytest
 
 from glamdb_sdk import Client
 
 CID = "11111111-2222-4333-8444-555555555555"
 
 
-def test_single_large_batch_peak_python_heap_is_about_one_body():
+@pytest.mark.parametrize("legacy", [False, True], ids=["cursor", "legacy"])
+def test_single_large_batch_peak_python_heap_is_about_one_body(legacy):
     values = pa.array([b"x" * 1024] * (16 * 1024), type=pa.string())   # ~16 MiB body
     schema = pa.schema([pa.field("s", pa.string(), nullable=False)])
     sink = pa.BufferOutputStream()
@@ -25,6 +28,14 @@ def test_single_large_batch_peak_python_heap_is_about_one_body():
                 yield data[start:start + 65536]
 
     def handler(request):
+        assert request.method == "POST"
+        if request.url.path.endswith("/scan/open"):
+            if legacy:
+                return httpx.Response(404, json={"error": {"code": "ROUTE_NOT_FOUND"}})
+            return httpx.Response(200, json={"cursor": "first"})
+        assert request.url.path.endswith("/scan")
+        if not legacy:
+            assert json.loads(request.content) == {"cursor": "first"}
         return httpx.Response(200, stream=Chunked(), headers={
             "content-type": "application/vnd.apache.arrow.stream", "x-glamdb-snapshot-id": "1",
             "content-length": str(len(data)), "x-content-sha256": hashlib.sha256(data).hexdigest()})

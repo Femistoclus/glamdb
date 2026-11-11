@@ -25,6 +25,8 @@ public:
     Engine& operator=(const Engine&) = delete;
 
     const StoreInfo& GetStoreInfo() const;
+    // No catalog/file I/O and no writer wait; remains callable during recovery/shutdown.
+    StoreHealth GetHealth() const;
     CreateOutcome CreateCollection(const CreateCollectionRequest& request);
     Result<CollectionInfo> GetCollection(std::string_view collection_id) const;
     Result<CollectionInfo> ResolveCollection(std::string_view exact_name) const;

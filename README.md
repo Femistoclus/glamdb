@@ -151,6 +151,12 @@ The full build installs `glamdb::core` and public headers. Storage adapters
 (`GLAMDB_BUILD_STORAGE`) are on by default; `GLAMDB_IO_ONLY=ON` provides a separate
 lightweight build. See the build guide for Docker setup.
 
+Store readiness is available through authenticated
+`GET /databases/{id}/readyz` (legacy single-store mode: `/readyz`) and scoped
+capabilities. It reports read availability separately from write readiness;
+`/healthz` remains process liveness. All backends explicitly remain
+`durability_qualified=false`. See the [health contract](docs/development/HTTP_SERVER.md).
+
 - [Project structure](docs/PROJECT_STRUCTURE.md)
 - [Build and quality checks](docs/development/BUILDING.md)
 - [C++ style guide](docs/development/CPP_STYLE_GUIDE.md)

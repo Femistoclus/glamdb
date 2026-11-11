@@ -47,6 +47,7 @@ struct TRowJsonBudget
 };
 size_t AppendRowsJson(const arrow::RecordBatch& batch, std::string& output, const TRowJsonBudget& budget);
 TJson EncodeIdentity(const BaseIdentity& identity);
+TJson EncodeHealth(const StoreHealth& health);
 TJson EncodeError(const ErrorDetail& error);
 int ErrorStatus(std::string_view code);
 } // namespace glamdb::NTransport

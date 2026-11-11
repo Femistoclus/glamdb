@@ -835,6 +835,16 @@
           "additionalProperties": {
             "type": "integer"
           }
+        },
+        "health": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/storeHealth"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -845,7 +855,8 @@
         "collection_modes",
         "features",
         "predicate_ops",
-        "limits"
+        "limits",
+        "health"
       ],
       "additionalProperties": false
     },
@@ -1101,6 +1112,57 @@
           "$ref": "#/$defs/limits"
         }
       },
+      "additionalProperties": false
+    },
+    "storeHealth": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "recovering",
+            "ready",
+            "recovery_required",
+            "storage_failed",
+            "unavailable",
+            "stopping",
+            "closed"
+          ]
+        },
+        "read_available": {
+          "type": "boolean"
+        },
+        "write_ready": {
+          "type": "boolean"
+        },
+        "storage_failure_latched": {
+          "type": "boolean"
+        },
+        "durability_qualified": {
+          "const": false
+        },
+        "backend": {
+          "enum": [
+            "local",
+            "mock"
+          ]
+        },
+        "mock": {
+          "type": "boolean"
+        },
+        "durability_validation": {
+          "const": "designed"
+        }
+      },
+      "required": [
+        "state",
+        "read_available",
+        "write_ready",
+        "storage_failure_latched",
+        "durability_qualified",
+        "backend",
+        "mock",
+        "durability_validation"
+      ],
       "additionalProperties": false
     }
   }

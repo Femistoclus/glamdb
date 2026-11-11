@@ -153,6 +153,10 @@ class NativeFaultHTTP(unittest.TestCase):
                 deadline = time.monotonic() + 5
                 while self.api(self.base)['state'] != 'closing':
                     self.assertLess(time.monotonic(), deadline)
+                health = self.api(self.base + '/readyz', status=503)
+                self.assertEqual(health['state'], 'stopping')
+                self.assertFalse(health['read_available'])
+                self.assertFalse(health['write_ready'])
                 discards = [workers.submit(self.request, self.base + '/discard', {}) for _ in range(2)]
                 # Exercise controls while both discard requests have time to
                 # reach the server; they must never occupy the control workers.
@@ -201,6 +205,58 @@ class NativeFaultHTTP(unittest.TestCase):
                 self.assertEqual(self.api(self.base + '/open', {})['state'], 'open')
             finally:
                 self.arm('release', 0, False)
+            self.assertEqual(append.result(timeout=10)['outcome'], 'committed')
+
+    def test_readiness_during_open_recovery_and_reconciliation(self):
+        self.api(self.base + '/close', {})
+        for action in ('open', 'reconcile'):
+            with self.subTest(action=action):
+                self.arm('pause', 1, False)
+                with ThreadPoolExecutor(max_workers=1) as workers:
+                    pending = workers.submit(self.api, self.base + '/' + action, {})
+                    self.wait_for_publication()
+                    try:
+                        health = self.api(self.base + '/readyz', status=503)
+                        self.assertEqual(health['state'], 'recovering')
+                        self.assertFalse(health['read_available'])
+                        self.assertFalse(health['write_ready'])
+                        self.assertEqual(self.api(self.base + '/capabilities')['health'], health)
+                        self.assertEqual(self.api('/healthz')['status'], 'live')
+                    finally:
+                        self.arm('release', 0, False)
+                    pending.result(timeout=10)
+                self.assertTrue(self.api(self.base + '/readyz')['write_ready'])
+
+    def test_readiness_bypasses_blocked_operation_lookup_workers(self):
+        path = self.collection()
+        self.arm('pause', 2, False)  # Pause outer publication, holding the catalog mutex.
+        with ThreadPoolExecutor(max_workers=1) as workers:
+            append = workers.submit(self.api, path + '/append',
+                {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'paused'}]})
+            self.wait_for_publication()
+            sockets = []
+            try:
+                for _ in range(8):
+                    stream = socket.create_connection(('127.0.0.1', self.port), timeout=2)
+                    sockets.append(stream)
+                    stream.sendall((f'GET {path}/operations/{uuid.uuid4()} HTTP/1.1\r\n'
+                        f'Host: local\r\nAuthorization: Bearer {TOKEN}\r\n\r\n').encode())
+                # All lookup calls wait on the paused catalog. The health routes
+                # must respond while those workers and their queue are occupied.
+                self.assertFalse(select.select(sockets, [], [], 0.2)[0])
+                for suffix in ('/readyz', '/capabilities'):
+                    connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=1)
+                    try:
+                        connection.request('GET', self.base + suffix,
+                            headers={'Authorization': 'Bearer ' + TOKEN})
+                        response = connection.getresponse()
+                        self.assertEqual(response.status, 200, response.read())
+                    finally:
+                        connection.close()
+            finally:
+                self.arm('release', 0, False)
+                for stream in sockets:
+                    stream.close()
             self.assertEqual(append.result(timeout=10)['outcome'], 'committed')
 
     def test_control_acknowledgements_after_startup(self):
@@ -274,6 +330,9 @@ class NativeFaultHTTP(unittest.TestCase):
                 self.arm('core', 1, after)
                 unknown = self.api(path + '/append', body, status=503)
                 self.assertEqual(unknown['phase'], 'binding')
+                health = self.api(self.base + '/readyz', status=503)
+                self.assertEqual(health['state'], 'recovery_required')
+                self.assertFalse(health['write_ready'])
                 self.assertFalse(unknown['recovery']['publication_started'])
                 self.arm('core', 0, False)
                 self.api(self.base + '/reconcile', {})

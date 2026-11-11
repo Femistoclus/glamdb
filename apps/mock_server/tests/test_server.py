@@ -55,6 +55,18 @@ def append(client, rows=ROWS, operation_id=OP1, **extra):
     return client.post(f"/collections/{CID}/append", json={"operation_id": operation_id, "rows": rows, **extra})
 
 
+def test_readiness_reports_mock_availability_without_qualification(client):
+    health = client.get('/readyz')
+    assert health.status_code == 200
+    assert health.json() == {
+        'state': 'ready', 'read_available': True, 'write_ready': True,
+        'storage_failure_latched': False, 'durability_qualified': False,
+        'backend': 'mock', 'mock': True, 'durability_validation': 'designed',
+    }
+    assert client.get('/capabilities').json()['health'] == health.json()
+    assert client.get('/readyz', headers={'Authorization': ''}).status_code == 401
+
+
 def test_public_health_and_auth_are_explicitly_mock(ui):
     with TestClient(create_app(token="test-secret", ui_dir=ui)) as client:
         assert client.get("/health").json() == {

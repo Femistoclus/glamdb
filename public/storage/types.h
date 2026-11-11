@@ -29,6 +29,21 @@ template <class T>
 using Result = std::expected<T, ErrorDetail>;
 using Status = Result<void>;
 
+enum class StoreState : uint8_t { Recovering, Ready, RecoveryRequired, StorageFailed, Unavailable, Stopping, Closed };
+
+// Point-in-time admission information, not a reservation or a durability claim.
+// Availability describes new scans/writes; already retained cursors keep their
+// existing lifetime contract. Resource pressure can still reject individual calls.
+struct StoreHealth
+{
+    StoreState state = StoreState::Recovering;
+    bool read_available = false;
+    bool write_ready = false;
+    bool storage_failure_latched = false;
+    // No environment has completed the durability qualification campaign.
+    bool durability_qualified = false;
+};
+
 enum class FieldType : uint8_t { String = 1, Bool, Int64, Float64, TimestampUsUtc };
 
 struct FieldSpec

@@ -15,6 +15,10 @@ applicable; terminal mock receipts carry `durable=false`.
 ## Routes
 
 - `GET /healthz`: explicit mock health, never production storage readiness.
+- Authenticated `GET /readyz`: readiness of disposable in-memory operations;
+  `read_available=true`, `write_ready=true`, `durability_qualified=false` and
+  explicit mock identity. The same snapshot is `health` in `/capabilities`;
+  it never claims persistence or production durability.
 - `GET /workbench/config`: validated, uncached runtime theme JSON.
 - `GET /capabilities`: append mode, unavailable extensions, limits and
   development-fault flag.

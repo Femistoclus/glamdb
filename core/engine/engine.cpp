@@ -161,6 +161,7 @@ struct Engine::Impl
     std::timed_mutex writer;
     std::atomic<bool> closing{false};
     bool ready = false;
+    bool recovering = false;
     bool closed = false;
     uint64_t health_generation = 0;
     int64_t pending_calls = 0;
@@ -500,6 +501,23 @@ struct Engine::Impl
 
     void Recover(bool reopen)
     {
+        {
+            std::lock_guard lock(state_mutex);
+            recovering = true;
+        }
+        try {
+            RecoverStore(reopen);
+        } catch (...) {
+            std::lock_guard lock(state_mutex);
+            recovering = false;
+            throw;
+        }
+        std::lock_guard lock(state_mutex);
+        recovering = false;
+    }
+
+    void RecoverStore(bool reopen)
+    {
         uint64_t start_generation = 0;
         {
             std::lock_guard lock(state_mutex);
@@ -693,6 +711,32 @@ Result<std::shared_ptr<Engine>> OpenExisting(const OpenStoreRequest& request)
 const StoreInfo& Engine::GetStoreInfo() const
 {
     return impl_->info;
+}
+
+StoreHealth Engine::GetHealth() const
+{
+    const auto impl = impl_;
+    std::lock_guard lock(impl->state_mutex);
+    const auto backend =
+        impl->backend ? impl->backend->GetHealth() : detail::StorageBackend::Health{false, false, false};
+    StoreHealth health;
+    health.storage_failure_latched = backend.write_failure_latched;
+    if (impl->closed) {
+        health.state = StoreState::Closed;
+    } else if (impl->closing.load()) {
+        health.state = StoreState::Stopping;
+    } else if (impl->recovering) {
+        health.state = StoreState::Recovering;
+    } else if (!impl->ready) {
+        health.state = StoreState::RecoveryRequired;
+    } else {
+        health.read_available = backend.read_available;
+        health.write_ready = backend.write_available && !backend.write_failure_latched;
+        health.state = backend.write_failure_latched ? StoreState::StorageFailed
+            : health.write_ready                     ? StoreState::Ready
+                                                     : StoreState::Unavailable;
+    }
+    return health;
 }
 
 Result<CollectionInfo> Engine::GetCollection(std::string_view id) const

@@ -274,6 +274,10 @@ public:
         return Inner_->VerifyCommittedAppend(store, collection, operations, receipt);
     }
 
+    Health GetHealth() const override
+    {
+        return Inner_->GetHealth();
+    }
     Result<std::shared_ptr<iceberg::FileIO>> ReadOnlyFileIO() override
     {
         return Inner_->ReadOnlyFileIO();
