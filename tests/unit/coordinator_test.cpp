@@ -70,6 +70,28 @@ TEST_F(CoordinatorTest, HealthObservesRecoveryFailureAndShutdownWithoutWriterWai
     EXPECT_FALSE(engine->GetHealth().read_available);
 }
 
+TEST_F(CoordinatorTest, AppendSchemaDistinguishesUnknownClosedAndRecoveringCollections)
+{
+    const auto missing = "00000000-0000-0000-0000-000000000006";
+    ASSERT_TRUE(engine->SchemaForAppend(test::collection_id));
+    const auto absent = engine->SchemaForAppend(missing);
+    ASSERT_FALSE(absent);
+    EXPECT_EQ(absent.error().code, "COLLECTION_NOT_FOUND");
+    backend->throw_verifier = true;
+    ASSERT_FALSE(engine->Reconcile());
+    // A confirmed immutable schema is needed to validate an uncertain retry.
+    EXPECT_TRUE(engine->SchemaForAppend(test::collection_id));
+    const auto blocked = engine->SchemaForAppend(missing);
+    ASSERT_FALSE(blocked);
+    EXPECT_EQ(blocked.error().code, "RECOVERY_REQUIRED");
+    backend->throw_verifier = false;
+    ASSERT_TRUE(engine->Reconcile());
+    ASSERT_TRUE(engine->Shutdown(std::chrono::seconds(1)));
+    const auto closed = engine->SchemaForAppend(test::collection_id);
+    ASSERT_FALSE(closed);
+    EXPECT_EQ(closed.error().code, "CANCELLED");
+}
+
 TEST(CoordinatorHealth, MissingBackendDoesNotAdvertiseStorageAvailability)
 {
     test::TempDir temporary;

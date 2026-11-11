@@ -1,6 +1,7 @@
 #include "apps/server/databases.h"
 #include "core/api/binary.h"
 #include "core/catalog/sqlite.h"
+#include "core/engine/store_lease.h"
 #include "tests/support/journal_fault_vfs.h"
 #include "tests/support/temp_dir.h"
 
@@ -222,7 +223,7 @@ TEST(Databases, ReservationCrashAndIncompleteStoreRemainExplicit)
                 EXPECT_TRUE(std::filesystem::is_empty(item.path()));
             }
         }
-        EXPECT_EQ(preserved, 1U);
+        EXPECT_EQ(preserved, 0U);
         EXPECT_EQ(databases.Get(test::store_id).at("state"), "open");
         databases.Shutdown();
     }
@@ -298,7 +299,7 @@ TEST(Databases, UncertainCloseFencesCallsButAllowsOutcomeRecovery)
             return TResponse{200, ""};
         },
         true));
-    EXPECT_EQ(databases.Change(id, "reconcile").at("state"), "error");
+    EXPECT_THROW(databases.Change(id, "reconcile"), TFailure);
     EXPECT_THROW(databases.Use(id,
                      [](const auto&) {
                          return TResponse{200, ""};
@@ -319,6 +320,7 @@ TEST(Databases, UnknownDatabaseHasDistinctAbsenceCode)
         ADD_FAILURE() << "unknown database must fail";
     } catch (const TFailure& error) {
         EXPECT_EQ(error.Detail.code, "DATABASE_NOT_FOUND");
+        EXPECT_EQ(error.Detail.retry_hint, RetryHint::FixInput);
     }
     databases.Shutdown();
 }
@@ -378,7 +380,7 @@ TEST(Databases, StartupRegistrationFaultDoesNotHideOtherInitializedDatabases)
     EXPECT_NO_THROW(databases.Use(second, [](const auto&) {
         return TResponse{200, ""};
     }));
-    EXPECT_EQ(databases.Change(first, "reconcile").at("state"), "error");
+    EXPECT_THROW(databases.Change(first, "reconcile"), TFailure);
     EXPECT_THROW(databases.Use(first,
                      [](const auto&) {
                          return TResponse{200, ""};
@@ -394,7 +396,7 @@ TEST(Databases, StartupRegistrationFaultDoesNotHideOtherInitializedDatabases)
     databases.Shutdown();
 }
 
-TEST(Databases, DiscardReservationPreservesFilesAndReleasesNameAndCapacity)
+TEST(Databases, DiscardReservationReclaimsDisposableFilesAndReleasesNameAndCapacity)
 {
     test::TempDir temporary;
     const auto directory = temporary.path / "server";
@@ -416,11 +418,17 @@ TEST(Databases, DiscardReservationPreservesFilesAndReleasesNameAndCapacity)
     const auto incomplete = directory / "databases" / test::store_id;
     std::filesystem::create_directory(incomplete);
     {
-        std::ofstream(incomplete / "evidence") << "preserve this incomplete store";
+        std::ofstream(incomplete / "store.identity") << "partial initialization";
     }
     {
         TDatabases databases(directory);
-        EXPECT_THROW(databases.Create({{"name", "overflow"}}), TFailure);
+        try {
+            databases.Create({{"name", "overflow"}});
+            FAIL() << "registry capacity must fail";
+        } catch (const TFailure& error) {
+            EXPECT_EQ(error.Detail.code, "RESOURCE_EXHAUSTED");
+            EXPECT_EQ(error.Detail.retry_hint, RetryHint::OperatorAction);
+        }
         EXPECT_EQ(databases.Change(test::store_id, "discard").at("discarded"), true);
         EXPECT_THROW(databases.Get(test::store_id), TFailure);
         EXPECT_EQ(databases.List().at("items").size(), 63U);
@@ -428,12 +436,10 @@ TEST(Databases, DiscardReservationPreservesFilesAndReleasesNameAndCapacity)
         size_t preserved = 0;
         for (const auto& item : std::filesystem::directory_iterator(directory / "databases")) {
             if (item.path().filename().string().starts_with("incomplete-")) {
-                std::ifstream input(item.path() / "evidence");
-                EXPECT_EQ(std::string(std::istreambuf_iterator<char>(input), {}), "preserve this incomplete store");
                 ++preserved;
             }
         }
-        EXPECT_EQ(preserved, 1U);
+        EXPECT_EQ(preserved, 0U);
         EXPECT_NE(databases.Create({{"name", "reserved-1"}}).at("database_id"), test::store_id);
         EXPECT_EQ(databases.List().at("items").size(), 64U);
         databases.Shutdown();
@@ -456,13 +462,14 @@ TEST(Databases, DiscardRefusesInitializedOrReadyStores)
     {
         detail::Database registry;
         registry.Open(directory / "registry.sqlite", SQLITE_OPEN_READWRITE, "");
-        registry.Execute("INSERT INTO databases(id,name,initialized,auto_open) VALUES(?,?,0,1)",
+        registry.Execute("INSERT INTO databases(id,name,initialized,auto_open) VALUES(?,?,0,0)",
             {test::table_uuid, "ready-but-unregistered"});
     }
     const auto ready = directory / "databases" / test::table_uuid;
-    std::filesystem::create_directory(ready);
     {
-        std::ofstream(ready / "store.ready") << "must not be removed";
+        auto engine = CreateStore({test::table_uuid, ready.string()});
+        ASSERT_TRUE(engine);
+        ASSERT_TRUE((*engine)->Shutdown(1s));
     }
     TDatabases databases(directory);
     for (const auto* id : {test::store_id, test::table_uuid}) {
@@ -509,6 +516,168 @@ TEST(Databases, UncertainDiscardRequiresRegistryRecoveryBeforeReuse)
         }
         EXPECT_EQ(reopened.List().at("items").size(), 0U);
     }
+}
+
+TEST(Databases, InvalidReadyMarkerCanBeDiscardedOrRetriedWithoutHiddenDirectories)
+{
+    for (const bool discard : {false, true}) {
+        for (const auto* marker : {"", "GLAMDB\n1\nwrong-id\nlocal-delete-extra-v1\n"}) {
+            SCOPED_TRACE(discard ? "discard" : "retry create");
+            test::TempDir temporary;
+            const auto directory = temporary.path / "server";
+            {
+                TDatabases databases(directory);
+            }
+            {
+                detail::Database registry;
+                registry.Open(directory / "registry.sqlite", SQLITE_OPEN_READWRITE, "");
+                registry.Execute("INSERT INTO databases(id,name,initialized,auto_open) VALUES(?,?,0,1)",
+                    {test::store_id, "incomplete"});
+            }
+            const auto root = directory / "databases" / test::store_id;
+            std::filesystem::create_directory(root);
+            std::filesystem::create_directory(root / "warehouse");
+            std::ofstream(root / "store.identity") << "GLAMDB\n1\n" << test::store_id << "\nlocal-delete-extra-v1\n";
+            std::ofstream(root / "store.ready") << marker;
+            TDatabases databases(directory);
+            ASSERT_EQ(databases.Get(test::store_id).at("state"), "error");
+            if (discard) {
+                EXPECT_EQ(databases.Change(test::store_id, "discard").at("discarded"), true);
+                EXPECT_FALSE(std::filesystem::exists(root));
+            } else {
+                EXPECT_EQ(databases.Create({{"name", "incomplete"}}).at("state"), "open");
+                EXPECT_EQ(databases.Get(test::store_id).at("database_id"), test::store_id);
+            }
+            for (const auto& item : std::filesystem::directory_iterator(directory / "databases")) {
+                EXPECT_FALSE(item.path().filename().string().starts_with("incomplete-"));
+            }
+            databases.Shutdown();
+        }
+    }
+}
+
+TEST(Databases, IncompleteCleanupPreservesUnknownFilesAndSymlinks)
+{
+    for (const std::string kind : {"unknown", "marker-symlink", "root-symlink", "nonempty-warehouse"}) {
+        SCOPED_TRACE(kind);
+        test::TempDir temporary;
+        const auto directory = temporary.path / "server";
+        {
+            TDatabases databases(directory);
+        }
+        {
+            detail::Database registry;
+            registry.Open(directory / "registry.sqlite", SQLITE_OPEN_READWRITE, "");
+            registry.Execute("INSERT INTO databases(id,name,initialized,auto_open) VALUES(?,?,0,1)",
+                {test::store_id, "incomplete"});
+        }
+        const auto root = directory / "databases" / test::store_id;
+        const auto evidence = temporary.path / "evidence";
+        std::ofstream(evidence) << "retain";
+        std::filesystem::path retained;
+        if (kind == "root-symlink") {
+            const auto target = temporary.path / "external-store";
+            std::filesystem::create_directory(target);
+            std::ofstream(target / "store.ready") << "retain";
+            std::filesystem::create_directory_symlink(target, root);
+            retained = target / "store.ready";
+        } else {
+            std::filesystem::create_directory(root);
+            if (kind == "marker-symlink") {
+                std::filesystem::create_symlink(evidence, root / "store.ready");
+                retained = root / "store.ready";
+            } else if (kind == "nonempty-warehouse") {
+                std::filesystem::create_directory(root / "warehouse");
+                retained = root / "warehouse/data";
+                std::ofstream(retained) << "retain";
+            } else {
+                retained = root / "unknown";
+                std::ofstream(retained) << "retain";
+            }
+        }
+        TDatabases databases(directory);
+        EXPECT_THROW(databases.Create({{"name", "incomplete"}}), TFailure);
+        EXPECT_THROW(databases.Change(test::store_id, "discard"), TFailure);
+        EXPECT_TRUE(std::filesystem::exists(root));
+        EXPECT_TRUE(std::filesystem::exists(evidence));
+        EXPECT_TRUE(std::filesystem::exists(retained));
+        databases.Shutdown();
+    }
+}
+
+TEST(Databases, ReadyStoreWithAnotherIdentityCannotBeReclaimed)
+{
+    test::TempDir temporary;
+    const auto directory = temporary.path / "server";
+    {
+        TDatabases databases(directory);
+    }
+    {
+        detail::Database registry;
+        registry.Open(directory / "registry.sqlite", SQLITE_OPEN_READWRITE, "");
+        registry.Execute("INSERT INTO databases(id,name,initialized,auto_open) VALUES(?,?,0,0)",
+            {test::store_id, "reserved"});
+    }
+    const auto root = directory / "databases" / test::store_id;
+    {
+        auto engine = CreateStore({test::table_uuid, root.string()});
+        ASSERT_TRUE(engine);
+        ASSERT_TRUE((*engine)->Shutdown(1s));
+    }
+    const auto bytes = std::filesystem::file_size(root / "catalog.sqlite");
+    TDatabases databases(directory);
+    EXPECT_THROW(databases.Create({{"name", "reserved"}}), TFailure);
+    EXPECT_THROW(databases.Change(test::store_id, "discard"), TFailure);
+    EXPECT_EQ(std::filesystem::file_size(root / "catalog.sqlite"), bytes);
+    auto engine = OpenExisting({root.string(), test::table_uuid});
+    ASSERT_TRUE(engine);
+    ASSERT_TRUE((*engine)->Shutdown(1s));
+    databases.Shutdown();
+}
+
+TEST(Databases, IncompleteCleanupCannotRemoveOwnedDirectory)
+{
+    test::TempDir temporary;
+    const auto directory = temporary.path / "server";
+    {
+        TDatabases databases(directory);
+    }
+    {
+        detail::Database registry;
+        registry.Open(directory / "registry.sqlite", SQLITE_OPEN_READWRITE, "");
+        registry.Execute("INSERT INTO databases(id,name,initialized,auto_open) VALUES(?,?,0,1)",
+            {test::store_id, "incomplete"});
+    }
+    const auto root = directory / "databases" / test::store_id;
+    auto lease = detail::StoreLease::Create(root, {test::store_id, "local-delete-extra-v1", 1});
+    TDatabases databases(directory);
+    EXPECT_THROW(databases.Create({{"name", "incomplete"}}), TFailure);
+    EXPECT_THROW(databases.Change(test::store_id, "discard"), TFailure);
+    EXPECT_TRUE(std::filesystem::exists(root / "store.identity"));
+    lease.reset();
+    EXPECT_EQ(databases.Change(test::store_id, "discard").at("discarded"), true);
+    databases.Shutdown();
+}
+
+TEST(Databases, RegistryRestartFenceRejectsReconcileWithOperatorAction)
+{
+    test::TempDir temporary;
+    test::JournalFaultVfs vfs;
+    TDatabases databases(temporary.path / "server", vfs.Name());
+    const auto id = databases.Create({{"name", "a"}}).at("database_id").get<std::string>();
+    vfs.Arm(1, true);
+    EXPECT_THROW(databases.Change(id, "close"), detail::Failure);
+    vfs.Disarm();
+    EXPECT_EQ(databases.Get(id).at("error").at("retry_hint"), "OperatorAction");
+    try {
+        databases.Change(id, "reconcile");
+        FAIL() << "reconcile cannot resolve an uncertain registry";
+    } catch (const TFailure& error) {
+        EXPECT_EQ(error.Detail.code, "RECOVERY_REQUIRED");
+        EXPECT_EQ(error.Detail.retry_hint, RetryHint::OperatorAction);
+    }
+    EXPECT_EQ(databases.Get(id).at("state"), "error");
+    databases.Shutdown();
 }
 
 } // namespace glamdb::NServer

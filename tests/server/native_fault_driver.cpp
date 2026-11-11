@@ -16,7 +16,7 @@
 // production managed server and storage backend. No fault route is installed.
 int main(int argc, char** argv)
 try {
-    if (argc != 2 && argc != 3) {
+    if (argc < 2 || argc > 4) {
         return 2;
     }
     glamdb::test::JournalFaultVfs core, registry;
@@ -94,7 +94,8 @@ try {
                 continue;
             }
             if (target == "wait") {
-                reply(core.WaitUntilPaused(std::chrono::seconds(10)) ? "paused\n" : "timeout\n");
+                reply(
+                    core.WaitUntilPaused(std::chrono::seconds(10), commit > 0 ? commit : 1) ? "paused\n" : "timeout\n");
                 continue;
             }
             if (target == "release") {
@@ -115,8 +116,8 @@ try {
     glamdb::NServer::RunServer(routes,
         "127.0.0.1",
         0,
-        std::chrono::seconds(10),
-        argc == 3 ? static_cast<size_t>(std::stoul(argv[2])) : 96);
+        argc == 4 ? std::chrono::milliseconds(std::stoul(argv[3])) : std::chrono::seconds(10),
+        argc >= 3 ? static_cast<size_t>(std::stoul(argv[2])) : 96);
     drained = true;
     controls.join();
     databases->Shutdown();

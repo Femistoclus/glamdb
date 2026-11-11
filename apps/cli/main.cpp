@@ -7,9 +7,11 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <stdexcept>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
 
@@ -19,10 +21,19 @@ class TTemporaryOutput
 public:
     explicit TTemporaryOutput(const std::filesystem::path& destination)
         : Path_(destination.string() + ".tmp.XXXXXX")
-        , Descriptor_(mkstemp(Path_.data()))
+        , Descriptor_(-1)
     {
+        const auto status = CheckDestination(destination);
+        Descriptor_ = mkstemp(Path_.data());
         if (Descriptor_ < 0) {
             throw std::runtime_error("cannot create temporary output file");
+        }
+        if (std::filesystem::exists(status) &&
+            fchmod(Descriptor_, static_cast<mode_t>(status.permissions()) & 07777) != 0)
+        {
+            close(std::exchange(Descriptor_, -1));
+            std::filesystem::remove(Path_);
+            throw std::runtime_error("cannot preserve output file permissions");
         }
     }
     TTemporaryOutput(const TTemporaryOutput&) = delete;
@@ -55,11 +66,24 @@ public:
         if (close(std::exchange(Descriptor_, -1)) != 0) {
             throw std::runtime_error("output close failed");
         }
+        CheckDestination(destination);
         std::filesystem::rename(Path_, destination);
         Path_.clear();
     }
 
 private:
+    static std::filesystem::file_status CheckDestination(const std::filesystem::path& path)
+    {
+        std::error_code error;
+        const auto status = std::filesystem::symlink_status(path, error);
+        if ((error && error != std::errc::no_such_file_or_directory) ||
+            (std::filesystem::exists(status) && !std::filesystem::is_regular_file(status)))
+        {
+            throw std::runtime_error("output destination must be a regular file, not a symlink or special file");
+        }
+        return status;
+    }
+
     std::string Path_;
     int Descriptor_;
 };
@@ -95,7 +119,11 @@ nlohmann::json HeaderJson(const glamdb::NClient::TResponse& response)
     }
     return {{"status", response.Status}, {"headers", std::move(headers)}};
 }
-void Write(const std::filesystem::path& path, std::string_view bytes)
+std::unique_ptr<TTemporaryOutput> PrepareOutput(const std::filesystem::path& path)
+{
+    return path.empty() || path == "-" ? nullptr : std::make_unique<TTemporaryOutput>(path);
+}
+void Write(const std::filesystem::path& path, std::string_view bytes, TTemporaryOutput* temporary)
 {
     if (path.empty() || path == "-") {
         std::cout.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
@@ -104,15 +132,7 @@ void Write(const std::filesystem::path& path, std::string_view bytes)
             throw std::runtime_error("output write failed");
         }
     } else {
-        std::error_code error;
-        const auto status = std::filesystem::symlink_status(path, error);
-        if ((error && error != std::errc::no_such_file_or_directory) ||
-            (std::filesystem::exists(status) && !std::filesystem::is_regular_file(status)))
-        {
-            throw std::runtime_error("output destination must be a regular file, not a symlink or special file");
-        }
-        TTemporaryOutput temporary(path);
-        temporary.Publish(path, bytes);
+        temporary->Publish(path, bytes);
     }
 }
 }
@@ -215,12 +235,15 @@ try {
         }
         input.Url = url;
     }
+    // Validate and reserve both destinations before a request can mutate data.
+    auto bodyOutput = PrepareOutput(output);
+    auto headerOutput = PrepareOutput(headers);
     const auto response = glamdb::NClient::SendRequest(input);
     try {
         if (!headers.empty()) {
-            Write(headers, HeaderJson(response).dump(2) + '\n');
+            Write(headers, HeaderJson(response).dump(2) + '\n', headerOutput.get());
         }
-        Write(output, response.Body);
+        Write(output, response.Body, bodyOutput.get());
     } catch (const std::exception& error) {
         std::cerr << error.what() << "; output failed after complete HTTP " << response.Status;
         if (input.Method == "POST") {

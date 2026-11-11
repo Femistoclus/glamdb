@@ -190,7 +190,21 @@ test('unknown append survives database switching and reconciliation with its ori
     await expect(dialog.getByText('Outcome unresolved · keep this operation ID')).toBeVisible();
     await expect(dialog.locator('#modal-error')).toContainText('recovery context');
     await dialog.getByRole('button', { name: 'Close dialog' }).click();
+    await page.route('**/databases', (route) =>
+        route.fulfill({
+            status: 503,
+            json: { error: { code: 'SERVER_BUSY', message: 'Temporary database list failure' } },
+        }),
+    );
     await page.getByRole('button', { name: 'Databases', exact: true }).click();
+    await expect(page.getByText('Temporary database list failure')).toBeVisible();
+    await expect(
+        page.getByRole('button', { name: 'Refresh databases', exact: true }),
+    ).toBeVisible();
+    await expect(page.getByLabel('Access token')).toHaveCount(0);
+    await page.unroute('**/databases');
+    await page.getByRole('button', { name: 'Refresh databases', exact: true }).click();
+
     await page.getByLabel('Database name').fill('another_pending_workspace');
     await page.getByRole('button', { name: 'Create database', exact: true }).click();
     await page.getByRole('button', { name: 'Databases', exact: true }).click();

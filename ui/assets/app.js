@@ -203,12 +203,14 @@ async function databaseWorkspace(database = null) {
         else await databaseList();
     } catch (error) {
         if (state.api !== api) return;
-        if (database) await databaseWorkspace();
-        else {
-            resetSession();
-            login();
+        if (database) {
+            await databaseWorkspace();
+            report(error);
+        } else {
+            $('#app').innerHTML =
+                `<header class="topbar">${brand()}<div class="top-actions"><button class="text-button" data-action="databases">Refresh databases</button><button class="text-button" data-action="disconnect">Disconnect</button></div></header>
+                <main id="main-content" class="main"><h1>Database list unavailable</h1><p role="alert">${e(error.message)}</p><p>Refresh to try again. Your saved operations remain available in this session.</p></main>`;
         }
-        report(error);
     }
 }
 async function databaseList() {

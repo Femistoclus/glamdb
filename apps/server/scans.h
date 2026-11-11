@@ -11,9 +11,14 @@ namespace glamdb::NServer {
 class TScans
 {
 public:
+    static constexpr size_t SessionLimit = 64;
+    static constexpr size_t DatabaseSessionLimit = 8;
+    static constexpr size_t ReplayBytes = SessionLimit * NTransport::MaxResponseBytes;
+    static constexpr int IdleSeconds = 60;
+    static constexpr int LifetimeSeconds = 0;
     // Internal service policy; production routes use these bounded defaults.
-    explicit TScans(std::chrono::milliseconds idle = std::chrono::seconds(60),
-        std::chrono::milliseconds lifetime = std::chrono::minutes(5));
+    explicit TScans(std::chrono::milliseconds idle = std::chrono::seconds(IdleSeconds),
+        std::chrono::milliseconds lifetime = std::chrono::seconds(LifetimeSeconds));
     ~TScans();
     NTransport::TResponse Open(const std::shared_ptr<Engine>& engine,
         const std::string& database,

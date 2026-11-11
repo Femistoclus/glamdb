@@ -18,9 +18,9 @@
 namespace glamdb::NServer {
 using namespace NTransport;
 namespace {
-constexpr size_t MaxSessions = 64;
-constexpr std::ptrdiff_t MaxDatabaseSessions = 8;
-constexpr size_t MaxReplayBytes = size_t{128} * 1024 * 1024;
+constexpr size_t MaxSessions = TScans::SessionLimit;
+constexpr std::ptrdiff_t MaxDatabaseSessions = TScans::DatabaseSessionLimit;
+constexpr size_t MaxReplayBytes = TScans::ReplayBytes;
 constexpr size_t PageRows = 10000;
 constexpr size_t PageBytes = size_t{4} * 1024 * 1024;
 int64_t Now()
@@ -110,7 +110,7 @@ struct TScans::TImpl
         std::mutex Mutex;
         std::string Database, Collection, NextToken, ReplayToken;
         bool Arrow = false, Ended = false;
-        std::atomic<bool> Cancelled{false}, Complete{false};
+        std::atomic<bool> Cancelled{false}, Complete{false}, Busy{false};
         const int64_t Created = Now();
         std::atomic<int64_t> Touched{Created};
         // LLVM 18 supports the C++23 shared_ptr atomic free functions.
@@ -187,7 +187,8 @@ struct TScans::TImpl
     bool Expired(const TSession& session) const
     {
         const auto now = Now();
-        return now - session.Created >= Lifetime.count() || now - session.Touched.load() >= IdleTimeout.count();
+        return (Lifetime.count() > 0 && now - session.Created >= Lifetime.count()) ||
+            (!session.Busy.load() && now - session.Touched.load() >= IdleTimeout.count());
     }
     void CheckActive(const TSession& session) const
     {
@@ -307,25 +308,15 @@ struct TScans::TImpl
         Require(Sessions.size() < MaxSessions && localCount < MaxDatabaseSessions,
             "too many scan sessions; cancel unused cursors or retry after expiry",
             "RESOURCE_EXHAUSTED");
+        Require(MaxResponseBytes <= MaxReplayBytes - ReplayBytes,
+            "scan replay reservation is full",
+            "RESOURCE_EXHAUSTED");
+        // Reserve the hard page bound before planning or consuming any rows.
+        // Every admitted cursor can retain its largest legal replay page.
+        ReplayBytes += MaxResponseBytes;
+        session->ChargedBytes = MaxResponseBytes;
         Sessions.push_back(session);
         Tokens.emplace(session->NextToken, session);
-    }
-    void Charge(const TPtr& session, size_t bytes)
-    {
-        bool full = false;
-        {
-            std::lock_guard lock(Mutex);
-            full = bytes > MaxReplayBytes - (ReplayBytes - session->ChargedBytes);
-        }
-        if (full) {
-            EvictCompleted(nullptr, session);
-        }
-        std::lock_guard lock(Mutex);
-        Require(bytes <= MaxReplayBytes - (ReplayBytes - session->ChargedBytes),
-            "scan replay memory is full; retry after cancelling unused scans",
-            "RESOURCE_EXHAUSTED");
-        ReplayBytes = ReplayBytes - session->ChargedBytes + bytes;
-        session->ChargedBytes = bytes;
     }
     bool Peek(TSession& session)
     {
@@ -486,7 +477,6 @@ struct TScans::TImpl
         }
         Require(response.Body.size() <= MaxResponseBytes, "scan response exceeds response byte limit");
         session->Replay = response;
-        Charge(session, session->Replay.Body.size());
         CheckActive(*session);
         session->ReplayToken = token;
         session->NextToken = next;
@@ -513,7 +503,7 @@ struct TScans::TImpl
 };
 TScans::TScans(std::chrono::milliseconds idle, std::chrono::milliseconds lifetime)
 {
-    Require(idle.count() > 0 && lifetime.count() > 0, "scan lifetime limits must be positive");
+    Require(idle.count() > 0 && lifetime.count() >= 0, "idle timeout must be positive; lifetime must be nonnegative");
     Impl_ = std::make_unique<TImpl>(TImpl::TExpiryPolicy{.Idle = idle, .Lifetime = lifetime});
 }
 TScans::~TScans() = default;
@@ -545,6 +535,21 @@ TResponse TScans::Open(const std::shared_ptr<Engine>& engine,
     Require(token == session->NextToken || token == session->ReplayToken,
         "scan cursor not found or expired",
         "NOT_FOUND");
+    {
+        // Serialize admission with the reaper's expiry decision. Busy pages
+        // remain active until completion; replay still does not refresh idle.
+        std::lock_guard activityLock(Impl_->Mutex);
+        Impl_->CheckActive(*session);
+        session->Busy = true;
+    }
+    struct TActivity
+    {
+        TImpl::TSession& Session;
+        ~TActivity()
+        {
+            Session.Busy = false;
+        }
+    } activity{*session};
     try {
         if (!body.contains("cursor")) {
             Impl_->Register(session);
@@ -567,6 +572,7 @@ TResponse TScans::Open(const std::shared_ptr<Engine>& engine,
         }
         Impl_->CheckActive(*session);
         if (openOnly) {
+            session->Touched = Now();
             return {200,
                 TJson{{"cursor", token},
                     {"snapshot_id", Snapshot(session->Info)},
@@ -574,24 +580,6 @@ TResponse TScans::Open(const std::shared_ptr<Engine>& engine,
                     {"identity", EncodeIdentity(session->Info.identity)}}
                     .dump()};
         }
-    } catch (...) {
-        Impl_->Release(session);
-        throw;
-    }
-    // Reserve before cursor I/O or row consumption. Keep the previous replay
-    // charged while its replacement is encoded; a refused existing cursor
-    // must retain both tokens and the exact previous response.
-    try {
-        if (token != session->ReplayToken) {
-            Impl_->Charge(session, session->Replay.Body.size() + MaxResponseBytes);
-        }
-    } catch (...) {
-        if (!body.contains("cursor")) {
-            Impl_->Release(session);
-        }
-        throw;
-    }
-    try {
         return Impl_->Page(session, token);
     } catch (...) {
         Impl_->Release(session);

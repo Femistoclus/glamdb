@@ -75,7 +75,7 @@ class DatabaseLimits(unittest.TestCase):
         self.api(append, {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'two'}]}, 507)
         self.assertEqual(self.api('/databases', {'name': 'limited'})['limits'], limits)
         self.api('/databases', {'name': 'limited', 'limits': {'max_collections': 2}}, 409)
-        self.api(base + '/open', {'limits': {'max_collections': 2}}, 429)
+        self.api(base + '/open', {'limits': {'max_collections': 2}}, 412)
         self.assertEqual(self.api(base + '/close', {})['limits'], limits)
         self.stop()
         self.start()

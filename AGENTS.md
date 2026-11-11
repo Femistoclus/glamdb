@@ -44,11 +44,10 @@ are implemented. They can use the native Asio HTTP server over the public Engine
 list, open, close and reconcile databases. A separate SQLite service registry
 stores identities, persisted engine limits and open intent; collection/data writes remain in core.
 Scans use bounded fixed-view pages with per-database quotas, finite replay retention,
-expiry and explicit cancellation. Separate HTTP data, lifecycle and control workers
-keep healthy databases and descriptors available during long operations.
-Outcome lookup refuses catalog contention without blocking control workers.
-Scan pages reserve replay capacity before consumption; admission refusal preserves
-the existing cursor and its last replay. Other page failures invalidate it.
+idle expiry and explicit cancellation. Each admitted cursor reserves its maximum
+replay page before consuming rows. Separate HTTP reader, publisher, lifecycle and
+control pools use bounded fair per-database queues with deadlines and cancellation.
+Outcome lookups refuse tentative catalog reads without waiting on publication.
 The network CLI also builds independently with OpenSSL; optional offline commands
 are in `apps/admin` and never required for server initialization.
 Collection routes are scoped by `/databases/{id}`; optional legacy

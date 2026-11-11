@@ -72,6 +72,32 @@ TEST_F(CoordinatorFaultTest, LostOuterCommitResultBlocksWritersAndFenceFailureKe
     EXPECT_EQ(backend->prepares, 1);
 }
 
+TEST_F(CoordinatorFaultTest, OutcomeLookupDoesNotWaitForAnotherPublication)
+{
+    const auto first = engine->AppendDurable(Request());
+    ASSERT_EQ(first.disposition, CommitDisposition::Committed);
+    vfs.PauseBeforeDelete(2);
+    auto writer = std::async(std::launch::async, [&] {
+        return engine->AppendDurable(Request("00000000-0000-0000-0000-000000000006"));
+    });
+    const auto entered = vfs.WaitUntilPaused(std::chrono::seconds(5));
+    auto lookup = std::async(std::launch::async, [&] {
+        return engine->FindAppendOutcome(test::collection_id, test::operation_id);
+    });
+    const auto ready = lookup.wait_for(std::chrono::milliseconds(250));
+    const auto active = engine->FindAppendOutcome(test::collection_id, "00000000-0000-0000-0000-000000000006");
+    vfs.Release();
+    const auto result = lookup.get();
+    EXPECT_TRUE(entered);
+    EXPECT_EQ(ready, std::future_status::ready);
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().code, "OPERATION_IN_PROGRESS");
+    ASSERT_FALSE(active);
+    EXPECT_EQ(active.error().retry_hint, RetryHint::SameIdAfterReconcile);
+    EXPECT_EQ(writer.get().disposition, CommitDisposition::Committed);
+    EXPECT_EQ(test::Present(engine->FindAppendOutcome(test::collection_id, test::operation_id).value()), first);
+}
+
 TEST_F(CoordinatorFaultTest, UnknownBindingHasNoDataPublicationAndResolvesWithoutReplay)
 {
     vfs.Arm(1, true);
@@ -212,6 +238,9 @@ TEST_F(CoordinatorFaultTest, UncertainCreateRetainsItsIdentityAndOutcomeUntilRec
         vfs.Arm(1, committed);
         const auto first = engine->CreateCollection(request);
         ASSERT_EQ(first.disposition, CommitDisposition::CommitUnknown);
+        const auto schema = engine->SchemaForAppend(request.collection_id);
+        ASSERT_FALSE(schema);
+        EXPECT_EQ(schema.error().code, "RECOVERY_REQUIRED");
         const auto repeated = engine->CreateCollection(request);
         EXPECT_EQ(repeated.disposition, CommitDisposition::CommitUnknown);
         EXPECT_EQ(repeated.phase, first.phase);

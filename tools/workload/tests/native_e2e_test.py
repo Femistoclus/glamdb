@@ -345,7 +345,9 @@ class NativeWorkload(unittest.TestCase):
                     "--spawn-rate",
                     20,
                     "--duration",
-                    "3s",
+                    # Allow at least one complete large scan in Debug builds;
+                    # the short shutdown grace can cancel the final scan.
+                    "10s",
                     "--report",
                     report,
                 )

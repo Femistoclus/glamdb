@@ -50,7 +50,7 @@ TJson EncodeRow(const arrow::RecordBatch& batch, int64_t row)
                 value = FormatTimestamp(static_cast<const arrow::TimestampArray&>(array).Value(row));
                 break;
             default:
-                throw TFailure({"INTERNAL", "unsupported output type"});
+                throw TFailure({"INTERNAL", "unsupported output type", RetryHint::OperatorAction});
         }
     }
     return item;
@@ -63,7 +63,7 @@ TJson EncodeRows(const arrow::RecordBatch& batch)
     for (int64_t row = 0; row < batch.num_rows(); ++row) {
         auto item = EncodeRow(batch, row);
         bytes += item.dump().size() + 1;
-        Require(bytes <= MaxResponseBytes, "JSON response exceeds transport limit", "RESOURCE_EXHAUSTED");
+        Require(bytes <= MaxResponseBytes, "JSON response exceeds transport limit", "INPUT_TOO_LARGE");
         rows.push_back(std::move(item));
     }
     return rows;

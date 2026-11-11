@@ -284,24 +284,21 @@ TEST_F(ScanSessionsTest, GlobalQuotaIsBoundedAndCancellationRestoresAdmission)
     scans.Clear();
     EXPECT_FALSE(Open(scans).empty());
 }
-TEST_F(ScanSessionsTest, ConcurrentPagesReserveReplayCapacityBeforeReading)
+TEST_F(ScanSessionsTest, ConcurrentPagesKeepReservationsBeforeReading)
 {
     TScans scans;
     std::vector<std::string> tokens;
-    tokens.reserve(8);
-    for (int index = 0; index < 8; ++index) {
-        tokens.push_back(Open(scans));
+    for (size_t index = 0; index < TScans::SessionLimit; ++index) {
+        tokens.push_back(Open(scans, std::to_string(index / TScans::DatabaseSessionLimit)));
     }
-    const auto waiting = Open(scans, "b");
     {
         std::lock_guard lock(Fs->Mutex);
         Fs->Armed = true;
     }
     std::vector<std::future<TResponse>> pages;
-    pages.reserve(tokens.size());
-    for (size_t index = 0; index < tokens.size(); ++index) {
+    for (size_t index = 0; index < 8; ++index) {
         pages.push_back(std::async(std::launch::async, [&, index] {
-            return scans.Open(Db, "a", test::collection_id, {{"cursor", tokens[index]}}, false, false);
+            return scans.Open(Db, "0", test::collection_id, {{"cursor", tokens[index]}}, false, false);
         }));
     }
     bool entered;
@@ -313,8 +310,8 @@ TEST_F(ScanSessionsTest, ConcurrentPagesReserveReplayCapacityBeforeReading)
     }
     auto refused = std::async(std::launch::async, [&] {
         try {
-            scans.Open(Db, "b", test::collection_id, {{"cursor", waiting}}, false, false);
-            return std::string("advanced");
+            Open(scans, "overflow");
+            return std::string("admitted");
         } catch (const TFailure& error) {
             return error.Detail.code;
         }
@@ -327,13 +324,14 @@ TEST_F(ScanSessionsTest, ConcurrentPagesReserveReplayCapacityBeforeReading)
     for (auto& page : pages) {
         EXPECT_EQ(page.get().Status, 200);
     }
-    EXPECT_EQ(scans.Open(Db, "b", test::collection_id, {{"cursor", waiting}}, false, false).Status, 200);
+    // Existing cursors already own their replay capacity, even at the ceiling.
+    EXPECT_EQ(scans.Open(Db, "1", test::collection_id, {{"cursor", tokens[8]}}, false, false).Status, 200);
 }
 class ReplayAdmissionTest
     : public ScanSessionsTest
     , public ::testing::WithParamInterface<bool>
 { };
-TEST_P(ReplayAdmissionTest, RefusalPreservesCursorAndLastReplay)
+TEST_P(ReplayAdmissionTest, AdmissionRefusalPreservesCursorAndLastReplay)
 {
     const std::string collection = "00000000-0000-4000-8000-0000000000c3";
     SchemaSpec schema{{{"key", FieldType::String, false}}};
@@ -341,7 +339,7 @@ TEST_P(ReplayAdmissionTest, RefusalPreservesCursorAndLastReplay)
     for (int column = 0; column < 9; ++column) {
         const auto name = "s" + std::to_string(column);
         schema.fields.push_back({name, FieldType::String, true});
-        row[name] = std::string(175000, '\x01');
+        row[name] = std::string(75000, '\x01');
     }
     ASSERT_EQ(Db->CreateCollection({collection, "large", schema}).disposition, CommitDisposition::Committed);
     auto second = row;
@@ -358,25 +356,14 @@ TEST_P(ReplayAdmissionTest, RefusalPreservesCursorAndLastReplay)
         token = TJson::parse(replayBody).at("next_cursor");
     }
     std::vector<std::pair<std::string, std::string>> tokens;
-    bool full = false;
-    for (int index = 0; index < 32; ++index) {
-        const auto database = std::to_string(index / 8);
-        try {
-            const auto response = scans.Open(Db, database, collection, TJson::object(), false, false);
-            ASSERT_GT(response.Body.size(), 9000000);
-            tokens.emplace_back(database, TJson::parse(response.Body).at("next_cursor").get<std::string>());
-        } catch (const TFailure& error) {
-            EXPECT_EQ(error.Detail.code, "RESOURCE_EXHAUSTED");
-            full = true;
-            break;
-        }
+    for (size_t index = 0; index < TScans::SessionLimit - 1; ++index) {
+        const auto database = std::to_string(index / TScans::DatabaseSessionLimit);
+        tokens.emplace_back(database, Open(scans, database, collection));
     }
-    ASSERT_TRUE(full) << "retained replay byte budget was not enforced";
-    ASSERT_FALSE(tokens.empty());
     for (int retry = 0; retry < 2; ++retry) {
         try {
-            scans.Open(Db, "victim", collection, {{"cursor", token}}, false, false);
-            FAIL() << "page advanced without replay capacity";
+            Open(scans, "overflow", collection);
+            FAIL() << "new cursor admitted without replay capacity";
         } catch (const TFailure& error) {
             EXPECT_EQ(error.Detail.code, "RESOURCE_EXHAUSTED");
             EXPECT_EQ(error.Detail.retry_hint, RetryHint::SameIdAfterReconcile);
@@ -386,6 +373,7 @@ TEST_P(ReplayAdmissionTest, RefusalPreservesCursorAndLastReplay)
         }
     }
     scans.Cancel(tokens.front().first, collection, {{"cursor", tokens.front().second}});
+    EXPECT_FALSE(Open(scans, "overflow", collection).empty());
     // A later append must not enter the refused cursor's already fixed view.
     ASSERT_EQ(Db->AppendDurable({collection, ThirdOperation, {}, {ParseRows(schema, TJson::array({row}))}}).disposition,
         CommitDisposition::Committed);
@@ -401,6 +389,74 @@ TEST_P(ReplayAdmissionTest, RefusalPreservesCursorAndLastReplay)
     EXPECT_EQ(scans.Open(Db, "victim", collection, {{"cursor", reopened}}, false, false).Status, 200);
 }
 INSTANTIATE_TEST_SUITE_P(FirstAndNextPage, ReplayAdmissionTest, ::testing::Bool());
+TEST_F(ScanSessionsTest, EveryAdmittedLargePageRetainsItsReplayAndNextCursor)
+{
+    const std::string collection = "00000000-0000-4000-8000-0000000000c3";
+    SchemaSpec schema{{{"key", FieldType::String, false}}};
+    TJson row{{"key", "same"}};
+    schema.fields.push_back({"payload", FieldType::String, true});
+    row["payload"] = std::string(700000, '\x01');
+    ASSERT_EQ(Db->CreateCollection({collection, "large", schema}).disposition, CommitDisposition::Committed);
+    const auto append =
+        Db->AppendDurable({collection, SecondOperation, {}, {ParseRows(schema, TJson::array({row, row}))}});
+    ASSERT_EQ(append.disposition, CommitDisposition::Committed);
+    TScans scans(5min, 5min);
+    std::vector<std::pair<std::string, std::string>> tokens;
+    for (int index = 0; index < 32; ++index) {
+        const auto database = std::to_string(index / 8);
+        const auto token = Open(scans, database, collection);
+        const auto response = scans.Open(Db, database, collection, {{"cursor", token}}, false, false);
+        ASSERT_GT(response.Body.size(), 4U * 1024 * 1024);
+        const auto replay = scans.Open(Db, database, collection, {{"cursor", token}}, false, false);
+        EXPECT_EQ(replay.Body, response.Body);
+        const auto envelope = TJson::parse(response.Body.substr(0, response.Body.rfind(",\"rows\":")) + "}");
+        tokens.emplace_back(database, envelope.at("next_cursor").get<std::string>());
+    }
+    const auto fifth = Open(scans, "fifth", collection);
+    EXPECT_EQ(scans.Open(Db, "fifth", collection, {{"cursor", fifth}}, false, false).Status, 200);
+    for (const auto& [database, token] : tokens) {
+        const auto last = scans.Open(Db, database, collection, {{"cursor", token}}, false, false);
+        const auto envelope = TJson::parse(last.Body.substr(0, last.Body.rfind(",\"rows\":")) + "}");
+        EXPECT_TRUE(envelope.at("next_cursor").is_null());
+        EXPECT_GT(last.Body.size(), 4U * 1024 * 1024);
+    }
+}
+
+TEST_F(ScanSessionsTest, ActiveScansCanUseIdleExpiryWithoutAnAbsoluteLifetime)
+{
+    TScans scans(1s, 0ms);
+    const auto token = Open(scans);
+    EXPECT_EQ(scans.Open(Db, "a", test::collection_id, {{"cursor", token}}, false, false).Status, 200);
+}
+
+TEST_F(ScanSessionsTest, ReadingAPageIsActivityAcrossTheIdleDeadline)
+{
+    TScans scans(150ms, 0ms);
+    const auto token = Open(scans);
+    {
+        std::lock_guard lock(Fs->Mutex);
+        Fs->Armed = true;
+    }
+    auto reading = std::async(std::launch::async, [&] {
+        try {
+            return scans.Open(Db, "a", test::collection_id, {{"cursor", token}}, false, false).Status;
+        } catch (const TFailure&) {
+            return 404;
+        }
+    });
+    bool entered;
+    {
+        std::unique_lock lock(Fs->Mutex);
+        entered = Fs->Changed.wait_for(lock, 5s, [&] {
+            return Fs->Entered;
+        });
+    }
+    std::this_thread::sleep_for(350ms);
+    Fs->Release();
+    EXPECT_TRUE(entered);
+    EXPECT_EQ(reading.get(), 200);
+    EXPECT_EQ(scans.Open(Db, "a", test::collection_id, {{"cursor", token}}, false, false).Status, 200);
+}
 TEST(ScanRowsJson, BatchEncodingPreservesTypesAndBudgetedSlices)
 {
     auto batch = Batch({{"a\n\"", -4, 2.5, true, -1}, {"same", {}, {}, {}, {}}, {"same", {}, {}, {}, {}}});

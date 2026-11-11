@@ -2,11 +2,78 @@
 import http.client
 import json
 import socket
+import time
 import unittest
 from native_http_test import NativeHTTP, TOKEN
 
 
 class HTTPReview(NativeHTTP):
+    def test_complete_request_after_write_side_half_close_receives_response(self):
+        with socket.create_connection(('127.0.0.1', self.port), timeout=5) as stream:
+            stream.sendall((f'GET /databases HTTP/1.1\r\nHost: local\r\n'
+                f'Authorization: Bearer {TOKEN}\r\nConnection: close\r\n\r\n').encode())
+            stream.shutdown(socket.SHUT_WR)
+            response = http.client.HTTPResponse(stream)
+            response.begin()
+            body = response.read()
+            self.assertEqual(response.status, 200, body)
+            self.assertEqual(json.loads(body)['items'][0]['database_id'], self.store_id)
+
+    def test_capabilities_report_the_production_scan_policy(self):
+        for path in ('/capabilities', '/databases/' + self.store_id + '/capabilities'):
+            limits = self.api(path)['limits']
+            self.assertEqual(limits['scan_sessions'], 64)
+            self.assertEqual(limits['scan_sessions_per_database'], 8)
+            self.assertEqual(limits['scan_lifetime_seconds'], 0)
+            self.assertEqual(limits['scan_replay_bytes'], 1024 * 1024 * 1024)
+            self.assertEqual(limits['scan_idle_seconds'], 60)
+
+    def test_unauthenticated_peer_headers_leave_room_for_complete_requests(self):
+        streams = []
+        try:
+            for _ in range(32):
+                stream = socket.create_connection(('127.0.0.1', self.port), timeout=5)
+                streams.append(stream)
+                stream.sendall(b'GET /healthz HTTP/1.1\r\nHost: ')
+            time.sleep(0.1)
+            self.assertEqual(self.api('/healthz')['status'], 'live')
+            self.assertEqual(self.api('/databases/' + self.store_id)['state'], 'open')
+        finally:
+            for stream in streams:
+                stream.close()
+
+    def test_media_parameters_do_not_reject_supported_json(self):
+        collection = self.collection()
+        for accept in ('application/json; charset=utf-8',
+                       'application/json; profile="a,b"; q=0.8',
+                       'application/json; profile="a;b"; q=0.8; extension=test'):
+            with self.subTest(accept=accept):
+                self.assertEqual(self.request(collection + '/scan/open', {}, accept=accept)[0], 200)
+        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=5)
+        try:
+            conn.request('POST', '/databases/' + self.store_id + '/open', '{}',
+                {'Authorization': 'Bearer ' + TOKEN,
+                 'Content-Type': 'application/json; profile="a;b"; charset=UTF-8'})
+            response = conn.getresponse()
+            self.assertEqual(response.status, 200, response.read())
+        finally:
+            conn.close()
+
+    def test_health_post_is_a_method_error_without_content_type(self):
+        code, body = self.raw(b'POST /healthz HTTP/1.1\r\nHost: local\r\nContent-Length: 0\r\n\r\n')
+        self.assertEqual(code, 400, body)
+
+    def test_eager_oversized_body_receives_error_without_reset(self):
+        body = b'x' * (17 * 1024 * 1024)
+        with socket.create_connection(('127.0.0.1', self.port), timeout=10) as stream:
+            stream.sendall((f'POST /databases HTTP/1.1\r\nHost: local\r\n'
+                f'Authorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\n'
+                f'Content-Length: {len(body)}\r\n\r\n').encode() + body)
+            response = http.client.HTTPResponse(stream)
+            response.begin()
+            self.assertEqual(response.status, 413)
+            self.assertEqual(json.loads(response.read())['error']['code'], 'PAYLOAD_TOO_LARGE')
+
     def raw(self, payload):
         with socket.create_connection(('127.0.0.1', self.port), timeout=5) as stream:
             stream.sendall(payload)

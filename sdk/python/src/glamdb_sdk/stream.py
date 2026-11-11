@@ -10,6 +10,7 @@ import httpx
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from .cleanup import CleanupQueue
 from .codec import MAX_TIMESTAMP_US, MIN_TIMESTAMP_US, Field, Schema, int64
 from .errors import IntegrityError, ProtocolError, SDKError, ValidationError
 from .transport import Deadline, translate_transport
@@ -133,7 +134,7 @@ class ScanStream:
     """
 
     def __init__(self, response: httpx.Response, budget: Deadline, *, max_read_bytes: int,
-                 on_close: Callable[["ScanStream"], Any]):
+                 on_close: Callable[["ScanStream"], Any], cleanup_queue=None):
         self._response = response
         self._budget = budget
         self._on_close = on_close
@@ -141,13 +142,18 @@ class ScanStream:
         self._source = None
         self._closed = False
         self._failure = None
+        self._owners = [None, None, response]
+        owners = self._owners
+        self._finalizer = (cleanup_queue or CleanupQueue()).register(self, lambda: _close_owners(owners))
         self.integrity = "not_complete"
         self.checksum_verified = False
         self.schema: pa.Schema
         try:
             self._parse_headers(response.headers)
             self._source = _ResponseReader(response, budget, max_read_bytes)
+            self._owners[1] = self._source
             self._reader = pa.ipc.open_stream(self._source)
+            self._owners[0] = self._reader
             self.schema = self._reader.schema
             self._validate_schema()
         except BaseException as exc:
@@ -223,12 +229,6 @@ class ScanStream:
                 if maximum is not None and maximum > (1024 if field.name == "key" else 1024**2):
                     raise ProtocolError("Arrow string exceeds UTF-8 value byte limit")
 
-    def __del__(self):
-        try:
-            self.close()
-        except BaseException:
-            pass
-
     @property
     def closed(self) -> bool:
         return self._closed
@@ -294,23 +294,17 @@ class ScanStream:
         if self._closed:
             return
         self._closed = True
-        first_error = None
-        for owner in (self._reader, self._source, self._response):
-            if owner is not None:
-                try:
-                    owner.close()
-                except BaseException as exc:
-                    if first_error is None:
-                        first_error = exc
-        self._on_close(self)
-        if first_error is not None:
-            raise first_error
+        self._finalizer.detach()
+        try:
+            _close_owners(self._owners)
+        finally:
+            self._on_close(self)
 
 
 class PagedScanStream:
     """Drain independently verified IPC pages without joining their byte streams."""
 
-    def __init__(self, first, next_page, cancel, on_close):
+    def __init__(self, first, next_page, cancel, on_close, cleanup_queue=None):
         self._page = first
         self._next_page = next_page
         self._cancel = cancel
@@ -324,12 +318,9 @@ class PagedScanStream:
         self.integrity = 'not_complete'
         self.checksum_verified = False
         self._cursor = first._response.headers.get('x-glamdb-next-cursor')
-
-    def __del__(self):
-        try:
-            self.close()
-        except BaseException:
-            pass
+        state = self._cleanup_state = [first, self._cursor]
+        self._finalizer = (cleanup_queue or CleanupQueue()).register(
+            self, lambda: _close_page(state, cancel))
 
     @property
     def closed(self):
@@ -380,6 +371,7 @@ class PagedScanStream:
                     self._bytes += self._page.bytes_read
                     self._page = following
                     self._cursor = cursor
+                    self._cleanup_state[:] = [following, cursor]
         except StopIteration:
             raise
         except BaseException as exc:
@@ -394,11 +386,30 @@ class PagedScanStream:
         if self.closed:
             return
         self._closed = True
+        self._finalizer.detach()
         try:
-            self._page.close()
+            _close_page(self._cleanup_state, self._cancel)
         finally:
+            self._on_close(self)
+
+
+def _close_owners(owners):
+    first_error = None
+    for owner in owners:
+        if owner is not None:
             try:
-                if self._cursor is not None:
-                    self._cancel(self._cursor)
-            finally:
-                self._on_close(self)
+                owner.close()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+    if first_error is not None:
+        raise first_error
+
+
+def _close_page(state, cancel):
+    page, cursor = state
+    try:
+        page.close()
+    finally:
+        if cursor is not None:
+            cancel(cursor)

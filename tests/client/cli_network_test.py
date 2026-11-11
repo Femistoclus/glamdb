@@ -33,11 +33,19 @@ def raw_server(reply, delay=0, requests=None):
     with socket.socket() as listener:
         listener.bind(('127.0.0.1', 0))
         listener.listen()
-        listener.settimeout(5)
+        listener.settimeout(0.1)
+        stopped = threading.Event()
         errors = []
         def serve():
             try:
-                conn, _ = listener.accept()
+                while not stopped.is_set():
+                    try:
+                        conn, _ = listener.accept()
+                        break
+                    except socket.timeout:
+                        continue
+                else:
+                    return
                 with conn:
                     conn.settimeout(5)
                     data = b''
@@ -59,6 +67,7 @@ def raw_server(reply, delay=0, requests=None):
         try:
             yield listener.getsockname()[1]
         finally:
+            stopped.set()
             thread.join(7)
             if thread.is_alive():
                 raise AssertionError('raw response server hung')
@@ -144,9 +153,39 @@ class Client(unittest.TestCase):
             link.symlink_to(target)
             with raw_server(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}') as port:
                 result = self.run_cli('request', '--url', f'http://localhost:{port}/', '--output', str(link))
-                self.assertEqual(result.returncode, 4, result.stderr)
+                self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertTrue(link.is_symlink())
                 self.assertEqual(target.read_bytes(), b'original')
+
+    def test_output_preflight_rejects_invalid_targets_before_mutation(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as tmp:
+            root = Path(tmp)
+            (root / 'directory').mkdir()
+            (root / 'link').symlink_to(root / 'missing')
+            os.mkfifo(root / 'fifo')
+            targets = ['/dev/null', '/dev/full', root / 'directory', root / 'link', root / 'fifo', root / 'missing' / 'out']
+            for command in ('request', 'create-store'):
+                for option in ('--output', '--headers'):
+                    for target in targets:
+                        seen = []
+                        with self.subTest(command=command, option=option, target=target), raw_server(
+                                b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}', requests=seen) as port:
+                            args = [command, '--url', f'http://localhost:{port}/', option, str(target)]
+                            args += ['--method', 'POST'] if command == 'request' else ['--name', 'must-not-create']
+                            result = self.run_cli(*args)
+                            self.assertEqual(result.returncode, 1, result.stderr)
+                        self.assertEqual(seen, [], result.stderr)
+
+    def test_atomic_output_preserves_existing_permissions(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as tmp:
+            output = Path(tmp) / 'result.json'
+            output.write_bytes(b'old')
+            output.chmod(0o640)
+            with raw_server(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}') as port:
+                result = self.run_cli('request', '--url', f'http://localhost:{port}/', '--output', str(output))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(output.read_bytes(), b'{}')
+            self.assertEqual(output.stat().st_mode & 0o777, 0o640)
 
     def test_binary_headers_dns_and_stdout_failure(self):
         body = b'\x00\xff\n\r\x00arrow\xff\xff\xff\xff\x00\x00\x00\x00'
@@ -171,7 +210,7 @@ class Client(unittest.TestCase):
             result = self.run_cli('request', '--url', f'http://localhost:{port}/', '--headers', '/dev/full')
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(result.stdout, b'')
-            self.assertIn(b'complete HTTP 200', result.stderr)
+            self.assertIn(b'regular file', result.stderr)
 
     def test_invalid_and_interrupted_responses(self):
         for reply in (

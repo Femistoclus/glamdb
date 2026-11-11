@@ -1,16 +1,33 @@
 #include "apps/server/server.h"
+#include "apps/server/admission.h"
 
 #include <asio.hpp>
 
 #include <atomic>
+#include <cerrno>
+#include <cstdio>
+#include <deque>
 #include <iostream>
 #include <set>
+#include <sys/socket.h>
+#include <thread>
 
 namespace glamdb::NServer {
 using namespace NTransport;
 namespace {
 using TTcp = asio::ip::tcp;
 class TSession;
+struct TCallQueue
+{
+    TCallQueue(size_t workers, size_t perDatabase)
+        : Pool(workers)
+        , Calls({.Active = workers, .PerDatabase = perDatabase})
+    { }
+    void Pump();
+    asio::thread_pool Pool;
+    TFairQueue<std::shared_ptr<TSession>> Calls;
+    bool Pumping = false, Stopping = false;
+};
 struct TState
 {
     explicit TState(TRoutes& routes, std::chrono::milliseconds timeout)
@@ -18,19 +35,25 @@ struct TState
         , Timeout(timeout)
     { }
     asio::io_context IO;
-    asio::thread_pool Workers{4};
-    asio::thread_pool Control{2};
-    asio::thread_pool Lifecycle{2};
+    void PumpBodies();
+    void ReapWorkers();
+    TCallQueue Readers{4, 2};
+    TCallQueue Writers{4, 1};
+    TCallQueue Control{2, 1};
+    TCallQueue Lifecycle{4, 1};
     TRoutes& Routes;
     std::set<std::shared_ptr<TSession>> Sessions;
-    std::map<std::string, size_t> DatabaseCalls;
     std::map<std::string, size_t> HeaderPeers;
+    std::deque<std::shared_ptr<TSession>> BodyWaiters;
     std::chrono::milliseconds Timeout;
-    size_t Headers = 0, Bodies = 0, DataCalls = 0, ControlCalls = 0, LifecycleCalls = 0;
+    size_t Headers = 0, Bodies = 0;
+    bool BodyPumping = false;
 };
 
 class TSession : public std::enable_shared_from_this<TSession>
 {
+    friend struct TState;
+
 public:
     TSession(TTcp::socket socket, TState& state)
         : Socket_(std::move(socket))
@@ -58,21 +81,59 @@ public:
     void Start()
     {
         Peer_ = Socket_.remote_endpoint().address().to_string();
-        if (State_.Headers >= 64 || State_.HeaderPeers[Peer_] >= 32) {
-            Busy();
-            return;
-        }
+        // Keep response slots usable by complete authenticated requests even
+        // when unauthenticated peers exhaust their ordinary header allowance.
+        HeaderProbe_ = State_.Headers >= 64 || State_.HeaderPeers[Peer_] >= 32;
         ReadingHeaders_ = true;
         ++State_.Headers;
         ++State_.HeaderPeers[Peer_];
-        Deadline(std::min(State_.Timeout, std::chrono::milliseconds(1000)), true);
+        ReadExpires_ = std::chrono::steady_clock::now() + State_.Timeout;
+        if (HeaderProbe_) {
+            Deadline(std::min(State_.Timeout, std::chrono::milliseconds(100)), true);
+        } else {
+            ReadDeadline();
+        }
         ReadHeaders();
     }
     void StopIdle()
     {
-        if (!Processing_) {
+        if (!Active_) {
             Finish();
         }
+    }
+    void StartCall()
+    {
+        Queued_ = false;
+        Active_ = true;
+        if (std::chrono::steady_clock::now() >= QueueExpires_) {
+            Write(Refusal(408, "REQUEST_TIMEOUT", "request queue deadline exceeded"));
+            return;
+        }
+        // The cancellation callback may still be queued when a worker frees.
+        // Peek without Asio's synchronous retry loop before entering core.
+        if (PeerAborted()) {
+            Finish();
+            return;
+        }
+        std::error_code ignored;
+        Socket_.cancel(ignored);
+        WatchWorker();
+        asio::post(Queue_->Pool, [self = shared_from_this(), guard = asio::make_work_guard(State_.IO)]() mutable {
+            try {
+                auto response = self->State_.Routes.Handle(self->Request_);
+                self->WorkerDone_.store(true);
+                asio::post(self->State_.IO, [self, response = std::move(response), guard = std::move(guard)]() mutable {
+                    self->Guard([&] {
+                        self->CompleteCall();
+                        self->Write(std::move(response));
+                    });
+                });
+            } catch (...) {
+                self->WorkerDone_.store(true);
+                self->WorkerFailed_.store(true);
+            }
+        });
+        WorkerStarted_ = true;
     }
 
 private:
@@ -123,6 +184,20 @@ private:
         ++Generation_;
         Timer_.cancel();
     }
+    TResponse Refusal(int status, std::string_view code, std::string_view message)
+    {
+        auto response = ErrorResponse(status, code, message);
+        auto body = TJson::parse(response.Body);
+        body["execution_started"] = false;
+        response.Body = body.dump();
+        response.Headers["Retry-After"] = "1";
+        return response;
+    }
+    void ReadDeadline()
+    {
+        Deadline(std::chrono::duration_cast<std::chrono::milliseconds>(ReadExpires_ - std::chrono::steady_clock::now()),
+            true);
+    }
     void Deadline(std::chrono::milliseconds timeout, bool reading = false)
     {
         const auto generation = ++Generation_;
@@ -133,7 +208,11 @@ private:
                     return;
                 }
                 if (reading) {
-                    self->Write(ErrorResponse(408, "REQUEST_TIMEOUT", "request read deadline exceeded"));
+                    if (self->HeaderProbe_) {
+                        self->Busy();
+                    } else {
+                        self->Write(self->Refusal(408, "REQUEST_TIMEOUT", "request read or queue deadline exceeded"));
+                    }
                 } else {
                     self->Finish();
                 }
@@ -143,6 +222,9 @@ private:
     void Finish() noexcept
     {
         if (Closed_) {
+            if (Active_ && WorkerDone_.load()) {
+                CompleteCall();
+            }
             return;
         }
         Closed_ = true;
@@ -155,19 +237,25 @@ private:
         }
         Socket_.close(ignored);
         ReleaseHeaders();
-        if (BodyAdmitted_) {
-            --State_.Bodies;
-            BodyAdmitted_ = false;
+        HeaderProbe_ = false;
+        ReleaseBody();
+        if (Active_ && WorkerStarted_ && !WorkerDone_.load()) {
+            // Socket/watchdog failure cannot release an executing core call's
+            // permit. The worker acknowledgement owns its remaining lifetime.
+            try {
+                WatchWorker();
+            } catch (...) {
+                // A later accept or shutdown also reaps finished workers.
+                std::fputs("worker watchdog rearm failed\n", stderr);
+            }
+            return;
         }
         ReleaseCall();
         State_.Sessions.erase(shared_from_this());
     }
     void Busy()
     {
-        auto response =
-            ErrorResponse(503, "SERVER_BUSY", "server admission limit reached; retry with original operation ID");
-        response.Headers["Retry-After"] = "1";
-        Write(std::move(response));
+        Write(Refusal(503, "SERVER_BUSY", "server admission limit reached; retry with original operation ID"));
     }
     void Headers(size_t size)
     {
@@ -180,17 +268,24 @@ private:
             return;
         }
         ReleaseHeaders();
+        HeaderProbe_ = false;
         Input_.erase(0, size);
         Require(Input_.size() <= Request_.ContentLength, "pipelining is unsupported");
         if (Request_.ContentLength != 0) {
             if (State_.Bodies >= 16) {
-                Busy();
+                State_.BodyWaiters.push_back(shared_from_this());
+                WaitingBody_ = true;
+                ReadDeadline();
                 return;
             }
             ++State_.Bodies;
             BodyAdmitted_ = true;
         }
-        Deadline(State_.Timeout, true);
+        BeginBody();
+    }
+    void BeginBody()
+    {
+        ReadDeadline();
         if (Request_.Headers.contains("expect")) {
             // A stalled interim write must close, not start an overlapping 408
             // write. The body read budget begins after Continue is delivered.
@@ -203,13 +298,30 @@ private:
                         if (error || self->Closed_) {
                             self->Finish();
                         } else {
-                            self->Deadline(self->State_.Timeout, true);
+                            self->ReadDeadline();
                             self->ReadBody();
                         }
                     });
                 });
         } else {
             ReadBody();
+        }
+    }
+    void ReleaseBody() noexcept
+    {
+        if (WaitingBody_) {
+            std::erase(State_.BodyWaiters, shared_from_this());
+            WaitingBody_ = false;
+        }
+        if (BodyAdmitted_) {
+            --State_.Bodies;
+            BodyAdmitted_ = false;
+        }
+        try {
+            State_.PumpBodies();
+        } catch (...) {
+            // Waiting headers retain bounded buffers and their read deadlines.
+            std::fputs("body queue dispatch failed\n", stderr);
         }
     }
     void ReadBody()
@@ -227,6 +339,9 @@ private:
             asio::transfer_exactly(remaining),
             [self = shared_from_this()](const std::error_code& error, size_t) {
                 self->Guard([&] {
+                    if (self->Processing_ || self->Closed_) {
+                        return;
+                    }
                     if (error) {
                         self->Finish();
                     } else {
@@ -237,16 +352,29 @@ private:
     }
     void ReleaseCall() noexcept
     {
-        if (!Calls_) {
+        if (!Queue_) {
             return;
         }
-        --*Calls_;
-        Calls_ = nullptr;
-        if (!Database_.empty()) {
-            const auto found = State_.DatabaseCalls.find(Database_);
-            if (found != State_.DatabaseCalls.end() && --found->second == 0) {
-                State_.DatabaseCalls.erase(found);
-            }
+        auto* queue = std::exchange(Queue_, nullptr);
+        if (Queued_) {
+            queue->Calls.Remove(Database_, shared_from_this());
+            Queued_ = false;
+        } else if (Active_) {
+            queue->Calls.Release(Database_);
+            Active_ = false;
+        }
+        try {
+            queue->Pump();
+        } catch (...) {
+            // Pending calls retain their own deadline and cancellation handlers.
+            std::fputs("call queue dispatch failed\n", stderr);
+        }
+    }
+    void CompleteCall() noexcept
+    {
+        ReleaseCall();
+        if (Closed_) {
+            State_.Sessions.erase(shared_from_this());
         }
     }
     // A worker cannot touch socket state. If allocating its completion fails,
@@ -257,23 +385,39 @@ private:
         Timer_.expires_after(std::chrono::milliseconds(100));
         Timer_.async_wait([self = shared_from_this(), generation](const std::error_code& error) {
             self->Guard([&] {
-                if (error || self->Closed_ || generation != self->Generation_) {
+                if (error || (self->Closed_ && !self->Active_) || generation != self->Generation_) {
                     return;
                 }
-                if (self->WorkerFailed_.load()) {
+                if (self->WorkerFailed_.load() || (!self->Closed_ && self->PeerAborted())) {
                     self->Finish();
+                } else if (self->Closed_ && self->WorkerDone_.load()) {
+                    self->CompleteCall();
                 } else {
                     self->WatchWorker();
                 }
             });
         });
     }
+    bool PeerAborted()
+    {
+        // Read EOF closes only the peer's send side; it can still read our reply.
+        // Extra input is unsupported pipelining in this one-request session.
+        char byte = 0;
+        const auto received = recv(Socket_.native_handle(), &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+        return received > 0 || (received < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR);
+    }
     void Dispatch()
     {
         if (Closed_ || Processing_) {
             return;
         }
+        if (std::chrono::steady_clock::now() >= ReadExpires_) {
+            Write(Refusal(408, "REQUEST_TIMEOUT", "request read deadline exceeded"));
+            return;
+        }
         CancelDeadline();
+        BodyComplete_ = true;
+        ReleaseBody();
         Request_.Body = std::move(Input_);
         const auto [path, query] = ParseTarget(Request_.Target);
         (void)query;
@@ -292,54 +436,76 @@ private:
             (path == "/databases" || (path.starts_with("/databases/") && split == std::string::npos) ||
                 !suffix.starts_with("/collections") || suffix.find("/operations/") != std::string::npos ||
                 suffix.ends_with("/scan/cancel"));
-        auto& pool = lifecycle ? State_.Lifecycle : control ? State_.Control : State_.Workers;
-        auto& count = lifecycle ? State_.LifecycleCalls : control ? State_.ControlCalls : State_.DataCalls;
-        if (count >= (lifecycle ? 2U : control ? 8U : 4U)) {
+        const bool writer = Request_.Method == "POST" && suffix.find("/scan") == std::string::npos;
+        auto& queue = lifecycle ? State_.Lifecycle
+            : control           ? State_.Control
+            : writer            ? State_.Writers
+                                : State_.Readers;
+        Database_ = split == std::string::npos ? std::string("legacy") : path.substr(11, split - 11);
+        if (!queue.Calls.Enqueue(Database_, Request_.Body.size(), shared_from_this())) {
             Busy();
             return;
         }
-        if (!lifecycle && !control) {
-            const auto database = split == std::string::npos ? std::string("legacy") : path.substr(11, split - 11);
-            if (State_.DatabaseCalls[database] >= 2) {
-                Busy();
-                return;
-            }
-            Database_ = database;
-            ++State_.DatabaseCalls[Database_];
-        }
-        ++count;
-        Calls_ = &count;
+        Queue_ = &queue;
+        Queued_ = true;
         Processing_ = true;
-        WatchWorker();
-        asio::post(pool, [self = shared_from_this(), guard = asio::make_work_guard(State_.IO)]() mutable {
-            try {
-                auto response = self->State_.Routes.Handle(self->Request_);
-                asio::post(self->State_.IO, [self, response = std::move(response), guard = std::move(guard)]() mutable {
-                    self->Guard([&] {
-                        self->ReleaseCall();
-                        self->Write(std::move(response));
-                    });
-                });
-            } catch (...) {
-                self->WorkerFailed_.store(true);
-            }
+        QueueExpires_ = std::chrono::steady_clock::now() + State_.Timeout;
+        Deadline(State_.Timeout, true);
+        Socket_.async_wait(TTcp::socket::wait_read, [self = shared_from_this()](const std::error_code& error) {
+            self->Guard([&] {
+                if (self->Queued_ && error != asio::error::operation_aborted && (error || self->PeerAborted())) {
+                    self->Finish();
+                }
+                // Do not rearm a readable EOF: complete half-closed requests
+                // retain their queue deadline and can still receive a response.
+            });
         });
+        queue.Pump();
     }
     void Write(TResponse response)
     {
         if (Closed_ || Writing_) {
             return;
         }
+        ReleaseCall();
+        ReleaseBody();
         ReleaseHeaders();
         Processing_ = true;
         Writing_ = true;
+        std::error_code ignored;
+        Socket_.cancel(ignored);
         Header_ = SerializeResponseHead(response);
         Output_ = std::move(response.Body);
-        Deadline(std::chrono::seconds(5));
+        Deadline(std::chrono::seconds(30));
         const std::array buffers{asio::buffer(Header_), asio::buffer(Output_)};
-        asio::async_write(Socket_, buffers, [self = shared_from_this()](const std::error_code&, size_t) {
-            self->Finish();
+        asio::async_write(Socket_, buffers, [self = shared_from_this()](const std::error_code& error, size_t) {
+            self->Guard([&] {
+                if (error || self->BodyComplete_) {
+                    self->Finish();
+                } else {
+                    // Half-close the reply, then drain bounded eager request data
+                    // so closing a rejected body does not reset the response.
+                    std::error_code ignored;
+                    self->Socket_.shutdown(TTcp::socket::shutdown_send, ignored);
+                    self->Deadline(std::chrono::seconds(2));
+                    self->Drain();
+                }
+            });
         });
+    }
+    void Drain()
+    {
+        Socket_.async_read_some(asio::buffer(ReadBuffer_),
+            [self = shared_from_this()](const std::error_code& error, size_t size) {
+                self->Guard([&] {
+                    self->Drained_ += size;
+                    if (error || self->Closed_ || self->Drained_ >= (size_t{32} << 20)) {
+                        self->Finish();
+                    } else {
+                        self->Drain();
+                    }
+                });
+            });
     }
     TTcp::socket Socket_;
     asio::steady_timer Timer_;
@@ -347,11 +513,80 @@ private:
     TRequest Request_;
     std::array<char, 4096> ReadBuffer_{};
     std::string Input_, Header_, Output_, Peer_, Database_;
-    size_t Checked_ = 0, Generation_ = 0;
-    size_t* Calls_ = nullptr;
-    std::atomic<bool> WorkerFailed_{false};
+    size_t Checked_ = 0, Generation_ = 0, Drained_ = 0;
+    TCallQueue* Queue_ = nullptr;
+    std::chrono::steady_clock::time_point ReadExpires_, QueueExpires_;
+    std::atomic<bool> WorkerFailed_{false}, WorkerDone_{false};
     bool ReadingHeaders_ = false, BodyAdmitted_ = false, Processing_ = false, Writing_ = false, Closed_ = false;
+    bool Queued_ = false, Active_ = false, BodyComplete_ = false, HeaderProbe_ = false, WaitingBody_ = false;
+    bool WorkerStarted_ = false;
 };
+
+void TState::ReapWorkers()
+{
+    std::array<std::shared_ptr<TSession>, 96> finished;
+    size_t count = 0;
+    for (const auto& session : Sessions) {
+        if (session->Active_ && session->WorkerDone_.load() && (session->Closed_ || session->WorkerFailed_.load())) {
+            finished[count++] = session;
+        }
+    }
+    for (size_t i = 0; i < count; ++i) {
+        finished[i]->Guard([&] {
+            finished[i]->CompleteCall();
+            finished[i]->Finish();
+        });
+    }
+}
+
+void TState::PumpBodies()
+{
+    if (BodyPumping || Readers.Stopping) {
+        return;
+    }
+    BodyPumping = true;
+    struct TReset
+    {
+        bool& Flag;
+        ~TReset()
+        {
+            Flag = false;
+        }
+    } reset{BodyPumping};
+    while (Bodies < 16 && !BodyWaiters.empty()) {
+        const auto session = BodyWaiters.front();
+        BodyWaiters.pop_front();
+        session->WaitingBody_ = false;
+        if (!session->Closed_ && !session->Writing_) {
+            ++Bodies;
+            session->BodyAdmitted_ = true;
+            session->Guard([&] {
+                session->BeginBody();
+            });
+        }
+    }
+}
+
+void TCallQueue::Pump()
+{
+    if (Pumping || Stopping) {
+        return;
+    }
+    Pumping = true;
+    struct TReset
+    {
+        bool& Flag;
+        ~TReset()
+        {
+            Flag = false;
+        }
+    } reset{Pumping};
+    while (const auto session = Calls.Take()) {
+        (*session)->Guard([&] {
+            (*session)->StartCall();
+        });
+    }
+}
 } // namespace
 
 void RunServer(TRoutes& routes,
@@ -372,6 +607,7 @@ void RunServer(TRoutes& routes,
         std::error_code ignored;
         acceptor.close(ignored);
         retry.cancel();
+        state.Readers.Stopping = state.Writers.Stopping = state.Control.Stopping = state.Lifecycle.Stopping = true;
         routes.CancelScans();
         // StopIdle can erase itself; advancing before it avoids allocating a copy.
         for (auto it = state.Sessions.begin(); it != state.Sessions.end();) {
@@ -391,6 +627,7 @@ void RunServer(TRoutes& routes,
         waiting = true;
     };
     accept = [&] {
+        state.ReapWorkers();
         if (!acceptor.is_open() || accepting || waiting) {
             return;
         }
@@ -408,6 +645,7 @@ void RunServer(TRoutes& routes,
                     return;
                 }
                 if (error) {
+                    std::cerr << "accept: " << error.value() << '\n';
                     backoff();
                     return;
                 }
@@ -430,7 +668,6 @@ void RunServer(TRoutes& routes,
             backoff();
         }
     };
-    accept();
     std::cout << TJson({{"address", address}, {"port", acceptor.local_endpoint().port()}, {"backend", "local"}}).dump()
               << '\n'
               << std::flush;
@@ -438,16 +675,18 @@ void RunServer(TRoutes& routes,
     // scheduling accept backoff must not permanently abandon the listener.
     for (;;) {
         try {
+            accept();
             state.IO.run();
             break;
         } catch (...) {
-            if (acceptor.is_open()) {
-                accept();
-            }
+            accepting = waiting = false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     }
-    state.Workers.join();
-    state.Control.join();
-    state.Lifecycle.join();
+    state.Readers.Pool.join();
+    state.Writers.Pool.join();
+    state.Control.Pool.join();
+    state.Lifecycle.Pool.join();
+    state.ReapWorkers();
 }
 } // namespace glamdb::NServer

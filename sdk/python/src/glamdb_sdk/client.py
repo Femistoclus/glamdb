@@ -11,6 +11,7 @@ from uuid import UUID
 
 import httpx
 
+from .cleanup import CleanupQueue
 from .codec import Schema, decode_rows, int64, timestamp_us
 from .errors import (AuthenticationError, ErrorDetail, HTTPError, OutcomeUnknownError, ProtocolError,
                      TransportError, ValidationError)
@@ -22,17 +23,12 @@ from .transport import JSON_ACCEPT_ENCODING, Deadline, read_json, translate_tran
 
 
 class _ScanPages:
-    def __init__(self, iterator, on_close):
+    def __init__(self, iterator, on_close, cleanup_queue):
         self._iterator, self._on_close = iterator, on_close
         self._failure = None
         self._closed = False
         self.integrity = "not_complete"
-
-    def __del__(self):
-        try:
-            self.close()
-        except BaseException:
-            pass
+        self._finalizer = cleanup_queue.register(self, iterator.close)
 
     def __iter__(self):
         return self
@@ -60,6 +56,7 @@ class _ScanPages:
         if self._closed:
             return
         self._closed = True
+        self._finalizer.detach()
         try:
             self._iterator.close()
         finally:
@@ -103,6 +100,7 @@ class Client:
         self._max_arrow_read_bytes = max_arrow_read_bytes
         self._schemas: dict[str, Schema] = {}
         self._streams = weakref.WeakSet()
+        self._cleanup = CleanupQueue()
         self._closed = False
         self._http = httpx.Client(base_url=str(url).rstrip("/") + "/", headers={"Authorization": f"Bearer {token}"},
                                   verify=verify, timeout=timeout, transport=transport, follow_redirects=False)
@@ -118,6 +116,7 @@ class Client:
     def close(self) -> None:
         if self._closed:
             return
+        self._cleanup.drain()
         first_error = None
         try:
             for stream in tuple(self._streams):
@@ -128,6 +127,7 @@ class Client:
                         first_error = exc
         finally:
             try:
+                self._cleanup.close()
                 self._closed = True
                 self._http.close()
             except BaseException as exc:
@@ -140,6 +140,7 @@ class Client:
               body: bytes | None = None, accept: str = "application/json") -> httpx.Response:
         if self._closed:
             raise TransportError("client is closed", collection_id=budget.collection_id, operation_id=budget.operation_id)
+        self._cleanup.drain()
         remaining = budget.check()
         timeout = self._timeout if remaining is None else min(self._timeout, remaining)
         headers = {"Accept": accept, "Accept-Encoding": JSON_ACCEPT_ENCODING}
@@ -172,10 +173,12 @@ class Client:
             try:
                 value = read_json(response, budget, self._max_json_bytes)
             except ProtocolError:
-                if write and status >= 500:
+                if write and (status >= 500 or status == 408):
                     self._unknown_write(status, {}, budget)
                 raise
-            if write and status >= 500 and "outcome" not in value:
+            if (write and (status >= 500 or status == 408)
+                    and value.get("outcome") not in ("committed", "definitely_not_committed", "commit_unknown")
+                    and not self._pre_execution_error(status, value)):
                 self._unknown_write(status, value, budget)
             if status in (401, 403):
                 self._http_error(status, value, budget)
@@ -184,6 +187,16 @@ class Client:
             exc.operation_id = budget.operation_id
             exc.collection_id = budget.collection_id
             raise
+
+    @staticmethod
+    def _pre_execution_error(status, value):
+        error = value.get("error")
+        return (value.get("execution_started") is False
+                and set(value).isdisjoint(("outcome", "phase", "result", "info", "recovery", "recovery_required"))
+                and isinstance(error, dict)
+                and (status, error.get("code")) in ((503, "SERVER_BUSY"), (408, "REQUEST_TIMEOUT"))
+                and isinstance(error.get("message"), str)
+                and error.get("retry_hint") == "SameIdAfterReconcile")
 
     @staticmethod
     def _unknown_write(status, value, budget):
@@ -657,7 +670,7 @@ class Client:
         """
         iterator = _ScanPages(self._scan_pages(collection_id, projection=projection, predicate=predicate,
                                               snapshot_id=snapshot_id, limit=limit, deadline=deadline),
-                              self._streams.discard)
+                              self._streams.discard, self._cleanup)
         self._streams.add(iterator)
         return iterator
 
@@ -712,7 +725,7 @@ class Client:
             return following
         def next_page(cursor):
             return ScanStream(send_page(cursor), budget, max_read_bytes=self._max_arrow_read_bytes,
-                              on_close=lambda stream: None)
+                              on_close=lambda stream: None, cleanup_queue=self._cleanup)
         try:
             response = (send_page(initial_cursor) if initial_cursor is not None else
                         self._send("POST", path, budget, body=body, accept="application/vnd.apache.arrow.stream"))
@@ -728,7 +741,8 @@ class Client:
         paged = cursor is not None
         try:
             stream = ScanStream(response, budget, max_read_bytes=self._max_arrow_read_bytes,
-                                on_close=(lambda stream: None) if paged else self._streams.discard)
+                                on_close=(lambda stream: None) if paged else self._streams.discard,
+                                cleanup_queue=self._cleanup)
         except BaseException:
             # ScanStream closes HTTP/Arrow owners on construction failure, but
             # no public iterator exists yet to release the server-side cursor.
@@ -740,6 +754,6 @@ class Client:
             raise
         if paged:
             stream = PagedScanStream(stream, next_page, lambda cursor: self._cancel_scan_quietly(cid, cursor),
-                                     self._streams.discard)
+                                     self._streams.discard, self._cleanup)
         self._streams.add(stream)
         return stream

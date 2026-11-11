@@ -491,9 +491,10 @@ std::optional<OperationRecord> DurableSqliteCatalogStore::TryFindOperation(std::
     std::string_view operation_id)
 {
     std::unique_lock lock(mutex_, std::try_to_lock);
-    Require(lock.owns_lock(), "OPERATION_IN_PROGRESS", "catalog publication is executing");
     // Also reject reentrant reads from a callback on the publication thread.
-    Require(!transaction_ && publication_ == nullptr, "OPERATION_IN_PROGRESS", "catalog view is tentative");
+    if (!lock.owns_lock() || transaction_ || publication_ != nullptr) {
+        throw Failure({"OPERATION_IN_PROGRESS", "catalog publication is executing", RetryHint::SameIdAfterReconcile});
+    }
     return FindOperation(collection_id, operation_id);
 }
 

@@ -91,10 +91,14 @@ fabricated failed write outcome.
 `TransportError`, `DeadlineExceeded`, `ProtocolError`, `AuthenticationError`
 and `HTTPError` are separate from those outcomes. A lost response or malformed
 write response does not prove that publication failed. Exceptions retain the
-caller operation and collection IDs when applicable. A server/gateway 5xx write
+caller operation and collection IDs when applicable. A server/gateway 5xx or 408 write
 response without an authoritative outcome raises `OutcomeUnknownError` (an
 `HTTPError` subclass); preserve the original IDs and reconcile or look up that
-operation before deciding whether to retry. Database and route 404 errors never
+operation before deciding whether to retry. A valid pre-execution refusal
+(`503 SERVER_BUSY` or `408 REQUEST_TIMEOUT`, `execution_started: false`, and
+`SameIdAfterReconcile`) raises ordinary `HTTPError` instead; the SDK never retries
+it automatically. Missing or contradictory refusal fields remain conservative.
+Database and route 404 errors never
 mean an append operation is absent. The SDK does not add
 credentials to error messages, and redirects are disabled.
 
@@ -164,10 +168,12 @@ parameters, selector and page size; do not resolve latest again between pages.
 ## Streaming and transport ownership
 
 Always use `with client.scan_batches(...) as stream:` or call `stream.close()`.
-The client tracks iterators weakly; dropping an iterator releases its cursor via
-a nonthrowing finalizer. Explicit close remains preferable because garbage
-collection timing varies. Breaking a loop whose iterator is retained does not
-immediately release it.
+The client tracks iterators weakly. Dropping an iterator queues its HTTP owners
+and cursor cleanup through a nonthrowing finalizer; GC never closes a response or
+sends a request. The next client request or `Client.close()` drains that queue.
+Use explicit close for prompt release: abandoned owners remain retained until a
+drain, and the server cursor TTL is the fallback when no client call follows.
+Breaking a loop whose iterator is retained does not immediately release it.
 Exiting the context or closing the client closes every reader and HTTP
 response, including on a consumer exception. Already returned Arrow batches
 remain usable after those owners close. Iteration failures remain sticky: another

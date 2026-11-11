@@ -5,6 +5,54 @@
 #include <gtest/gtest.h>
 
 namespace glamdb::NTransport {
+TEST(Transport, EveryCoreErrorHasAnExplicitStatusAndRetryPolicy)
+{
+    using enum RetryHint;
+    struct TCase
+    {
+        const char* Code;
+        int Status;
+        RetryHint Hint;
+    };
+    const TCase cases[] = {{"ALREADY_EXISTS", 409, FixInput},
+        {"CANCELLED", 503, SameIdAfterReconcile},
+        {"CAPACITY_EXCEEDED", 507, OperatorAction},
+        {"COLLECTION_NOT_FOUND", 404, FixInput},
+        {"CONFIG_TOO_SMALL", 400, FixInput},
+        {"CORRUPTION", 500, OperatorAction},
+        {"DEADLINE_EXCEEDED", 504, SameIdAfterReconcile},
+        {"DEPENDENCY_UNAVAILABLE", 503, OperatorAction},
+        {"INPUT_TOO_LARGE", 413, FixInput},
+        {"INTERNAL", 500, OperatorAction},
+        {"INTERRUPTED", 503, SameIdAfterReconcile},
+        {"INVALID_ARGUMENT", 400, FixInput},
+        {"IO_ERROR", 503, OperatorAction},
+        {"NOT_FOUND", 404, FixInput},
+        {"OPERATION_CONFLICT", 409, FixInput},
+        {"OPERATION_IN_PROGRESS", 503, SameIdAfterReconcile},
+        {"PRECONDITION_FAILED", 412, FixInput},
+        {"RECOVERY_REQUIRED", 503, SameIdAfterReconcile},
+        {"RESOURCE_EXHAUSTED", 429, SameIdAfterReconcile},
+        {"SCHEMA_MISMATCH", 409, FixInput},
+        {"STALE_BASE", 409, FixInput},
+        {"STATE_IN_USE", 409, OperatorAction},
+        {"STORE_IDENTITY_MISMATCH", 409, OperatorAction},
+        {"STORE_INCOMPLETE", 409, OperatorAction},
+        {"STORE_MISSING", 409, OperatorAction},
+        {"UNSUPPORTED_STORE_VERSION", 501, OperatorAction},
+        {"UNSUPPORTED_TABLE_FEATURE", 501, OperatorAction},
+        {"REQUEST_TIMEOUT", 408, SameIdAfterReconcile},
+        {"UNSUPPORTED_OPERATION", 501, FixInput}};
+    for (const auto& value : cases) {
+        SCOPED_TRACE(value.Code);
+        const auto policy = ErrorPolicy(value.Code);
+        EXPECT_EQ(policy.Status, value.Status);
+        EXPECT_EQ(policy.Hint, value.Hint);
+    }
+    EXPECT_EQ(ErrorStatus(ErrorDetail{"RESOURCE_EXHAUSTED", "bounded input", FixInput}), 413);
+    EXPECT_EQ(ErrorStatus(ErrorDetail{"RESOURCE_EXHAUSTED", "permanent capacity", OperatorAction}), 507);
+}
+
 TEST(Transport, HealthStateFixturesKeepReadinessSeparateFromDurability)
 {
     std::ifstream input(
@@ -154,7 +202,7 @@ TEST(Transport, AcceptsAdvertisedWideAppendAndTypedValues)
 {
     TJson row = TJson::object();
     SchemaSpec schema;
-    for (int i = 0; i < 49; ++i) {
+    for (int i = 0; i < 64; ++i) {
         const auto name = "field" + std::to_string(i);
         schema.fields.push_back({name, FieldType::Int64, false});
         row[name] = "1";
@@ -166,13 +214,22 @@ TEST(Transport, AcceptsAdvertisedWideAppendAndTypedValues)
     auto parsed = ParseJson(TJson({{"rows", rows}}).dump());
     const auto batch = ParseRows(schema, parsed["rows"]);
     EXPECT_EQ(batch->num_rows(), 10000);
-    EXPECT_EQ(batch->num_columns(), 49);
+    EXPECT_EQ(batch->num_columns(), 64);
     const SchemaSpec types{
         {{"flag", FieldType::Bool, false}, {"f", FieldType::Float64, true}, {"ts", FieldType::TimestampUsUtc, false}}};
     const auto typed = ParseRows(types, ParseJson(R"([{"flag":true,"f":1.25,"ts":"2026-01-01T01:30:00.123+01:30"}])"));
     EXPECT_EQ(EncodeRows(*typed)[0]["ts"], "2026-01-01T00:00:00.123000Z");
     EXPECT_EQ(EncodeRows(*typed)[0]["flag"], true);
     EXPECT_THROW(ParseRows(types, ParseJson(R"([{"flag":1,"ts":"2026-01-01T00:00:00Z"}])")), TFailure);
+}
+TEST(Transport, RejectsObjectFloodBeyondTheMaximumSupportedAppend)
+{
+    std::string body = "[{}";
+    for (size_t i = 1; i < 650100; ++i) {
+        body += ",{}";
+    }
+    body += ']';
+    EXPECT_THROW(ParseJson(body), TFailure);
 }
 TEST(Transport, ErrorPolicyPreservesOperationalRecovery)
 {
@@ -200,7 +257,7 @@ TEST(Transport, ExhaustedCapacityIs507AndAdmissionIs429)
     using enum RetryHint;
     EXPECT_EQ(ErrorStatus(ErrorDetail{"RESOURCE_EXHAUSTED", "storage preflight", OperatorAction}), 507);
     EXPECT_EQ(ErrorStatus(ErrorDetail{"CAPACITY_EXCEEDED", "catalog full", OperatorAction}), 507);
-    for (const auto hint : {SameIdAfterReconcile, NewOperationId, FixInput}) {
+    for (const auto hint : {SameIdAfterReconcile, NewOperationId}) {
         EXPECT_EQ(ErrorStatus(ErrorDetail{"RESOURCE_EXHAUSTED", "pending budget is full", hint}), 429);
     }
     EXPECT_EQ(ErrorStatus("RESOURCE_EXHAUSTED"), 429);
@@ -282,9 +339,7 @@ TEST(Transport, ParsesCompoundPredicatesAndEnforcesLimitsAndErrorCodes)
         } catch (const TFailure& error) {
             EXPECT_EQ(ErrorStatus(error.Detail), expectedStatus) << body;
             EXPECT_EQ(error.Detail.code, expectedCode) << body;
-            EXPECT_EQ(error.Detail.retry_hint,
-                expectedCode == "INVALID_ARGUMENT" ? RetryHint::FixInput : RetryHint::OperatorAction)
-                << body;
+            EXPECT_EQ(error.Detail.retry_hint, RetryHint::FixInput) << body;
         } catch (const std::exception& ex) {
             FAIL() << "Expected TFailure, got std::exception: " << ex.what() << " for " << body;
         }

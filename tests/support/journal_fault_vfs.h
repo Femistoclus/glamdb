@@ -20,8 +20,9 @@ public:
     JournalFaultVfs& operator=(const JournalFaultVfs&) = delete;
     void Arm(int journal_delete_number, bool after_unlink);
     void Disarm();
+    // A negative number pauses the next abs(number) deletions independently.
     void PauseBeforeDelete(int journal_delete_number);
-    bool WaitUntilPaused(std::chrono::milliseconds timeout);
+    bool WaitUntilPaused(std::chrono::milliseconds timeout, int count = 1);
     void Release();
     const std::string& Name() const
     {
@@ -40,7 +41,7 @@ private:
     bool after_unlink_ = false;
     int pause_remaining_ = 0;
     std::condition_variable pause_changed_;
-    bool paused_ = false;
+    int paused_ = 0;
     bool released_ = true;
 };
 

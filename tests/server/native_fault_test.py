@@ -3,12 +3,14 @@ import http.client
 import json
 import select
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
 import uuid
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -28,8 +30,10 @@ class NativeFaultHTTP(unittest.TestCase):
 
     def start(self):
         arguments = [DRIVER, str(self.directory)]
-        if hasattr(self, 'connection_limit'):
-            arguments.append(str(self.connection_limit))
+        if hasattr(self, 'connection_limit') or hasattr(self, 'request_timeout_ms'):
+            arguments.append(str(getattr(self, 'connection_limit', 96)))
+        if hasattr(self, 'request_timeout_ms'):
+            arguments.append(str(self.request_timeout_ms))
         self.process = subprocess.Popen(arguments, stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
         self.assertTrue(select.select([self.process.stdout], [], [], 20)[0], 'server startup timed out')
@@ -49,8 +53,8 @@ class NativeFaultHTTP(unittest.TestCase):
         self.assertTrue(select.select([self.process.stdout], [], [], 10)[0], 'fault control timed out')
         self.assertEqual(self.process.stdout.readline().strip(), 'armed')
 
-    def wait_for_publication(self):
-        self.process.stdin.write('wait\n')
+    def wait_for_publication(self, count=1):
+        self.process.stdin.write(f'wait {count}\n')
         self.process.stdin.flush()
         self.assertTrue(select.select([self.process.stdout], [], [], 12)[0])
         self.assertEqual(self.process.stdout.readline().strip(), 'paused')
@@ -265,6 +269,7 @@ class NativeFaultHTTP(unittest.TestCase):
                     failure = json.loads(response.read())
                     self.assertEqual(response.status, 503, failure)
                     self.assertEqual(failure['error']['code'], 'OPERATION_IN_PROGRESS')
+                    self.assertEqual(failure['error']['retry_hint'], 'SameIdAfterReconcile')
                     self.assertNotIn('outcome', failure)
                 for target in ('/databases', self.base, '/databases/' + other,
                         quiet + '/operations/' + quiet_receipt['operation_id'],
@@ -284,6 +289,217 @@ class NativeFaultHTTP(unittest.TestCase):
             self.assertEqual(append.result(timeout=10)['outcome'], 'committed')
         self.assertEqual(self.api(path + '/operations/' + original['operation_id']), original)
         self.api(path + '/operations/' + operations[-1], status=404)
+
+    def test_concurrent_appends_wait_without_fast_refusals(self):
+        path = self.collection()
+        self.arm('pause', 2, False)
+        with ThreadPoolExecutor(max_workers=1) as workers:
+            append = workers.submit(self.api, path + '/append',
+                {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'first'}]})
+            self.wait_for_publication()
+            streams = []
+            try:
+                for index in range(6):
+                    body = json.dumps({'operation_id': str(uuid.uuid4()), 'rows': [{'key': str(index)}]})
+                    stream = socket.create_connection(('127.0.0.1', self.port), timeout=5)
+                    self.addCleanup(stream.close)
+                    streams.append(stream)
+                    stream.sendall((f'POST {path}/append HTTP/1.1\r\nHost: local\r\n'
+                        f'Authorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\n'
+                        f'Content-Length: {len(body)}\r\n\r\n{body}').encode())
+                self.assertFalse(select.select(streams, [], [], 0.25)[0], 'queued appends were refused before execution')
+            finally:
+                self.arm('release', 0, False)
+            try:
+                for stream in streams:
+                    response = http.client.HTTPResponse(stream)
+                    response.begin()
+                    self.assertEqual(response.status, 200, response.read())
+            finally:
+                for stream in streams:
+                    stream.close()
+            self.assertEqual(append.result(timeout=10)['outcome'], 'committed')
+
+    def test_half_closed_active_and_queued_appends_receive_committed_responses(self):
+        path = self.collection()
+        operations = [str(uuid.uuid4()), str(uuid.uuid4())]
+        streams = []
+        self.arm('pause', 2, False)
+        try:
+            try:
+                for index, operation in enumerate(operations):
+                    stream = socket.create_connection(('127.0.0.1', self.port), timeout=5)
+                    streams.append(stream)
+                    body = json.dumps({'operation_id': operation, 'rows': [{'key': str(index)}]})
+                    stream.sendall((f'POST {path}/append HTTP/1.1\r\nHost: local\r\n'
+                        f'Authorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\n'
+                        f'Connection: close\r\nContent-Length: {len(body)}\r\n\r\n{body}').encode())
+                    if index == 0:
+                        self.wait_for_publication()
+                    stream.shutdown(socket.SHUT_WR)
+                self.assertFalse(select.select(streams, [], [], 0.25)[0],
+                    'half-closed requests lost their response socket before publication')
+            finally:
+                self.arm('release', 0, False)
+            outcomes = []
+            for stream, operation in zip(streams, operations):
+                response = http.client.HTTPResponse(stream)
+                response.begin()
+                body = response.read()
+                self.assertEqual(response.status, 200, body)
+                outcome = json.loads(body)
+                self.assertEqual(outcome['operation_id'], operation)
+                self.assertEqual(outcome['outcome'], 'committed')
+                outcomes.append(outcome)
+            for outcome in outcomes:
+                self.assertEqual(self.api(path + '/operations/' + outcome['operation_id']), outcome)
+        finally:
+            for stream in streams:
+                stream.close()
+        self.assertCountEqual(self.api(path + '/scan', {})['rows'], [{'key': '0'}, {'key': '1'}])
+
+    def test_queued_append_reset_never_executes(self):
+        path = self.collection()
+        operation = str(uuid.uuid4())
+        self.arm('pause', 2, False)
+        with ThreadPoolExecutor(max_workers=1) as workers:
+            append = workers.submit(self.api, path + '/append',
+                {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'first'}]})
+            self.wait_for_publication()
+            stream = socket.create_connection(('127.0.0.1', self.port), timeout=5)
+            try:
+                body = json.dumps({'operation_id': operation, 'rows': [{'key': 'disconnected'}]})
+                stream.sendall((f'POST {path}/append HTTP/1.1\r\nHost: local\r\n'
+                    f'Authorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\n'
+                    f'Content-Length: {len(body)}\r\n\r\n{body}').encode())
+                stream.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+                stream.close()
+                # Allow the I/O loop to observe the reset while publication waits.
+                self.assertEqual(self.api(self.base)['state'], 'open')
+                time.sleep(0.1)
+            finally:
+                stream.close()
+                self.arm('release', 0, False)
+            self.assertEqual(append.result(timeout=10)['outcome'], 'committed')
+        self.api(path + '/operations/' + operation, status=404)
+
+    def test_queue_timeout_never_executes_the_refused_append(self):
+        self.stop()
+        self.request_timeout_ms = 200
+        self.start()
+        path = self.collection()
+        operation = str(uuid.uuid4())
+        self.arm('pause', 2, False)
+        with ThreadPoolExecutor(max_workers=1) as workers:
+            append = workers.submit(self.api, path + '/append',
+                {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'first'}]})
+            self.wait_for_publication()
+            try:
+                refused = self.api(path + '/append',
+                    {'operation_id': operation, 'rows': [{'key': 'expired'}]}, status=408)
+                self.assertIs(refused['execution_started'], False)
+                self.assertEqual(refused['error']['retry_hint'], 'SameIdAfterReconcile')
+            finally:
+                self.arm('release', 0, False)
+            self.assertEqual(append.result(timeout=10)['outcome'], 'committed')
+        self.api(path + '/operations/' + operation, status=404)
+
+    def test_closed_active_call_keeps_its_publisher_permit_until_completion(self):
+        self.stop()
+        self.request_timeout_ms = 200
+        self.start()
+        path = self.collection()
+        first, second = str(uuid.uuid4()), str(uuid.uuid4())
+        self.arm('pause', 2, False)
+        stream = socket.create_connection(('127.0.0.1', self.port), timeout=5)
+        try:
+            body = json.dumps({'operation_id': first, 'rows': [{'key': 'held'}]})
+            stream.sendall((f'POST {path}/append HTTP/1.1\r\nHost: local\r\n'
+                f'Authorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\n'
+                f'Content-Length: {len(body)}\r\n\r\n{body}').encode())
+            self.wait_for_publication()
+            stream.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+            stream.close()
+            refused = self.api(path + '/append',
+                {'operation_id': second, 'rows': [{'key': 'expired'}]}, status=408)
+            self.assertIs(refused['execution_started'], False)
+        finally:
+            stream.close()
+            self.arm('release', 0, False)
+        deadline = time.monotonic() + 3
+        while self.request(path + '/operations/' + first)[0] != 200:
+            self.assertLess(time.monotonic(), deadline)
+        self.api(path + '/operations/' + second, status=404)
+
+    def test_two_busy_stores_leave_other_stores_readers_and_lifecycle_available(self):
+        paths = [self.collection()]
+        first_base = self.base
+        for name in ('second', 'third'):
+            database = self.api('/databases', {'name': name})['database_id']
+            self.base = '/databases/' + database
+            paths.append(self.collection())
+        self.base = first_base
+        self.arm('pause', -2, False)
+        with ThreadPoolExecutor(max_workers=4) as workers:
+            appends = [workers.submit(self.api, path + '/append',
+                {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'held'}]}) for path in paths[:2]]
+            self.wait_for_publication(2)
+            streams = []
+            try:
+                for path in paths[:2] * 2:
+                    stream = socket.create_connection(('127.0.0.1', self.port), timeout=5)
+                    streams.append(stream)
+                    body = json.dumps({'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'queued'}]})
+                    stream.sendall((f'POST {path}/append HTTP/1.1\r\nHost: local\r\n'
+                        f'Authorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\n'
+                        f'Content-Length: {len(body)}\r\n\r\n{body}').encode())
+                self.assertFalse(select.select(streams, [], [], 0.2)[0])
+                self.assertEqual(self.api(paths[2] + '/append',
+                    {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'free'}]})['outcome'], 'committed')
+                self.assertEqual(self.api(paths[0] + '/scan', {})['rows'], [])
+                self.assertEqual(len(self.api('/databases')['items']), 3)
+                closes = [workers.submit(self.api, path.split('/collections/')[0] + '/close', {}) for path in paths[:2]]
+                deadline = time.monotonic() + 3
+                while any(self.api(path.split('/collections/')[0])['state'] != 'closing' for path in paths[:2]):
+                    self.assertLess(time.monotonic(), deadline)
+                third = paths[2].split('/collections/')[0]
+                self.assertEqual(self.api(third + '/close', {})['state'], 'closed')
+                self.assertEqual(self.api(third + '/open', {})['state'], 'open')
+            finally:
+                for stream in streams:
+                    stream.close()
+                self.arm('release', 0, False)
+            for append in appends:
+                self.assertEqual(append.result(timeout=10)['outcome'], 'committed')
+            for close in closes:
+                self.assertEqual(close.result(timeout=10)['state'], 'closed')
+
+    def test_32_and_64_concurrent_snapshot_sessions_finish_without_busy_refusals(self):
+        first_base = self.base
+        paths = []
+        for index in range(8):
+            if index:
+                database = self.api('/databases', {'name': 'readers-' + str(index)})['database_id']
+                self.base = '/databases/' + database
+            path = self.collection()
+            self.api(path + '/append', {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'same'}] * 2})
+            paths.append(path)
+        self.base = first_base
+        for count in (32, 64):
+            with self.subTest(sessions=count), ThreadPoolExecutor(max_workers=count) as workers:
+                barrier = threading.Barrier(count, timeout=30)
+                def scan(index):
+                    path = paths[index // 8]
+                    opened = self.api(path + '/scan/open', {})
+                    barrier.wait()
+                    try:
+                        page = self.api(path + '/scan', {'cursor': opened['cursor']})
+                        self.assertEqual(page['rows'], [{'key': 'same'}] * 2)
+                        self.assertEqual(page['snapshot_id'], opened['snapshot_id'])
+                    finally:
+                        self.api(path + '/scan/cancel', {'cursor': opened['cursor']})
+                for future in [workers.submit(scan, index) for index in range(count)]:
+                    future.result(timeout=40)
 
     def test_control_acknowledgements_after_startup(self):
         # The readiness record and control replies come from different threads.

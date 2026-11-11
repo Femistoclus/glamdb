@@ -29,6 +29,55 @@ std::string Normalized(std::string_view text)
     }
     return result;
 }
+std::optional<size_t> MediaSeparator(std::string_view text, char separator)
+{
+    bool quoted = false, escaped = false;
+    for (size_t end = 0; end < text.size(); ++end) {
+        const auto c = text[end];
+        if (escaped) {
+            escaped = false;
+        } else if (quoted && c == '\\') {
+            escaped = true;
+        } else if (c == '"') {
+            quoted = !quoted;
+        } else if (!quoted && c == separator) {
+            return end;
+        }
+    }
+    if (quoted || escaped) {
+        return {};
+    }
+    return std::string_view::npos;
+}
+template <class F>
+bool MediaParameters(std::string_view text, F&& consume)
+{
+    while (!text.empty()) {
+        const auto separator = MediaSeparator(text, ';');
+        if (!separator) {
+            return false;
+        }
+        const auto end = *separator;
+        const auto parameter = text.substr(0, end);
+        const auto equals = parameter.find('=');
+        if (equals == std::string_view::npos) {
+            return false;
+        }
+        const auto name = Normalized(parameter.substr(0, equals));
+        const auto value = Normalized(parameter.substr(equals + 1));
+        if (name.empty() || value.empty() || !consume(name, value)) {
+            return false;
+        }
+        if (end == std::string_view::npos) {
+            return true;
+        }
+        text.remove_prefix(end + 1);
+        if (text.empty()) {
+            return false;
+        }
+    }
+    return true;
+}
 bool IsJsonContentType(std::string_view text)
 {
     const auto semi = text.find(';');
@@ -38,13 +87,15 @@ bool IsJsonContentType(std::string_view text)
     if (semi == std::string_view::npos) {
         return true;
     }
-    const auto parameter = text.substr(semi + 1);
-    const auto equals = parameter.find('=');
-    if (equals == std::string_view::npos || Normalized(parameter.substr(0, equals)) != "charset") {
-        return false;
-    }
-    const auto value = Normalized(parameter.substr(equals + 1));
-    return value == "utf-8" || value == "\"utf-8\"";
+    bool charset = false;
+    return MediaParameters(text.substr(semi + 1), [&](const auto& name, const auto& value) {
+        if (name != "charset") {
+            return true;
+        }
+        const bool valid = !charset && (value == "utf-8" || value == "\"utf-8\"");
+        charset = true;
+        return valid;
+    });
 }
 std::optional<bool> ArrowAccepted(std::string_view text)
 {
@@ -55,28 +106,36 @@ std::optional<bool> ArrowAccepted(std::string_view text)
     };
     TChoice json, arrow;
     while (!text.empty()) {
-        const auto comma = text.find(',');
+        const auto separator = MediaSeparator(text, ',');
+        Require(separator.has_value(), "invalid Accept parameter");
+        const auto comma = separator.value_or(std::string_view::npos);
         auto item = text.substr(0, comma);
         const auto semi = item.find(';');
         const auto media = Normalized(item.substr(0, semi));
         int quality = 1000;
         if (semi != std::string_view::npos) {
-            const auto parameter = item.substr(semi + 1);
-            const auto equals = parameter.find('=');
-            Require(equals != std::string_view::npos && Normalized(parameter.substr(0, equals)) == "q",
+            bool seenQuality = false;
+            Require(MediaParameters(item.substr(semi + 1),
+                        [&](const auto& name, const auto& value) {
+                            if (name != "q") {
+                                return true;
+                            }
+                            Require(!seenQuality, "duplicate Accept quality");
+                            seenQuality = true;
+                            Require(!value.empty() && (value[0] == '0' || value[0] == '1') &&
+                                    (value.size() == 1 || (value.size() <= 5 && value[1] == '.')),
+                                "invalid Accept quality");
+                            quality = value[0] == '1' ? 1000 : 0;
+                            int scale = 100;
+                            for (size_t i = 2; i < value.size(); ++i) {
+                                Require(value[i] >= '0' && value[i] <= '9' && (value[0] != '1' || value[i] == '0'),
+                                    "invalid Accept quality");
+                                quality += (value[i] - '0') * scale;
+                                scale /= 10;
+                            }
+                            return true;
+                        }),
                 "invalid Accept parameter");
-            const auto value = Normalized(parameter.substr(equals + 1));
-            Require(!value.empty() && (value[0] == '0' || value[0] == '1') &&
-                    (value.size() == 1 || (value.size() <= 5 && value[1] == '.')),
-                "invalid Accept quality");
-            quality = value[0] == '1' ? 1000 : 0;
-            int scale = 100;
-            for (size_t i = 2; i < value.size(); ++i) {
-                Require(value[i] >= '0' && value[i] <= '9' && (value[0] != '1' || value[i] == '0'),
-                    "invalid Accept quality");
-                quality += (value[i] - '0') * scale;
-                scale /= 10;
-            }
         }
         const auto match = [&](std::string_view type, TChoice& choice) {
             const int specificity = media == type ? 2 : media == "application/*" ? 1 : media == "*/*" ? 0 : -1;
@@ -111,7 +170,7 @@ bool IsApiPath(std::string_view path)
 TResponse JsonResponse(const TJson& value)
 {
     auto body = value.dump();
-    Require(body.size() <= MaxResponseBytes, "response exceeds transport limit", "RESOURCE_EXHAUSTED");
+    Require(body.size() <= MaxResponseBytes, "response exceeds transport limit", "INPUT_TOO_LARGE");
     return {200, std::move(body)};
 }
 TResponse OutcomeResponse(Result<json_adapter::Response> result)
@@ -186,7 +245,7 @@ TResponse TRoutes::Handle(const TRequest& request) const
             return ErrorResponse(401, "UNAUTHORIZED", "bearer token required");
         }
         auto response = Route(request);
-        Require(response.Body.size() <= MaxResponseBytes, "response exceeds transport limit", "RESOURCE_EXHAUSTED");
+        Require(response.Body.size() <= MaxResponseBytes, "response exceeds transport limit", "INPUT_TOO_LARGE");
         return response;
     } catch (const TFailure& error) {
         return {ErrorStatus(error.Detail), EncodeError(error.Detail).dump()};
@@ -195,8 +254,8 @@ TResponse TRoutes::Handle(const TRequest& request) const
     } catch (const TJson::exception&) {
         return ErrorResponse(400, "INVALID_ARGUMENT", "invalid JSON request");
     } catch (const std::bad_alloc&) {
-        return ErrorResponse(503,
-            "RESOURCE_EXHAUSTED",
+        return ErrorResponse(500,
+            "INTERNAL",
             "request allocation failed; resolve write outcome by original ID",
             RetryHint::SameIdAfterReconcile);
     } catch (const std::exception&) {
@@ -210,6 +269,7 @@ TResponse TRoutes::Handle(const TRequest& request) const
 TResponse TRoutes::Route(const TRequest& request) const
 {
     const auto [path, query] = ParseTarget(request.Target);
+    Require(path != "/healthz" || request.Method == "GET", "health requires GET");
     TJson body;
     if (request.Method == "POST") {
         const auto type = request.Headers.find("content-type");
@@ -272,11 +332,11 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
                     {"response_bytes", MaxResponseBytes},
                     {"append_rows", 10000},
                     {"scan_page_rows", 10000},
-                    {"scan_sessions", 64},
-                    {"scan_sessions_per_database", 8},
-                    {"scan_lifetime_seconds", 300},
-                    {"scan_replay_bytes", 128ULL * 1024 * 1024},
-                    {"scan_idle_seconds", 60},
+                    {"scan_sessions", TScans::SessionLimit},
+                    {"scan_sessions_per_database", TScans::DatabaseSessionLimit},
+                    {"scan_lifetime_seconds", TScans::LifetimeSeconds},
+                    {"scan_replay_bytes", TScans::ReplayBytes},
+                    {"scan_idle_seconds", TScans::IdleSeconds},
                     {"batch_rows", 65536},
                     {"predicate_depth", detail::MaxPredicateDepth},
                     {"predicate_nodes", detail::MaxPredicateNodes},

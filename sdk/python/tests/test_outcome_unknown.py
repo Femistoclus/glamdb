@@ -41,3 +41,64 @@ def test_non_json_gateway_failure_preserves_write_identity():
             client.append(CID, [{'key': 'a'}], operation_id=OP, schema=SCHEMA)
         assert caught.value.collection_id == CID
         assert caught.value.operation_id == OP
+
+
+@pytest.mark.parametrize('method', ['append', 'create_collection'])
+@pytest.mark.parametrize('status,code', [(503, 'SERVER_BUSY'), (408, 'REQUEST_TIMEOUT')])
+def test_explicit_pre_execution_refusal_is_http_error_without_retry(method, status, code):
+    seen = []
+    body = {'error': {'code': code, 'message': 'not executed', 'retry_hint': 'SameIdAfterReconcile'},
+            'execution_started': False}
+    def handle(request):
+        seen.append(request)
+        return httpx.Response(status, json=body)
+    with Client('http://example.test', 'secret', transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(HTTPError) as caught:
+            if method == 'append':
+                client.append(CID, [{'key': 'a'}], operation_id=OP, schema=SCHEMA)
+            else:
+                client.create_collection('events', SCHEMA, collection_id=CID)
+        assert type(caught.value) is HTTPError
+        assert caught.value.raw == body
+    assert len(seen) == 1
+
+@pytest.mark.parametrize('status,code', [(503, 'SERVER_BUSY'), (408, 'REQUEST_TIMEOUT')])
+@pytest.mark.parametrize('extra', [
+    {}, {'execution_started': 0}, {'execution_started': None}, {'execution_started': True},
+    {'execution_started': False, 'recovery_required': True},
+    {'execution_started': False, 'result': {}},
+    {'execution_started': False, 'phase': 'catalog_commit'},
+    {'execution_started': False, 'error': {'code': 'SERVER_BUSY', 'message': 'busy', 'retry_hint': 1}},
+    {'execution_started': False, 'error': {'code': 'SERVER_BUSY', 'message': 'busy'}},
+    {'execution_started': False, 'error': {'code': 'INTERNAL', 'message': 'busy', 'retry_hint': 'SameIdAfterReconcile'}},
+])
+def test_malformed_pre_execution_refusal_stays_unknown(extra, status, code):
+    from glamdb_sdk import OutcomeUnknownError
+    body = {'error': {'code': code, 'message': 'busy', 'retry_hint': 'SameIdAfterReconcile'}} | extra
+    with Client('http://example.test', 'secret', transport=httpx.MockTransport(
+            lambda request: httpx.Response(status, json=body))) as client:
+        with pytest.raises(OutcomeUnknownError):
+            client.append(CID, [{'key': 'a'}], operation_id=OP, schema=SCHEMA)
+
+@pytest.mark.parametrize('method', ['append', 'create_collection'])
+@pytest.mark.parametrize('status', [408, 503])
+@pytest.mark.parametrize('outcome', [None, 'garbage', '', False, 0, [], {}])
+def test_junk_outcome_never_makes_a_write_failure_definite(method, status, outcome):
+    from glamdb_sdk import OutcomeUnknownError
+    body = {'outcome': outcome, 'error': {'code': 'SERVER_BUSY', 'message': 'failure', 'retry_hint': 'FixInput'}}
+    seen = []
+    def handle(request):
+        seen.append(request)
+        return httpx.Response(status, json=body)
+    with Client('http://example.test', 'secret', transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(OutcomeUnknownError) as caught:
+            if method == 'append':
+                client.append(CID, [{'key': 'a'}], operation_id=OP, schema=SCHEMA)
+            else:
+                client.create_collection('events', SCHEMA, collection_id=CID)
+        assert caught.value.raw == body
+        assert caught.value.detail.retry_hint == 'SameIdAfterReconcile'
+        assert caught.value.collection_id == CID
+        if method == 'append':
+            assert caught.value.operation_id == OP
+    assert len(seen) == 1

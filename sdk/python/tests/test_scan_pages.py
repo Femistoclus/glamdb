@@ -123,6 +123,8 @@ def test_abandoned_page_iterator_is_not_retained_by_client():
         del iterator
         gc.collect()
         assert reference() is None
+        assert cancelled == []
+        client.capabilities()
         assert cancelled == ['next']
         assert not client._streams
 
@@ -182,6 +184,7 @@ def test_abandoned_arrow_iterator_releases_live_cursor():
     with pa.ipc.new_stream(sink, schema) as writer:
         writer.write_batch(pa.record_batch([pa.array(['a'])], schema=schema))
     def handle(request):
+        if request.url.path.endswith('/capabilities'): return httpx.Response(200, json={})
         if request.url.path.endswith('/open'): return httpx.Response(200, json={'cursor': 'first'})
         if request.url.path.endswith('/cancel'):
             cancelled.append(json.loads(request.content)['cursor'])
@@ -195,4 +198,6 @@ def test_abandoned_arrow_iterator_releases_live_cursor():
         del batches
         gc.collect()
         assert reference() is None
+        assert cancelled == []
+        client.capabilities()
         assert cancelled == ['next']

@@ -838,6 +838,16 @@ Result<SchemaSpec> Engine::SchemaForAppend(std::string_view id) const
     try {
         const auto impl = impl_;
         std::lock_guard lock(impl->state_mutex);
+        if (impl->closed || impl->closing.load()) {
+            throw Failure({"CANCELLED", "engine is closing or closed", RetryHint::SameIdAfterReconcile});
+        }
+        if (!impl->ready && std::ranges::none_of(impl->confirmed_views, [&](const auto& view) {
+                return view.info.collection_id == id;
+            }))
+        {
+            throw Failure(
+                {"RECOVERY_REQUIRED", "collection lookup is blocked by recovery", RetryHint::SameIdAfterReconcile});
+        }
         return impl->CachedCollection(id).schema;
     } catch (const Failure& error) {
         return std::unexpected(error.detail);
@@ -1344,9 +1354,10 @@ Result<std::optional<AppendOutcome>> Engine::FindAppendOutcome(std::string_view 
             impl->CheckReady();
             (void)impl->CachedCollection(collection_id);
             const auto active = impl->active;
-            Require(!active || active->collection_id != collection_id || active->operation_id != operation_id,
-                "OPERATION_IN_PROGRESS",
-                "registered append is still executing");
+            if (active && active->collection_id == collection_id && active->operation_id == operation_id) {
+                throw Failure(
+                    {"OPERATION_IN_PROGRESS", "registered append is still executing", RetryHint::SameIdAfterReconcile});
+            }
         }
         // Publication owns the catalog lock through durable file work. Outcome
         // lookup must leave the service's control workers available meanwhile.
@@ -1358,7 +1369,10 @@ Result<std::optional<AppendOutcome>> Engine::FindAppendOutcome(std::string_view 
         if (!record) {
             return std::optional<AppendOutcome>{};
         }
-        Require(record->outcome.has_value(), "OPERATION_IN_PROGRESS", "registered append is still executing");
+        if (!record->outcome) {
+            throw Failure(
+                {"OPERATION_IN_PROGRESS", "registered append is still executing", RetryHint::SameIdAfterReconcile});
+        }
         return record->outcome;
     } catch (const Failure& error) {
         impl->CloseOnCorruption(error.detail);

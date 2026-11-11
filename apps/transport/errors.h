@@ -33,7 +33,7 @@ inline TErrorPolicy ErrorPolicy(std::string_view code)
         return {406, FixInput};
     }
     if (code == "REQUEST_TIMEOUT") {
-        return {408, FixInput};
+        return {408, SameIdAfterReconcile};
     }
     if (code == "DATABASE_CLOSED" || code == "STATE_IN_USE" || code == "STORE_INCOMPLETE" || code == "STORE_MISSING" ||
         code == "STORE_IDENTITY_MISMATCH")
@@ -63,7 +63,10 @@ inline TErrorPolicy ErrorPolicy(std::string_view code)
     if (code == "HEADERS_TOO_LARGE") {
         return {431, FixInput};
     }
-    if (code == "UNSUPPORTED_OPERATION" || code == "UNSUPPORTED_TABLE_FEATURE" || code == "UNSUPPORTED_STORE_VERSION") {
+    if (code == "UNSUPPORTED_OPERATION") {
+        return {501, FixInput};
+    }
+    if (code == "UNSUPPORTED_TABLE_FEATURE" || code == "UNSUPPORTED_STORE_VERSION") {
         return {501, OperatorAction};
     }
     if (code == "RECOVERY_REQUIRED" || code == "OPERATION_IN_PROGRESS" || code == "CANCELLED" ||
@@ -80,6 +83,9 @@ inline TErrorPolicy ErrorPolicy(std::string_view code)
     if (code == "CAPACITY_EXCEEDED") {
         return {507, OperatorAction};
     }
+    if (code == "CORRUPTION" || code == "INTERNAL") {
+        return {500, OperatorAction};
+    }
     return {500, OperatorAction};
 }
 // Core RESOURCE_EXHAUSTED covers both bounded admission (busy writer, pending
@@ -90,6 +96,9 @@ inline int ErrorStatus(const ErrorDetail& error)
 {
     if (error.code == "RESOURCE_EXHAUSTED" && error.retry_hint == RetryHint::OperatorAction) {
         return 507;
+    }
+    if (error.code == "RESOURCE_EXHAUSTED" && error.retry_hint == RetryHint::FixInput) {
+        return 413;
     }
     return ErrorPolicy(error.code).Status;
 }

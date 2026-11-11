@@ -46,7 +46,9 @@ automatic file cleanup remain outside this MVP.
   Its exact base includes store/collection/table identities, metadata location,
   optional snapshot, schema and partition-spec IDs. Retrying identical content
   returns the original terminal result before evaluating a new precondition,
-  reserving owned input or admitting another operation. Healthy terminal lookups
+  reserving owned input or admitting another operation. Outcome lookups use a
+  nonblocking catalog read and return retryable `OPERATION_IN_PROGRESS` while
+  publication owns the catalog. Healthy terminal lookups
   query only the requested catalog record, reusing the verified generation from
   open/reconciliation and confirmed publications. They neither enumerate retained
   operations nor scrub warehouse files. Observed corruption or uncertain

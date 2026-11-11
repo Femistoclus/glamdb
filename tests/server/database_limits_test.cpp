@@ -58,4 +58,22 @@ TEST(DatabaseLimits, InterruptedInitializationPublishesOnlyCompleteRegistry)
         reopened.Shutdown();
     }
 }
+TEST(DatabaseLimits, ChangingLimitsWhileOpenRequiresClose)
+{
+    test::TempDir temporary;
+    TDatabases databases(temporary.path / "server");
+    const auto id = databases.Create({{"name", "limited"}}).at("database_id").get<std::string>();
+    try {
+        databases.Change(id, "open", {{"limits", {{"max_collections", 1}}}});
+        FAIL() << "changing limits requires a closed database";
+    } catch (const TFailure& error) {
+        EXPECT_EQ(error.Detail.code, "PRECONDITION_FAILED");
+        EXPECT_EQ(error.Detail.retry_hint, RetryHint::FixInput);
+    }
+    EXPECT_EQ(databases.Get(id).at("limits").at("max_collections"), 8);
+    databases.Change(id, "close");
+    EXPECT_EQ(databases.Change(id, "open", {{"limits", {{"max_collections", 1}}}}).at("limits").at("max_collections"),
+        1);
+    databases.Shutdown();
+}
 } // namespace glamdb::NServer

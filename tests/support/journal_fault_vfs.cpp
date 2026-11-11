@@ -51,15 +51,15 @@ void JournalFaultVfs::Disarm()
 void JournalFaultVfs::PauseBeforeDelete(int journal_delete_number)
 {
     std::lock_guard lock(control_mutex_);
-    paused_ = false;
+    paused_ = 0;
     released_ = false;
     pause_remaining_ = journal_delete_number;
 }
-bool JournalFaultVfs::WaitUntilPaused(std::chrono::milliseconds timeout)
+bool JournalFaultVfs::WaitUntilPaused(std::chrono::milliseconds timeout, int count)
 {
     std::unique_lock lock(control_mutex_);
     return pause_changed_.wait_for(lock, timeout, [&] {
-        return paused_;
+        return paused_ >= count;
     });
 }
 void JournalFaultVfs::Release()
@@ -84,12 +84,14 @@ int JournalFaultVfs::Delete(sqlite3_vfs* vfs, const char* path, int sync_directo
     bool fail = false, after_unlink = false;
     if (journal) {
         std::unique_lock lock(owner->control_mutex_);
-        const bool pause = owner->pause_remaining_ == 1;
+        const bool pause = owner->pause_remaining_ == 1 || owner->pause_remaining_ < 0;
         if (owner->pause_remaining_ > 0) {
             --owner->pause_remaining_;
+        } else if (owner->pause_remaining_ < 0) {
+            ++owner->pause_remaining_;
         }
         if (pause) {
-            owner->paused_ = true;
+            ++owner->paused_;
             owner->pause_changed_.notify_all();
             // Waiting releases the control mutex so a test can arm/disarm
             // this deletion before releasing it.

@@ -5,6 +5,8 @@
 #include "core/engine/store_lease.h"
 
 #include <atomic>
+#include <cerrno>
+#include <dirent.h>
 #include <fcntl.h>
 #include <mutex>
 #include <shared_mutex>
@@ -175,23 +177,129 @@ void InitializeRegistry(const std::filesystem::path& directory, const std::strin
     SyncDirectory(directory);
     SyncDirectory(directory.parent_path());
 }
-void PreserveIncompleteStore(const std::filesystem::path& path)
+std::vector<std::string> ListDirectory(int descriptor)
 {
+    struct TDirectoryEntries
+    {
+        DIR* Value = nullptr;
+        ~TDirectoryEntries()
+        {
+            if (Value) {
+                closedir(Value);
+            }
+        }
+    } entries;
+    const int copied = dup(descriptor);
+    Require(copied >= 0, "cannot inspect incomplete store", "IO_ERROR");
+    entries.Value = fdopendir(copied);
+    if (!entries.Value) {
+        close(copied);
+        throw TFailure({"IO_ERROR", "cannot inspect incomplete store", RetryHint::OperatorAction});
+    }
+    std::vector<std::string> names;
+    for (;;) {
+        errno = 0;
+        const auto* item = readdir(entries.Value);
+        if (!item) {
+            Require(errno == 0, "cannot enumerate incomplete store", "IO_ERROR");
+            return names;
+        }
+        const std::string name = item->d_name;
+        if (name != "." && name != "..") {
+            Require(names.size() < 5, "unexpected incomplete store contents require inspection", "PRECONDITION_FAILED");
+            names.push_back(name);
+        }
+    }
+}
+std::string ReadStoreMarker(int directory, const char* name)
+{
+    TDirectoryLock file;
+    file.Descriptor = openat(directory, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    if (file.Descriptor < 0 && errno == ENOENT) {
+        return {};
+    }
+    Require(file.Descriptor >= 0, "cannot safely inspect store marker", "PRECONDITION_FAILED");
+    struct stat status
+    { };
+    Require(fstat(file.Descriptor, &status) == 0 && S_ISREG(status.st_mode) && status.st_size >= 0 &&
+            status.st_size <= 512,
+        "invalid store marker requires inspection",
+        "PRECONDITION_FAILED");
+    std::string contents(static_cast<size_t>(status.st_size), '\0');
+    size_t offset = 0;
+    while (offset < contents.size()) {
+        const auto count = read(file.Descriptor, contents.data() + offset, contents.size() - offset);
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        Require(count > 0, "cannot read store marker", "IO_ERROR");
+        offset += static_cast<size_t>(count);
+    }
+    return contents;
+}
+bool HasValidReadyMarker(int directory)
+{
+    const auto ready = ReadStoreMarker(directory, "store.ready");
+    constexpr std::string_view prefix = "GLAMDB\n1\n";
+    constexpr std::string_view suffix = "\nlocal-delete-extra-v1\n";
+    return ready.size() == prefix.size() + 36 + suffix.size() && ready.starts_with(prefix) && ready.ends_with(suffix) &&
+        detail::ValidUuid(std::string_view(ready).substr(prefix.size(), 36)) &&
+        ready == ReadStoreMarker(directory, "store.identity");
+}
+bool ReclaimIncompleteStore(const std::filesystem::path& path, bool discard)
+{
+    if (!std::filesystem::exists(std::filesystem::symlink_status(path))) {
+        return true;
+    }
     Require(std::filesystem::is_directory(std::filesystem::symlink_status(path)),
         "incomplete store is not a directory",
-        "CORRUPTION");
+        "PRECONDITION_FAILED");
     TDirectoryLock ownership;
     ownership.Descriptor = open(path.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     Require(ownership.Descriptor >= 0 && flock(ownership.Descriptor, LOCK_EX | LOCK_NB) == 0,
         "incomplete store is already owned",
         "STATE_IN_USE");
-    Require(!std::filesystem::exists(std::filesystem::symlink_status(path / "store.ready")),
-        "ready store cannot be replaced",
-        "CORRUPTION");
-    // Preserve every byte for inspection. Never remove an initialized/ready store.
-    std::filesystem::rename(path,
-        path.parent_path() / ("incomplete-" + path.filename().string() + "-" + detail::NewUuid()));
+    if (HasValidReadyMarker(ownership.Descriptor)) {
+        Require(!discard, "ready stores cannot be discarded", "PRECONDITION_FAILED");
+        return false;
+    }
+    const auto names = ListDirectory(ownership.Descriptor);
+    for (const auto& name : names) {
+        struct stat status
+        { };
+        Require(fstatat(ownership.Descriptor, name.c_str(), &status, AT_SYMLINK_NOFOLLOW) == 0,
+            "cannot inspect incomplete store contents",
+            "IO_ERROR");
+        if (name == "warehouse" && S_ISDIR(status.st_mode)) {
+            TDirectoryLock warehouse;
+            warehouse.Descriptor =
+                openat(ownership.Descriptor, name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            Require(warehouse.Descriptor >= 0 && ListDirectory(warehouse.Descriptor).empty(),
+                "nonempty warehouse requires inspection",
+                "PRECONDITION_FAILED");
+        } else {
+            Require(S_ISREG(status.st_mode) &&
+                    (name == "store.identity" || name == "store.ready" || name == "catalog.sqlite" ||
+                        name == "catalog.sqlite-journal"),
+                "unexpected incomplete store contents require inspection",
+                "PRECONDITION_FAILED");
+        }
+    }
+    // Only unpublished initialization files in an uninitialized reservation are disposable.
+    for (const auto& name : names) {
+        Require(unlinkat(ownership.Descriptor, name.c_str(), name == "warehouse" ? AT_REMOVEDIR : 0) == 0,
+            "cannot reclaim incomplete store contents",
+            "IO_ERROR");
+    }
+    Require(rmdir(path.c_str()) == 0, "cannot reclaim incomplete store directory", "IO_ERROR");
     SyncDirectory(path.parent_path());
+    return true;
+}
+void RequireRegistryHealthy(bool healthy, std::string_view message = "registry needs restart")
+{
+    if (!healthy) {
+        throw TFailure({"RECOVERY_REQUIRED", std::string(message), RetryHint::OperatorAction});
+    }
 }
 void ValidateName(const std::string& name)
 {
@@ -227,7 +335,7 @@ struct TDatabases::TImpl
 
     void Write(std::string_view sql, std::initializer_list<detail::SqlValue> values = {})
     {
-        Require(Healthy, "registry needs restart after an uncertain write", "RECOVERY_REQUIRED");
+        RequireRegistryHealthy(Healthy, "registry needs restart after an uncertain write");
         try {
             Registry.Execute(sql, values);
         } catch (const detail::Failure& error) {
@@ -260,7 +368,7 @@ struct TDatabases::TImpl
                 return entry;
             }
         }
-        throw TFailure({"DATABASE_NOT_FOUND", "database not found", RetryHint::OperatorAction});
+        throw TFailure({"DATABASE_NOT_FOUND", "database not found", RetryHint::FixInput});
     }
     TEntries Snapshot() const
     {
@@ -275,18 +383,17 @@ struct TDatabases::TImpl
             entry.Error = ErrorDetail{"RECOVERY_REQUIRED",
                 Healthy ? "database registration is incomplete; retry reconciliation"
                         : "database registration is uncertain; restart to resolve registry state",
-                RetryHint::SameIdAfterReconcile};
+                Healthy ? RetryHint::SameIdAfterReconcile : RetryHint::OperatorAction};
         }
         Publish(entry);
     }
     void Open(TEntry& entry, bool create)
     {
         Require(!entry.Retired, "database not found", "DATABASE_NOT_FOUND");
-        Require(!create || entry.Initialized || Healthy, "registry needs restart", "RECOVERY_REQUIRED");
-        Require(!entry.RegistryFence || Healthy,
-            "database registry intent is uncertain; restart before reopening",
-            "RECOVERY_REQUIRED");
-        Require(!entry.Closing, "retry close before reopening this database", "DATABASE_BUSY");
+        RequireRegistryHealthy(!create || entry.Initialized || Healthy);
+        RequireRegistryHealthy(!entry.RegistryFence || Healthy,
+            "database registry intent is uncertain; restart before reopening");
+        Require(!entry.Closing, "retry close before reopening this database", "PRECONDITION_FAILED");
         if (entry.Instance) {
             Require(entry.State == "open", "database needs reconciliation or close", "RECOVERY_REQUIRED");
             return;
@@ -295,11 +402,7 @@ struct TDatabases::TImpl
         entry.State = "opening";
         Publish(entry);
         try {
-            const bool initialize = create && !entry.Initialized &&
-                !std::filesystem::exists(std::filesystem::symlink_status(path / "store.ready"));
-            if (initialize && std::filesystem::exists(std::filesystem::symlink_status(path))) {
-                PreserveIncompleteStore(path);
-            }
+            const bool initialize = create && !entry.Initialized && ReclaimIncompleteStore(path, false);
             auto engine = initialize
                 ? Unwrap(CreateStore({entry.ID, path.string(), "local-delete-extra-v1", entry.ResourceLimits}))
                 : Unwrap(OpenExisting({path.string(), entry.ID, "local-delete-extra-v1", entry.ResourceLimits}));
@@ -469,8 +572,10 @@ TJson TDatabases::Create(const TJson& body)
             }
         }
         if (!entry) {
-            Require(Impl_->Healthy, "registry needs restart", "RECOVERY_REQUIRED");
-            Require(Impl_->Entries.size() < 64, "database limit reached", "RESOURCE_EXHAUSTED");
+            RequireRegistryHealthy(Impl_->Healthy);
+            if (Impl_->Entries.size() >= 64) {
+                throw TFailure({"RESOURCE_EXHAUSTED", "database limit reached", RetryHint::OperatorAction});
+            }
             entry = std::make_shared<TEntry>();
             entry->Name = name;
             entry->ID = supplied.empty() ? detail::NewUuid() : supplied;
@@ -539,7 +644,7 @@ TJson TDatabases::Change(const std::string& id, std::string_view action, const T
                     : ParseLimits(descriptor.at("limits"));
                 Require(EncodeLimits(limits) == descriptor.at("limits"),
                     "close database before changing limits",
-                    "DATABASE_BUSY");
+                    "PRECONDITION_FAILED");
                 return descriptor;
             }
         }
@@ -550,15 +655,10 @@ TJson TDatabases::Change(const std::string& id, std::string_view action, const T
         Require(!entry->Initialized && !entry->Instance && !entry->Closing,
             "only an uninitialized, unowned reservation can be discarded",
             "PRECONDITION_FAILED");
-        Require(Impl_->Healthy, "registry needs restart", "RECOVERY_REQUIRED");
+        RequireRegistryHealthy(Impl_->Healthy);
         std::unique_lock gate(entry->Gate);
         const auto path = Impl_->Root / "databases" / entry->ID;
-        if (std::filesystem::exists(std::filesystem::symlink_status(path))) {
-            Require(!std::filesystem::exists(std::filesystem::symlink_status(path / "store.ready")),
-                "ready stores cannot be discarded",
-                "PRECONDITION_FAILED");
-            PreserveIncompleteStore(path);
-        }
+        ReclaimIncompleteStore(path, true);
         TJson response{{"database_id", entry->ID}, {"discarded", true}};
         auto descriptor = Current(*entry);
         descriptor["state"] = "discarded";
@@ -593,7 +693,7 @@ TJson TDatabases::Change(const std::string& id, std::string_view action, const T
             body.contains("limits") ? ParseLimits(body.at("limits"), entry->ResourceLimits) : entry->ResourceLimits;
         Require(EncodeLimits(limits) == EncodeLimits(entry->ResourceLimits),
             "close database before changing limits",
-            "DATABASE_BUSY");
+            "PRECONDITION_FAILED");
         return Current(*entry);
     }
     const bool admitted = entry->Accepting.exchange(false);
@@ -608,7 +708,7 @@ TJson TDatabases::Change(const std::string& id, std::string_view action, const T
             const bool changed = EncodeLimits(limits) != EncodeLimits(entry->ResourceLimits);
             Require(!changed || (!entry->Instance && !entry->Closing && previousState == "closed"),
                 "close database before changing limits",
-                "DATABASE_BUSY");
+                "PRECONDITION_FAILED");
             entry->State = previousState;
             if (!entry->Instance && !entry->Closing && (changed || !entry->AutoOpen)) {
                 std::lock_guard registryLock(Impl_->Mutex);
@@ -630,7 +730,7 @@ TJson TDatabases::Change(const std::string& id, std::string_view action, const T
                         entry->RegistryFence = true;
                         entry->Error = ErrorDetail{"RECOVERY_REQUIRED",
                             "close intent is uncertain; restart to resolve registry state",
-                            RetryHint::SameIdAfterReconcile};
+                            RetryHint::OperatorAction};
                     }
                     throw;
                 }
@@ -656,10 +756,12 @@ TJson TDatabases::Change(const std::string& id, std::string_view action, const T
             if (!Impl_->Healthy) {
                 entry->Error = ErrorDetail{"RECOVERY_REQUIRED",
                     "closed locally; restart to resolve registry open intent",
-                    RetryHint::SameIdAfterReconcile};
+                    RetryHint::OperatorAction};
             }
         } else {
             Require(entry->Instance && !entry->Closing, "open database or retry close first", "DATABASE_CLOSED");
+            RequireRegistryHealthy(!entry->RegistryFence || Impl_->Healthy,
+                "database registry intent is uncertain; restart before reconciliation");
             Impl_->CancelScans(entry->ID);
             const auto reconciled = entry->Instance->Reconcile();
             if (reconciled && entry->RegistryFence && Impl_->Healthy) {
@@ -668,6 +770,10 @@ TJson TDatabases::Change(const std::string& id, std::string_view action, const T
                 entry->Initialized = true;
                 entry->AutoOpen = true;
                 entry->RegistryFence = false;
+            }
+            if (reconciled) {
+                RequireRegistryHealthy(!entry->RegistryFence,
+                    "database registry intent is uncertain; restart before reconciliation");
             }
             entry->Accepting = !entry->RegistryFence;
             if (!reconciled) {
@@ -711,7 +817,7 @@ TResponse TDatabases::Use(const std::string& id,
         {
             throw TFailure({"RECOVERY_REQUIRED",
                 "database admission is fenced until registry recovery",
-                RetryHint::SameIdAfterReconcile});
+                Impl_->Healthy ? RetryHint::SameIdAfterReconcile : RetryHint::OperatorAction});
         }
         const bool busy = state == "opening" || state == "closing" || state == "reconciling" || state == "open";
         throw TFailure({busy ? "DATABASE_BUSY" : "DATABASE_CLOSED",
@@ -720,9 +826,11 @@ TResponse TDatabases::Use(const std::string& id,
     }
     std::shared_lock lock(entry->Gate, std::try_to_lock);
     Require(lock.owns_lock(), "database lifecycle is busy; retry the same request", "DATABASE_BUSY");
-    Require(!entry->RegistryFence || recoveryOnly,
-        "database admission is fenced until registry recovery",
-        "RECOVERY_REQUIRED");
+    if (entry->RegistryFence && !recoveryOnly) {
+        throw TFailure({"RECOVERY_REQUIRED",
+            "database admission is fenced until registry recovery",
+            Impl_->Healthy ? RetryHint::SameIdAfterReconcile : RetryHint::OperatorAction});
+    }
     Require(entry->Instance && (entry->Accepting || (recoveryOnly && entry->RegistryFence)),
         "database is closed",
         "DATABASE_CLOSED");

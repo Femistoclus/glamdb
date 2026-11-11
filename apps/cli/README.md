@@ -60,8 +60,10 @@ and use `--headers` for Arrow continuation metadata.
 Output is the exact response body, including binary Arrow IPC, without an added
 newline. `--output FILE` replaces a regular file atomically after writing, syncing,
 and closing a temporary file in the same directory; a failed write preserves the
-existing file. New files have owner-only permissions. Symlinks and special files
-are rejected. The default is stdout. `--headers FILE`
+existing file and its permissions. New files have owner-only permissions.
+Both output destinations are validated and temporary files reserved before any
+HTTP request. Symlinks, directories and special files (including `/dev/null`)
+are rejected before a mutation can execute. The default is stdout. `--headers FILE`
 writes a separate JSON object containing `status` and all lower-case response
 header names. A repeated header has an array of values, in received order; a single
 header has a string value. Header bytes above ASCII map to Latin-1 code points in
@@ -91,7 +93,8 @@ a timeout or interrupted response does not prove that a write failed. A failed
 output write/flush/close or cancelled client process likewise does not undo a
 server operation. Reconcile a write through its original
 operation ID; never retry it under a new ID merely because the response was lost.
-A header-output failure returns `4`, even when the server already committed.
+A header-output failure after a complete response returns `4`, even when the
+server already committed. Destination preflight failures return `1` before sending.
 Header and body output files are replaced independently; they are not one atomic
 multi-file transaction.
 
