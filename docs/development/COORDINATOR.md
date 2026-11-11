@@ -64,6 +64,11 @@ automatic file cleanup remain outside this MVP.
   the final health decision runs inside the catalog guard while a commit gate
   is held through the outer COMMIT, so a concurrent corruption report either
   prevents that publication or is surfaced after it completes.
+- After the outer pointer/receipt transaction resolves, `PublicationFinished`
+  hands its disposition and exact candidate root to the backend. Success promotes
+  that candidate; rollback discards it; uncertainty invalidates the verified
+  generation until reconciliation. Storage admission/preparation cannot promote
+  candidates by observing a later pointer or reload a changed prepared base.
 - An uncertain binding/publication/failure-recording result closes readiness.
   Reconciliation closes the old handle, reopens authoritative SQLite state,
   validates retained storage in both directions, and commits a real fence
@@ -211,7 +216,13 @@ Independent catalog, coordinator and SDK reviews exercised these boundaries;
 their confirmed correctness defects have regression tests. Production
 coordinator-to-storage appends and scans are exercised in-process by
 `glamdb_vertical` and in fresh processes by `glamdb.scan_process` (see
-[SCANNER.md](SCANNER.md#validation-status)). Restore, combined capacity/RSS and
+[SCANNER.md](SCANNER.md#validation-status)). `BackendPublicationTest` exercises
+explicit promotion, rollback discard, uncertain-result invalidation and
+metadata-only base changes over the real backend. `BackendPublicationIntegration`
+uses the real SQLite journal fault VFS with Parquet/Iceberg files: scans during
+the tentative transaction and retained cursors after a lost COMMIT result keep
+the confirmed snapshot; new scans block until reconciliation. This injected
+result loss does not simulate loss of the OS page cache. Restore, combined capacity/RSS and
 OS-cache-loss/power-cut qualification remain NOT RUN.
 
 ## Public health observation

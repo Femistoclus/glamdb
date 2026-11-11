@@ -48,10 +48,10 @@ if(NOT GLAMDB_IO_ONLY)
 
         # Public API with the real storage backend: Parquet, Iceberg metadata and SQLite.
         file(GLOB_RECURSE vertical_test_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/vertical/*.cpp")
-        add_executable(glamdb_vertical ${vertical_test_sources} support/fault_fs.cpp)
+        add_executable(glamdb_vertical ${vertical_test_sources} support/fault_fs.cpp support/journal_fault_vfs.cpp)
         target_include_directories(glamdb_vertical PRIVATE "${PROJECT_SOURCE_DIR}")
         target_link_libraries(glamdb_vertical PRIVATE glamdb::core glamdb_storage glamdb_build_options
-            GTest::gtest_main)
+            GTest::gtest_main SQLite::SQLite3)
         gtest_discover_tests(glamdb_vertical TEST_PREFIX glamdb.vertical.
             PROPERTIES LABELS "vertical;scan" TIMEOUT 60)
     endif()

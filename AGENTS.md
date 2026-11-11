@@ -109,6 +109,10 @@ Preserve these boundaries when adding or changing engine behavior:
   transaction commits. File finalization, buffer flush, file sync, checked close,
   and directory sync all matter. SQLite commits do not sync external files;
   successful internal Iceberg updates do not authorize a committed response.
+  The coordinator reports the outer result through `PublicationFinished`:
+  promote the exact candidate on success, discard it on rollback, invalidate
+  the verified generation on uncertainty. Admission/preparation only use an
+  explicitly confirmed base; reconciliation rebuilds invalidated generations.
   Preserve the first I/O failure through retries, repeated close, and cleanup.
   The initial catalog profile uses `journal_mode=DELETE` and `synchronous=EXTRA`,
   verified on the actual working connection.

@@ -71,8 +71,15 @@ public:
         const CollectionInfo& collection,
         const NormalizedInput& input,
         std::chrono::steady_clock::time_point deadline) = 0;
-    virtual void ConfirmPublication(std::string_view, std::string_view)
-    { }
+    // Called only after the outer pointer/receipt transaction has resolved.
+    // Committed promotes the exact candidate; DefinitelyNotCommitted discards
+    // it; CommitUnknown revokes the verified generation until recovery.
+    virtual void PublicationFinished(std::string_view, std::string_view, CommitDisposition result)
+    {
+        if (result == CommitDisposition::CommitUnknown) {
+            InvalidateCache();
+        }
+    }
     virtual void InvalidateCache()
     { }
     // A committed append superseded this base's root, and no reader can still be

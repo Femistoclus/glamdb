@@ -923,13 +923,21 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
         committed = true;
         if (gate.owns_lock()) {
             if (context->candidate_metadata_location) {
-                impl->backend->ConfirmPublication(created.collection_id, *context->candidate_metadata_location);
+                impl->backend->PublicationFinished(created.collection_id,
+                    *context->candidate_metadata_location,
+                    CommitDisposition::Committed);
             }
             gate.unlock();
         }
         impl->RefreshCache();
         return {CommitDisposition::Committed, CommitPhase::Complete, created, std::nullopt, std::nullopt};
     } catch (const Failure& error) {
+        if (publication_started && context && context->candidate_metadata_location) {
+            impl->backend->PublicationFinished(context->collection_id,
+                *context->candidate_metadata_location,
+                error.uncertain || committed ? CommitDisposition::CommitUnknown
+                                             : CommitDisposition::DefinitelyNotCommitted);
+        }
         impl->CloseOnCorruption(error.detail);
         if ((error.uncertain || committed) && context) {
             return impl->UnknownCreate(*context,
@@ -942,6 +950,11 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
             error.detail,
             std::nullopt};
     } catch (const std::exception& error) {
+        if (publication_started && context && context->candidate_metadata_location) {
+            impl->backend->PublicationFinished(context->collection_id,
+                *context->candidate_metadata_location,
+                CommitDisposition::CommitUnknown);
+        }
         if ((publication_started || committed) && context) {
             return impl->UnknownCreate(*context, CommitPhase::Reconciling, ExceptionError(error));
         }
@@ -1203,7 +1216,9 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         phase = CommitPhase::Complete;
         if (gate.owns_lock()) {
             if (context.candidate_metadata_location) {
-                impl->backend->ConfirmPublication(binding->collection_id, *context.candidate_metadata_location);
+                impl->backend->PublicationFinished(binding->collection_id,
+                    *context.candidate_metadata_location,
+                    CommitDisposition::Committed);
             }
             gate.unlock();
         }
@@ -1220,6 +1235,12 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         }
         return committed;
     } catch (const Failure& error) {
+        if (publication_started && binding && context.candidate_metadata_location) {
+            impl->backend->PublicationFinished(binding->collection_id,
+                *context.candidate_metadata_location,
+                error.uncertain || phase == CommitPhase::Complete ? CommitDisposition::CommitUnknown
+                                                                  : CommitDisposition::DefinitelyNotCommitted);
+        }
         impl->CloseOnCorruption(error.detail);
         if (!binding) {
             return Rejected(request.operation_id, phase, error.detail);
@@ -1231,6 +1252,11 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         return impl->FailBound(*binding, phase, error.detail, publication_started);
     } catch (const std::exception& error) {
         const auto detail = ExceptionError(error);
+        if (publication_started && binding && context.candidate_metadata_location) {
+            impl->backend->PublicationFinished(binding->collection_id,
+                *context.candidate_metadata_location,
+                CommitDisposition::CommitUnknown);
+        }
         if (!binding) {
             return Rejected(request.operation_id, phase, detail);
         }

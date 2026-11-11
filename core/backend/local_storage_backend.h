@@ -64,7 +64,9 @@ public:
         const CollectionInfo& collection,
         const NormalizedInput& input,
         std::chrono::steady_clock::time_point deadline) override;
-    void ConfirmPublication(std::string_view collectionID, std::string_view metadataLocation) override;
+    void PublicationFinished(std::string_view collectionID,
+        std::string_view metadataLocation,
+        CommitDisposition result) override;
     void InvalidateCache() override;
     void RetireRoot(const BaseIdentity& superseded) override;
     Status VerifyRetained(const StoreInfo& store,
@@ -76,8 +78,8 @@ public:
         const AppendResult& receipt) override;
     Result<std::shared_ptr<iceberg::FileIO>> ReadOnlyFileIO() override;
 
-    // A verified candidate is tentative until the outer COMMIT is confirmed or
-    // a later binding/recovery observes its root as the committed SQLite pointer.
+    // A verified candidate is tentative until PublicationFinished confirms the
+    // outer COMMIT. Recovery rebuilds the generation independently.
     void RecordCandidate(std::string_view collectionID, std::shared_ptr<const NGlamDB::NStorage::TBaseState> candidate);
     void DiscardCandidate(std::string_view collectionID);
 
