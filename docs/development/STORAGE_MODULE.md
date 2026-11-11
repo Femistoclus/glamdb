@@ -5,6 +5,9 @@ for the append-store MVP. The catalog/coordinator and installed public API are
 separate components; `core/backend/` bridges them to these primitives and
 `core/scan/` reads them, as described in [SCANNER.md](SCANNER.md). See
 [the coordinator guide](COORDINATOR.md) for the integration contract.
+The [shared resource budget matrix](RESOURCE_BUDGETS.md) distinguishes persisted
+file/history limits and disk preflight checks from shared runtime memory and
+device reservations, including completion and recovery capacity.
 
 `glamdb_io` contains the independent local I/O components. `glamdb_storage`
 adds the pinned dependency adapters; `GLAMDB_BUILD_STORAGE` enables it and

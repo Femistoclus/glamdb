@@ -152,6 +152,9 @@ Not implemented: file/row-group pruning, compound predicates (`And`, `Or`,
 runtime memory leases and quotas,
 page CRC verification, per-device physical/inode budgets and in-flight
 reservations, and measured attempt-volume/capacity qualification.
+The [shared resource budget contract](RESOURCE_BUDGETS.md) defines the required
+memory accounting lifetime for retained buffers and the process/store ownership
+of reader, writer, metadata and recovery reservations.
 
 ## Validation status
 

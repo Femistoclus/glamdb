@@ -83,6 +83,10 @@ schema evolution are outside the initial append scope. Consult
 
 Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before changing persistence,
 recovery, scan semantics, or resource ownership.
+For resource limits, read [the shared budget contract](docs/development/RESOURCE_BUDGETS.md):
+it names accounting units, owners, enforcement and release points across the
+engine and transport. Preserve its distinction between current local checks and
+required aggregate memory/device reservations; update the matrix when either changes.
 
 Preserve these boundaries when adding or changing engine behavior:
 

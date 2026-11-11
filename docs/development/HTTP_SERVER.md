@@ -298,10 +298,12 @@ Errors are `{error:{code,message,retry_hint}}`, with the core retry hint unchang
 412 precondition, 413 oversized body or decoded input, 415 media type, 429 bounded resource admission,
 501 unsupported, 503 recovery/dependency/unresolved outcome, 504 deadline,
 507 exhausted capacity, 500 corruption/unexpected error. Core `RESOURCE_EXHAUSTED`
-is 429 when a retry with the same ID may succeed (busy writer, pending budget) and
+uses 429 for bounded admission (busy writer, pending budget) and
 507 when the core marks it `OperatorAction`: free-space reserves, store limits,
 `max_collections`/`max_operations`/catalog bytes, or failed allocation. `CAPACITY_EXCEEDED`
-is always 507. The free-space reserve is the larger of 1 GiB and 5% of the data
+is always 507. Writer preflight also currently emits `RESOURCE_EXHAUSTED` with
+`FixInput` (429) when its separate row/input estimate exceeds a bound; reduce the
+input instead of retrying it unchanged. The free-space reserve is the larger of 1 GiB and 5% of the data
 filesystem plus 512 MiB for an attempt and journal. Database, collection and
 operation absence have distinct codes; only `OPERATION_NOT_FOUND` proves an
 operation lookup absent. Transport errors carry the shared retry policy; unexpected
@@ -333,6 +335,12 @@ Transient accept failures retry with backoff. Header limit: 16 KiB; request/resp
 16 MiB; append: 10000 rows. JSON depth and event limits bound a single-pass parser
 and accommodate the full 256-field append schema. These transport bounds are not
 a qualified process-memory or storage budget.
+
+The [shared resource budget matrix](RESOURCE_BUDGETS.md) specifies which limits
+are per request, store or service, who reserves/releases them and which aggregate
+budgets remain required. HTTP body bytes, parsed JSON/Arrow allocations and core
+canonical bytes are different quantities; the per-store owned-input limit does
+not cover adapter allocations or all databases together.
 
 HTTP/1.1 uses Content-Length and closes each response connection. Duplicate
 headers, folded headers, Transfer-Encoding, compressed requests and pipelined bytes
