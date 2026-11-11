@@ -94,7 +94,9 @@ catalog pages, 16 pending calls and 128 MiB aggregate owned input. Per append:
 10,000 rows, 16 MiB canonical input, 2 MiB per row, 1 MiB per string and 1024
 bytes per key. Writer wait is at most five seconds; append deadline at most
 60 seconds. Configuration may lower these bounds. These are admission limits,
-not measured simultaneous RSS or full-storage capacity guarantees.
+not measured simultaneous RSS or full-storage capacity guarantees. All limits,
+including the catalog limits, are validated before `CreateStore` creates the
+root, so a rejected configuration leaves the root and store UUID reusable.
 
 ## Storage backend integration
 

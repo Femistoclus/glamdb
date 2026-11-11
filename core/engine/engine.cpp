@@ -58,6 +58,13 @@ void ValidateConfig(const StoreInfo& info, const Limits& limits)
             limits.append_deadline <= std::chrono::milliseconds(60000),
         "INVALID_ARGUMENT",
         "invalid writer resource limits");
+    // Catalog limits are also enforced by the catalog itself; checking them
+    // here rejects a configuration before the store root is created.
+    Require(limits.max_catalog_bytes >= 65536 && limits.max_catalog_bytes <= 256LL * 1024 * 1024 &&
+            limits.max_operations > 0 && limits.max_operations <= 4096 && limits.max_collections > 0 &&
+            limits.max_collections <= 8,
+        "INVALID_ARGUMENT",
+        "invalid catalog limits");
 }
 
 RecoveryContext Context(const BoundOperation& binding, const ErrorDetail& first, bool publication)
