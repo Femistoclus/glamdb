@@ -34,11 +34,15 @@ writer, background job or online backup protocol.
   actual `DELETE`/`EXTRA` profile. Open validates schema/version, integrity,
   foreign keys, collection registry and operation records.
 - The coordinator validates and fingerprints Arrow input without copying the
-  payload. It copies into owned normalized rows only for a new operation, after
-  acquiring the writer and resolving any previous outcome. Caller-owned Arrow
+  payload; the same inspection sizes the owned-input reservation. Only for a new
+  operation, after acquiring the writer and resolving any previous outcome, it
+  validates the caller buffers again and copies them once into owned canonical
+  Arrow columns, which it hashes; a copy whose shape or hash differs from the
+  fingerprint fails before binding (`Arrow input changed during append`). Later
+  checks, the hash and the writer read only that copy. Caller-owned Arrow
   buffers must remain immutable throughout the synchronous call. Backend admission
-  checks disk/write health and writer limits, then builds the normalized writer
-  batch before binding. Allocation refusal leaves the ID unbound; production
+  checks disk/write health and writer limits on the owned columns, then copies
+  them into its input pool as the writer batch before binding. Allocation refusal leaves the ID unbound; production
   reuses the admitted batch. Final publication still rechecks changing capacity.
   Field IDs follow fixed schema order from 1; omitted nullable values become
   NULL, duplicate rows remain, float negative zero normalizes, nonfinite floats
@@ -207,7 +211,10 @@ permanent failures; exact metadata-only bases; nested transaction rollback;
 lost COMMIT and fence results through a real SQLite VFS; global-barrier races;
 writer/pending/input pressure without changing old outcomes; tentative-catalog
 lookup isolation; retained uncertain-create contexts; incremental SHA-256
-padding boundaries and all-type Arrow fingerprint goldens; shutdown during
+padding boundaries and all-type Arrow fingerprint goldens; a materialized-encoding
+hash oracle for every input path and owned columns equal to the row-built writer
+batch (`canonical_hash_oracle_test.cpp`); caller-buffer mutation after return and
+while queued (`append_input_ownership_test.cpp`); shutdown during
 publication with queued retries; bounded multibyte diagnostics and live recovery
 after losing failure-recording results; fresh-process
 operation recovery, hot rollback journals and store leases; and the installed
