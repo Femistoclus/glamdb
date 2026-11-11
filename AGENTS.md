@@ -430,6 +430,11 @@ the network CLI and codecs. `GLAMDB_BUILD_ADMIN=ON` additionally builds the offl
 pointing to the built server; `GLAMDB_E2E_PYTHON` can select
 the workbench Python environment. See the native HTTP guide for exact commands.
 
+SIGINT/SIGTERM close socket and scan admission and mark active scans cancelled
+before worker draining. Cancellation never waits on a scan's session lock; retain
+its read lease until the call finishes. Accepted writes still drain, and shutdown
+deadlines or lost COMMIT replies never establish a definite failed outcome.
+
 Native CI requires SDK/Arrow/schema checks in every profile and native browser
 acceptance plus a standalone client build in the normal profile. MSan uses the
 ordinary standalone TLS client against the instrumented server; system OpenSSL

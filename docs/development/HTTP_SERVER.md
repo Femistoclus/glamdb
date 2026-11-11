@@ -371,11 +371,13 @@ reverse proxy for remote access. There is one bearer identity, no user/RBAC laye
 The token comes only from `GLAMDB_TOKEN`, never a URL, log, config response or UI
 storage. API responses are uncached. CORS is disabled; the UI uses the same origin.
 
-SIGINT/SIGTERM stop accepting and close incomplete requests; admitted calls finish
-and responses drain before Engine::Shutdown releases store ownership. OS IO may
-still block; there is no forced rollback or detached writer. Client disconnects
-do not cancel publication. Scan pages are synchronous bounded responses; cursor
-cancellation releases the remaining read session.
+SIGINT/SIGTERM stop accepting, close incomplete requests, cancel scan sessions and
+reject new scans before draining workers. Cancellation reaches core cursors without
+waiting on their session locks; read leases remain owned until those calls finish.
+Admitted writes and responses drain before Engine::Shutdown releases store
+ownership. OS IO may still block; there is no forced rollback or detached writer.
+Client disconnects do not cancel publication. Scan pages are synchronous bounded
+responses; cancelled cursors cannot publish another page.
 
 Static serving allows only index, theme and supported assets beneath `--ui-root`,
 rejects traversal and symlinks, and never exposes the store. Administrators must
@@ -434,11 +436,15 @@ its Python environment through `GLAMDB_NATIVE_PYTHON` if needed.
 `glamdb.native_http_fault` uses the production managed HTTP service and real
 storage with a test-only SQLite VFS control channel. It covers faults before/after
 create, append and registry COMMIT, failed recovery fencing, failure recording,
-producer path corruption, descriptor exhaustion, and close waiting for an admitted
-native append. `glamdb.http_review` checks HTTP error responses, Expect handshakes,
+producer path corruption, descriptor exhaustion, close waiting for an admitted
+native append, and SIGTERM draining publication after a shutdown deadline while
+an independent embedded open still fails. Fresh-process restart resolves uncertain
+COMMIT results and retains original receipts and duplicate rows.
+`glamdb.http_review` checks HTTP error responses, Expect handshakes,
 idle-header admission, media negotiation and canonical scoped dispatch.
 `glamdb.scan_http` covers fixed-view pages beyond 100000 rows and 16 MiB, response
 replay, scope, cancellation, expiry, resource capacity, small-batch IPC, abandoned
 SDK iterators and real read corruption. Scan session tests also pause a real Parquet
-read while another database progresses and enforce the shared replay byte budget.
+read while another database progresses, check nonblocking shutdown cancellation
+and closed scan admission, and enforce the shared replay byte budget.
 These deterministic checks are separate from physical power-loss qualification.

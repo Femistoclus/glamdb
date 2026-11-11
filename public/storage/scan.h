@@ -138,6 +138,7 @@ public:
     virtual const ScanInfo& Info() const = 0;
     // nullptr marks the end of the stream; a read failure is an error, never EOS.
     virtual Result<std::shared_ptr<arrow::RecordBatch>> Next() = 0;
+    // Thread-safe request; an active I/O call may finish before cancellation is observed.
     virtual void Cancel() = 0;
     // Thread-safe observation; counters remain available after EOS/error.
     // Custom cursors may leave unsupported measurements unavailable.

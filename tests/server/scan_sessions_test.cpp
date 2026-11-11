@@ -1,3 +1,4 @@
+#include "apps/server/routes.h"
 #include "apps/server/scans.h"
 #include "tests/support/checked.h"
 #include "tests/vertical/vertical_support.h"
@@ -5,6 +6,7 @@
 #include <condition_variable>
 #include <future>
 #include <mutex>
+#include <set>
 #include <thread>
 
 namespace glamdb::NServer {
@@ -24,6 +26,7 @@ public:
     bool Armed = false;
     size_t Entered = 0;
     bool Released = false;
+    std::set<std::string> OpenedParquet;
     void Release()
     {
         std::lock_guard lock(Mutex);
@@ -50,6 +53,9 @@ public:
     {
         {
             std::unique_lock lock(Mutex);
+            if (name.ends_with(".parquet")) {
+                OpenedParquet.emplace(name);
+            }
             if (Armed && name.ends_with(".parquet")) {
                 ++Entered;
                 Changed.notify_all();
@@ -174,6 +180,68 @@ TEST_F(ScanSessionsTest, SlowReadDoesNotBlockOtherSessionsOrCancellation)
     EXPECT_EQ(cancelling.get(), 200);
     EXPECT_TRUE(reading.get());
     EXPECT_THROW(scans.Cancel("a", test::collection_id, {{"cursor", token}}), TFailure);
+}
+TEST_F(ScanSessionsTest, ServiceShutdownRejectsNewScans)
+{
+    TRoutes routes(Db, {}, "secret");
+    const TRequest request{"POST",
+        std::string("/collections/") + test::collection_id + "/scan/open",
+        {{"authorization", "Bearer secret"}, {"content-type", "application/json"}},
+        "{}"};
+    ASSERT_EQ(routes.Handle(request).Status, 200);
+    routes.CancelScans();
+    const auto response = routes.Handle(request);
+    EXPECT_EQ(response.Status, 503) << response.Body;
+    EXPECT_EQ(TJson::parse(response.Body)["error"]["code"], "CANCELLED");
+    routes.CancelScans();
+    EXPECT_EQ(routes.Handle(request).Status, 503);
+}
+TEST_F(ScanSessionsTest, ServiceShutdownCancelsSlowReadsWithoutWaiting)
+{
+    ASSERT_EQ(Db->AppendDurable({test::collection_id, SecondOperation, {}, {Batch({{"other", 2, 2.5, false, 1}})}})
+                  .disposition,
+        CommitDisposition::Committed);
+    TRoutes routes(Db, {}, "secret");
+    TRequest request{"POST",
+        std::string("/collections/") + test::collection_id + "/scan/open",
+        {{"authorization", "Bearer secret"}, {"content-type", "application/json"}},
+        R"({"predicate":{"op":"eq","field":"key","value":"absent"}})"};
+    const auto opened = routes.Handle(request);
+    ASSERT_EQ(opened.Status, 200);
+    const auto token = TJson::parse(opened.Body).at("cursor");
+    request.Target = std::string("/collections/") + test::collection_id + "/scan";
+    request.Body = TJson{{"cursor", token}}.dump();
+    {
+        std::lock_guard lock(Fs->Mutex);
+        Fs->Armed = true;
+        Fs->OpenedParquet.clear();
+    }
+    auto reading = std::async(std::launch::async, [&] {
+        return routes.Handle(request);
+    });
+    bool entered;
+    {
+        std::unique_lock lock(Fs->Mutex);
+        entered = Fs->Changed.wait_for(lock, 5s, [&] {
+            return Fs->Entered;
+        });
+    }
+    auto stopping = std::async(std::launch::async, [&] {
+        routes.CancelScans();
+    });
+    const auto stopped = stopping.wait_for(2s);
+    const auto owner = OpenExisting({(Temporary.path / "db").string(), test::store_id});
+    Fs->Release();
+    stopping.get();
+    const auto response = reading.get();
+    EXPECT_TRUE(entered);
+    EXPECT_EQ(stopped, std::future_status::ready);
+    ASSERT_FALSE(owner);
+    EXPECT_EQ(owner.error().code, "STATE_IN_USE");
+    EXPECT_EQ(response.Status, 404) << response.Body;
+    EXPECT_EQ(TJson::parse(response.Body)["error"]["code"], "NOT_FOUND");
+    std::lock_guard lock(Fs->Mutex);
+    EXPECT_EQ(Fs->OpenedParquet.size(), 1);
 }
 TEST_F(ScanSessionsTest, ReplayingCompletedPageDoesNotRefreshIdleExpiry)
 {
