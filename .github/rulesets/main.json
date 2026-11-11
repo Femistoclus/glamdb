@@ -62,6 +62,10 @@
             "integration_id": 15368
           },
           {
+            "context": "clang-format",
+            "integration_id": 15368
+          },
+          {
             "context": "Native / normal",
             "integration_id": 15368
           },

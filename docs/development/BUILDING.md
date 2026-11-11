@@ -233,8 +233,9 @@ suites locally even if an earlier suite fails; an optional `python`, `node`, or
 Both workflows run on PRs, pushes to `main`, and manual dispatch. Native tests
 have no path filters: all six profiles run even for documentation-only changes.
 Each `Native / <profile>` job is a required check from GitHub Actions, alongside
-`Workflow security`. Ordinary merges and auto-merge wait for all seven checks
-to pass on an up-to-date branch. The maintainer PR-only bypass still applies.
+`Workflow security` and `clang-format`. Ordinary merges and auto-merge wait for
+all eight checks to pass on an up-to-date branch. The maintainer PR-only bypass
+still applies.
 
 Workbench checks skip changes limited to `docs/`, Markdown, issue templates,
 CODEOWNERS, and LICENSE. New code directories still trigger tests, and manual
@@ -249,6 +250,20 @@ must apply it separately:
 gh api --method PUT repos/glamourdb/glamdb/rulesets/26868823 \
   --input .github/rulesets/main.json
 ```
+
+The selected Actions allowlist is tracked in
+[`.github/allowed-actions.json`](../../.github/allowed-actions.json).
+Apply reviewed additions separately as well:
+
+```sh
+gh api --method PUT repos/glamourdb/glamdb/actions/permissions/selected-actions \
+  --input .github/allowed-actions.json
+```
+
+An unlisted Action rejects the entire workflow before jobs start. Required
+checks remain **Expected — Waiting for status to be reported** because no job
+reports them. Inspect the run's annotation, apply the reviewed Action pin, then
+re-run all jobs for the rejected run.
 
 Keep the required check names in sync with the native matrix. Removing a path
 filter ensures required checks are emitted; the active GitHub ruleset enforces
