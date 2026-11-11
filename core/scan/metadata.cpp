@@ -2,6 +2,7 @@
 
 #include "core/api/binary.h"
 #include "core/api/canonical.h"
+#include "core/scan/predicate.h"
 #include "core/scan/scan_planner.h"
 
 #include <iceberg/snapshot.h>
@@ -119,12 +120,14 @@ ScanExplanation ExplainScan(const TScanContext& context, const ScanRequest& requ
     result.predicate = request.predicate;
     result.limit = request.limit;
     result.batch_rows = request.batch_rows;
-    for (const auto& field : context.Collection.schema.fields) {
+    const auto boundPredicate = Take(BindPredicate(request.predicate, context.Collection.schema));
+    for (size_t index = 0; index < context.Collection.schema.fields.size(); ++index) {
+        const auto& field = context.Collection.schema.fields[index];
         const bool projected =
             !request.projection || std::ranges::find(*request.projection, field.name) != request.projection->end();
-        if (projected ||
-            (request.predicate.kind() == Predicate::Kind::Compare && request.predicate.field() == field.name))
-        {
+        const bool referenced =
+            std::ranges::find(boundPredicate.ReferencedFields, index) != boundPredicate.ReferencedFields.end();
+        if (projected || referenced) {
             result.read_fields.push_back(field.name);
         }
     }

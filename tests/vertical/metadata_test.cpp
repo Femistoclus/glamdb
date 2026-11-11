@@ -91,6 +91,13 @@ TEST_F(NativeMetadata, ExplainsValidatedScansWithoutInventingPruningOrSelectivit
     EXPECT_EQ(explanation->info.selector_resolved, SnapshotSelector::Id(a.snapshot_id));
     EXPECT_EQ(explanation->info.output_schema->field_names(), std::vector<std::string>{"key"});
     EXPECT_EQ(explanation->read_fields, (std::vector<std::string>{"key", "value"}));
+    const auto compound = Engine_->ExplainScan({.collection_id = test::collection_id,
+        .projection = std::vector<std::string>{"key"},
+        .predicate =
+            Predicate::And({Predicate::Compare("value", CompareOp::Gt, int64_t{0}), Predicate::IsNotNull("flag")})});
+    ASSERT_TRUE(compound) << compound.error().message;
+    EXPECT_EQ(compound->read_fields, (std::vector<std::string>{"key", "value", "flag"}));
+    EXPECT_FALSE(compound->estimated_output_rows.value);
     EXPECT_EQ(explanation->candidates.rows.value, 3);
     EXPECT_EQ(explanation->candidates.data_files.value, 1);
     EXPECT_FALSE(explanation->estimated_output_rows.value);
