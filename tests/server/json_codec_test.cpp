@@ -200,8 +200,10 @@ TEST(JsonRowEncoder, MatchesReferenceForEveryTypeAndExtreme)
         -62167219200000000LL,
         -62167219200000001LL,
         253402300800000000LL,
-        std::numeric_limits<int64_t>::min(),
-        std::numeric_limits<int64_t>::max(),
+        // Far outside 0001..9999 but within std::chrono's overflow-free range,
+        // which the reference formatter needs.
+        -9000000000000000000LL,
+        9000000000000000000LL,
         951782400000000LL,
         1767225600123456LL,
         std::nullopt};
