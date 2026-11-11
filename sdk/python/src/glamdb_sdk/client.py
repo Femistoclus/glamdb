@@ -240,7 +240,8 @@ class Client:
                 self._verify_created(info, cid, name, schema)
                 self._schemas[cid] = schema
             elif kind == "definitely_not_committed":
-                if not isinstance(value.get("error"), dict) or info is not None:
+                if (not isinstance(value.get("error"), dict) or info is not None or not 400 <= status <= 599
+                        or value.get("recovery_required", False) is not False or "recovery" in value):
                     raise ProtocolError("invalid noncommitted create outcome", raw=value)
             elif kind == "commit_unknown":
                 if status != 503 or value.get("recovery_required") is not True or info is not None:
@@ -356,7 +357,8 @@ class Client:
                 int64(result["snapshot_id"])
                 self._validate_receipt(result, expected_payload_hash)
             elif kind == "definitely_not_committed":
-                if not isinstance(error_value, dict) or result is not None:
+                if (not isinstance(error_value, dict) or result is not None or not 400 <= status <= 599
+                        or value.get("recovery_required", False) is not False or "recovery" in value):
                     raise ProtocolError("invalid noncommitted append outcome", raw=value)
             elif kind == "commit_unknown":
                 if status != 503 or value.get("recovery_required") is not True or result is not None:

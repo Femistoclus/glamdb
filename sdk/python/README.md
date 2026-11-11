@@ -87,7 +87,8 @@ outcome is unknown. A terminal failed outcome may request a *new, explicit*
 operation ID for a corrected attempt. A retry whose content conflicts with the
 bound operation (`OPERATION_CONFLICT`/`IDEMPOTENCY_CONFLICT`) raises
 `HTTPError`; it is not an outcome of that operation, which may already be
-committed.
+committed. A `definitely_not_committed` reply must use an HTTP error status and
+carry no recovery state, otherwise it is a `ProtocolError`.
 
 `create_collection` requires a caller collection UUID. Its returned
 `CreateOutcome.info` contains collection metadata. For a lost create response,
@@ -113,7 +114,9 @@ matching row. The SDK enforces the v0 10,000-row/16-MiB decoded append ceiling
 during normalization, plus row and string limits.
 
 Timestamps accept timezone-aware `datetime`, RFC3339 text with a required
-timezone and up to six fractional digits, or exact integer microseconds.
+timezone and up to six fractional digits, or exact integer microseconds as an
+`int`. Text is always parsed as RFC3339: digit-only text such as `"20260101"`
+is rejected rather than read as microseconds.
 Normalization uses integer arithmetic. UTC years 0001 through 9999 are allowed;
 offset overflow, naive datetimes, leap seconds and excess precision are
 rejected. Wire timestamps always have six fractional digits and `Z`; int64 wire

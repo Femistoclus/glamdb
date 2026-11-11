@@ -39,7 +39,7 @@ class Schema:
         for index, field in enumerate(values, 1):
             if not isinstance(field, Field):
                 raise ValidationError("schema entries must be Field values")
-            if not isinstance(field.name, str) or not field.name or len(_utf8(field.name)) > 128:
+            if not isinstance(field.name, str) or not field.name or "\0" in field.name or len(_utf8(field.name)) > 128:
                 raise ValidationError("field name must have 1 through 128 UTF-8 bytes")
             if field.name in names or field.type not in _TYPES or type(field.nullable) is not bool:
                 raise ValidationError("duplicate field name, unsupported type, or invalid nullable flag")
@@ -94,7 +94,8 @@ def int64(value: Any) -> int:
 
 
 def timestamp_us(value: Any) -> int:
-    if isinstance(value, str) and not _DECIMAL.fullmatch(value):
+    # Text is always RFC3339; exact integer microseconds must be passed as int.
+    if isinstance(value, str):
         match = _TIMESTAMP.fullmatch(value)
         if match is None:
             raise ValidationError("timestamp requires RFC3339 with timezone and at most six fractional digits")
