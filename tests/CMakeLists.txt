@@ -58,6 +58,10 @@ if(NOT GLAMDB_IO_ONLY)
         add_executable(glamdb_scan_index_bench "${PROJECT_SOURCE_DIR}/benchmarks/scan_index.cpp" support/fault_fs.cpp)
         target_include_directories(glamdb_scan_index_bench PRIVATE "${PROJECT_SOURCE_DIR}")
         target_link_libraries(glamdb_scan_index_bench PRIVATE glamdb::core glamdb_storage glamdb_build_options)
+
+        add_executable(glamdb_scan_data_reads_bench "${PROJECT_SOURCE_DIR}/benchmarks/scan_data_reads.cpp")
+        target_include_directories(glamdb_scan_data_reads_bench PRIVATE "${PROJECT_SOURCE_DIR}")
+        target_link_libraries(glamdb_scan_data_reads_bench PRIVATE glamdb::core glamdb_storage glamdb_build_options)
     endif()
 
     file(GLOB_RECURSE fault_test_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/fault/*.cpp")
