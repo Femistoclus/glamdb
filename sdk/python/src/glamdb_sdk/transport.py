@@ -3,6 +3,7 @@
 import json
 import math
 import time
+import zlib
 from typing import Any
 
 import httpx
@@ -38,12 +39,28 @@ def read_json(response: httpx.Response, budget: Deadline, max_bytes: int) -> dic
     try:
         if response.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
             raise ProtocolError("expected application/json response")
+        encoding = response.headers.get("content-encoding", "identity").strip().lower()
         chunks = bytearray()
-        for chunk in response.iter_bytes(chunk_size=65536):
-            budget.check()
-            if len(chunks) + len(chunk) > max_bytes:
-                raise ProtocolError("JSON response exceeds configured byte limit")
-            chunks.extend(chunk)
+        if encoding in ("", "identity"):
+            for chunk in response.iter_bytes(chunk_size=65536):
+                budget.check()
+                if len(chunks) + len(chunk) > max_bytes:
+                    raise ProtocolError("JSON response exceeds configured byte limit")
+                chunks.extend(chunk)
+        elif encoding in ("gzip", "x-gzip", "deflate"):
+            # Inflate with an output bound: httpx would inflate each whole network read first.
+            inflater = zlib.decompressobj(15 if encoding == "deflate" else 47)
+            for raw in response.iter_raw(chunk_size=65536):
+                budget.check()
+                data = inflater.decompress(raw, max_bytes + 1 - len(chunks))
+                if len(chunks) + len(data) > max_bytes or inflater.unconsumed_tail:
+                    raise ProtocolError("JSON response exceeds configured byte limit")
+                chunks.extend(data)
+            chunks.extend(inflater.flush())
+            if not inflater.eof or len(chunks) > max_bytes:
+                raise ProtocolError("truncated or oversized compressed JSON response")
+        else:
+            raise ProtocolError("unsupported JSON content encoding")
         budget.check()
         def invalid_number(value: str):
             raise ValueError(f"invalid JSON constant {value}")
