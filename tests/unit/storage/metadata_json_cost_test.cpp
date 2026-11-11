@@ -21,7 +21,9 @@ namespace {
 
 iceberg::TableMetadata MetadataWithSnapshots(int count)
 {
-    iceberg::TableMetadata metadata;
+    // Value-initialized: TableMetadata has scalar members without initializers
+    // (ids, last_updated_ms) that ToJson serializes.
+    iceberg::TableMetadata metadata{};
     metadata.format_version = 2;
     metadata.table_uuid = "01a1c818-40f3-760c-8139-973d9b81c9a0";
     metadata.location = "store://00000000-0000-0000-0000-000000000001/warehouse/00112233-4455-6677-8899-aabbccddeeff";
@@ -57,6 +59,7 @@ iceberg::TableMetadata MetadataWithSnapshots(int count)
         parent = snapshot->snapshot_id;
     }
     metadata.current_snapshot_id = count > 0 ? *parent : iceberg::kInvalidSnapshotId;
+    metadata.last_updated_ms = iceberg::TimePointMsFromUnixMs(1700000000000LL + count);
     return metadata;
 }
 
