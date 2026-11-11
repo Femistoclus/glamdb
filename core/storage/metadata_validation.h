@@ -7,6 +7,7 @@
 
 namespace iceberg {
 struct ManifestFile;
+struct Snapshot;
 struct TableMetadata;
 }
 
@@ -14,6 +15,7 @@ namespace NGlamDB::NStorage {
 
 struct TTableProfile;
 
+iceberg::Status CheckSnapshotTimestamp(const iceberg::Snapshot& snapshot);
 iceberg::Status
 CheckCreateMetadata(const iceberg::TableMetadata& candidate, const TTableProfile& profile, const std::string& location);
 iceberg::Status CheckAppendMetadata(const iceberg::TableMetadata& base,

@@ -31,9 +31,11 @@
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <thread>
+#include <tuple>
 
 extern char** environ;
 
@@ -48,7 +50,8 @@ constexpr auto AttemptID = "33333333-3333-7333-8333-333333333333";
 void ExpectFreshProcess(const std::filesystem::path& root,
     const std::string& location,
     std::optional<std::uint64_t> expectedSnapshots = 2,
-    std::string_view corruptFile = {})
+    std::string_view corruptFile = {},
+    std::string_view validationError = {})
 {
 #ifdef __linux__
     std::vector<std::string> environment;
@@ -62,8 +65,10 @@ void ExpectFreshProcess(const std::filesystem::path& root,
     }
     environment.push_back("GLAMDB_RECOVERY_ROOT=" + root.string());
     environment.push_back("GLAMDB_RECOVERY_METADATA=" + location);
-    environment.push_back("GLAMDB_RECOVERY_EXPECTED_SNAPSHOTS=" +
-        (expectedSnapshots ? std::to_string(*expectedSnapshots) : "CORRUPTION: " + std::string(corruptFile)));
+    const auto expected = expectedSnapshots ? std::to_string(*expectedSnapshots)
+        : validationError.empty()           ? "CORRUPTION: " + std::string(corruptFile)
+                                            : "VALIDATION: " + std::string(validationError);
+    environment.push_back("GLAMDB_RECOVERY_EXPECTED_SNAPSHOTS=" + expected);
     std::vector<char*> variables;
     variables.reserve(environment.size() + 1);
     for (auto& value : environment) {
@@ -88,6 +93,7 @@ void ExpectFreshProcess(const std::filesystem::path& root,
     static_cast<void>(location);
     static_cast<void>(expectedSnapshots);
     static_cast<void>(corruptFile);
+    static_cast<void>(validationError);
     GTEST_SKIP() << "Fresh-process recovery is checked on Linux.";
 #endif
 }
@@ -108,6 +114,12 @@ TEST(RecoveryChildProcess, ReopensPublishedRoot)
     const auto recovered = VerifyReachable(*fileIO, location, StoreID, CollectionID);
     ASSERT_NE(expected, nullptr);
     const std::string_view expectation(expected);
+    if (expectation.starts_with("VALIDATION: ")) {
+        ASSERT_FALSE(recovered);
+        EXPECT_EQ(recovered.error().kind, iceberg::ErrorKind::kValidationFailed);
+        EXPECT_EQ(recovered.error().message, expectation.substr(std::string_view("VALIDATION: ").size()));
+        return;
+    }
     if (expectation.starts_with("CORRUPTION: ")) {
         ASSERT_FALSE(recovered);
         EXPECT_EQ(recovered.error().kind, iceberg::ErrorKind::kInvalid);
@@ -723,6 +735,54 @@ TEST_P(TRecoveryHistoryTest, ChecksEveryRetainedTransitionAndTheFinalRoot)
 }
 
 INSTANTIATE_TEST_SUITE_P(RetainedHistory, TRecoveryHistoryTest, ::testing::Range(0, 8));
+
+class TRecoveryTimestampTest
+    : public TPublicationGuardTest
+    , public ::testing::WithParamInterface<std::tuple<std::int64_t, std::size_t>>
+{ };
+
+TEST_P(TRecoveryTimestampTest, ValidatesCurrentAndHistoricalSnapshotTimesInFreshProcess)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto first = Append(1, create.GetCandidate(), 1);
+    ASSERT_TRUE(first) << first.error().message;
+    const auto second = Append(2, *first, 1);
+    ASSERT_TRUE(second) << second.error().message;
+    auto metadata = *(*second)->Metadata;
+    const auto [milliseconds, index] = GetParam();
+    auto snapshot = std::make_shared<iceberg::Snapshot>(*metadata.snapshots[index]);
+    snapshot->timestamp_ms = iceberg::TimePointMs(std::chrono::milliseconds(milliseconds));
+    metadata.snapshot_log[index].timestamp_ms = snapshot->timestamp_ms;
+    metadata.snapshots[index] = std::move(snapshot);
+    const auto root = WriteRecoveryRoot(metadata);
+    ASSERT_TRUE(root) << root.error().message;
+    const auto recovered = VerifyReachable(IO_, *root, StoreID, CollectionID);
+    if (milliseconds == -62135596800000LL || milliseconds == 253402300799999LL) {
+        ASSERT_TRUE(recovered) << recovered.error().message;
+        EXPECT_EQ(*recovered->Metadata, metadata);
+        ExpectFreshProcess(Root_, *root);
+    } else {
+        constexpr auto message = "Snapshot timestamp is outside UTC years 0001..9999.";
+        ASSERT_FALSE(recovered);
+        EXPECT_EQ(recovered.error().kind, iceberg::ErrorKind::kValidationFailed);
+        EXPECT_EQ(recovered.error().message, message);
+        ExpectFreshProcess(Root_, *root, std::nullopt, {}, message);
+    }
+    EXPECT_TRUE(VerifyReachable(IO_, (*second)->MetadataLocation, StoreID, CollectionID));
+    EXPECT_FALSE(Dirs_->Latch()->Error());
+}
+
+INSTANTIATE_TEST_SUITE_P(SupportedUtcRange,
+    TRecoveryTimestampTest,
+    ::testing::Combine(::testing::Values(std::int64_t{-62135596800000LL},
+                           std::int64_t{253402300799999LL},
+                           std::int64_t{-62135596800001LL},
+                           std::int64_t{253402300800000LL},
+                           std::numeric_limits<std::int64_t>::min(),
+                           std::numeric_limits<std::int64_t>::max()),
+        ::testing::Values(std::size_t{0}, std::size_t{1})));
 
 TEST_F(TPublicationGuardTest, RecoveryRejectsADataFileReusedByDistinctManifests)
 {

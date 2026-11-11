@@ -3,6 +3,7 @@
 
 #include "core/io/io_attempt.h"
 #include "core/storage/iceberg_error_boundary.h"
+#include "core/storage/metadata_validation.h"
 
 #include <iceberg/manifest/manifest_entry.h>
 #include <iceberg/partition_spec.h>
@@ -52,6 +53,7 @@ iceberg::Result<TStagedAppend> CollectStage(std::shared_ptr<iceberg::Transaction
     const NIO::TIOAttempt& attempt)
 {
     ICEBERG_ASSIGN_OR_RAISE(auto snapshot, transaction->current().Snapshot());
+    ICEBERG_RETURN_UNEXPECTED(CheckSnapshotTimestamp(*snapshot));
     const auto list = attempt.Record(snapshot->manifest_list);
     if (!list || list.Value().Kind != NIO::EFileKind::ManifestList || !list.Value().Receipt ||
         list.Value().State != NIO::EFileState::DirSynced)

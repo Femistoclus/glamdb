@@ -8,6 +8,7 @@
 #include <iceberg/sort_order.h>
 #include <iceberg/table_metadata.h>
 
+#include <array>
 #include <functional>
 #include <limits>
 #include <ranges>
@@ -100,6 +101,39 @@ TEST_F(TMetadataValidationTest, RejectsChangedSnapshotLogTimes)
     ASSERT_TRUE(CheckAppendMetadata(first, second, Summary_));
     second.snapshot_log.front().timestamp_ms += std::chrono::milliseconds(1);
     EXPECT_FALSE(CheckAppendMetadata(first, second, Summary_));
+}
+
+TEST_F(TMetadataValidationTest, AcceptsSnapshotTimestampUtcBoundaries)
+{
+    for (const std::int64_t milliseconds :
+        {-62135596800000LL, -62135596799999LL, -1LL, 0LL, 253402300799998LL, 253402300799999LL})
+    {
+        SCOPED_TRACE(milliseconds);
+        auto candidate = Append(*Base_, 71);
+        const iceberg::TimePointMs timestamp{std::chrono::milliseconds(milliseconds)};
+        candidate.snapshots.back()->timestamp_ms = timestamp;
+        candidate.snapshot_log.back().timestamp_ms = timestamp;
+        EXPECT_TRUE(CheckAppendMetadata(*Base_, candidate, Summary_));
+    }
+}
+
+TEST_F(TMetadataValidationTest, RejectsSnapshotTimestampsOutsideUtcRange)
+{
+    const std::array<std::int64_t, 4> values{-62135596800001LL,
+        253402300800000LL,
+        std::numeric_limits<std::int64_t>::min(),
+        std::numeric_limits<std::int64_t>::max()};
+    for (const auto milliseconds : values) {
+        SCOPED_TRACE(milliseconds);
+        auto candidate = Append(*Base_, 71);
+        const iceberg::TimePointMs timestamp{std::chrono::milliseconds(milliseconds)};
+        candidate.snapshots.back()->timestamp_ms = timestamp;
+        candidate.snapshot_log.back().timestamp_ms = timestamp;
+        const auto checked = CheckAppendMetadata(*Base_, candidate, Summary_);
+        ASSERT_FALSE(checked);
+        EXPECT_EQ(checked.error().kind, iceberg::ErrorKind::kValidationFailed);
+        EXPECT_EQ(checked.error().message, "Snapshot timestamp is outside UTC years 0001..9999.");
+    }
 }
 
 TEST_F(TMetadataValidationTest, RejectsChangesOutsideTheAppendDelta)
