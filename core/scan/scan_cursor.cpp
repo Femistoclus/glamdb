@@ -4,6 +4,7 @@
 #include "core/api/canonical.h"
 #include "core/backend/storage_errors.h"
 #include "core/engine/storage_mapping.h"
+#include "core/scan/buffer_file.h"
 #include "core/scan/predicate.h"
 #include "core/scan/scan_planner.h"
 #include "core/storage/format_verifier.h"
@@ -21,6 +22,7 @@
 #include <cmath>
 #include <cstring>
 #include <mutex>
+#include <new>
 #include <numeric>
 #include <span>
 
@@ -43,10 +45,11 @@ void RequireInput(bool condition, std::string_view message)
         RetryHint::OperatorAction});
 }
 
+// Allocation failure is resource pressure, not a property of the decoded file.
 void CheckArrow(const arrow::Status& status, std::string_view code, std::string_view context)
 {
     if (!status.ok()) {
-        Fail(code, context, status.ToString());
+        Fail(status.IsOutOfMemory() ? "RESOURCE_EXHAUSTED" : code, context, status.ToString());
     }
 }
 
@@ -66,86 +69,6 @@ T TakeIceberg(iceberg::Result<T> result, std::string_view code, std::string_view
     }
     return std::move(*result);
 }
-
-// Read-only iceberg::InputFile over bytes already read once, so the footer
-// check and decoding observe exactly the same file content.
-class TBufferInputStream final : public iceberg::SeekableInputStream
-{
-public:
-    explicit TBufferInputStream(std::string_view bytes)
-        : Bytes_(bytes)
-    { }
-
-    iceberg::Result<int64_t> Position() const override
-    {
-        return Position_;
-    }
-
-    iceberg::Status Seek(int64_t position) override
-    {
-        if (position < 0 || position > static_cast<int64_t>(Bytes_.size())) {
-            return iceberg::InvalidArgument("seek outside the buffered file");
-        }
-        Position_ = position;
-        return {};
-    }
-
-    iceberg::Result<int64_t> Read(std::span<std::byte> out) override
-    {
-        const auto count = std::min(static_cast<int64_t>(out.size()), static_cast<int64_t>(Bytes_.size()) - Position_);
-        std::memcpy(out.data(), Bytes_.data() + Position_, static_cast<size_t>(count));
-        Position_ += count;
-        return count;
-    }
-
-    iceberg::Status ReadFully(int64_t position, std::span<std::byte> out) override
-    {
-        if (position < 0 || static_cast<uint64_t>(position) > Bytes_.size() ||
-            out.size() > Bytes_.size() - static_cast<size_t>(position))
-        {
-            return iceberg::Invalid("CORRUPTION: read outside the buffered file");
-        }
-        std::memcpy(out.data(), Bytes_.data() + position, out.size());
-        return {};
-    }
-
-    iceberg::Status Close() override
-    {
-        return {};
-    }
-
-private:
-    const std::string_view Bytes_;
-    int64_t Position_ = 0;
-};
-
-class TBufferInputFile final : public iceberg::InputFile
-{
-public:
-    TBufferInputFile(std::string_view location, std::string_view bytes)
-        : Location_(location)
-        , Bytes_(bytes)
-    { }
-
-    std::string_view location() const override
-    {
-        return Location_;
-    }
-
-    iceberg::Result<int64_t> Size() const override
-    {
-        return static_cast<int64_t>(Bytes_.size());
-    }
-
-    iceberg::Result<std::unique_ptr<iceberg::SeekableInputStream>> Open() override
-    {
-        return std::make_unique<TBufferInputStream>(Bytes_);
-    }
-
-private:
-    const std::string_view Location_;
-    const std::string_view Bytes_;
-};
 
 // Limits of the canonical input (see core/api/canonical.cpp); stored values
 // outside them cannot have been written by this engine.
@@ -206,8 +129,8 @@ decltype(auto) DecodeParquet(std::string_view context, TFunction&& fn)
         return fn();
     } catch (const Failure&) {
         throw;
-    } catch (const std::bad_alloc&) {
-        throw;
+    } catch (const std::bad_alloc& error) {
+        Fail("RESOURCE_EXHAUSTED", context, error.what());
     } catch (const std::exception& error) {
         Fail("CORRUPTION", context, error.what());
     }
@@ -328,6 +251,10 @@ public:
                 Failed_ = error.detail;
             }
             return std::unexpected(error.detail);
+        } catch (const std::bad_alloc& error) {
+            Release();
+            Failed_ = ErrorDetail{"RESOURCE_EXHAUSTED", BoundedDiagnostic(error.what()), RetryHint::OperatorAction};
+            return std::unexpected(*Failed_);
         } catch (const std::exception& error) {
             Release();
             Failed_ = ErrorDetail{"INTERNAL", BoundedDiagnostic(error.what()), RetryHint::OperatorAction};
@@ -419,7 +346,7 @@ private:
         }
         // The same strict footer check as recovery: field IDs, names,
         // repetition, physical/logical types and row counts per row group.
-        TBufferInputFile buffered(file.Path, bytes);
+        TBufferInputFile buffered({.Location = file.Path, .Bytes = bytes});
         (void)TakeIceberg(NGlamDB::NStorage::CheckParquet(buffered, *FileSchema_, {file.SizeBytes, file.RecordCount}),
             "CORRUPTION",
             "verify Parquet file");
@@ -548,6 +475,9 @@ Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanReq
             request.limit);
     } catch (const Failure& error) {
         return std::unexpected(error.detail);
+    } catch (const std::bad_alloc& error) {
+        return std::unexpected(
+            ErrorDetail{"RESOURCE_EXHAUSTED", BoundedDiagnostic(error.what()), RetryHint::OperatorAction});
     } catch (const std::exception& error) {
         return std::unexpected(ErrorDetail{"INTERNAL", BoundedDiagnostic(error.what()), RetryHint::OperatorAction});
     }

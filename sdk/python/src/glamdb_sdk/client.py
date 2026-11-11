@@ -240,7 +240,8 @@ class Client:
                 self._verify_created(info, cid, name, schema)
                 self._schemas[cid] = schema
             elif kind == "definitely_not_committed":
-                if not isinstance(value.get("error"), dict) or info is not None:
+                if (not isinstance(value.get("error"), dict) or info is not None or not 400 <= status <= 599
+                        or value.get("recovery_required", False) is not False or "recovery" in value):
                     raise ProtocolError("invalid noncommitted create outcome", raw=value)
             elif kind == "commit_unknown":
                 if status != 503 or value.get("recovery_required") is not True or info is not None:
@@ -342,6 +343,10 @@ class Client:
                         expected_payload_hash: str | None = None) -> AppendOutcome:
         try:
             kind, result, error_value = value.get("outcome"), value.get("result"), value.get("error")
+            if isinstance(error_value, dict) and error_value.get("code") in ("OPERATION_CONFLICT", "IDEMPOTENCY_CONFLICT"):
+                # A conflicting request changes nothing; it is not the original operation's outcome.
+                raise HTTPError(status, ErrorDetail.from_dict(error_value), raw=value,
+                                operation_id=budget.operation_id, collection_id=budget.collection_id)
             if kind == "committed":
                 if status != 200 or not isinstance(result, dict) or error_value is not None:
                     raise ProtocolError("invalid committed append outcome", raw=value)
@@ -352,7 +357,8 @@ class Client:
                 int64(result["snapshot_id"])
                 self._validate_receipt(result, expected_payload_hash)
             elif kind == "definitely_not_committed":
-                if not isinstance(error_value, dict) or result is not None:
+                if (not isinstance(error_value, dict) or result is not None or not 400 <= status <= 599
+                        or value.get("recovery_required", False) is not False or "recovery" in value):
                     raise ProtocolError("invalid noncommitted append outcome", raw=value)
             elif kind == "commit_unknown":
                 if status != 503 or value.get("recovery_required") is not True or result is not None:

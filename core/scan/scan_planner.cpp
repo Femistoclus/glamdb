@@ -3,6 +3,7 @@
 #include "core/api/binary.h"
 #include "core/api/canonical.h"
 #include "core/backend/storage_errors.h"
+#include "core/scan/buffer_file.h"
 #include "core/storage/capacity.h"
 #include "core/storage/format_registry.h"
 #include "core/storage/format_verifier.h"
@@ -15,6 +16,8 @@
 #include <iceberg/partition_spec.h>
 #include <iceberg/snapshot.h>
 #include <iceberg/table_metadata.h>
+
+#include <new>
 
 namespace glamdb::detail {
 namespace {
@@ -39,12 +42,33 @@ decltype(auto) DecodePersisted(std::string_view context, TFunction&& fn)
         return fn();
     } catch (const Failure&) {
         throw;
-    } catch (const std::bad_alloc&) {
-        throw;
+    } catch (const std::bad_alloc& error) {
+        throw Failure({"RESOURCE_EXHAUSTED",
+            BoundedDiagnostic(std::string(context) + ": " + error.what()),
+            RetryHint::OperatorAction});
     } catch (const std::exception& error) {
         throw Failure(
             {"CORRUPTION", BoundedDiagnostic(std::string(context) + ": " + error.what()), RetryHint::OperatorAction});
     }
+}
+
+// Reads a committed Avro file through the store FileIO before decoding it.
+// The upstream Avro stream treats a read error as end of input, which would
+// make a transient I/O failure look like a malformed file; decoding from
+// memory leaves only genuine format errors to the decoder.
+std::shared_ptr<iceberg::FileIO> ReadPersisted(const std::shared_ptr<iceberg::FileIO>& io,
+    const std::string& location,
+    std::optional<int64_t> length,
+    std::string_view context)
+{
+    Require(!length || *length > 0, "CORRUPTION", "committed file has an invalid length");
+    auto bytes = Take(io->ReadFile(location, length ? std::optional(static_cast<size_t>(*length)) : std::nullopt),
+        "IO_ERROR",
+        context);
+    Require(!length || static_cast<int64_t>(bytes.size()) == *length,
+        "CORRUPTION",
+        "committed file length differs from its metadata");
+    return std::make_shared<TBufferFileIO>(location, std::move(bytes));
 }
 
 [[noreturn]] void Unsupported(std::string_view message)
@@ -99,8 +123,9 @@ void AppendFiles(const iceberg::TableMetadata& metadata,
     if (!spec->IsUnpartitioned()) {
         Unsupported("partitioned manifests are not supported");
     }
+    const auto bytes = ReadPersisted(io, manifest.manifest_path, manifest.manifest_length, "read manifest");
     auto reader = DecodePersisted("open manifest", [&] {
-        return Take(iceberg::ManifestReader::Make(manifest, io, schema, spec), "IO_ERROR", "open manifest");
+        return Take(iceberg::ManifestReader::Make(manifest, bytes, schema, spec), "IO_ERROR", "open manifest");
     });
     const auto entries = DecodePersisted("read manifest", [&] {
         return Take(reader->LiveEntries(), "IO_ERROR", "read manifest");
@@ -131,7 +156,7 @@ PlanScan(const std::shared_ptr<iceberg::FileIO>& io, const BaseIdentity& base, c
         const auto limit = static_cast<int64_t>(NGlamDB::NStorage::TStorageLimits{}.RootBytes);
         const auto metadata =
             Take(NGlamDB::NStorage::ReadTableMetadata(*io, base.metadata_location, std::nullopt, limit),
-                "CORRUPTION",
+                "IO_ERROR",
                 "read committed root");
         CheckRoot(*metadata, base);
         TScanPlan plan;
@@ -140,8 +165,9 @@ PlanScan(const std::shared_ptr<iceberg::FileIO>& io, const BaseIdentity& base, c
             return plan;
         }
         plan.SnapshotID = snapshot->snapshot_id;
+        const auto listBytes = ReadPersisted(io, snapshot->manifest_list, std::nullopt, "read manifest list");
         const auto list = DecodePersisted("open manifest list", [&] {
-            return Take(iceberg::ManifestListReader::Make(snapshot->manifest_list, io),
+            return Take(iceberg::ManifestListReader::Make(snapshot->manifest_list, listBytes),
                 "IO_ERROR",
                 "open manifest list");
         });
@@ -154,6 +180,9 @@ PlanScan(const std::shared_ptr<iceberg::FileIO>& io, const BaseIdentity& base, c
         return plan;
     } catch (const Failure& error) {
         return std::unexpected(error.detail);
+    } catch (const std::bad_alloc& error) {
+        return std::unexpected(
+            ErrorDetail{"RESOURCE_EXHAUSTED", BoundedDiagnostic(error.what()), RetryHint::OperatorAction});
     } catch (const std::exception& error) {
         return std::unexpected(ErrorDetail{"INTERNAL", BoundedDiagnostic(error.what()), RetryHint::OperatorAction});
     }

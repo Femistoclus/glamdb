@@ -41,6 +41,9 @@ Result<SchemaSpec> DecodeSchema(std::string_view bytes);
 Result<std::string> SchemaFingerprint(const SchemaSpec& schema);
 Result<NormalizedInput>
 NormalizeRows(const SchemaSpec& schema, std::string_view collection_id, const std::vector<Row>& rows);
+// Normalizes rows the caller already owns by moving them: no second copy.
+Result<NormalizedInput>
+NormalizeOwnedRows(const SchemaSpec& schema, std::string_view collection_id, std::vector<Row>&& rows);
 Result<NormalizedInput> NormalizeBatches(const SchemaSpec& schema,
     std::string_view collection_id,
     const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches);

@@ -56,8 +56,12 @@ def validate_receipt(receipt: dict) -> dict:
     if timestamp % 1000:
         raise ValueError("Iceberg snapshot time must have millisecond precision")
     output["snapshot_created_at_us"] = str(timestamp)
-    if not isinstance(receipt["durability_profile"], str) or not receipt["durability_profile"]:
-        raise ValueError("durability_profile is required")
+    if not isinstance(receipt["durability_profile"], str) or not 1 <= len(receipt["durability_profile"].encode("utf-8")) <= 128:
+        raise ValueError("durability_profile is required (1..128 UTF-8 bytes)")
+    if not 1 <= output["compressed_data_bytes_added"] <= 32 * 1024 * 1024:
+        raise ValueError("compressed_data_bytes_added must be 1..32 MiB")
+    if output["parent_snapshot_id"] is not None and output["parent_snapshot_id"] == output["snapshot_id"]:
+        raise ValueError("parent_snapshot_id must differ from snapshot_id")
     return output
 
 

@@ -74,7 +74,8 @@ void CheckIceberg(const iceberg::Status& status, std::string_view code, std::str
     }
 }
 
-// Committed or retained state: every failure fails closed.
+// Committed or retained state: invariant violations fail closed; I/O and
+// resource failures keep their environmental classification.
 template <class T>
 T TakeRetained(iceberg::Result<T> result, std::string_view context)
 {

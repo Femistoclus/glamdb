@@ -53,7 +53,7 @@ def read_json(response: httpx.Response, budget: Deadline, max_bytes: int) -> dic
         return value
     except httpx.HTTPError as exc:
         raise translate_transport(exc, budget) from exc
-    except (UnicodeError, ValueError) as exc:
+    except (UnicodeError, ValueError, RecursionError) as exc:
         raise ProtocolError("invalid JSON response") from exc
     finally:
         response.close()

@@ -225,6 +225,16 @@ Result<Response> ToJson(const AppendOutcome& outcome)
                     outcome.phase == CommitPhase::Validation && outcome.error && !outcome.result && !outcome.recovery),
             "INVALID_ARGUMENT",
             "invalid append outcome");
+        if (outcome.disposition == CommitDisposition::DefinitelyNotCommitted && outcome.error &&
+            outcome.error->code == "OPERATION_CONFLICT")
+        {
+            // The conflicting request changed nothing and says nothing about the
+            // bound operation, which may be committed or unknown: a plain error,
+            // never a terminal outcome of that operation ID.
+            Object error;
+            error.Add("error", Error(*outcome.error));
+            return Response{ErrorStatus(*outcome.error), error.Finish()};
+        }
         Object out;
         out.String("outcome", Disposition(outcome.disposition));
         out.String("phase", Phase(outcome.phase));

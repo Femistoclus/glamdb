@@ -3,6 +3,7 @@
 #endif
 
 #include <exception>
+#include <new>
 
 namespace NGlamDB::NStorage {
 
@@ -11,6 +12,8 @@ auto CatchIcebergExceptions(Function&& function) -> decltype(std::forward<Functi
 {
     try {
         return std::forward<Function>(function)();
+    } catch (const std::bad_alloc& error) {
+        return iceberg::IOError("{}{}", ResourcePrefix, error.what());
     } catch (const std::exception& error) {
         return iceberg::UnknownError(error.what());
     } catch (...) {
