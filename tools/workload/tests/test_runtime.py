@@ -61,8 +61,8 @@ def test_lost_commit_response_then_lookup_never_resends(tmp_path):
         assert calls[0][1] == req.body
 
 
-@pytest.mark.parametrize("kind", ["unknown", "conflict", "timeout"])
-def test_unknown_conflict_and_timeout_stay_pending_without_hidden_retry(tmp_path, kind):
+@pytest.mark.parametrize("kind", ["unknown", "malformed", "conflict", "timeout"])
+def test_append_failures_stay_pending_without_hidden_retry(tmp_path, kind):
     from glamdb_workload.ledger import Ledger
     from glamdb_workload.runtime import append_once
 
@@ -81,12 +81,51 @@ def test_unknown_conflict_and_timeout_stay_pending_without_hidden_retry(tmp_path
                     "error": {"code": "OPERATION_CONFLICT", "message": "conflict"},
                 },
             )
+        if kind == "malformed":
+            return httpx.Response(
+                503,
+                json={
+                    "outcome": "commit_unknown",
+                    "recovery_required": True,
+                    "error": {"code": "IO_ERROR", "message": "uncertain"},
+                },
+            )
+        store_id = str(uuid4())
+        error = {
+            "code": "IO_ERROR",
+            "message": "uncertain",
+            "retry_hint": "SameIdAfterReconcile",
+        }
         return httpx.Response(
             503,
             json={
                 "outcome": "commit_unknown",
+                "phase": "catalog_commit",
+                "operation_id": req.operation_id,
                 "recovery_required": True,
-                "error": {"code": "IO_ERROR", "message": "uncertain"},
+                "error": error,
+                "recovery": {
+                    "store_id": store_id,
+                    "collection_id": req.collection_id,
+                    "operation_id": req.operation_id,
+                    "payload_hash": req.payload_hash,
+                    "hash_version": 1,
+                    "base": {
+                        "store_id": store_id,
+                        "collection_id": req.collection_id,
+                        "table_uuid": str(uuid4()),
+                        "metadata_location": "metadata/base.json",
+                        "current_snapshot_id": None,
+                        "schema_id": 0,
+                        "spec_id": 0,
+                    },
+                    "attempt_id": str(uuid4()),
+                    "candidate_snapshot_id": "1",
+                    "candidate_metadata_location": "metadata/candidate.json",
+                    "first_error": error,
+                    "publication_started": True,
+                    "lookup_blocked": False,
+                },
             },
         )
 
@@ -98,6 +137,7 @@ def test_unknown_conflict_and_timeout_stay_pending_without_hidden_retry(tmp_path
             result["state"]
             == {
                 "unknown": "commit_unknown",
+                "malformed": "protocol_error",
                 "conflict": "conflict",
                 "timeout": "transport_error",
             }[kind]
