@@ -47,6 +47,11 @@ struct TLocalStorageOptions
     // faults here.
     std::shared_ptr<NGlamDB::NIO::ILocalFS> Fs{};
     std::shared_ptr<ResourceOwner> Resources{};
+    // Publication rechecks the physical warehouse cap. By default it adds the
+    // append's own durable files to the admission measurement, so growth by
+    // anything else after admission is first seen by the next admission.
+    // True walks the whole warehouse again before every append publication.
+    bool WalkWarehouseAtPublication = false;
 };
 
 // Production bridge from the coordinator seam to the durable storage
@@ -128,8 +133,9 @@ private:
     void CheckStore(const StoreInfo& store) const;
     // Root identity, warehouse limit and free-space reserve before a write.
     // `remember` keeps the measured warehouse bytes for the same append's
-    // PrepareAppend; `reuse` consumes them instead of walking again.
-    std::error_code CheckWriteCapacity(bool remember, bool reuse);
+    // PrepareAppend; `reuse` consumes them instead of walking again. Returns
+    // the warehouse bytes it checked.
+    NGlamDB::NIO::TResult<std::uint64_t> CheckWriteCapacity(bool remember, bool reuse);
     // The caller holds Mutex_. Usage and cached bases are authoritative only
     // after VerifyRetained; InvalidateCache revokes them.
     void RequireVerified() const;

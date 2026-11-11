@@ -6,6 +6,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
+#include <limits>
 #include <spawn.h>
 #include <sys/wait.h>
 
@@ -135,11 +136,12 @@ TEST_F(TAggregateCapacityTest, ReopenCountsOrphansAgainstPhysicalWarehouseLimit)
     EXPECT_TRUE(Engine_->GetHealth().read_available);
 }
 
-TEST_F(TAggregateCapacityTest, PhysicalGrowthAfterAdmissionCannotPublishOverBudget)
+TEST_F(TAggregateCapacityTest, PublicationWalkCatchesPhysicalGrowthAfterAdmission)
 {
     detail::TLocalStorageOptions options;
     options.Storage.WarehouseBytes = 1U << 20;
     options.Storage.AttemptReserveBytes = 0;
+    options.WalkWarehouseAtPublication = true;
     Create(options);
     Hooks_->AfterPrepareAppend = [&](const detail::BoundOperation&) {
         WriteBytes(Root_ / "warehouse" / "orphan.parquet", std::string(2U << 20, 'x'));
@@ -155,6 +157,70 @@ TEST_F(TAggregateCapacityTest, PhysicalGrowthAfterAdmissionCannotPublishOverBudg
     ASSERT_TRUE(outcome);
     ASSERT_TRUE(outcome->has_value());
     EXPECT_EQ(test::Present(*outcome).disposition, CommitDisposition::DefinitelyNotCommitted);
+}
+
+// By default publication adds the attempt's durable files to the admission
+// measurement: growth by anything else after admission is first rejected by
+// the next admission, before that append binds an operation.
+TEST_F(TAggregateCapacityTest, NextAdmissionRejectsPhysicalGrowthAfterAnEarlierAdmission)
+{
+    detail::TLocalStorageOptions options;
+    options.Storage.WarehouseBytes = 1U << 20;
+    options.Storage.AttemptReserveBytes = 0;
+    Create(options);
+    const auto orphan = Root_ / "warehouse" / "orphan.parquet";
+    Hooks_->AfterPrepareAppend = [&](const detail::BoundOperation&) {
+        WriteBytes(orphan, std::string(2U << 20, 'x'));
+    };
+    ASSERT_EQ(Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}}).disposition,
+        CommitDisposition::Committed);
+    Hooks_->AfterPrepareAppend = {};
+    const auto rejected = Engine_->AppendDurable({test::collection_id, SecondOperation, {}, {Batch(SecondRows)}});
+    EXPECT_EQ(rejected.disposition, CommitDisposition::DefinitelyNotCommitted);
+    ASSERT_TRUE(rejected.error);
+    EXPECT_EQ(test::Present(rejected.error).code, "RESOURCE_EXHAUSTED");
+    const auto outcome = Engine_->FindAppendOutcome(test::collection_id, SecondOperation);
+    ASSERT_TRUE(outcome);
+    EXPECT_FALSE(outcome->has_value()) << "admission rejection binds no operation";
+    std::filesystem::remove(orphan);
+    EXPECT_EQ(Engine_->AppendDurable({test::collection_id, SecondOperation, {}, {Batch(SecondRows)}}).disposition,
+        CommitDisposition::Committed);
+}
+
+// Without a second walk, the attempt's own files still cannot publish above
+// the physical cap: admission passes at exactly the measured warehouse and
+// the guard rejects the produced files before the pointer changes.
+TEST_F(TAggregateCapacityTest, AttemptFilesAboveThePhysicalCapCannotPublish)
+{
+    Create();
+    Close();
+    const auto warehouse = Posix_.OpenDir(Root_ / "warehouse");
+    ASSERT_TRUE(warehouse);
+    const auto measured = Posix_.MeasureTree(warehouse.Value(), std::numeric_limits<std::uint64_t>::max());
+    ASSERT_TRUE(measured);
+    auto faults = std::make_shared<NGlamDB::NTesting::TFaultFS>(Posix_);
+    detail::TLocalStorageOptions options;
+    options.Fs = faults;
+    options.Storage.WarehouseBytes = measured.Value() + 1;
+    options.Storage.AttemptReserveBytes = 0;
+    auto reopened =
+        detail::EngineFactory::OpenWith({Root_.string(), test::store_id}, THookBackend::Factory(Hooks_, options));
+    ASSERT_TRUE(reopened) << reopened.error().message;
+    Engine_ = std::move(*reopened);
+    const auto mark = faults->Events().size();
+    const auto rejected = Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
+    EXPECT_EQ(rejected.disposition, CommitDisposition::DefinitelyNotCommitted);
+    ASSERT_TRUE(rejected.error);
+    EXPECT_EQ(test::Present(rejected.error).code, "RESOURCE_EXHAUSTED");
+    std::size_t walks = 0;
+    const auto events = faults->Events();
+    for (std::size_t index = mark; index < events.size(); ++index) {
+        walks += events[index].Op == NGlamDB::NTesting::EIOOp::MeasureTree ? 1 : 0;
+    }
+    EXPECT_EQ(walks, 1U) << "only admission walks the warehouse";
+    const auto collection = Engine_->GetCollection(test::collection_id);
+    ASSERT_TRUE(collection);
+    EXPECT_FALSE(collection->current_snapshot_id);
 }
 
 TEST_F(TAggregateCapacityTest, PhysicalCapacityFailureKeepsReconcileNotReadyUntilSpaceIsReleased)
@@ -175,13 +241,30 @@ TEST_F(TAggregateCapacityTest, PhysicalCapacityFailureKeepsReconcileNotReadyUnti
     EXPECT_TRUE(Engine_->GetHealth().write_ready);
 }
 
-TEST_F(TAggregateCapacityTest, PublicationMeasurementFailureDoesNotPublishCandidate)
+class TPublicationMeasurementFailureTest
+    : public TAggregateCapacityTest
+    , public ::testing::WithParamInterface<bool>
+{ };
+
+// With the publication walk, its failure rejects the candidate. Without it,
+// a failed directory measurement falls back to the walk, whose failure
+// rejects it the same way.
+TEST_P(TPublicationMeasurementFailureTest, DoesNotPublishCandidate)
 {
     auto faults = std::make_shared<NGlamDB::NTesting::TFaultFS>(Posix_);
     detail::TLocalStorageOptions options;
     options.Fs = faults;
+    options.WalkWarehouseAtPublication = GetParam();
     Create(options);
     Hooks_->AfterPrepareAppend = [&](const detail::BoundOperation&) {
+        if (!GetParam()) {
+            faults->AddRule({NGlamDB::NTesting::EIOOp::Stat,
+                "*/data",
+                1,
+                1,
+                std::make_error_code(std::errc::io_error),
+                std::nullopt});
+        }
         faults->AddRule({NGlamDB::NTesting::EIOOp::MeasureTree,
             "*",
             1,
@@ -197,6 +280,8 @@ TEST_F(TAggregateCapacityTest, PublicationMeasurementFailureDoesNotPublishCandid
     ASSERT_TRUE(collection);
     EXPECT_FALSE(collection->current_snapshot_id);
 }
+
+INSTANTIATE_TEST_SUITE_P(PublicationWalk, TPublicationMeasurementFailureTest, ::testing::Bool());
 
 TEST_F(TAggregateCapacityTest, AlternatingCollectionsShareSnapshotCapacityAfterLostCommitResult)
 {

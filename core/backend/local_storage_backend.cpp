@@ -530,7 +530,7 @@ Result<std::unique_ptr<StagedCreate>> TLocalStorageBackend::PrepareCreate(const 
         CheckStore(store);
         CheckWriteLatch(*Dirs_);
         auto profile = MakeProfile(request.schema, "INVALID_ARGUMENT");
-        CheckIO(CheckWriteCapacity(false, false), EStoragePath::Preflight, "storage preflight");
+        (void)TakeIO(CheckWriteCapacity(false, false), EStoragePath::Preflight, "storage preflight");
         const auto minUsage =
             TakeUsage(NStorage::ReplaceUsage(ComputeStoreUsage(), {.Previous = {}, .Next = {.RootBytes = 1}}),
                 "RESOURCE_EXHAUSTED",
@@ -595,7 +595,7 @@ Status TLocalStorageBackend::CheckAppendAdmissible(const StoreInfo& store,
             "base does not match the collection");
         (void)MakeProfile(collection.schema, "INVALID_ARGUMENT");
         CheckWriterInput(collection.schema, input, Options_.Writer);
-        CheckIO(CheckWriteCapacity(true, false), EStoragePath::Preflight, "storage preflight");
+        (void)TakeIO(CheckWriteCapacity(true, false), EStoragePath::Preflight, "storage preflight");
         // Every append writes a strictly larger root with one more snapshot,
         // data file, manifest and manifest list. The pinned Iceberg builder
         // never records a previous metadata location for these commits, so the
@@ -649,7 +649,18 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
         CheckWriterInput(collection.schema, input, Options_.Writer);
         const auto base = ResolveBase(binding.base);
         CheckDeadline(deadline);
-        CheckIO(CheckWriteCapacity(false, true), EStoragePath::Preflight, "storage preflight");
+        // A full measurement from this append's admission (or a new walk), taken
+        // before any file of this attempt exists; publication adds the attempt's
+        // own files to it instead of walking the warehouse again.
+        const auto warehouseBytes =
+            TakeIO(CheckWriteCapacity(false, true), EStoragePath::Preflight, "storage preflight");
+        std::optional<NStorage::TWarehouseBaseline> warehouse;
+        if (!Options_.WalkWarehouseAtPublication) {
+            warehouse = NStorage::TWarehouseBaseline{.Bytes = warehouseBytes,
+                .Directories = TakeIO(NStorage::MeasureCollectionDirs(*Dirs_, binding.collection_id),
+                    EStoragePath::Preflight,
+                    "storage preflight")};
+        }
 
         auto attempt = TakeIO(NIO::TIOAttempt::Make({Store_.store_id,
                                                         binding.collection_id,
@@ -721,7 +732,8 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
             .Base = base,
             .ExpectedSummary = summary,
             .StoreUsage = ComputeStoreUsage(),
-            .Limits = Options_.Storage};
+            .Limits = Options_.Storage,
+            .Warehouse = warehouse};
         return std::make_unique<TStagedAppend>(shared_from_this(),
             binding.collection_id,
             collection.name,
@@ -790,7 +802,7 @@ void TLocalStorageBackend::InvalidateCache()
     AdmittedWarehouseBytes_.reset();
 }
 
-std::error_code TLocalStorageBackend::CheckWriteCapacity(bool remember, bool reuse)
+NIO::TResult<std::uint64_t> TLocalStorageBackend::CheckWriteCapacity(bool remember, bool reuse)
 {
     std::optional<std::uint64_t> bytes;
     {
@@ -818,7 +830,7 @@ std::error_code TLocalStorageBackend::CheckWriteCapacity(bool remember, bool reu
         std::lock_guard lock(Mutex_);
         AdmittedWarehouseBytes_ = bytes;
     }
-    return {};
+    return *bytes;
 }
 
 Status TLocalStorageBackend::VerifyRetained(const StoreInfo& store,

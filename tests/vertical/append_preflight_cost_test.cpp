@@ -1,6 +1,6 @@
 // PrepareAppend reuses admission's measurement because binding writes only
-// the catalog. Publication must measure again after file production, so there
-// are two O(files) walks and no redundant walk between admission and production.
+// the catalog. Publication adds the attempt's durable files to it instead of
+// walking again, so one O(files) walk remains per append.
 
 #include "tests/support/fault_fs.h"
 #include "tests/vertical/vertical_support.h"
@@ -17,7 +17,7 @@ using namespace std::chrono_literals;
 using namespace glamdb::vertical;
 namespace NT = NGlamDB::NTesting;
 
-TEST(BackendPreflightCostTest, AppendMeasuresWarehouseOnlyAtAdmissionAndPublication)
+TEST(BackendPreflightCostTest, AppendMeasuresWarehouseOnlyAtAdmission)
 {
     test::TempDir temporary;
     const auto root = temporary.path / "store";
@@ -64,7 +64,7 @@ TEST(BackendPreflightCostTest, AppendMeasuresWarehouseOnlyAtAdmissionAndPublicat
         rootOpens,
         listOpens,
         manifestOpens);
-    EXPECT_EQ(walks, 2U) << "warehouse tree walks during one append";
+    EXPECT_EQ(walks, 1U) << "warehouse tree walks during one append";
     EXPECT_GE(statfs, 1U) << "free-space reserve must still be checked";
     ASSERT_TRUE(engine->Shutdown(1000ms));
 }

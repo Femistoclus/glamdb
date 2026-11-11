@@ -41,6 +41,10 @@ struct TPublicationContext
     std::unordered_map<std::string, std::string> ExpectedSummary{};
     TStorageUsage StoreUsage{};
     TStorageLimits Limits{};
+    // Pre-production warehouse measurement of this append. With it the guard
+    // adds the attempt's durable files instead of walking the warehouse
+    // again; without it (creation, or no admitted measurement) it walks.
+    std::optional<TWarehouseBaseline> Warehouse{};
 };
 
 class TStoragePublicationGuard final : public IPublicationGuard
