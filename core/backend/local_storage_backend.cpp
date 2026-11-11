@@ -799,8 +799,8 @@ Status TLocalStorageBackend::VerifyRetained(const StoreInfo& store,
                     view.base.current_snapshot_id == view.info.current_snapshot_id,
                 "CORRUPTION",
                 "collection view identity is inconsistent");
-            // The full reachable closure on open and Reconcile. Idempotent
-            // retries use VerifyCommittedAppend for their own snapshot.
+            // The full reachable closure on open and Reconcile; terminal
+            // receipt lookups reuse this verified generation.
             auto state = VerifyCollection(view.base);
             CheckSchema(*state->Metadata, view.info.schema);
             CheckHistory(*state->Metadata, view.info.collection_id, operations);
@@ -846,42 +846,6 @@ void TLocalStorageBackend::RetireRoot(const BaseIdentity& superseded)
     }
     // Best effort: a root that cannot be removed stays as an orphan file.
     [[maybe_unused]] const auto error = Dirs_->RemoveMetadataFile(uri.Value());
-}
-
-Status TLocalStorageBackend::VerifyCommittedAppend(const StoreInfo& store,
-    const CollectionView& collection,
-    std::span<const OperationRecord>,
-    const AppendResult& receipt)
-{
-    return Guarded<Status>([&]() -> Status {
-        CheckStore(store);
-        const auto& base = collection.base;
-        Require(base.collection_id == collection.info.collection_id && base.table_uuid == collection.info.table_uuid &&
-                base.current_snapshot_id == collection.info.current_snapshot_id &&
-                receipt.collection_id == collection.info.collection_id,
-            "CORRUPTION",
-            "collection view identity is inconsistent");
-        const std::shared_ptr<iceberg::FileIO> view =
-            TakeIceberg(FileIO_->ReadOnlyView(), "IO_ERROR", "open read-only FileIO");
-        // A retry must not return a committed outcome over missing or corrupt
-        // files: check the receipt's own snapshot closure in the current root.
-        const auto state = TakeRetained(NStorage::VerifyRetainedSnapshot(view,
-                                            base.metadata_location,
-                                            Store_.store_id,
-                                            base.collection_id,
-                                            receipt.snapshot_id,
-                                            Options_.Storage),
-            "verify committed snapshot");
-        CheckIdentity(state, base);
-        CheckSchema(*state.Metadata, collection.info.schema);
-        const auto snapshot = TakeRetained(state.Metadata->SnapshotById(receipt.snapshot_id), "committed snapshot");
-        const auto operation = snapshot->summary.find(std::string(OperationKey));
-        Require(operation != snapshot->summary.end() && operation->second == receipt.operation_id,
-            "CORRUPTION",
-            "retained snapshot has another operation identity");
-        CheckReceipt(*snapshot, receipt);
-        return {};
-    });
 }
 
 Result<std::shared_ptr<iceberg::FileIO>> TLocalStorageBackend::ReadOnlyFileIO()

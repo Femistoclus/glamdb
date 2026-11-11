@@ -256,12 +256,14 @@ class ScanHTTP(NativeHTTP):
             {'name': 'n' + str(i), 'type': 'int64', 'nullable': False} for i in range(63)]
         self.api('/collections', {'collection_id': cid, 'name': 'ipc_wide', 'schema': {'fields': fields}})
         path = '/collections/' + cid
+        # Cross the 128-batch coalescing boundary without exhausting the
+        # cursor idle timeout under sanitizer overhead.
         for _ in range(4):
             rows = [dict({'key': 'same'}, **{'n' + str(i): str(int(index % 4 == 0)) for i in range(63)})
-                    for index in range(6000)]
+                    for index in range(256)]
             self.api(path + '/append', {'operation_id': str(uuid.uuid4()), 'rows': rows})
-        for body, expected in [({'batch_rows': 1, 'limit': 6000}, 6000),
-            ({'batch_rows': 4, 'predicate': {'op': 'eq', 'field': 'n0', 'value': '1'}}, 6000)]:
+        for body, expected in [({'batch_rows': 1, 'limit': 512}, 512),
+            ({'batch_rows': 4, 'predicate': {'op': 'eq', 'field': 'n0', 'value': '1'}}, 256)]:
             count = 0
             while True:
                 status, headers, data = self.request(path + '/scan', body, accept='application/vnd.apache.arrow.stream')

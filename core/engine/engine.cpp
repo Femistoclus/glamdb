@@ -543,37 +543,6 @@ struct Engine::Impl
         }
     }
 
-    void VerifyCommittedRetry(const AppendOutcome& outcome)
-    {
-        try {
-            if (!outcome.result) {
-                throw Failure({"CORRUPTION", "committed operation has no receipt", RetryHint::OperatorAction});
-            }
-            const auto& result = *outcome.result;
-            const auto& collection_id = result.collection_id;
-            const CollectionView view{catalog->Collection(collection_id), catalog->Base(collection_id)};
-            std::vector<OperationRecord> operations;
-            for (auto& record : catalog->Operations()) {
-                if (record.binding.collection_id == collection_id) {
-                    operations.push_back(std::move(record));
-                }
-            }
-            Require(backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage recovery validator is not installed");
-            const auto verified = backend->VerifyCommittedAppend(info, view, operations, result);
-            if (!verified) {
-                throw Failure(verified.error());
-            }
-        } catch (...) {
-            if (backend) {
-                backend->InvalidateCache();
-            }
-            std::lock_guard lock(state_mutex);
-            ready = false;
-            ++health_generation;
-            throw;
-        }
-    }
-
     void Recover(bool reopen)
     {
         {
@@ -1168,11 +1137,13 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
                 "operation ID is permanently bound to different content");
             if (previous->outcome) {
                 try {
-                    // A failed outcome references no storage; a committed one
-                    // re-checks only its own collection and snapshot.
-                    if (previous->outcome->disposition == CommitDisposition::Committed) {
-                        impl->VerifyCommittedRetry(*previous->outcome);
-                    }
+                    // Startup/recovery verified the retained history; confirmed
+                    // publications preserve it. A terminal lookup is not a scrub.
+                    std::lock_guard state_lock(impl->state_mutex);
+                    impl->CheckReady();
+                    Require(impl->health_generation == expected_generation,
+                        "RECOVERY_REQUIRED",
+                        "authoritative reconciliation is required");
                 } catch (const Failure& error) {
                     return impl->Unknown(Context(previous->binding, error.detail, true),
                         CommitPhase::Reconciling,

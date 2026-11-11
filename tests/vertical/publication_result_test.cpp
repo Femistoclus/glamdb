@@ -229,8 +229,8 @@ TEST(BackendPublicationIntegration, LostCommitResultKeepsReadersOnConfirmedViewU
     auto engine = *created;
     ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", Schema}).disposition,
         CommitDisposition::Committed);
-    ASSERT_EQ(engine->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}}).disposition,
-        CommitDisposition::Committed);
+    const auto original = engine->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
+    ASSERT_EQ(original.disposition, CommitDisposition::Committed);
     const auto drain = [](ScanCursor& cursor) {
         std::vector<std::string> rows;
         while (true) {
@@ -265,6 +265,17 @@ TEST(BackendPublicationIntegration, LostCommitResultKeepsReadersOnConfirmedViewU
     const auto blocked = engine->Scan({.collection_id = test::collection_id});
     ASSERT_FALSE(blocked);
     EXPECT_EQ(blocked.error().code, "RECOVERY_REQUIRED");
+    const auto blockedRetry = engine->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
+    EXPECT_EQ(blockedRetry.disposition, CommitDisposition::CommitUnknown);
+    ASSERT_TRUE(blockedRetry.recovery);
+    EXPECT_TRUE(test::Present(blockedRetry.recovery).lookup_blocked);
+    EXPECT_FALSE(engine->FindAppendOutcome(test::collection_id, FirstOperation));
+
+    // Verifying files alone cannot reopen admission: the recovery fence must commit.
+    vfs.Arm(1, true);
+    EXPECT_FALSE(engine->Reconcile());
+    EXPECT_EQ(engine->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}}).disposition,
+        CommitDisposition::CommitUnknown);
     vfs.Disarm();
     ASSERT_TRUE(engine->Reconcile());
     const auto retry = engine->AppendDurable({test::collection_id, SecondOperation, {}, {Batch(SecondRows)}});
@@ -273,6 +284,7 @@ TEST(BackendPublicationIntegration, LostCommitResultKeepsReadersOnConfirmedViewU
     const auto first = engine->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
     ASSERT_EQ(first.disposition, CommitDisposition::Committed);
     ASSERT_TRUE(first.result);
+    EXPECT_EQ(first, original);
     EXPECT_EQ(test::Present(retry.result).parent_snapshot_id, test::Present(first.result).snapshot_id);
     EXPECT_EQ(read(), Expected({&FirstRows, &SecondRows}));
     EXPECT_EQ(engine->AppendDurable({test::collection_id, ThirdOperation, {}, {Batch(SecondRows)}}).disposition,

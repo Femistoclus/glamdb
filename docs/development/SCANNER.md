@@ -59,14 +59,15 @@ does not qualify physical power-loss durability.
   footers), its schema, a one-to-one mapping between retained snapshots and
   committed receipts, and the aggregate multi-collection store usage against
   `TStorageLimits::Store`. It runs on open, `Reconcile()` and every identical
-  create retry. An idempotent retry of a committed append runs
-  `VerifyCommittedAppend` instead: the collection's committed root, the
-  receipt's snapshot (its transition from the parent, manifest list, new
-  manifest and Parquet footer) and the receipt fields, so the retry never
-  returns a committed outcome over missing or corrupt files of that append
-  without re-reading unrelated history. A retry of a failed outcome reads no
-  storage. Missing or inconsistent committed state is `CORRUPTION`, which
-  closes readiness.
+  create retry. Healthy append retries and `FindAppendOutcome` use direct catalog
+  lookups within the verified generation, without enumerating operation history
+  or rereading warehouse files. Confirmed publications preserve that generation;
+  observed corruption and uncertain publication invalidate it. Receipt lookup
+  does not scrub for unobserved file damage. A scan or explicit `Reconcile()`
+  detects damage; missing or inconsistent committed state is `CORRUPTION` and
+  closes readiness. Full recovery verification and a successful durability fence
+  are required before terminal lookups resume. A durable write latch alone still
+  permits old receipt lookup.
 - After a committed append the backend removes the superseded root
   (`RetireRoot`). The engine defers it while a scan that resolved that root is
   still planning; a root that cannot be removed remains an orphan. Removal

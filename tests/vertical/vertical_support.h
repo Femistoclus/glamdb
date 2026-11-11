@@ -267,14 +267,6 @@ public:
         return Inner_->VerifyRetained(store, collections, operations);
     }
 
-    Status VerifyCommittedAppend(const StoreInfo& store,
-        const detail::CollectionView& collection,
-        std::span<const detail::OperationRecord> operations,
-        const AppendResult& receipt) override
-    {
-        return Inner_->VerifyCommittedAppend(store, collection, operations, receipt);
-    }
-
     Health GetHealth() const override
     {
         return Inner_->GetHealth();

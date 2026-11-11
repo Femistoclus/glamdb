@@ -82,10 +82,6 @@ public:
     Status VerifyRetained(const StoreInfo& store,
         std::span<const CollectionView> collections,
         std::span<const OperationRecord> operations) override;
-    Status VerifyCommittedAppend(const StoreInfo& store,
-        const CollectionView& collection,
-        std::span<const OperationRecord> operations,
-        const AppendResult& receipt) override;
     Result<std::shared_ptr<iceberg::FileIO>> ReadOnlyFileIO() override;
 
     // A verified candidate is tentative until PublicationFinished confirms the

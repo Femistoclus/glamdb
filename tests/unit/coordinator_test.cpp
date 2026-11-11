@@ -390,7 +390,7 @@ TEST_P(DiagnosticTest, LongProducerFailureRemainsDurableAndRecoverable)
     EXPECT_EQ(backend->prepares, 1);
 }
 
-TEST_P(DiagnosticTest, LongVerifierExceptionPreservesAValidUnknownOutcome)
+TEST_P(DiagnosticTest, LongRecoveryVerifierExceptionKeepsReceiptBlocked)
 {
     const auto original = engine->AppendDurable(Request());
     ASSERT_EQ(original.disposition, CommitDisposition::Committed);
@@ -398,12 +398,14 @@ TEST_P(DiagnosticTest, LongVerifierExceptionPreservesAValidUnknownOutcome)
     backend->on_verify = [&] {
         throw std::runtime_error(prefix + GetParam());
     };
+    const auto recovery = engine->Reconcile();
+    ASSERT_FALSE(recovery);
+    EXPECT_EQ(recovery.error().code, "INTERNAL");
+    EXPECT_EQ(recovery.error().message, prefix);
     const auto unknown = engine->AppendDurable(Request());
     backend->on_verify = {};
     EXPECT_EQ(unknown.disposition, CommitDisposition::CommitUnknown);
-    EXPECT_EQ(test::Present(unknown.error).code, "INTERNAL");
-    EXPECT_EQ(test::Present(unknown.error).message, prefix);
-    EXPECT_EQ(test::Present(unknown.recovery).first_error.message, prefix);
+    EXPECT_EQ(test::Present(unknown.error).code, "RECOVERY_REQUIRED");
     EXPECT_TRUE(detail::ValidateOutcome(unknown));
     ASSERT_TRUE(engine->Reconcile());
     EXPECT_EQ(engine->AppendDurable(Request()), original);
@@ -491,16 +493,20 @@ TEST_F(CoordinatorTest, CorruptOrMissingPublishedRootClosesReadiness)
     EXPECT_TRUE(std::filesystem::exists(root / "catalog.sqlite"));
 }
 
-TEST_F(CoordinatorTest, VerifierExceptionCannotTurnCommittedRetryIntoFailure)
+TEST_F(CoordinatorTest, TerminalRetrySkipsVerifierButFailedRecoveryBlocksIt)
 {
-    ASSERT_EQ(engine->AppendDurable(Request()).disposition, CommitDisposition::Committed);
+    const auto original = engine->AppendDurable(Request());
+    ASSERT_EQ(original.disposition, CommitDisposition::Committed);
     backend->throw_verifier = true;
+    EXPECT_EQ(engine->AppendDurable(Request()), original);
+    EXPECT_FALSE(engine->Reconcile());
     const auto retry = engine->AppendDurable(Request());
     EXPECT_EQ(retry.disposition, CommitDisposition::CommitUnknown);
+    EXPECT_EQ(test::Present(retry.error).code, "RECOVERY_REQUIRED");
     EXPECT_FALSE(engine->GetCollection(test::collection_id));
     backend->throw_verifier = false;
     EXPECT_TRUE(engine->Reconcile());
-    EXPECT_EQ(engine->AppendDurable(Request()).disposition, CommitDisposition::Committed);
+    EXPECT_EQ(engine->AppendDurable(Request()), original);
 }
 
 TEST_F(CoordinatorTest, DetectedCorruptionBlocksFurtherWritesInTheLiveProcess)
@@ -608,7 +614,7 @@ TEST_F(CoordinatorTest, ShutdownReportsRecoveryExceptionAndRetainsOwnership)
 {
     ASSERT_EQ(engine->AppendDurable(Request()).disposition, CommitDisposition::Committed);
     backend->throw_verifier = true;
-    ASSERT_EQ(engine->AppendDurable(Request()).disposition, CommitDisposition::CommitUnknown);
+    ASSERT_FALSE(engine->Reconcile());
     Status shutdown;
     EXPECT_NO_THROW(shutdown = engine->Shutdown(std::chrono::milliseconds(1000)));
     ASSERT_FALSE(shutdown);
@@ -616,7 +622,7 @@ TEST_F(CoordinatorTest, ShutdownReportsRecoveryExceptionAndRetainsOwnership)
     const auto retry = engine->AppendDurable(Request());
     EXPECT_EQ(retry.disposition, CommitDisposition::CommitUnknown);
     EXPECT_TRUE(detail::ValidateOutcome(retry));
-    EXPECT_FALSE(test::Present(retry.recovery).lookup_blocked);
+    EXPECT_TRUE(test::Present(retry.recovery).lookup_blocked);
     const auto other = detail::EngineFactory::Open({root.string(), test::store_id}, backend);
     ASSERT_FALSE(other);
     EXPECT_EQ(other.error().code, "STATE_IN_USE");

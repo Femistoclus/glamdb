@@ -132,7 +132,11 @@ Preserve these boundaries when adding or changing engine behavior:
   ID to its canonical content hash before file I/O. Persist the committed
   outcome atomically with the catalog pointer. The same ID and hash return the
   original terminal outcome, including failure; a different hash conflicts.
-  Outcomes survive restart and do not expire. The initial engine has no input
+  Outcomes survive restart and do not expire. Healthy terminal receipt lookups
+  use the verified generation and query one catalog record without rereading
+  warehouse files or enumerating history. Lookup is not a scrub: observed
+  corruption or uncertain publication requires full reconciliation and its
+  durability fence before lookups resume. The initial engine has no input
   payload journal or asynchronous job queue.
 - **Snapshot reads.** Resolve the selected view once and enumerate its files
   through Iceberg manifests. Read neither uncommitted nor orphan files by

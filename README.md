@@ -28,6 +28,8 @@ see [SCANNER.md](docs/development/SCANNER.md).
 The [installed public API consumer](docs/development/BUILDING.md#build-and-install)
 checks real A/B appends, fixed-view scans, persisted receipts and retries after
 reopening in a new process, with a separate storage-disabled contour.
+Healthy terminal receipt lookups reuse the verified generation without rereading
+warehouse history; observed corruption and uncertainty still require recovery.
 See the [coordinator guide](docs/development/COORDINATOR.md)
 and [storage guide](docs/development/STORAGE_MODULE.md) for supported boundaries.
 The [shared resource budget matrix](docs/development/RESOURCE_BUDGETS.md) names

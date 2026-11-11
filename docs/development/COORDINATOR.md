@@ -46,7 +46,12 @@ automatic file cleanup remain outside this MVP.
   Its exact base includes store/collection/table identities, metadata location,
   optional snapshot, schema and partition-spec IDs. Retrying identical content
   returns the original terminal result before evaluating a new precondition,
-  reserving owned input or admitting another operation. Different content
+  reserving owned input or admitting another operation. Healthy terminal lookups
+  query only the requested catalog record, reusing the verified generation from
+  open/reconciliation and confirmed publications. They neither enumerate retained
+  operations nor scrub warehouse files. Observed corruption or uncertain
+  publication closes this path until authoritative recovery and its durability
+  fence succeed; a write-only I/O latch still permits old receipts. Different content
   conflicts: the public API rejects that request as `DefinitelyNotCommitted`
   with `OPERATION_CONFLICT`, which describes only the conflicting request, not
   the bound operation (which may be committed or unknown). Outcome JSON
