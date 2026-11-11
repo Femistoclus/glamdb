@@ -982,6 +982,7 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
                 request.expected_snapshot.kind <= SnapshotPreconditionKind::Equals,
             "INVALID_ARGUMENT",
             "append requires canonical UUIDs and a valid precondition");
+        Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "durable storage producer is not installed");
         CollectionInfo collection;
         std::optional<RecoveryContext> unresolved;
         {
@@ -1154,7 +1155,6 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         Require(std::chrono::steady_clock::now() < deadline,
             "DEADLINE_EXCEEDED",
             "append deadline expired before execution");
-        Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "durable storage producer is not installed");
         phase = CommitPhase::Data;
         auto staged = Take(impl->backend->PrepareAppend(impl->info, *binding, collection, input, deadline));
         Require(staged != nullptr, "IO_ERROR", "producer returned no staged append");

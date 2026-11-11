@@ -109,6 +109,7 @@ if(NOT GLAMDB_IO_ONLY)
             "-DTEST_LINKER_FLAGS=${CMAKE_EXE_LINKER_FLAGS}"
             "-DTEST_TOOLCHAIN=${CMAKE_TOOLCHAIN_FILE}"
             "-DTEST_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+            "-DTEST_STORAGE_ENABLED=${GLAMDB_BUILD_STORAGE}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/installed_consumer/run.cmake")
         set_tests_properties(glamdb.installed_consumer PROPERTIES LABELS installed TIMEOUT 120)
     endif()

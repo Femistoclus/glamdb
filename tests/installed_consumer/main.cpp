@@ -3,94 +3,237 @@
 
 #include <arrow/api.h>
 
-#include <filesystem>
+#include <algorithm>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <optional>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace {
 
+constexpr char StoreId[] = "00000000-0000-0000-0000-000000000001";
 constexpr char CollectionId[] = "00112233-4455-6677-8899-aabbccddeeff";
+constexpr char OperationA[] = "00000000-0000-0000-0000-000000000004";
+constexpr char OperationB[] = "00000000-0000-0000-0000-000000000005";
+constexpr char UnknownOperation[] = "00000000-0000-0000-0000-000000000006";
 
-// Exercises the installed scan contract when the package includes storage.
-int CheckAppendAndScan(glamdb::Engine& engine)
+using TRow = std::pair<std::string, std::optional<int64_t>>;
+const std::vector<TRow> RowsA{{"dup", 1}, {"dup", 1}, {"null", std::nullopt}};
+const std::vector<TRow> RowsB{{"b", 2}, {"dup", 3}};
+const std::vector<TRow> RowsAB{{"dup", 1}, {"dup", 1}, {"null", std::nullopt}, {"b", 2}, {"dup", 3}};
+const glamdb::SchemaSpec Schema{{{"key", glamdb::FieldType::String, false}, {"n", glamdb::FieldType::Int64, true}}};
+
+void Check(bool condition, std::string_view message)
 {
-    const glamdb::SchemaSpec schema{{{"key", glamdb::FieldType::String, false}, {"n", glamdb::FieldType::Int64, true}}};
-    const auto created = engine.CreateCollection({CollectionId, "events", schema});
-    if (created.disposition != glamdb::CommitDisposition::Committed) {
-        // A package built without storage installs no backend or scanner.
-        const auto scan = engine.Scan({.collection_id = CollectionId});
-        return created.error && created.error->code == "DEPENDENCY_UNAVAILABLE" && !scan &&
-                scan.error().code == "DEPENDENCY_UNAVAILABLE"
-            ? 0
-            : 10;
+    if (!condition) {
+        throw std::runtime_error(std::string(message));
     }
+}
+
+template <class T>
+T Take(glamdb::Result<T> result, std::string_view context)
+{
+    if (!result) {
+        throw std::runtime_error(std::string(context) + ": " + result.error().code + ": " + result.error().message);
+    }
+    return std::move(*result);
+}
+
+std::shared_ptr<arrow::Schema> InputSchema()
+{
+    return arrow::schema({arrow::field("key", arrow::utf8(), false), arrow::field("n", arrow::int64())});
+}
+
+std::shared_ptr<arrow::RecordBatch> MakeBatch(const std::vector<TRow>& rows)
+{
     arrow::StringBuilder keys;
     arrow::Int64Builder values;
+    for (const auto& [key, value] : rows) {
+        Check(keys.Append(key).ok(), "build keys");
+        Check((value ? values.Append(*value) : values.AppendNull()).ok(), "build values");
+    }
     std::shared_ptr<arrow::Array> keyArray;
     std::shared_ptr<arrow::Array> valueArray;
-    if (!keys.Append("a").ok() || !keys.Append("a").ok() || !values.Append(1).ok() || !values.AppendNull().ok() ||
-        !keys.Finish(&keyArray).ok() || !values.Finish(&valueArray).ok())
-    {
-        return 11;
-    }
-    const auto batch = arrow::RecordBatch::Make(
-        arrow::schema({arrow::field("key", arrow::utf8(), false), arrow::field("n", arrow::int64())}),
-        2,
-        {keyArray, valueArray});
-    const auto appended = engine.AppendDurable({CollectionId, "00000000-0000-0000-0000-000000000004", {}, {batch}});
-    if (appended.disposition != glamdb::CommitDisposition::Committed || !appended.result) {
-        return 12;
-    }
-    auto cursor = engine.Scan({.collection_id = CollectionId,
-        .selector = glamdb::SnapshotSelector::Id(appended.result->snapshot_id),
-        .projection = std::vector<std::string>{"n"}});
-    if (!cursor || (*cursor)->Info().output_schema->num_fields() != 1) {
-        return 13;
-    }
-    int64_t rows = 0;
-    int64_t nulls = 0;
-    while (true) {
-        const auto next = (*cursor)->Next();
-        if (!next) {
-            return 14;
+    Check(keys.Finish(&keyArray).ok() && values.Finish(&valueArray).ok(), "finish input arrays");
+    return arrow::RecordBatch::Make(InputSchema(), static_cast<int64_t>(rows.size()), {keyArray, valueArray});
+}
+
+void CheckRows(glamdb::ScanCursor& cursor, std::vector<TRow> expected, glamdb::SnapshotSelector resolved)
+{
+    Check(cursor.Info().selector_resolved == resolved, "resolved scan selector");
+    Check(cursor.Info().output_schema && cursor.Info().output_schema->Equals(*InputSchema()), "scan schema");
+    std::vector<TRow> rows;
+    while (const auto batch = Take(cursor.Next(), "scan next")) {
+        Check(batch->ValidateFull().ok() && batch->schema()->Equals(*InputSchema()), "scan batch schema and values");
+        const auto& keys = static_cast<const arrow::StringArray&>(*batch->column(0));
+        const auto& values = static_cast<const arrow::Int64Array&>(*batch->column(1));
+        for (int64_t row = 0; row < batch->num_rows(); ++row) {
+            Check(!keys.IsNull(row), "required key");
+            rows.emplace_back(keys.GetString(row),
+                values.IsNull(row) ? std::nullopt : std::optional<int64_t>(values.Value(row)));
         }
-        if (!*next) {
-            break;
-        }
-        rows += (*next)->num_rows();
-        nulls += (*next)->column(0)->null_count();
     }
-    return rows == 2 && nulls == 1 ? 0 : 15;
+    std::ranges::sort(rows);
+    std::ranges::sort(expected);
+    Check(rows == expected, "scan rows must match the literal multiset, including duplicates and NULL");
+}
+
+void CheckScan(glamdb::Engine& engine,
+    glamdb::SnapshotSelector selector,
+    const std::vector<TRow>& expected,
+    glamdb::SnapshotSelector resolved)
+{
+    auto cursor = Take(engine.Scan({.collection_id = CollectionId, .selector = selector, .batch_rows = 1}), "scan");
+    CheckRows(*cursor, expected, resolved);
+}
+
+const glamdb::AppendResult& CheckReceipt(const glamdb::AppendOutcome& outcome, std::string_view operation, int64_t rows)
+{
+    if (!outcome.result) {
+        throw std::runtime_error("committed append receipt is missing");
+    }
+    Check(outcome.disposition == glamdb::CommitDisposition::Committed &&
+            outcome.phase == glamdb::CommitPhase::Complete && outcome.operation_id == operation && !outcome.error &&
+            !outcome.recovery,
+        "committed append outcome");
+    const auto& receipt = *outcome.result;
+    Check(receipt.collection_id == CollectionId && receipt.operation_id == operation && receipt.rows_appended == rows &&
+            receipt.data_files_added == 1 && receipt.compressed_data_bytes_added > 0 && receipt.snapshot_id != 0 &&
+            receipt.snapshot_created_at_us > 0 && !receipt.payload_hash.empty() && receipt.hash_version == 1 &&
+            receipt.receipt_version == 1 && receipt.durability_profile == "local-delete-extra-v1",
+        "complete append receipt");
+    return receipt;
+}
+
+std::string RenderReceipt(const glamdb::AppendResult& receipt)
+{
+    std::ostringstream output;
+    output << std::quoted(receipt.collection_id) << ' ' << std::quoted(receipt.operation_id) << ' '
+           << std::quoted(receipt.payload_hash) << ' ' << receipt.hash_version << ' ' << receipt.snapshot_id << ' '
+           << (receipt.parent_snapshot_id ? std::to_string(*receipt.parent_snapshot_id) : "none") << ' '
+           << receipt.rows_appended << ' ' << receipt.data_files_added << ' ' << receipt.compressed_data_bytes_added
+           << ' ' << receipt.snapshot_created_at_us << ' ' << std::quoted(receipt.durability_profile) << ' '
+           << receipt.receipt_version;
+    return output.str();
+}
+
+void CheckViews(glamdb::Engine& engine, int64_t snapshotA, int64_t snapshotB)
+{
+    CheckScan(engine, glamdb::SnapshotSelector::Latest(), RowsAB, glamdb::SnapshotSelector::Id(snapshotB));
+    CheckScan(engine, glamdb::SnapshotSelector::Id(snapshotA), RowsA, glamdb::SnapshotSelector::Id(snapshotA));
+    CheckScan(engine, glamdb::SnapshotSelector::InitialEmpty(), {}, glamdb::SnapshotSelector::InitialEmpty());
+}
+
+void Write(glamdb::Engine& engine, const std::string& receiptPath)
+{
+    const auto created = engine.CreateCollection({CollectionId, "events", Schema});
+    Check(created.disposition == glamdb::CommitDisposition::Committed && created.info && !created.error &&
+            !created.info->current_snapshot_id,
+        "create collection with the default production backend");
+    CheckScan(engine, glamdb::SnapshotSelector::Latest(), {}, glamdb::SnapshotSelector::InitialEmpty());
+    const auto a = engine.AppendDurable(
+        {CollectionId, OperationA, {glamdb::SnapshotPreconditionKind::NoSnapshot, 0}, {MakeBatch(RowsA)}});
+    const auto& receiptA = CheckReceipt(a, OperationA, 3);
+    Check(!receiptA.parent_snapshot_id, "first snapshot has no parent");
+    auto fixedLatest = Take(engine.Scan({.collection_id = CollectionId, .batch_rows = 1}), "fixed latest scan");
+    const auto b = engine.AppendDurable({CollectionId,
+        OperationB,
+        {glamdb::SnapshotPreconditionKind::Equals, receiptA.snapshot_id},
+        {MakeBatch(RowsB)}});
+    const auto& receiptB = CheckReceipt(b, OperationB, 2);
+    Check(receiptA.snapshot_id != receiptB.snapshot_id && receiptB.parent_snapshot_id == receiptA.snapshot_id,
+        "second snapshot extends the first");
+    CheckRows(*fixedLatest, RowsA, glamdb::SnapshotSelector::Id(receiptA.snapshot_id));
+    CheckViews(engine, receiptA.snapshot_id, receiptB.snapshot_id);
+    std::ofstream output(receiptPath);
+    output << RenderReceipt(receiptA) << '\n' << RenderReceipt(receiptB) << '\n';
+    output.close();
+    Check(!output.fail(), "save original receipts for the next process");
+}
+
+void Reopen(glamdb::Engine& engine, const std::string& receiptPath)
+{
+    const auto collection = Take(engine.GetCollection(CollectionId), "get reopened collection");
+    Check(collection.schema == Schema && collection.name == "events", "persisted collection schema and name");
+    Check(Take(engine.ListCollections(), "list reopened collections").size() == 1, "persisted collection count");
+    const auto a = Take(engine.FindAppendOutcome(CollectionId, OperationA), "find receipt A");
+    const auto b = Take(engine.FindAppendOutcome(CollectionId, OperationB), "find receipt B");
+    if (!a || !b) {
+        throw std::runtime_error("both append outcomes must survive reopen");
+    }
+    const auto& receiptA = CheckReceipt(*a, OperationA, 3);
+    const auto& receiptB = CheckReceipt(*b, OperationB, 2);
+    std::ifstream input(receiptPath);
+    std::string expectedA;
+    std::string expectedB;
+    Check(static_cast<bool>(std::getline(input, expectedA)) && static_cast<bool>(std::getline(input, expectedB)),
+        "read original receipts");
+    Check(RenderReceipt(receiptA) == expectedA && RenderReceipt(receiptB) == expectedB,
+        "every receipt field must survive reopen unchanged");
+    Check(collection.current_snapshot_id == receiptB.snapshot_id, "persisted latest snapshot");
+    Check(!Take(engine.FindAppendOutcome(CollectionId, UnknownOperation), "find unknown operation"),
+        "unknown operation has no receipt");
+    CheckViews(engine, receiptA.snapshot_id, receiptB.snapshot_id);
+    const auto retryA = engine.AppendDurable(
+        {CollectionId, OperationA, {glamdb::SnapshotPreconditionKind::NoSnapshot, 0}, {MakeBatch(RowsA)}});
+    const auto retryB = engine.AppendDurable(
+        {CollectionId, OperationB, {glamdb::SnapshotPreconditionKind::NoSnapshot, 0}, {MakeBatch(RowsB)}});
+    Check(retryA == *a && retryB == *b, "retries return original outcomes despite stale preconditions");
+    CheckViews(engine, receiptA.snapshot_id, receiptB.snapshot_id);
+}
+
+void CheckUnavailable(glamdb::Engine& engine)
+{
+    const auto created = engine.CreateCollection({CollectionId, "events", Schema});
+    Check(created.disposition == glamdb::CommitDisposition::DefinitelyNotCommitted && !created.info && created.error &&
+            created.error->code == "DEPENDENCY_UNAVAILABLE",
+        "storage-disabled create must report DEPENDENCY_UNAVAILABLE");
+    const auto appended = engine.AppendDurable({CollectionId, OperationA, {}, {MakeBatch(RowsA)}});
+    Check(appended.disposition == glamdb::CommitDisposition::DefinitelyNotCommitted &&
+            appended.phase == glamdb::CommitPhase::Validation && !appended.result && !appended.recovery &&
+            appended.error && appended.error->code == "DEPENDENCY_UNAVAILABLE",
+        "storage-disabled append must report DEPENDENCY_UNAVAILABLE before binding");
+    const auto scan = engine.Scan({.collection_id = CollectionId});
+    Check(!scan && scan.error().code == "DEPENDENCY_UNAVAILABLE", "storage-disabled scan dependency error");
+    Check(Take(engine.ListCollections(), "list storage-disabled collections").empty(), "no fabricated collection");
+    const auto outcome = engine.FindAppendOutcome(CollectionId, OperationA);
+    Check(!outcome && outcome.error().code == "COLLECTION_NOT_FOUND", "no fabricated append outcome");
 }
 
 } // namespace
 
 int main(int argc, char** argv)
 try {
-    if (argc != 2) {
-        return 1;
+    if (argc != 5) {
+        std::cerr << "usage: consumer <write|reopen> <store-root> <receipt-file> <storage|nostorage>\n";
+        return 2;
     }
-    const std::filesystem::path root = argv[1];
-    const std::string id = "00000000-0000-0000-0000-000000000001";
-    {
-        const auto created = glamdb::CreateStore({id, root.string()});
-        if (!created || (*created)->GetStoreInfo().store_id != id || !(*created)->ListCollections()->empty()) {
-            return 2;
-        }
-        if (!(*created)->Shutdown(std::chrono::milliseconds(1000))) {
-            return 3;
-        }
+    const std::string mode = argv[1];
+    const std::string storage = argv[4];
+    Check(mode == "write" || mode == "reopen", "unknown consumer phase");
+    Check(storage == "storage" || storage == "nostorage", "explicit storage expectation required");
+    auto engine = mode == "write" ? Take(glamdb::CreateStore({StoreId, argv[2]}), "create store")
+                                  : Take(glamdb::OpenExisting({argv[2], StoreId}), "reopen store");
+    Check(engine->GetStoreInfo().store_id == StoreId, "store identity");
+    if (storage == "nostorage") {
+        CheckUnavailable(*engine);
+    } else if (mode == "write") {
+        Check(Take(engine->ListCollections(), "list initial collections").empty(), "new store is empty");
+        Write(*engine, argv[3]);
+    } else {
+        Reopen(*engine, argv[3]);
     }
-    const auto opened = glamdb::OpenExisting({root.string(), id});
-    if (!opened || (*opened)->GetCollection(CollectionId).has_value()) {
-        return 4;
-    }
-    const auto outcome = (*opened)->FindAppendOutcome(CollectionId, "00000000-0000-0000-0000-000000000003");
-    if (outcome || outcome.error().code != "COLLECTION_NOT_FOUND") {
-        return 6;
-    }
-    if (const auto scanned = CheckAppendAndScan(**opened); scanned != 0) {
-        return scanned;
-    }
-    return (*opened)->Shutdown(std::chrono::milliseconds(1000)) ? 0 : 5;
-} catch (...) {
-    return 100;
+    const auto shutdown = engine->Shutdown(std::chrono::milliseconds(1000));
+    Check(shutdown.has_value(), "shutdown");
+    std::cout << "Installed consumer " << storage << ' ' << mode << ": PASS\n";
+    return 0;
+} catch (const std::exception& error) {
+    std::cerr << error.what() << '\n';
+    return 1;
 }

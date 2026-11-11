@@ -235,8 +235,14 @@ test presets. `GLAMDB_BUILD_STORAGE` defaults to `ON` (unless `GLAMDB_IO_ONLY=ON
 and adds `glamdb_storage`, the production backend, the scanner, `glamdb_vertical`
 (CTest labels `vertical;scan`), the in-memory planner/cursor suite `glamdb_mock`
 (labels `mock;scan`) and the fresh-process `glamdb.scan_process` integration test;
-with it `OFF`, public factories install no backend and `Engine::Scan` reports
-`DEPENDENCY_UNAVAILABLE`.
+with it `OFF`, public factories install no backend and collection creation,
+appends and scans report `DEPENDENCY_UNAVAILABLE`.
+`glamdb.installed_consumer` copies its sources into the build workspace, links
+only installed public targets, and runs independent write/reopen processes.
+It requires real A/B appends, latest/A/initial rows, persisted receipts and
+idempotent retries when storage is enabled, and explicit dependency errors
+when disabled. Run it in both builds with `ctest --test-dir <build-dir> -R
+'^glamdb.installed_consumer$' --output-on-failure`; mock tests are separate.
 Core protocol tests use a test-only backend through `EngineFactory::Create/Open`;
 the real SqlCatalog test verifies the catalog integration separately. Neither
 establishes durable user-file production or power-loss safety.

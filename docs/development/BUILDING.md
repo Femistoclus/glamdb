@@ -53,9 +53,16 @@ The install contains the executable, `storage/*.h`, the `glamdb::core` static
 library and `GlamDBConfig.cmake`. Consumers use
 `find_package(GlamDB CONFIG REQUIRED)` with both GlamDB and dependency prefixes
 in `CMAKE_PREFIX_PATH`. `glamdb.installed_consumer` installs to a disposable
-prefix and builds/runs a public-header consumer without source-tree headers or
-HTTP/Python dependencies. It exercises create/open and missing-collection
-results. Scan/predicate acceptance awaits the scanner. The consumer test is
+prefix and copies the standalone consumer sources into its build workspace.
+It links only installed `glamdb::core` and Arrow targets, without private
+headers or HTTP/Python dependencies. Separate write/reopen processes create a
+collection, append A/B, check literal rows (including duplicates and NULL) in
+latest/A/initial views, and compare the full original append receipts after
+reopen and idempotent retries. Storage-enabled runs require the real backend;
+the separate `GLAMDB_BUILD_STORAGE=OFF` contour requires explicit
+`DEPENDENCY_UNAVAILABLE` from create, append and scan calls before and after
+reopen. Run either contour with `ctest --test-dir <build-dir> -R
+'^glamdb.installed_consumer$' --output-on-failure`. The consumer test is
 omitted from sanitizer builds because instrumented static libraries require
 matching consumer flags.
 
@@ -393,13 +400,13 @@ environment collector and the evidence required before running those campaigns.
 | Catalog/coordinator unit and VFS fault suites | Canonical input, SQLite transactions, bindings/outcomes and coordinator states with a storage test double. |
 | `glamdb.process_recovery` | Separate-process reopen, interrupted operations, hot-journal recovery and exclusive ownership. |
 | `glamdb.real_sqlcatalog` | Real Iceberg create/property-update ordering, outer rollback, exact base and fresh-process load with test FileIO. |
-| `glamdb.installed_consumer` | Installed CMake package and public facade work without private headers. |
+| `glamdb.installed_consumer` | Installed public API with the default real backend: A/B appends, latest/historical/initial scans, full receipts and retries in a fresh process; explicit dependency failures in a storage-disabled build. |
 | `unit` suite, storage enabled | Adds FileIO, table profiles, real file writing/staging, publication/closure/recovery, and capacity tests. |
 | `tooling` suite | Docker runner profiles, isolation and failure propagation; optional GoogleTest, static core and install contents. |
 | Formatting, tidy, and negative controls | Configured C++ checks execute and reject deliberate violations. |
 | Installed dependency probe | Pinned dependencies build/install and their public APIs work from a relocated installed prefix. |
 | Storage pipeline test | Real Parquet/Avro/JSON append and fresh-process reachable-file recovery with a catalog test double. |
-| Future combined integration | Production backend wiring, real public append/read, and scanner contracts. |
+| `glamdb_vertical` and `glamdb.scan_process` | Production backend/scanner behavior, injected faults, and fresh-process fixed-view scans over real files. |
 | Future environment qualification | Durability and supported limits for the specifically tested platform and storage configuration. |
 
 Fault injection and a storage pipeline are implemented in the component suites.
