@@ -28,8 +28,11 @@ assigned when the invitation is accepted.
 - These requirements also apply to workflow, dependency, release, policy, and
   CODEOWNERS changes.
 
-The repository ruleset enforces the required maintainer approval. CODEOWNERS
-requests the maintainers' review but does not enforce that count on its own.
+The repository ruleset enforces the required maintainer approval and the
+`Workflow security`, `clang-format`, `Native / normal`, `Native / asan`, `Native / ubsan`,
+`Native / msan`, `Native / tsan`, and `Native / lsan` checks from GitHub Actions.
+Pending or failed required checks block ordinary merges and auto-merge.
+CODEOWNERS requests review but does not enforce the approval count on its own.
 
 ### Maintainer force-merge
 
@@ -52,9 +55,9 @@ with grouped diagnostics and per-file timings. Workflow security and formatting
 run on every pull request, including documentation changes, and pushes to `main`.
 Clang-tidy runs only on pushes to `main` and manual dispatch; it is skipped on PRs.
 The `Native tests` workflow runs independent normal, ASan, UBSan, MSan, TSan,
-and LSan jobs. `Workbench checks` runs independent Python, Node, and browser
-jobs. These test workflows skip documentation-only changes; new code paths
-trigger them automatically. See [test CI](docs/development/BUILDING.md#test-ci)
+and LSan jobs on every PR, including documentation-only changes.
+`Workbench checks` runs independent Python, Node, and browser jobs and skips
+documentation-only changes. See [test CI](docs/development/BUILDING.md#test-ci)
 for discovery, sanitizer scope, and failure logs.
 External contributors' workflow runs require a maintainer to approve execution;
 approval to run CI does not approve the pull request for merging.
@@ -75,7 +78,12 @@ and the possibility of data loss. Record relevant performance measurements.
 - Use reviewed upstream sources and pin dependencies to explicit versions or
   immutable revisions. Preserve and verify checksums or lockfiles where supported.
 - Actions must use a full commit SHA. The repository permits only the Actions
-  explicitly selected in its settings; additions need maintainer review.
+  explicitly selected in its settings; additions need maintainer review. Keep
+  `.github/allowed-actions.json` in sync with those settings. An unlisted Action
+  rejects the entire workflow before jobs start, leaving required checks at
+  **Expected — Waiting for status to be reported**. Inspect the run's annotation
+  for the rejected Action; see [test CI](docs/development/BUILDING.md#test-ci)
+  for the command to apply reviewed allowlist changes.
 - PR workflows run on GitHub-hosted runners with read-only repository access,
   without release credentials or other secrets.
 - Keep privileged release jobs separate from PR code. Do not execute fork code

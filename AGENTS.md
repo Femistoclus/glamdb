@@ -185,7 +185,11 @@ The normal profile also runs named `vertical`, `nostorage` (a separate
 `GLAMDB_BUILD_STORAGE=OFF` build) and `mock` contours.
 Python tests use repository-wide pytest discovery (excluding native tooling,
 vendor, and generated trees); Node and Playwright use their own discovery.
-Both test workflows skip documentation-only changes. See
+All six native profiles are required checks and run on every PR, including
+documentation-only changes. The main ruleset is tracked in
+`.github/rulesets/main.json`; changes also need to be applied in GitHub.
+The ruleset also requires `Workflow security` and `clang-format`.
+Workbench checks still skip documentation-only changes. See
 [test CI](docs/development/BUILDING.md#test-ci) for logs and reproduction.
 
 ```sh
@@ -329,3 +333,5 @@ describe behavior, validation, and any storage compatibility impact.
 When changing workflows, preserve SHA-pinned Actions, read-only PR permissions,
 and separation from privileged release credentials. For vulnerabilities, follow
 [SECURITY.md](SECURITY.md) and report privately rather than in public issues.
+Keep `.github/allowed-actions.json` and GitHub's selected Actions setting in sync;
+an unlisted Action prevents the entire workflow from starting.
