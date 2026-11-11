@@ -177,6 +177,7 @@ Preserve these boundaries when adding or changing engine behavior:
 | `apps/server/`, `apps/transport/` | `glamdb`: Asio HTTP server, shared precise codecs and native outcome serialization. |
 | `cmake/` | Build options, sanitizers, quality targets, and dependency recipes. |
 | `tests/` | Native unit/recovery/SqlCatalog/VFS/consumer suites, `vertical/` public-API storage tests, `mock/` in-memory scan tests, verification and actual SDK HTTP/HTTPS tests. |
+| `tests/stress/` | Explicit manual native capacity campaigns; excluded from default pytest/CTest and CI. |
 | `apps/mock_server/` | Disposable Python mock, real HTTP/Arrow, no warehouse/catalog access. |
 | `fixtures/`, `tools/verification/` | Literal canonical/metadata inputs, independent row oracle and evidence helpers. |
 | `sdk/python/`, `ui/` | Standalone Python HTTP SDK; HTML/CSS/ES-module pink workbench and browser/unit tests. |
@@ -236,7 +237,7 @@ the unit, I/O, storage, mock, vertical, and fault suites. Tooling tests use unit
 The normal profile also runs named `vertical`, `nostorage` (a separate
 `GLAMDB_BUILD_STORAGE=OFF` build) and `mock` contours.
 Python tests use repository-wide pytest discovery (excluding native tooling,
-vendor, and generated trees); Node and Playwright use their own discovery.
+manual stress suites, vendor, and generated trees); Node and Playwright use their own discovery.
 All four PR native profiles are required checks and run on every PR, including
 documentation-only changes. The main ruleset is tracked in
 `.github/rulesets/main.json`; changes also need to be applied in GitHub.

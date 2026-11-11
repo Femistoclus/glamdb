@@ -153,6 +153,11 @@ Those coordinator tests use a storage test double; the independent real-file
 pipeline lives in `tests/unit/storage/`. The installed third-party consumer
 lives in `probes/build_install/`.
 
+`tests/stress/` holds explicitly launched native load campaigns with disposable
+stores, Locust measurements and reopen verification. See its
+[manual runner](../tests/stress/README.md); it is excluded from default
+pytest/CTest discovery and CI.
+
 `probes/` holds bounded dependency/platform experiments, while `benchmarks/`
 holds workload and capacity measurements. Neither a dependency probe nor a
 benchmark replaces correctness tests. Share deterministic inputs and expected
