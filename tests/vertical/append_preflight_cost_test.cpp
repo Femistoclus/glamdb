@@ -6,6 +6,8 @@
 #include "tests/vertical/vertical_support.h"
 
 #include <chrono>
+#include <cstdio>
+#include <filesystem>
 #include <format>
 
 namespace glamdb {
@@ -38,11 +40,30 @@ TEST(BackendPreflightCostTest, AppendMeasuresWarehouseOnlyAtAdmissionAndPublicat
         CommitDisposition::Committed);
     std::size_t walks = 0;
     std::size_t statfs = 0;
+    std::size_t rootOpens = 0;
+    std::size_t listOpens = 0;
+    std::size_t manifestOpens = 0;
     const auto events = faults->Events();
     for (std::size_t index = mark; index < events.size(); ++index) {
-        walks += events[index].Op == NT::EIOOp::MeasureTree ? 1 : 0;
-        statfs += events[index].Op == NT::EIOOp::StatFs ? 1 : 0;
+        const auto& event = events[index];
+        walks += event.Op == NT::EIOOp::MeasureTree ? 1 : 0;
+        statfs += event.Op == NT::EIOOp::StatFs ? 1 : 0;
+        if (event.Op == NT::EIOOp::OpenRead) {
+            const auto leaf = std::filesystem::path(event.Path).filename().string();
+            rootOpens += leaf.ends_with(".metadata.json") ? 1 : 0;
+            listOpens += leaf.starts_with("snap-") ? 1 : 0;
+            manifestOpens += leaf.ends_with(".avro") && !leaf.starts_with("snap-") ? 1 : 0;
+        }
     }
+    RecordProperty("root_opens", static_cast<int>(rootOpens));
+    RecordProperty("manifest_list_opens", static_cast<int>(listOpens));
+    RecordProperty("manifest_opens", static_cast<int>(manifestOpens));
+    std::printf("per append: walks=%zu statfs=%zu root_opens=%zu manifest_list_opens=%zu manifest_opens=%zu\n",
+        walks,
+        statfs,
+        rootOpens,
+        listOpens,
+        manifestOpens);
     EXPECT_EQ(walks, 2U) << "warehouse tree walks during one append";
     EXPECT_GE(statfs, 1U) << "free-space reserve must still be checked";
     ASSERT_TRUE(engine->Shutdown(1000ms));
