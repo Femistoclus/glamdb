@@ -147,6 +147,13 @@ T Take(Result<T> result)
     return std::move(*result);
 }
 
+struct TScanResources
+{
+    std::shared_ptr<const void> Owner;
+    std::shared_ptr<iceberg::FileIO> FileIO;
+    std::shared_ptr<arrow::MemoryPool> Pool;
+};
+
 class TLeaseBuffer final : public arrow::Buffer
 {
 public:
@@ -158,7 +165,7 @@ public:
 
 private:
     // Destroy Inner_ before Lease_ so buffer memory is freed while the
-    // store lease is still held.
+    // allocator and engine resources are still held.
     std::shared_ptr<const void> Lease_;
     std::shared_ptr<arrow::Buffer> Inner_;
 };
@@ -218,6 +225,7 @@ public:
         int64_t batchRows,
         std::optional<int64_t> limit)
         : Context_(std::move(context))
+        , Resources_(std::make_shared<TScanResources>(Context_.Lease, Context_.FileIO, Context_.Pool))
         , FileSchema_(std::move(fileSchema))
         , OutputSchema_(std::move(outputSchema))
         , Info_{OutputSchema_,
@@ -295,6 +303,7 @@ public:
 
 private:
     const TScanContext Context_;
+    const std::shared_ptr<const TScanResources> Resources_;
     // The canonical Iceberg schema of every data file of this collection.
     const std::shared_ptr<iceberg::Schema> FileSchema_;
     const std::shared_ptr<arrow::Schema> OutputSchema_;
@@ -350,6 +359,7 @@ private:
                     CheckActive();
                     auto files = Take(ManifestFiles(Context_.FileIO, Plan_, NextManifest_++));
                     ++ManifestsRead_;
+                    CheckActive();
                     PendingFiles_.insert(PendingFiles_.end(),
                         std::make_move_iterator(files.begin()),
                         std::make_move_iterator(files.end()));
@@ -370,6 +380,7 @@ private:
                 continue;
             }
             RowsDecoded_ += batch->num_rows();
+            CheckActive();
             if (auto produced = Produce(*batch)) {
                 CheckActive();
                 RowsReturned_ += produced->num_rows();
@@ -390,6 +401,7 @@ private:
             "read data file");
         ++DataFilesRead_;
         DataBytesRead_ += static_cast<int64_t>(bytes.size());
+        CheckActive();
         if (static_cast<int64_t>(bytes.size()) != file.SizeBytes) {
             Fail("CORRUPTION", "read data file", "file length differs from its manifest");
         }
@@ -401,9 +413,8 @@ private:
             "verify Parquet file");
         DecodeParquet("open Parquet file", [&] {
             auto source = std::make_shared<arrow::io::BufferReader>(arrow::Buffer::FromString(std::move(bytes)));
-            auto reader = TakeArrow(parquet::arrow::OpenFile(source, arrow::default_memory_pool()),
-                "CORRUPTION",
-                "open Parquet file");
+            auto reader =
+                TakeArrow(parquet::arrow::OpenFile(source, Context_.Pool.get()), "CORRUPTION", "open Parquet file");
             reader->set_batch_size(BatchRows_);
             std::vector<int> rowGroups(static_cast<size_t>(reader->num_row_groups()));
             std::iota(rowGroups.begin(), rowGroups.end(), 0);
@@ -486,11 +497,11 @@ private:
             auto array = findReadColumn(field);
             if (selected) {
                 const auto rows = std::span<const int64_t>(*selected).first(static_cast<size_t>(count));
-                array = Take(TakeRows(*array, rows));
+                array = Take(TakeRows(*array, rows, Context_.Pool.get()));
             } else if (count != array->length()) {
                 array = array->Slice(0, count);
             }
-            columns.push_back(arrow::MakeArray(AttachLease(array->data(), Context_.Lease)));
+            columns.push_back(arrow::MakeArray(AttachLease(array->data(), Resources_)));
         }
         if (Remaining_) {
             *Remaining_ -= count;
@@ -504,6 +515,9 @@ private:
 Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanRequest& request)
 {
     try {
+        if (!context.Pool) {
+            context.Pool = std::make_shared<arrow::ProxyMemoryPool>(arrow::default_memory_pool());
+        }
         RequireInput(request.batch_rows >= 1 && request.batch_rows <= MaxBatchRows,
             "batch_rows must be within 1..65536");
         RequireInput(!request.limit || *request.limit >= 0, "limit must not be negative");

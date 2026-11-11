@@ -11,6 +11,7 @@
 
 namespace arrow {
 class Array;
+class MemoryPool;
 class RecordBatch;
 } // namespace arrow
 
@@ -82,6 +83,7 @@ Result<std::vector<int64_t>> SelectRows(const TBoundPredicate& predicate,
 Result<std::vector<int64_t>> SelectRows(const TBoundPredicate& predicate, const arrow::RecordBatch& batch);
 
 // Copies the selected rows, preserving NULLs, for the five supported types.
-Result<std::shared_ptr<arrow::Array>> TakeRows(const arrow::Array& column, std::span<const int64_t> rows);
+Result<std::shared_ptr<arrow::Array>>
+TakeRows(const arrow::Array& column, std::span<const int64_t> rows, arrow::MemoryPool* pool = nullptr);
 
 } // namespace glamdb::detail

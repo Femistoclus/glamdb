@@ -25,6 +25,8 @@ Tests cover real files, injected failures and fresh-process recovery.
 A storage backend connecting these primitives to the coordinator and a minimal
 scanner (`Engine::Scan`) are implemented and tested through `glamdb_vertical`;
 see [SCANNER.md](docs/development/SCANNER.md).
+Returned scan buffers retain allocator accounting, FileIO and engine ownership
+through slices and Arrow exports, including after shutdown.
 The [installed public API consumer](docs/development/BUILDING.md#build-and-install)
 checks real A/B appends, fixed-view scans, persisted receipts and retries after
 reopening in a new process, with a separate storage-disabled contour.

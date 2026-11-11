@@ -406,5 +406,16 @@ TEST(ScanPredicate, TakeRowsPreservesValuesAndNulls)
     EXPECT_FALSE(TakeRows(*batch->column(0), std::vector<int64_t>{4}));
 }
 
+TEST(ScanPredicate, FilterAllocationFailureIsResourceExhausted)
+{
+    const auto batch = Batch();
+    arrow::CappedMemoryPool pool(arrow::default_memory_pool(), 0);
+    for (const auto& column : batch->columns()) {
+        const auto taken = TakeRows(*column, std::vector<int64_t>{0, 2}, &pool);
+        ASSERT_FALSE(taken);
+        EXPECT_EQ(taken.error().code, "RESOURCE_EXHAUSTED");
+    }
+}
+
 } // namespace
 } // namespace glamdb::detail

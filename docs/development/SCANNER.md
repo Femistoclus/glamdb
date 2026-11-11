@@ -179,14 +179,19 @@ joins a writer attempt or holds a SQLite read transaction.
   non-projected filter columns) and limited. Batches have at most `batch_rows`
   rows and the exact `Info().output_schema`. `limit = 0` and empty views return
   `nullptr` from the first `Next()`.
-- Both the cursor and returned Arrow buffers retain the store lease until the
-  last dependent handle (including array slices and C Data exports) is
-  released. `Cancel()` or `Engine::Shutdown()` makes `Next()` return
-  `CANCELLED`; `Info()` remains valid. Detected corruption during `Next()`
+- The cursor and returned Arrow backing buffers retain the engine (including
+  the store lock), read-only FileIO and owned Arrow allocator/accounting pool
+  until the last batch, extracted array/buffer, slice or C Data export is
+  released. Decoding and filtered copies use the same per-scan proxy pool;
+  this accounts for Arrow allocations, not total process memory, and enforces
+  no byte quota. `Cancel()` or `Engine::Shutdown()` makes `Next()` return
+  `CANCELLED`; checks after I/O prevent further file reads, and checks before
+  delivery cover batches and EOS, including empty views and `limit = 0`.
+  `Info()` remains valid. Detected corruption during `Next()`
   closes engine readiness. Read failures are errors, never EOS.
 
 Not implemented: file/row-group pruning, reuse of the backend's parsed root by
-scans, runtime memory leases and quotas,
+scans, aggregate runtime memory reservations and quotas,
 page CRC verification, per-device physical/inode budgets and in-flight
 reservations, and measured attempt-volume/capacity qualification.
 The [shared resource budget contract](RESOURCE_BUDGETS.md) defines the required
@@ -197,13 +202,15 @@ of reader, writer, metadata and recovery reservations.
 
 | Check | Status |
 | --- | --- |
-| `cmake --build --preset local` (Clang 18.1.3, `GLAMDB_BUILD_STORAGE=ON`) and `format-check` | PASS |
-| `ctest --preset local` (unit `ScanPredicate.*`, mock `ScanMockTest.*`, vertical `EngineVerticalTest.*`, `glamdb.scan_process`, `glamdb.transport.*`, `glamdb.native_http`, `glamdb.http_review`, `glamdb.native_http_fault`, installed consumer) | PASS |
-| `glamdb_vertical` (`engine_vertical_test.cpp`, `engine_integrity_test.cpp`) | PASS: commit-gate boundaries, layout violations, retry verification, crafted same-length Parquet corruption (including filter-only columns), compound 3VL predicates across multiple Parquet files, quotas, write latch |
-| `glamdb_mock` (label `mock`, in-memory FileIO) | PASS, including compound 3VL truth tables, De Morgan laws with `NULL`, multi-column filter-only validation, and read-only working/temporary directory |
-| Separate `GLAMDB_BUILD_STORAGE=OFF` build (`build/nostorage`) and CTest (`ScanPredicate.*`, `Transport.*`, `installed_consumer`, `EngineBootstrap.*`) | PASS |
-| `tests/verification/test_oracle.py` against `glamdb_verify` | PASS |
-| `tidy-check`, sanitizer presets, TSan, Python `pytest`/`httpx`/`pyarrow`/`jsonschema` client & schema runner, Node/Playwright workbench checks, power-loss qualification | NOT RUN in this environment |
+| `cmake --build --preset local`, `format-check`, `quality-negative-check`; dependency pin verification | PASS |
+| `GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 ctest --preset local --parallel 6` | PASS: 635 passed, two child-process helper skips, one pre-existing disabled benchmark |
+| `GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ctest --preset asan-ubsan --parallel 6` | PASS: 634 passed, the same skips and disabled benchmark; ordinary pinned dependencies |
+| `TScanLifetimeTest` (real files and production backend) | PASS in normal and ASan/UBSan builds: batch/array/buffer/slice/C Data retention, final-release reopen, deterministic cancel/shutdown barriers before batch/EOS, empty and zero-limit views |
+| `ScanMockTest` (in-memory FileIO, real Arrow/Parquet) | PASS in both builds: extracted-buffer FileIO/owner retention, decoded/filtered Arrow pool accounting and compound predicates |
+| Separate `GLAMDB_BUILD_STORAGE=OFF` build and CTest | PASS: 309 passed, one pre-existing disabled benchmark |
+| `.venv/bin/python -m pytest tests/verification/test_oracle.py -q` | PASS: 38 passed |
+| `GLAMDB_TIDY_JOBS=6 cmake --build --preset local --target tidy-check`, then `clang-tidy-18 <file> -p build/local --warnings-as-errors=*` for merged sources | PASS: all 122 units before integration, all 11 changed upstream units rechecked after integration; predicate warnings fixed and rechecked |
+| TSan, fully instrumented dependencies, Node/Playwright workbench checks, power-loss qualification | NOT RUN in this change |
 
 Value validation reads only decoded columns of the projection and predicate;
 latent corruption in unread columns or unread data pages is not detected by

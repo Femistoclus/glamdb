@@ -155,6 +155,9 @@ Preserve these boundaries when adding or changing engine behavior:
   preserve integer precision across interfaces. Cursors and returned buffers
   retain their allocator, accounting, executor, and I/O resources until the last
   dependent handle is released, even after the engine or cursor is closed.
+  Scan buffers share an owned Arrow pool and retain the engine and read-only
+  FileIO, including after filtering. Cancellation is checked after reads and
+  before delivering a batch or EOS; use I/O barriers in concurrency tests.
 - **Bounded resources and retained data.** Account for data, metadata, and
   control memory separately, including allocations outside Arrow. Check that a
   published state can be reopened within the same limits. Capacity exhaustion

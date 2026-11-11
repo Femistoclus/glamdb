@@ -1499,7 +1499,7 @@ Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) con
         Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
         context.FileIO = Take(impl->backend->ReadOnlyFileIO());
         context.Closing = std::shared_ptr<const std::atomic<bool>>(impl, &impl->closing);
-        context.Lease = impl->lease;
+        context.Lease = impl;
         context.OnError = [impl](const ErrorDetail& error) {
             impl->CloseOnCorruption(error);
         };
