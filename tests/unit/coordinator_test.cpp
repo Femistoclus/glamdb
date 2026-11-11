@@ -82,6 +82,91 @@ TEST(CoordinatorHealth, MissingBackendDoesNotAdvertiseStorageAvailability)
     EXPECT_FALSE(health.durability_qualified);
 }
 
+class CoordinatorWriteHealthTest
+    : public CoordinatorTest
+    , public testing::WithParamInterface<bool>
+{
+protected:
+    void BlockWrites()
+    {
+        backend->write_failure_latched = GetParam();
+        backend->write_available = false;
+    }
+    std::string ExpectedError() const
+    {
+        return GetParam() ? "IO_ERROR" : "DEPENDENCY_UNAVAILABLE";
+    }
+};
+
+TEST_P(CoordinatorWriteHealthTest, RejectsNewBindingsWhilePreservingOldReceipts)
+{
+    const auto committed = engine->AppendDurable(Request());
+    ASSERT_EQ(committed.disposition, CommitDisposition::Committed);
+    BlockWrites();
+    EXPECT_FALSE(engine->GetHealth().write_ready);
+    ASSERT_TRUE(engine->Reconcile());
+    EXPECT_FALSE(engine->GetHealth().write_ready);
+    EXPECT_EQ(engine->AppendDurable(Request()).result, committed.result);
+    const auto new_id = "00000000-0000-0000-0000-000000000006";
+    const auto rejected = engine->AppendDurable(Request(new_id));
+    EXPECT_EQ(rejected.disposition, CommitDisposition::DefinitelyNotCommitted);
+    ASSERT_TRUE(rejected.error);
+    EXPECT_EQ(test::Present(rejected.error).code, ExpectedError());
+    const auto lookup = engine->FindAppendOutcome(test::collection_id, new_id);
+    ASSERT_TRUE(lookup);
+    EXPECT_FALSE(lookup->has_value());
+    EXPECT_TRUE(engine->ListCollections());
+}
+
+TEST_P(CoordinatorWriteHealthTest, RejectsNewCollectionWhilePreservingCreateRetry)
+{
+    BlockWrites();
+    const SchemaSpec schema{{{"n", FieldType::Int64, true}}};
+    EXPECT_EQ(engine->CreateCollection({test::collection_id, "events", schema}).disposition,
+        CommitDisposition::Committed);
+    const auto rejected = engine->CreateCollection({"00000000-0000-0000-0000-000000000006", "blocked", schema});
+    EXPECT_EQ(rejected.disposition, CommitDisposition::DefinitelyNotCommitted);
+    ASSERT_TRUE(rejected.error);
+    EXPECT_EQ(test::Present(rejected.error).code, ExpectedError());
+    ASSERT_TRUE(engine->ListCollections());
+    EXPECT_EQ(engine->ListCollections()->size(), 1U);
+}
+
+TEST_P(CoordinatorWriteHealthTest, HealthChangeDuringClosureRollsBackAppend)
+{
+    backend->on_guard = [&] {
+        BlockWrites();
+    };
+    const auto rejected = engine->AppendDurable(Request());
+    EXPECT_EQ(rejected.disposition, CommitDisposition::DefinitelyNotCommitted);
+    ASSERT_TRUE(rejected.error);
+    EXPECT_EQ(test::Present(rejected.error).code, ExpectedError());
+    EXPECT_EQ(test::Present(rejected.error).retry_hint, RetryHint::OperatorAction);
+    const auto collection = engine->GetCollection(test::collection_id);
+    ASSERT_TRUE(collection);
+    EXPECT_FALSE(collection->current_snapshot_id);
+    const auto lookup = engine->FindAppendOutcome(test::collection_id, test::operation_id);
+    ASSERT_TRUE(lookup);
+    ASSERT_TRUE(lookup->has_value());
+    EXPECT_EQ(test::Present(*lookup).disposition, CommitDisposition::DefinitelyNotCommitted);
+}
+
+TEST_P(CoordinatorWriteHealthTest, HealthChangeDuringClosureRollsBackCreate)
+{
+    backend->on_guard = [&] {
+        BlockWrites();
+    };
+    const auto rejected = engine->CreateCollection(
+        {"00000000-0000-0000-0000-000000000006", "blocked", SchemaSpec{{{"n", FieldType::Int64, true}}}});
+    EXPECT_EQ(rejected.disposition, CommitDisposition::DefinitelyNotCommitted);
+    ASSERT_TRUE(rejected.error);
+    EXPECT_EQ(test::Present(rejected.error).code, ExpectedError());
+    ASSERT_TRUE(engine->ListCollections());
+    EXPECT_EQ(engine->ListCollections()->size(), 1U);
+}
+
+INSTANTIATE_TEST_SUITE_P(BackendHealth, CoordinatorWriteHealthTest, testing::Bool());
+
 class RetryAdmissionTest
     : public CoordinatorTest
     , public testing::WithParamInterface<std::tuple<bool, int>>

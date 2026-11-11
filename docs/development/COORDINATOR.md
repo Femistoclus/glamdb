@@ -236,6 +236,13 @@ engines remain observable. A missing storage backend advertises neither scans
 nor writes. The storage seam explicitly reports reader availability, so the
 coordinator test backend does not claim to support scans.
 
+The coordinator checks backend write health after resolving terminal retries,
+before staging a new collection or binding a new append, and again at the final
+publication decision inside the commit gate. An unavailable writer refuses new
+work without consuming an operation slot. A latched failure returns `IO_ERROR`
+with operator action required; it leaves confirmed reads, old receipts and
+reconciliation available, but only reopening can replace that backend instance.
+
 The [HTTP contract](HTTP_SERVER.md) defines the state table, lifecycle overlays,
 and 200/503 readiness mapping. Every health snapshot remains durability-unqualified;
 backend availability and successful recovery are not qualification evidence.

@@ -82,6 +82,9 @@ public:
     }
     Status VerifyClosure(std::string_view location) override
     {
+        if (owner_.on_guard) {
+            owner_.on_guard();
+        }
         try {
             Require(!owner_.fail_guard && location == metadata_.base.metadata_location &&
                     Read(owner_.Physical(location)).base == metadata_.base,
@@ -132,6 +135,9 @@ public:
     }
     Status VerifyClosure(std::string_view location) override
     {
+        if (owner_.on_guard) {
+            owner_.on_guard();
+        }
         try {
             Require(!owner_.fail_guard && location == metadata_.base.metadata_location &&
                     Read(owner_.Physical(location)).base == metadata_.base,
