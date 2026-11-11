@@ -2,8 +2,11 @@
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+import hashlib
 import math
 import re
+import struct
 from typing import Any, Iterable, Mapping
 
 from .errors import ValidationError
@@ -11,6 +14,7 @@ from .errors import ValidationError
 MIN_TIMESTAMP_US = -62135596800000000
 MAX_TIMESTAMP_US = 253402300799999999
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_NAIVE_EPOCH = datetime(1970, 1, 1)
 _DECIMAL = re.compile(r"(?:0|-[1-9][0-9]*|[1-9][0-9]*)\Z", re.ASCII)
 _TIMESTAMP = re.compile(
     r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})"
@@ -131,10 +135,20 @@ def timestamp_us(value: Any) -> int:
     return value
 
 
+def _format_naive_utc(moment: datetime) -> str:
+    # Naive isoformat zero-pads the year to four digits; it omits the fraction
+    # only when it is zero.
+    text = moment.isoformat()
+    return text + "Z" if moment.microsecond else text + ".000000Z"
+
+
+def _format_us(micros: int) -> str:
+    """Format validated UTC microseconds as six-digit RFC3339 ``...Z`` text."""
+    return _format_naive_utc(_NAIVE_EPOCH + timedelta(0, 0, micros))
+
+
 def format_timestamp(value: Any) -> str:
-    moment = _EPOCH + timedelta(microseconds=timestamp_us(value))
-    return (f"{moment.year:04d}-{moment.month:02d}-{moment.day:02d}T"
-            f"{moment.hour:02d}:{moment.minute:02d}:{moment.second:02d}.{moment.microsecond:06d}Z")
+    return _format_us(timestamp_us(value))
 
 
 def encode_scalar(field: Field, value: Any) -> Any:
@@ -182,18 +196,275 @@ def _canonical_row_size(schema: Schema, row: Mapping[str, Any]) -> int:
     return size
 
 
-def encode_rows(schema: Schema, rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    result = []
-    names = {f.name for f in schema.fields}
-    for row in rows:
-        if not isinstance(row, Mapping) or set(row) - names:
+ROW_CANONICAL_LIMIT = 2 * 1024 * 1024
+_TAGS = {"string": 1, "bool": 2, "int64": 3, "float64": 4, "timestamp_us_utc": 5}
+_KIND_STRING, _KIND_BOOL, _KIND_INT64, _KIND_TIMESTAMP = 1, 2, 3, 5
+_INT64_MIN, _INT64_MAX = -(2**63), 2**63 - 1
+# Canonical v1 scalar encodings: NULL is one 0x00 byte; a present value is
+# 0x01 followed by its payload, so a field's canonical size is its chunk length.
+_NULL_CHUNK = b"\0"
+_TRUE_CHUNK = b"\1\1"
+_FALSE_CHUNK = b"\1\0"
+_PACK_INT = struct.Struct("<Bq").pack
+_PACK_FLOAT = struct.Struct("<Bd").pack
+_PACK_LEN = struct.Struct("<BI").pack
+_CANONICAL_TIMESTAMP_MATCH = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z", re.ASCII).fullmatch
+_FROM_ISO = datetime.fromisoformat
+_ONE_US = timedelta(microseconds=1)
+_ISFINITE = math.isfinite
+
+
+def _canonical_decimal(text: str) -> int | None:
+    """Return int64 for canonical decimal text (as ``int64`` accepts), else None."""
+    try:
+        number = int(text)
+    except ValueError:
+        return None
+    # int() also accepts signs, whitespace, underscores and non-ASCII digits;
+    # the round trip admits only the canonical ASCII form _DECIMAL matches.
+    if _INT64_MIN <= number <= _INT64_MAX and str(number) == text:
+        return number
+    return None
+
+
+def _timestamp_fast(value: Any) -> tuple[int, str] | None:
+    """Return (micros, wire text) for plainly valid timestamp input, else None.
+
+    Accepts only inputs whose result is unambiguous: six-digit UTC ``...Z``
+    text, in-range int, or an aware datetime in a stdlib fixed-offset zone.
+    Callers send everything else (including every invalid value) through
+    ``timestamp_us``, which owns all checks and error messages.
+    """
+    kind = type(value)
+    if kind is str:
+        # Hour 24 is excluded explicitly: some Python versions' fromisoformat
+        # read "24:00" as next-day midnight, which timestamp_us rejects.
+        if _CANONICAL_TIMESTAMP_MATCH(value) is not None and value[11:13] < "24":
+            try:
+                micros = (_FROM_ISO(value[:26]) - _NAIVE_EPOCH) // _ONE_US
+            except ValueError:  # e.g. day 31 of a 30-day month, year 0000
+                return None
+            return micros, value  # already canonical wire text
+    elif kind is int:
+        if MIN_TIMESTAMP_US <= value <= MAX_TIMESTAMP_US:
+            return value, _format_us(value)
+    elif kind is datetime and type(value.tzinfo) is timezone:
+        # Shift wall time to naive UTC; naive datetimes span exactly years
+        # 0001..9999, so results outside the timestamp range overflow here.
+        try:
+            moment = (value - value.utcoffset()).replace(tzinfo=None)
+        except OverflowError:
+            return None
+        return (moment - _NAIVE_EPOCH) // _ONE_US, _format_naive_utc(moment)
+    return None
+
+
+class _RowPlan:
+    """Immutable per-schema preparation plan.
+
+    Holds only values copied out of the schema (never caller rows or hashes
+    over caller buffers), so sharing one plan between requests is safe.
+    """
+
+    __slots__ = ("fields", "names", "order", "fingerprint", "wire_template", "chunk_template",
+                 "strings", "int64s", "float64s", "bools", "timestamps")
+
+    def __init__(self, key: tuple[tuple[str, str, bool, int], ...]):
+        # Declaration order defines wire-object key order and error order;
+        # field-ID order defines canonical hash order.
+        self.fields = tuple((name, _TAGS[kind], nullable, 1024 if name == "key" else 1024 * 1024)
+                            for name, kind, nullable, _ in key)
+        self.names = frozenset(name for name, *_ in key)
+        order = tuple(sorted(range(len(key)), key=lambda index: key[index][3]))
+        self.order = None if order == tuple(range(len(key))) else order
+        digest = hashlib.sha256()
+        digest.update(b"COLUMNAR-SCHEMA\0" + struct.pack("<HH", 1, len(key)))
+        for index in order:
+            name, kind, nullable, field_id = key[index]
+            encoded = name.encode("utf-8")
+            digest.update(struct.pack("<IH", field_id, len(encoded)) + encoded)
+            digest.update(bytes([_TAGS[kind], int(nullable)]))
+        self.fingerprint = digest.digest()
+        # Grouped fast path: fields of one type with their field-ID-order slot.
+        self.wire_template = dict.fromkeys(name for name, *_ in key)
+        self.chunk_template = [_NULL_CHUNK] * len(key)
+        slot = {index: rank for rank, index in enumerate(order)}
+        groups: dict[str, list] = {kind: [] for kind in _TAGS}
+        for index, (name, kind, nullable, maximum) in enumerate(self.fields):
+            groups[key[index][1]].append((name, slot[index], nullable, maximum))
+        self.strings = tuple(groups["string"])
+        self.int64s = tuple(groups["int64"])
+        self.float64s = tuple(groups["float64"])
+        self.bools = tuple(groups["bool"])
+        self.timestamps = tuple(groups["timestamp_us_utc"])
+
+    def encode_row(self, row: Any) -> tuple[dict[str, Any], bytes]:
+        """Validate one caller row once; return its wire object and canonical bytes.
+
+        Errors, their messages and the order in which they are raised match
+        ``encode_scalar`` applied field by field in declaration order. The
+        returned canonical bytes are the row's v1 hash preimage (fields in
+        field-ID order); their length is the row's canonical decoded size.
+        """
+        if not (type(row) is dict or isinstance(row, Mapping)) or not self.names.issuperset(row):
             raise ValidationError("row must be an object with only schema fields")
-        encoded = {field.name: encode_scalar(field, row.get(field.name)) for field in schema.fields}
-        size = _canonical_row_size(schema, encoded)
-        if size > 2 * 1024 * 1024:
+        result = self._encode_plain(row) if type(row) is dict else None
+        if result is None:
+            result = self._encode_ordered(row)
+        if len(result[1]) > ROW_CANONICAL_LIMIT:
             raise ValidationError("row exceeds 2 MiB canonical decoded bytes")
-        result.append(encoded)
-    return result
+        return result
+
+    def _encode_plain(self, row: dict) -> tuple[dict[str, Any], bytes] | None:
+        """Fast path for a plain dict whose values are exact, plainly valid types.
+
+        Visits fields grouped by type, so it returns None on the first value it
+        does not accept outright; the caller then re-encodes the whole row in
+        declaration order, which raises the same first error as before. dict.get
+        on a plain dict has no side effects, so the second visit sees the same
+        values. Absent and NULL values keep the templates' None/0x00 entries.
+        """
+        get = row.get
+        wire = self.wire_template.copy()
+        chunks = self.chunk_template.copy()
+        try:
+            for name, slot, nullable, maximum in self.strings:
+                value = get(name)
+                if value is None:
+                    if not nullable:
+                        return None
+                elif type(value) is str:
+                    encoded = value.encode("utf-8")
+                    if len(encoded) > maximum:
+                        return None
+                    wire[name] = value
+                    chunks[slot] = _PACK_LEN(1, len(encoded)) + encoded
+                else:
+                    return None
+            for name, slot, nullable, _ in self.int64s:
+                value = get(name)
+                if value is None:
+                    if not nullable:
+                        return None
+                elif type(value) is int and _INT64_MIN <= value <= _INT64_MAX:
+                    wire[name] = str(value)
+                    chunks[slot] = _PACK_INT(1, value)
+                elif type(value) is str and len(value) <= 20 and (number := _canonical_decimal(value)) is not None:
+                    wire[name] = value
+                    chunks[slot] = _PACK_INT(1, number)
+                else:
+                    return None
+            for name, slot, nullable, _ in self.float64s:
+                value = get(name)
+                if value is None:
+                    if not nullable:
+                        return None
+                elif type(value) is float and _ISFINITE(value):
+                    if value == 0:
+                        value = 0.0
+                    wire[name] = value
+                    chunks[slot] = _PACK_FLOAT(1, value)
+                else:
+                    return None
+            for name, slot, nullable, _ in self.bools:
+                value = get(name)
+                if value is True:
+                    wire[name] = True
+                    chunks[slot] = _TRUE_CHUNK
+                elif value is False:
+                    wire[name] = False
+                    chunks[slot] = _FALSE_CHUNK
+                elif value is not None or not nullable:
+                    return None
+            for name, slot, nullable, _ in self.timestamps:
+                value = get(name)
+                if value is None:
+                    if not nullable:
+                        return None
+                elif (converted := _timestamp_fast(value)) is not None:
+                    wire[name] = converted[1]
+                    chunks[slot] = _PACK_INT(1, converted[0])
+                else:
+                    return None
+        except Exception:  # noqa: BLE001 - the ordered path owns every error
+            return None
+        return wire, b"".join(chunks)
+
+    def _encode_ordered(self, row: Any) -> tuple[dict[str, Any], bytes]:
+        get = row.get
+        wire: dict[str, Any] = {}
+        chunks: list[bytes] = []
+        append = chunks.append
+        for name, kind, nullable, maximum in self.fields:
+            value = get(name)
+            if value is None:
+                if not nullable:
+                    raise ValidationError(f"required field {name} cannot be NULL")
+                wire[name] = None
+                append(_NULL_CHUNK)
+            elif kind == _KIND_STRING:
+                if not isinstance(value, str):
+                    raise ValidationError(f"field {name} requires a string")
+                try:
+                    encoded = value.encode("utf-8")
+                except UnicodeError as exc:
+                    raise ValidationError("string is not valid UTF-8") from exc
+                if len(encoded) > maximum:
+                    raise ValidationError(f"field {name} exceeds UTF-8 byte limit")
+                wire[name] = value
+                append(_PACK_LEN(1, len(encoded)) + encoded)
+            elif kind == _KIND_INT64:
+                number = int64(value)
+                wire[name] = str(number)
+                append(_PACK_INT(1, number))
+            elif kind == _KIND_TIMESTAMP:
+                # Convert to microseconds once; hash bytes and wire text both
+                # derive from them instead of formatting and re-parsing text.
+                converted = _timestamp_fast(value)
+                if converted is None:
+                    micros = timestamp_us(value)
+                    converted = micros, _format_us(micros)
+                wire[name] = converted[1]
+                append(_PACK_INT(1, converted[0]))
+            elif kind == _KIND_BOOL:
+                if type(value) is not bool:
+                    raise ValidationError(f"field {name} requires bool")
+                wire[name] = value
+                append(_TRUE_CHUNK if value else _FALSE_CHUNK)
+            else:
+                if type(value) not in (int, float):
+                    raise ValidationError(f"field {name} requires a finite number")
+                try:
+                    value = float(value)
+                except (OverflowError, ValueError) as exc:
+                    raise ValidationError(f"field {name} requires a finite float64") from exc
+                if not math.isfinite(value):
+                    raise ValidationError(f"field {name} requires a finite float64")
+                value = 0.0 if value == 0 else value
+                wire[name] = value
+                append(_PACK_FLOAT(1, value))
+        order = self.order
+        return wire, b"".join(chunks if order is None else [chunks[index] for index in order])
+
+
+@lru_cache(maxsize=128)
+def _compile(key: tuple[tuple[str, str, bool, int], ...]) -> _RowPlan:
+    return _RowPlan(key)
+
+
+def row_plan(schema: Schema) -> _RowPlan:
+    """Return the cached preparation plan for the schema's current field values.
+
+    The cache key is a value snapshot of every field, not object identity, so
+    equal schemas share a plan and a plan can never describe other fields.
+    """
+    return _compile(tuple((f.name, f.type, f.nullable, f.field_id) for f in schema.fields))
+
+
+def encode_rows(schema: Schema, rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    encode_row = row_plan(schema).encode_row
+    return [encode_row(row)[0] for row in rows]
 
 
 def decode_rows(schema: Schema, rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
