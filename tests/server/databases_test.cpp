@@ -15,6 +15,24 @@ namespace glamdb::NServer {
 using namespace NTransport;
 using namespace std::chrono_literals;
 
+TEST(Databases, ServiceReadinessReadsCoreHealth)
+{
+    test::TempDir temporary;
+    TDatabases databases(std::filesystem::canonical(temporary.path) / "server");
+    EXPECT_FALSE(databases.IsReady());
+    const auto id = databases.Create({{"name", "a"}}).at("database_id").get<std::string>();
+    EXPECT_TRUE(databases.IsReady());
+    databases.Use(id, [](const auto& engine) {
+        EXPECT_TRUE(engine->Shutdown(1s));
+        EXPECT_FALSE(engine->GetHealth().write_ready);
+        return TResponse{200, ""};
+    });
+    // The service descriptor is still open: readiness must consult the owned engine.
+    EXPECT_EQ(databases.Get(id).at("state"), "open");
+    EXPECT_FALSE(databases.IsReady());
+    databases.Shutdown();
+}
+
 TEST(Databases, RepeatedOpenAndCreateDoNotDrainAcceptedRequests)
 {
     test::TempDir temporary;

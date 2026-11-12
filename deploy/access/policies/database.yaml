@@ -1,0 +1,15 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: default
+  resource: database
+  rules:
+    - actions: [read, write, metadata]
+      effect: EFFECT_ALLOW
+      roles: [glamdb-member]
+      condition:
+        match:
+          expr: >-
+            request.principal.attr.organization != '' &&
+            request.principal.attr.organization == request.resource.attr.owner &&
+            request.resource.attr.organization_active == true &&
+            request.resource.attr.database_active == true

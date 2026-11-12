@@ -124,3 +124,28 @@ ExternalProject_Add(glamdb_iceberg
 # Re-copy and re-patch the source when a recorded patch or the copy script changes.
 ExternalProject_Add_StepDependencies(glamdb_iceberg download
     "${CMAKE_CURRENT_SOURCE_DIR}/PrepareSource.cmake" ${iceberg_patches})
+
+# CivetWeb shutdown needs synchronized stop-flag access; keep the pin unchanged.
+file(GLOB prometheus_patches LIST_DIRECTORIES false "${CMAKE_CURRENT_SOURCE_DIR}/patches/prometheus-cpp/*.patch")
+ExternalProject_Add(glamdb_prometheus_cpp
+    SOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/prometheus-src"
+    BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/prometheus-cpp"
+    DOWNLOAD_COMMAND "${CMAKE_COMMAND}"
+        "-DSOURCE=${PROJECT_SOURCE_DIR}/third_party/prometheus-cpp"
+        "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/prometheus-src"
+        "-DPATCH_DIR=${CMAKE_CURRENT_SOURCE_DIR}/patches/prometheus-cpp"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/PrepareSource.cmake"
+    UPDATE_COMMAND ""
+    CMAKE_ARGS ${dependency_args}
+        -DENABLE_PULL=ON
+        -DENABLE_PUSH=OFF
+        -DENABLE_TESTING=OFF
+        -DENABLE_COMPRESSION=OFF
+        -DTHIRDPARTY_CIVETWEB_WITH_SSL=OFF
+        -DOVERRIDE_CXX_STANDARD_FLAGS=OFF
+        -DCMAKE_CXX_STANDARD=23
+    BUILD_COMMAND "${CMAKE_COMMAND}" --build <BINARY_DIR> --parallel ${GLAMDB_DEPENDENCY_JOBS}
+    INSTALL_COMMAND "${CMAKE_COMMAND}" --install <BINARY_DIR>
+)
+ExternalProject_Add_StepDependencies(glamdb_prometheus_cpp download
+    "${CMAKE_CURRENT_SOURCE_DIR}/PrepareSource.cmake" ${prometheus_patches})

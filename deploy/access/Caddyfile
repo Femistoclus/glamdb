@@ -1,0 +1,86 @@
+{
+	email {$GLAMDB_ACME_EMAIL}
+	admin off
+	persist_config off
+	skip_install_trust
+	metrics
+	# TLS/startup diagnostics remain; HTTP errors can contain OAuth callback queries.
+	log {
+		level WARN
+		format json
+		exclude http.log.access http.log.error
+	}
+	servers :443 {
+		name workbench
+	}
+	servers :18080 {
+		name keycloak_admin
+	}
+}
+
+(strip_identity) {
+	request_header -Forwarded
+	request_header -X-Forwarded-*
+	request_header -X-Auth-Request-*
+	request_header -X-GlamDB-*
+	request_header -Remote-User
+	request_header -X-Remote-User
+}
+
+{$GLAMDB_SITE_HOST} {
+	route {
+		import strip_identity
+		@encoded_database_path {
+			path /databases /databases/*
+			expression `{http.request.orig_uri}.matches('^[^?]*%')`
+		}
+		respond @encoded_database_path 404
+		@private path /operator /operator/* /metrics /metrics/* /v0 /v0/* /capabilities /collections /collections/* /collections:resolve /readyz /admin /admin/* /ping /ready
+		respond @private 404
+		@api path /databases /databases/* /workbench /workbench/*
+		handle @api {
+			reverse_proxy oauth2-proxy:4180 {
+				@unauth status 401
+				handle_response @unauth {
+					header Content-Type application/json
+					header Cache-Control "private, no-store"
+					respond `{"error":{"code":"UNAUTHENTICATED","message":"Sign in required"}}` 401
+				}
+				@denied status 403
+				handle_response @denied {
+					header Content-Type application/json
+					header Cache-Control "private, no-store"
+					respond `{"error":{"code":"PERMISSION_DENIED","message":"Access denied"}}` 403
+				}
+			}
+		}
+		handle {
+			reverse_proxy oauth2-proxy:4180
+		}
+	}
+}
+
+{$GLAMDB_IDP_HOST} {
+	route {
+		import strip_identity
+		@administration path /admin /admin/* /realms/master /realms/master/*
+		respond @administration 404
+		@realm path /realms/glamdb /realms/glamdb/* /resources/*
+		handle @realm {
+			reverse_proxy keycloak:8080
+		}
+		respond 404
+	}
+}
+
+https://keycloak-admin:18080 {
+	tls internal
+	route {
+		import strip_identity
+		reverse_proxy keycloak:8080
+	}
+}
+
+http://:9095 {
+	metrics /metrics
+}

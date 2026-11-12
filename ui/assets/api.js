@@ -1,6 +1,24 @@
 import { validateRecovery } from './recovery.js';
 import { validateArrowFraming, validateArrowHeaders } from './arrow.js';
 
+export function csrfToken(cookie = globalThis.document?.cookie ?? '') {
+    const values = cookie
+        .split(';')
+        .map((part) => part.trim())
+        .filter((part) => part.startsWith('__Host-glamdb-csrf='));
+    if (values.length !== 1)
+        throw new Error('Reload your access session before submitting this request');
+    let token;
+    try {
+        token = decodeURIComponent(values[0].slice('__Host-glamdb-csrf='.length));
+    } catch {
+        throw new Error('The access session CSRF cookie is invalid');
+    }
+    if (!token || token.length > 4096 || /[\x00-\x20\x7f]/.test(token))
+        throw new Error('The access session CSRF cookie is invalid');
+    return token;
+}
+
 export class APIError extends Error {
     constructor(status, payload) {
         const detail = payload?.error ?? payload;
@@ -18,6 +36,7 @@ export class WorkbenchAPI {
         token,
         fetchImpl = globalThis.fetch.bind(globalThis),
         maxBytes = 16 * 1024 * 1024,
+        { gateway = false } = {},
     ) {
         const url = new URL(baseUrl);
         const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
@@ -30,10 +49,18 @@ export class WorkbenchAPI {
             (url.protocol === 'http:' && !local)
         )
             throw new Error('Use HTTPS, or HTTP on localhost, without credentials in the URL');
+        if (gateway && globalThis.location?.origin && url.origin !== globalThis.location.origin)
+            throw new Error('Gateway requests must remain same-origin');
         this.base = url.href.replace(/\/$/, '');
-        this.token = token;
+        this.gateway = gateway;
+        this.token = gateway ? '' : token;
         this.fetch = fetchImpl;
         this.maxBytes = maxBytes;
+        this.controller = new AbortController();
+    }
+    close() {
+        this.controller.abort();
+        this.token = '';
     }
     async selectDatabase(id, signal) {
         const path = `/databases/${encodeURIComponent(id)}`;
@@ -47,21 +74,40 @@ export class WorkbenchAPI {
             : database;
     }
     async request(path, { method = 'GET', body, signal, headers = {} } = {}) {
+        signal = signal
+            ? AbortSignal.any([signal, this.controller.signal])
+            : this.controller.signal;
+        signal.throwIfAborted();
         const options = {
             method,
             signal,
             headers: {
                 Accept: 'application/json',
-                Authorization: `Bearer ${this.token}`,
+                ...(this.gateway ? {} : { Authorization: `Bearer ${this.token}` }),
                 ...headers,
             },
             cache: 'no-store',
         };
+        if (this.gateway) {
+            options.credentials = 'same-origin';
+            options.redirect = 'error';
+            for (const name of Object.keys(options.headers)) {
+                if (['authorization', 'x-csrftoken'].includes(name.toLowerCase()))
+                    delete options.headers[name];
+            }
+            if (!['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase()))
+                options.headers['X-CSRFToken'] = csrfToken();
+        }
         if (body !== undefined) {
             options.body = JSON.stringify(body);
             options.headers['Content-Type'] = 'application/json';
         }
-        return this.fetch(`${this.base}${path}`, options);
+        const response = await this.fetch(`${this.base}${path}`, options);
+        if (signal.aborted) {
+            await response.body?.cancel();
+            signal.throwIfAborted();
+        }
+        return response;
     }
     async readBytes(response) {
         // Fetch decodes the body but keeps the encoded Content-Length header.
@@ -74,11 +120,15 @@ export class WorkbenchAPI {
         }
         if (!response.body) return new Uint8Array();
         const reader = response.body.getReader();
+        const cancel = () => reader.cancel().catch(() => {});
+        this.controller.signal.addEventListener('abort', cancel, { once: true });
         const chunks = [];
         let length = 0;
         try {
             for (;;) {
+                this.controller.signal.throwIfAborted();
                 const { done, value } = await reader.read();
+                this.controller.signal.throwIfAborted();
                 if (done) break;
                 length += value.byteLength;
                 if (length > this.maxBytes) {
@@ -88,6 +138,7 @@ export class WorkbenchAPI {
                 chunks.push(value);
             }
         } finally {
+            this.controller.signal.removeEventListener('abort', cancel);
             reader.releaseLock();
         }
         if (declared && Number(declared) !== length) throw new Error('Response was interrupted');
@@ -102,6 +153,7 @@ export class WorkbenchAPI {
     async json(path, options = {}) {
         const response = await this.request(path, options);
         const bytes = await this.readBytes(response);
+        this.controller.signal.throwIfAborted();
         let payload;
         try {
             payload = JSON.parse(new TextDecoder().decode(bytes));
@@ -229,6 +281,7 @@ export class WorkbenchAPI {
             ).join('');
             if (actual !== expected) throw new Error('Arrow download checksum mismatch');
             validateArrowFraming(bytes);
+            this.controller.signal.throwIfAborted();
             return bytes;
         } finally {
             try {

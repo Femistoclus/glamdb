@@ -1,6 +1,7 @@
 @PACKAGE_INIT@
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
+find_dependency(prometheus-cpp 1.3.0 EXACT CONFIG)
 find_dependency(SQLite3 CONFIG)
 find_dependency(Arrow 25 CONFIG)
 find_dependency(iceberg CONFIG)

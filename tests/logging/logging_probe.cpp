@@ -34,13 +34,18 @@ try {
         }
         for (std::uint64_t index = 0; index < count; ++index) {
             const auto error = mode != "sample" && mode != "rate" && mode != "default";
-            logger.TryLog({.Event = ELogEvent::RequestCompleted,
-                .Operation = ELogOperation::Append,
+            logger.TryLog({.Event = mode == "maximum" ? ELogEvent::OperationCompleted : ELogEvent::RequestCompleted,
+                .Operation = mode == "maximum" ? ELogOperation::CreateCollection : ELogOperation::Append,
                 .Outcome = error ? ELogOutcome::Error : ELogOutcome::Ok,
                 .RequestID = logger.NewRequestID(),
                 .DurationUs = mode == "maximum" ? std::numeric_limits<std::uint64_t>::max() : 123,
                 .RowCount = mode == "maximum" ? std::numeric_limits<std::uint64_t>::max() : 7,
-                .StatusCode = error ? 503U : 200U});
+                .StatusCode = mode == "maximum" ? std::numeric_limits<std::uint32_t>::max()
+                    : error                     ? 503U
+                                                : 200U,
+                .ByteCount = mode == "maximum" ? std::numeric_limits<std::uint64_t>::max() : 0,
+                .Phase = mode == "maximum" ? ELogPhase::CatalogTransaction : ELogPhase::None,
+                .ErrorCode = mode == "maximum" ? ELogError::DependencyUnavailable : ELogError::None});
         }
     };
     if (mode == "stress" || mode == "threads" || mode == "shutdown-race") {

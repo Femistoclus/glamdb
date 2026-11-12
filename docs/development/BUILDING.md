@@ -449,16 +449,18 @@ Selected reports, screenshots, downloaded Arrow and sanitized traces are retaine
 by the pinned official upload Action; private tokens/raw traces are excluded.
 ## Operational logging dependencies
 
-All native profiles, including IO-only, consume the pinned header-only Quill
-submodule privately. Initialize `third_party/quill` with the other submodules.
+Normal native profiles consume the pinned header-only Quill submodule privately.
+IO-only builds keep it optional; use `GLAMDB_BUILD_LOGGING=ON` for the independent
+logger and its tests. Initialize `third_party/quill` when enabling logging.
 Logging CTest also uses python-json-logger; install its verified wheel in the
 Python environment selected at configure time:
 
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install --require-hashes --only-binary=:all: --no-deps -r tools/logging/requirements.txt
-cmake -S . -B build/logging -DGLAMDB_IO_ONLY=ON -DPython3_EXECUTABLE="$PWD/.venv/bin/python"
+cmake -S . -B build/logging -DGLAMDB_IO_ONLY=ON -DGLAMDB_BUILD_LOGGING=ON -DPython3_EXECUTABLE="$PWD/.venv/bin/python"
 ```
 
 The container development image and native CI install the same pinned formatter.
-Application queues/sinks do not rotate files; see [LOGGING](LOGGING.md).
+Runtime services retain stderr; optional native file mode uses bounded Quill
+rotation. See [LOGGING](LOGGING.md) for both profiles.

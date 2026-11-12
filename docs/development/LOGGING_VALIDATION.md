@@ -1,5 +1,28 @@
 # Native server logging validation — 2026-11-12
 
+## Current server integration on main `dce0c5a`
+
+The rebased native telemetry build passed on macOS arm64 with AppleClang 21
+and Python 3.13. Nine focused CTest entries passed: `server_observability`,
+`native_metrics`, `logging`, `server_logging`, `native_metadata`, `native_http`,
+`http_review`, `http_security` and `http_lifecycle`. They cover actual HTTP/core
+correlation, receipt-replay publication counts, unsampled metrics, queued-body
+cancellation and preserving admin completion logs alongside sampled core events.
+HTTP and core completions use separate sampling sequences with one shared rate cap.
+
+The monitoring validator passed nine Python tests, its ASan/UBSan component and
+real listener checks, 879 fixed series, 152 dashboard queries and the pinned chart
+checksum/lint/render. LLVM 18 formatting passed all 251 project C++ files;
+actionlint and zizmor reported no findings. The CivetWeb teardown race reproduced
+under TSan before the build-private patch; its patched Exposer passed 20 fresh
+start/scrape/shutdown processes.
+
+These are focused integration checks. Broader local multi-store fixtures exceed
+the dedicated test filesystem's capacity; Linux `/proc` and `/dev/full` cases
+require Linux. Required hosted sanitizer checks remain separate merge gates.
+
+## Earlier native integration
+
 Rebased PR 14 onto main `0c5df05`. The native server now owns the logger,
 records HTTP completion and propagates correlation into synchronous engine
 storage/corruption and uncertain-commit observations. Admin read and quiesce
@@ -53,9 +76,76 @@ is made by these tests.
 
 Executed on macOS arm64, AppleClang 21.0.0, Python 3.14.3, CMake 4.4.4,
 Ninja 1.13.2 and LLVM format/tidy 18.1.8. These checks qualify the independent
-logging adapters and collection pipeline, not storage durability or a native
-HTTP server. The storage backend and scanner are implemented; their complete
-engine validation is separate from these logging component checks.
+logging adapters and collection pipeline. The native-service smoke check below
+verifies operational event collection; complete HTTP semantics and engine
+durability require their separate validation.
+
+## Native request and engine instrumentation
+
+The native telemetry integration includes main `6861b56`. A fresh Debug build
+with AppleClang 21 and Python 3.13.5 passed all three focused CTest entries:
+`glamdb.server_observability`, `glamdb.native_metrics`, `glamdb.logging`.
+These cover five new HTTP/core cases, eight existing HTTP cases and nineteen
+logging/schema cases; the Linux-only ENOSPC case skips on macOS. Actual native
+HTTP/core events passed through fresh Alloy/Loki processes with generated
+correlation and no private input markers. Metrics remained unsampled; append
+receipt replay did not increase publication counters. File rotation and its
+sample-every-success default remained covered.
+
+The logging-enabled scope probe and standalone metrics checks passed ASan/UBSan;
+LLVM 18 formatting passed 196 project files. The Python regression passed
+633 tests, with 17 skips and 12 passing subtests. The independent workload
+suite passed 36 tests. Six CMake configuration/installed logging consumer cases
+passed; the unavailable dependency-prefix case skipped.
+
+Expanded native vertical/routes/fault tests were attempted but their existing
+hard-coded `/tmp` paths are rejected as symlink aliases on macOS, causing store
+creation and subsequent startup failures. That run is not passing native
+qualification. Linux CI sanitizer profiles and power-loss qualification remain
+separate checks.
+
+## Current-main integration and native file collection
+
+The branch integrates main `46cad5a`, preserving the Quill and reproc pins,
+workload bootstrap and both paged/legacy stream-memory fixtures. Fresh focused
+checks passed: the rebuilt Quill probe, 16 logging cases, two stream-memory
+tests, six CMake configuration tests and LLVM 18 formatting of 185 files.
+The Linux-only ENOSPC logging case skipped on macOS.
+The standalone network/workload CLI rebuilt with pinned reproc. Six native-CI
+wrapper tests passed, preserving required-client/browser checks and workload
+forwarding.
+The storage-disabled CMake case skipped because its installed dependency prefix
+is unavailable. Earlier full suites and sanitizer results below are historical;
+fresh hosted native checks remain a merge gate.
+
+A separately configured native service supplied genuine schema-1 JSONL events
+to the macOS/Podman profile: startup, successful health requests and HTTP 404
+responses were queried from pinned Loki 3.7.9 through pinned Alloy 1.21.3.
+At the restart audit, Loki contained 40 events. An orderly collector restart
+preserved the file position; its seven newly read lines matched seven sent
+entries and seven new unique queried records. No duplicate `request_completed`
+correlation IDs, pipeline drops or write drops were observed. The source was
+the producer's actual active file; no synthetic event was added to that file.
+The collector profile requires a producer that owns bounded JSONL rotation;
+this smoke check does not qualify HTTP/storage outcome correctness.
+
+Loki data, WAL, index and compactor state were confined to a preallocated
+1,073,741,824-byte ext4 loop image. Its filesystem reported 1,020,702,720 bytes
+after ext4 overhead. Stopping the mount stopped Loki. Making the unmounted image
+unavailable caused the required-mount startup to fail, with no container and
+no writes in the underlying directory; restoring the image restored readiness.
+Both actual WAL metric families were present. The initial WAL usage fraction
+matched the dedicated filesystem's used/total ratio exactly; the 90% guard was
+unchanged. Retention remains asynchronous, and this check did not fill the
+filesystem or exercise retention deletion.
+
+Only `glamdb.jsonl` is discovered, using Alloy's built-in five-second retry.
+Numbered backups are not independent targets. Rotation during collector
+downtime, a missing target during discovery, lost positions and abrupt crashes
+can still cause unrecoverable gaps or replay. The verified orderly restart
+does not establish exactly-once delivery. Read-byte gauges are checkpoints and
+can lag a quiet source; actual read/sent counters and queried events established
+the ingestion result.
 
 ## Replacement and regression checks
 

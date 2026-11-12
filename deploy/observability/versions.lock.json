@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "checked_at": "2026-11-11",
+  "images": {
+    "prometheus": {
+      "version": "v3.13.5",
+      "image": "docker.io/prom/prometheus@sha256:aafa9d694e6a883c02db516d9f6e5b84e14195f49a2a6456a4cca815edda72b9",
+      "source": "https://github.com/prometheus/prometheus/tree/v3.13.5",
+      "license": "Apache-2.0",
+      "platforms": [
+        "amd64",
+        "arm64"
+      ]
+    },
+    "grafana": {
+      "version": "13.3.0",
+      "image": "docker.io/grafana/grafana@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205",
+      "source": "https://github.com/grafana/grafana/tree/v13.3.0",
+      "license": "AGPL-3.0-only",
+      "platforms": [
+        "amd64",
+        "arm64"
+      ]
+    },
+    "node": {
+      "version": "v1.12.1",
+      "image": "docker.io/prom/node-exporter@sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0",
+      "source": "https://github.com/prometheus/node_exporter/tree/v1.12.1",
+      "license": "Apache-2.0",
+      "platforms": [
+        "amd64",
+        "arm64"
+      ]
+    },
+    "loki": {
+      "version": "3.7.9",
+      "image": "docker.io/grafana/loki@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28",
+      "source": "https://github.com/grafana/loki/releases/tag/v3.7.9",
+      "license": "AGPL-3.0-only",
+      "platforms": [
+        "amd64",
+        "arm64"
+      ]
+    },
+    "alloy": {
+      "version": "v1.21.3",
+      "image": "docker.io/grafana/alloy@sha256:8ab871206bd2d8f89277f53abffee5f452a293980788d52f85fa183a87a505a4",
+      "source": "https://github.com/grafana/alloy/releases/tag/v1.21.3",
+      "license": "Apache-2.0",
+      "platforms": [
+        "amd64",
+        "arm64"
+      ]
+    },
+    "alertmanager": {
+      "version": "0.35.0",
+      "image": "docker.io/prom/alertmanager@sha256:e638797febd034838eca8b98cdbd46f951e9bf7f178777aa8669167406a9946c",
+      "source": "https://github.com/prometheus/alertmanager/releases/tag/v0.35.0",
+      "license": "Apache-2.0",
+      "platforms": [
+        "amd64",
+        "arm64"
+      ]
+    },
+    "podman": {
+      "version": "1.21.2",
+      "source": "https://github.com/containers/prometheus-podman-exporter/tree/dafd81078ef7651bd541234adb2dd59216f19235",
+      "license": "Apache-2.0",
+      "platform_images": {
+        "amd64": "quay.io/navidys/prometheus-podman-exporter@sha256:bffc353427a5ce1bdc8840d3a854bfc61b2982cd174adedcf489a6468cd8784e",
+        "arm64": "quay.io/navidys/prometheus-podman-exporter@sha256:0a9bfa9bd6260a47d3a0bbe2ce42f41ac98854f32dab5b4d7e28725075b0c187"
+      }
+    },
+    "cgroup": {
+      "version": "0.3.3",
+      "source": "https://github.com/arianvp/cgroup-exporter/tree/9d9967ac99b61899030ffc24fcd99395bcd9a248",
+      "license": "Apache-2.0",
+      "platform_images": {
+        "amd64": "ghcr.io/arianvp/cgroup-exporter@sha256:05d2f08a9eb409b8c569a6049744e478f6e00ec05209a4bfe1104d9b750d1944",
+        "arm64": "ghcr.io/arianvp/cgroup-exporter@sha256:3e427d53195d319a1aa5ff9ee65d76b5c6e6223d1d28db06f46e07c298c6228f"
+      },
+      "verification": "Official ghcr.io release manifests content-hashed, Docker-Content-Digest matched; image config architecture checked. amd64 configsha256:f9156027ed41a017f000d24f892afc7a9db2d624f8e90d2c53c66aa25eaede4e."
+    }
+  }
+}

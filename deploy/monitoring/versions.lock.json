@@ -1,0 +1,157 @@
+{
+  "schema_version": 1,
+  "images": {
+    "prometheus": {
+      "registry": "registry-1.docker.io",
+      "repository": "prom/prometheus",
+      "tag": "v3.13.5",
+      "digest": "sha256:aafa9d694e6a883c02db516d9f6e5b84e14195f49a2a6456a4cca815edda72b9",
+      "image": "prom/prometheus:v3.13.5@sha256:aafa9d694e6a883c02db516d9f6e5b84e14195f49a2a6456a4cca815edda72b9",
+      "checked_at": "2026-11-10",
+      "release": "https://github.com/prometheus/prometheus/releases/tag/v3.13.5",
+      "source": "https://github.com/prometheus/prometheus/tree/v3.13.5",
+      "upstream_license": "Apache-2.0",
+      "license_source": "https://github.com/prometheus/prometheus/blob/v3.13.5/LICENSE"
+    },
+    "grafana": {
+      "registry": "registry-1.docker.io",
+      "repository": "grafana/grafana",
+      "tag": "13.3.0",
+      "digest": "sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205",
+      "image": "grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205",
+      "checked_at": "2026-11-10",
+      "release": "https://github.com/grafana/grafana/releases/tag/v13.3.0",
+      "source": "https://github.com/grafana/grafana/tree/v13.3.0",
+      "upstream_license": "AGPL-3.0-only",
+      "license_source": "https://github.com/grafana/grafana/blob/v13.3.0/LICENSE"
+    },
+    "node-exporter": {
+      "registry": "registry-1.docker.io",
+      "repository": "prom/node-exporter",
+      "tag": "v1.12.1",
+      "digest": "sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0",
+      "image": "prom/node-exporter:v1.12.1@sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0",
+      "checked_at": "2026-11-10",
+      "release": "https://github.com/prometheus/node_exporter/releases/tag/v1.12.1",
+      "source": "https://github.com/prometheus/node_exporter/tree/v1.12.1",
+      "upstream_license": "Apache-2.0",
+      "license_source": "https://github.com/prometheus/node_exporter/blob/v1.12.1/LICENSE"
+    },
+    "cadvisor": {
+      "registry": "ghcr.io",
+      "repository": "google/cadvisor",
+      "tag": "0.60.6",
+      "digest": "sha256:b8e7d1093144fd088f425ff003d75a4aa405de075db78dae3bc563730b1bd07a",
+      "image": "ghcr.io/google/cadvisor:0.60.6@sha256:b8e7d1093144fd088f425ff003d75a4aa405de075db78dae3bc563730b1bd07a",
+      "checked_at": "2026-11-10",
+      "release": "https://github.com/google/cadvisor/releases/tag/v0.60.6",
+      "source": "https://github.com/google/cadvisor/tree/v0.60.6",
+      "upstream_license": "Apache-2.0",
+      "license_source": "https://github.com/google/cadvisor/blob/v0.60.6/LICENSE"
+    },
+    "kube-state-metrics": {
+      "registry": "registry.k8s.io",
+      "repository": "kube-state-metrics/kube-state-metrics",
+      "tag": "v2.20.0",
+      "digest": "sha256:42cfe3723a5f058171c627537fb57a3ea0f26e4380fa18555a95cb1a1b4cfc5b",
+      "image": "registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.20.0@sha256:42cfe3723a5f058171c627537fb57a3ea0f26e4380fa18555a95cb1a1b4cfc5b",
+      "checked_at": "2026-11-10",
+      "release": "https://github.com/kubernetes/kube-state-metrics/releases/tag/v2.20.0",
+      "source": "https://github.com/kubernetes/kube-state-metrics/tree/v2.20.0",
+      "upstream_license": "Apache-2.0",
+      "license_source": "https://github.com/kubernetes/kube-state-metrics/blob/v2.20.0/LICENSE"
+    },
+    "python": {
+      "registry": "registry-1.docker.io",
+      "repository": "library/python",
+      "tag": "3.13.11-slim-bookworm",
+      "digest": "sha256:20080e807bfc404f8450b185cf0fc95d553462673598549613735f70a5b4d5d0",
+      "image": "library/python:3.13.11-slim-bookworm@sha256:20080e807bfc404f8450b185cf0fc95d553462673598549613735f70a5b4d5d0",
+      "checked_at": "2026-11-10"
+    }
+  },
+  "downloads": {
+    "prometheus": {
+      "version": "3.13.5",
+      "release": "https://github.com/prometheus/prometheus/releases/tag/v3.13.5",
+      "darwin-arm64": {
+        "sha256": "909a07556df18afccdc8eb2c80c0b14f347b631b0e34c95bcabfd6d6a0080c92"
+      },
+      "linux-amd64": {
+        "sha256": "0388822ace519c5a3a8ef556a541ce1b536e21d872f82deded465bd27a5a0699"
+      }
+    },
+    "node-exporter": {
+      "version": "1.12.1",
+      "release": "https://github.com/prometheus/node_exporter/releases/tag/v1.12.1",
+      "darwin-arm64": {
+        "sha256": "35b246a34af55a8f0c3f11067f17aecf9836cfd4689bde364776b3a4ad3a84d6"
+      }
+    },
+    "kubeconform": {
+      "version": "0.8.0",
+      "release": "https://github.com/yannh/kubeconform/releases/tag/v0.8.0",
+      "darwin-arm64": {
+        "sha256": "f84f4dfbebf4a6b0b230385fa065a39ea35e02608c2b50d025dcf64775a69d67"
+      },
+      "linux-amd64": {
+        "sha256": "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883"
+      }
+    },
+    "helm": {
+      "version": "3.19.1",
+      "release": "https://github.com/helm/helm/releases/tag/v3.19.1",
+      "base_url": "https://get.helm.sh",
+      "darwin-arm64": {
+        "sha256": "080f320cfc4ee3816fd6c8f73820f4b3d941b10f709e69bf9afd78f8f8e7c92a"
+      },
+      "linux-amd64": {
+        "sha256": "966bed9b1e0dda11268f59bd7268c3cd3e308b37b070546e1d78a02526ff63f2"
+      }
+    }
+  },
+  "charts": {
+    "kube-prometheus-stack": {
+      "version": "92.7.0",
+      "url": "https://github.com/prometheus-community/helm-charts/releases/download/kube-prometheus-stack-92.7.0/kube-prometheus-stack-92.7.0.tgz",
+      "sha256": "af35d3e93750ce46d90cbb6537483c8fa914f19fbffa19fbabcb2825181a0f1a",
+      "source": "https://github.com/prometheus-community/helm-charts/tree/kube-prometheus-stack-92.7.0/charts/kube-prometheus-stack",
+      "license": "Apache-2.0",
+      "kubernetes_mixin_commit": "73ea726e63cc53c40e0412da02ea3da474f52686",
+      "kubernetes_mixin_source": "https://github.com/kubernetes-sigs/kubernetes-mixin/tree/73ea726e63cc53c40e0412da02ea3da474f52686",
+      "kube_prometheus_commit": "f81c076ab8f542c457840cd4c62656b8d6b4f43a"
+    }
+  },
+  "evaluated_exporters": {
+    "cgroup-exporter": {
+      "version": "0.3.3",
+      "commit": "9d9967ac99b61899030ffc24fcd99395bcd9a248",
+      "release": "https://github.com/arianvp/cgroup-exporter/releases/tag/v0.3.3",
+      "license": "Apache-2.0",
+      "enabled_by_default": false,
+      "decision": "Exact fields available for selected leaf cgroups; pod-parent scope, collector-failure signaling and resource bounds are not qualified. Default source gap remains No data."
+    }
+  },
+  "clients": {
+    "prometheus-cpp": {
+      "version": "1.3.0",
+      "commit": "e5fada43131d251e9c4786b04263ce98b6767ba5",
+      "license": "MIT",
+      "source": "https://github.com/jupp0r/prometheus-cpp/tree/v1.3.0"
+    },
+    "prometheus_client": {
+      "version": "0.26.0",
+      "license": "Apache-2.0 AND BSD-2-Clause",
+      "source": "https://github.com/prometheus/client_python/tree/v0.26.0"
+    }
+  },
+  "dashboards": {
+    "node-exporter": {
+      "source_chart": "kube-prometheus-stack-92.7.0",
+      "source_path": "templates/grafana/dashboards-1.14/nodes.yaml",
+      "rendered_source_sha256": "6f066c03e5e15aee27e31b1dfa537995a8902c03bac3a6d89008af6389a5469c",
+      "override": "Compose job selector node-exporter -> node; JSON formatting only otherwise.",
+      "license": "Apache-2.0"
+    }
+  }
+}

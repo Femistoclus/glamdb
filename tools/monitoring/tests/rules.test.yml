@@ -1,0 +1,121 @@
+{
+  "rule_files": [
+    "../../../deploy/monitoring/prometheus/rules/recording.yml"
+  ],
+  "evaluation_interval": "30s",
+  "tests": [
+    {
+      "name": "gateway status classes and counter reset",
+      "interval": "30s",
+      "input_series": [
+        {
+          "series": "glamdb_gateway_http_requests_total{job=\"glamdb-gateway\",cluster=\"test\",service=\"glamdb\",route=\"scan\",method=\"POST\",status_class=\"2xx\"}",
+          "values": "0+30x5 30+30x14"
+        },
+        {
+          "series": "glamdb_gateway_http_requests_total{job=\"glamdb-gateway\",cluster=\"test\",service=\"glamdb\",route=\"scan\",method=\"POST\",status_class=\"5xx\"}",
+          "values": "0+0x20"
+        },
+        {
+          "series": "glamdb_gateway_http_requests_total{job=\"other\",cluster=\"test\",service=\"glamdb\",route=\"scan\",method=\"POST\",status_class=\"2xx\"}",
+          "values": "0+300x20"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "glamdb:http_requests:rate5m",
+          "eval_time": "5m",
+          "exp_samples": [
+            {
+              "labels": "glamdb:http_requests:rate5m{cluster=\"test\",service=\"glamdb\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "native down endpoint does not retain successful operation recording",
+      "interval": "30s",
+      "input_series": [
+        {
+          "series": "glamdb_operations_total{job=\"glamdb-core\",cluster=\"test\",service=\"glamdb\",instance=\"native:9464\",operation=\"append\",outcome=\"committed\"}",
+          "values": "0+30x20"
+        },
+        {
+          "series": "up{job=\"glamdb-core\",cluster=\"test\",service=\"glamdb\",instance=\"native:9464\"}",
+          "values": "1+0x5 0+0x14"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "glamdb:native_operations:rate5m",
+          "eval_time": "5m",
+          "exp_samples": []
+        }
+      ]
+    },
+    {
+      "name": "missing sources leave request and PVC records absent",
+      "interval": "30s",
+      "input_series": [],
+      "promql_expr_test": [
+        {
+          "expr": "glamdb:podset_pvc_available:p50",
+          "eval_time": "5m",
+          "exp_samples": []
+        }
+      ]
+    },
+    {
+      "name": "actual PVC median across controller pods",
+      "interval": "30s",
+      "input_series": [
+        {
+          "series": "kubelet_volume_stats_available_bytes{cluster=\"test\",namespace=\"glamdb\",persistentvolumeclaim=\"db-0-data\"}",
+          "values": "20+0x20"
+        },
+        {
+          "series": "kubelet_volume_stats_capacity_bytes{cluster=\"test\",namespace=\"glamdb\",persistentvolumeclaim=\"db-0-data\"}",
+          "values": "100+0x20"
+        },
+        {
+          "series": "kube_pod_spec_volumes_persistentvolumeclaims_info{cluster=\"test\",namespace=\"glamdb\",pod=\"db-0\",persistentvolumeclaim=\"db-0-data\"}",
+          "values": "1+0x20"
+        },
+        {
+          "series": "kube_pod_owner{cluster=\"test\",namespace=\"glamdb\",pod=\"db-0\",owner_kind=\"StatefulSet\",owner_name=\"db\",owner_is_controller=\"true\"}",
+          "values": "1+0x20"
+        },
+        {
+          "series": "kubelet_volume_stats_available_bytes{cluster=\"test\",namespace=\"glamdb\",persistentvolumeclaim=\"db-1-data\"}",
+          "values": "80+0x20"
+        },
+        {
+          "series": "kubelet_volume_stats_capacity_bytes{cluster=\"test\",namespace=\"glamdb\",persistentvolumeclaim=\"db-1-data\"}",
+          "values": "100+0x20"
+        },
+        {
+          "series": "kube_pod_spec_volumes_persistentvolumeclaims_info{cluster=\"test\",namespace=\"glamdb\",pod=\"db-1\",persistentvolumeclaim=\"db-1-data\"}",
+          "values": "1+0x20"
+        },
+        {
+          "series": "kube_pod_owner{cluster=\"test\",namespace=\"glamdb\",pod=\"db-1\",owner_kind=\"StatefulSet\",owner_name=\"db\",owner_is_controller=\"true\"}",
+          "values": "1+0x20"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "glamdb:podset_pvc_available:p50",
+          "eval_time": "5m",
+          "exp_samples": [
+            {
+              "labels": "glamdb:podset_pvc_available:p50{cluster=\"test\",namespace=\"glamdb\",podset=\"StatefulSet/db\"}",
+              "value": 0.5
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

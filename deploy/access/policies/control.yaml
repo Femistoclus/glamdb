@@ -1,0 +1,8 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: default
+  resource: control
+  rules:
+    - actions: [manage]
+      effect: EFFECT_ALLOW
+      roles: [glamdb-operator]

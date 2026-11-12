@@ -1,0 +1,561 @@
+{
+  "uid": "glamdb-service",
+  "title": "GlamDB \u00b7 API and coordinator",
+  "schemaVersion": 39,
+  "version": 2,
+  "tags": [
+    "glamdb",
+    "provisioned"
+  ],
+  "editable": false,
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Scope and missing sources",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 3
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Standard host and Kubernetes panels come from the pinned upstream mixins/chart. Exact cgroup anonymous/file/unevictable and unconstrained-wait gaps are documented in MONITORING_COVERAGE.md; they remain **No data** in the default stack. Native readiness/commit-unknown state requires an authoritative server adapter. CLI metrics are never published as a stale server snapshot."
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Gateway scrape",
+      "description": "Reachability only; does not establish readiness.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 3,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=\"glamdb-gateway\",cluster=~\"$cluster\",service=~\"$service\"}",
+          "legendFormat": "{{operation}} {{outcome}} {{route}} {{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Gateway authoritative readiness",
+      "description": "Admission/backend owner sets this gauge. Default closed.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 3,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "glamdb_gateway_ready{cluster=~\"$cluster\",service=~\"$service\"}",
+          "legendFormat": "{{operation}} {{outcome}} {{route}} {{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Gateway requests / second",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 11,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "glamdb:http_requests:rate5m{cluster=~\"$cluster\",service=~\"$service\"}",
+          "legendFormat": "{{operation}} {{outcome}} {{route}} {{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Gateway HTTP 5xx fraction",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 11,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "glamdb:http_error:ratio5m{cluster=~\"$cluster\",service=~\"$service\"}",
+          "legendFormat": "{{operation}} {{outcome}} {{route}} {{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Gateway p99 duration",
+      "description": "Through response completion, including streaming. Idle or absent histogram stays No data.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "glamdb:http_request_duration_seconds:p99{cluster=~\"$cluster\",service=~\"$service\"}",
+          "legendFormat": "{{operation}} {{outcome}} {{route}} {{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Gateway stages p99",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 19,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99,sum by (stage,le) (rate(glamdb_gateway_stage_duration_seconds_bucket{cluster=~\"$cluster\",service=~\"$service\"}[5m])))",
+          "legendFormat": "{{operation}} {{outcome}} {{route}} {{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Gateway in flight",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (route) (glamdb_gateway_http_in_flight{cluster=~\"$cluster\",service=~\"$service\"})",
+          "legendFormat": "{{operation}} {{outcome}} {{route}} {{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Native calls / second",
+      "description": "API calls including retries, not distinct durable writes. No native production HTTP adapter is supplied.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 27,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "glamdb:native_operations:rate5m{cluster=~\"$cluster\",service=~\"$service\"}",
+          "legendFormat": "{{operation}} {{outcome}} {{route}} {{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Native p99 duration",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 35,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99,sum by (operation,outcome,le) (rate(glamdb_operation_duration_seconds_bucket{cluster=~\"$cluster\",service=~\"$service\"}[5m])))",
+          "legendFormat": "{{operation}} {{outcome}} {{route}} {{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Native measured stages p99",
+      "description": "Only observed coordinator regions. Data includes backend metadata work; no fabricated Parquet/Iceberg subspans.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 35,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99,sum by (operation,phase,le) (rate(glamdb_phase_duration_seconds_bucket{cluster=~\"$cluster\",service=~\"$service\"}[5m])))",
+          "legendFormat": "{{operation}} {{outcome}} {{route}} {{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Native deadline exceeded / second",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 43,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (operation) (rate(glamdb_operation_errors_total{cluster=~\"$cluster\",service=~\"$service\",error=\"DEADLINE_EXCEEDED\"}[5m]))",
+          "legendFormat": "{{operation}} {{outcome}} {{route}} {{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Native overload / second",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 43,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (operation) (rate(glamdb_operation_errors_total{cluster=~\"$cluster\",service=~\"$service\",error=\"RESOURCE_EXHAUSTED\"}[5m]))",
+          "legendFormat": "{{operation}} {{outcome}} {{route}} {{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Native in flight",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 51,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "glamdb_operations_in_flight{cluster=~\"$cluster\",service=~\"$service\"}",
+          "legendFormat": "{{operation}} {{outcome}} {{route}} {{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Admission-owned input",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 51,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "glamdb_admission_owned_input_bytes{cluster=~\"$cluster\",service=~\"$service\"}",
+          "legendFormat": "{{operation}} {{outcome}} {{route}} {{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Podset PVC free fraction p50",
+      "description": "Per pod least-free mounted PVC, median over immediate controller. CSI+kubelet stats+KSM required. No ephemeral-quota substitution.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 59,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "glamdb:podset_pvc_available:p50{cluster=~\"$cluster\"}",
+          "legendFormat": "{{operation}} {{outcome}} {{route}} {{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Podset PVC free fraction p100",
+      "description": "Most-free pod in immediate controller; inspect p00 for worst pod. No data without actual CSI/KSM sources.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 59,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "glamdb:podset_pvc_available:p100{cluster=~\"$cluster\"}",
+          "legendFormat": "{{operation}} {{outcome}} {{route}} {{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {}
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "cluster",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up,cluster)",
+        "query": {
+          "query": "label_values(up,cluster)",
+          "refId": "cluster"
+        },
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "service",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up,service)",
+        "query": {
+          "query": "label_values(up,service)",
+          "refId": "service"
+        },
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  }
+}

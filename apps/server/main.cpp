@@ -1,6 +1,9 @@
 #include "apps/server/databases.h"
+#include "apps/server/metrics.h"
 #include "apps/server/server.h"
 #include "storage/resources.h"
+
+#include "core/telemetry/structured_log.h"
 
 #include <CLI/CLI.hpp>
 
@@ -12,7 +15,7 @@ try {
     TLogOptions logOptions;
     CLI::App app{"GlamDB native HTTP server"};
     app.add_subcommand("serve", "Serve an existing store or a managed database directory")->fallthrough();
-    std::string root, storeID, uiRoot, dataDir;
+    std::string root, storeID, uiRoot, dataDir, metricsAddress, logDirectory;
     std::string address = "127.0.0.1";
     uint16_t port = 8080;
     int timeoutMs = 10000;
@@ -24,6 +27,8 @@ try {
     app.add_option("--store-id", storeID, "Expected legacy store UUID");
     app.add_option("--listen", address, "HTTP listen address; use TLS proxy outside loopback");
     app.add_option("--port", port, "HTTP port; zero selects an available port");
+    app.add_option("--metrics-listen-address", metricsAddress, "Private Prometheus IP:port; disabled by default");
+    app.add_option("--log-directory", logDirectory, "Private bounded JSONL log directory; disabled by default");
     app.add_option("--ui-root", uiRoot, "Workbench directory (defaults to installed share/glamdb/ui)");
     app.add_option("--request-timeout-ms", timeoutMs, "Total header/body read timeout")->check(CLI::Range(100, 60000));
     app.add_option("--scan-live-limit", scanLimits.Live, "Global live scan cursor limit")->check(CLI::Range(1, 4096));
@@ -63,6 +68,10 @@ try {
     scanLimits.CompletedTtl = std::chrono::seconds(completedTtl);
     glamdb::NServer::ValidateScanLimits(scanLimits, &resourceLimits);
     auto resources = std::make_shared<glamdb::ResourceOwner>(resourceLimits);
+    logOptions.Directory = logDirectory;
+    if (!logDirectory.empty() && app.get_option("--log-success-sample-every")->count() == 0) {
+        logOptions.SuccessSampleEvery = 1;
+    }
     TLogRuntime logging(logOptions);
     TLogScope scope(logging.Get(), ELogOperation::Other, logging.Get() ? logging.Get()->NewRequestID() : 0);
     glamdb::NTransport::Require((!dataDir.empty() && root.empty() && storeID.empty()) ||
@@ -82,6 +91,9 @@ try {
     }
     if (!dataDir.empty()) {
         auto databases = std::make_shared<glamdb::NServer::TDatabases>(dataDir, "", resources);
+        glamdb::NServer::TMetrics metrics(metricsAddress, [databases] {
+            return databases->IsReady();
+        });
         glamdb::NServer::TRoutes routes(databases, uiRoot, token, scanLimits);
         glamdb::NServer::RunServer(routes, address, port, std::chrono::milliseconds(timeoutMs), 96, logging.Get());
         routes.CancelScans();
@@ -91,6 +103,9 @@ try {
     }
     auto engine = glamdb::NTransport::Unwrap(
         glamdb::OpenExisting({.absolute_root = root, .expected_store_id = storeID, .resources = resources}));
+    glamdb::NServer::TMetrics metrics(metricsAddress, [engine] {
+        return engine->GetHealth().write_ready;
+    });
     glamdb::NServer::TRoutes routes(engine, uiRoot, token, scanLimits);
     glamdb::NServer::RunServer(routes, address, port, std::chrono::milliseconds(timeoutMs), 96, logging.Get());
     routes.CancelScans();

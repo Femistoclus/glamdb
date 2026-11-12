@@ -1,4 +1,5 @@
 #include "core/scan/scan_cursor.h"
+#include "core/telemetry/metrics.h"
 
 #include "core/api/binary.h"
 #include "core/api/canonical.h"
@@ -289,7 +290,14 @@ public:
         , ReadFields_(std::move(readFields))
         , BatchRows_(batchRows)
         , Remaining_(limit)
-    { }
+    {
+        NGlamDB::NTelemetry::AdjustRetainedCursors(1);
+    }
+
+    ~TScanCursor() override
+    {
+        NGlamDB::NTelemetry::AdjustRetainedCursors(-1);
+    }
 
     const ScanInfo& Info() const override
     {
@@ -298,12 +306,16 @@ public:
 
     Result<std::shared_ptr<arrow::RecordBatch>> Next() override
     {
+        NGlamDB::NTelemetry::TReadOperationScope metrics(NGlamDB::NTelemetry::EReadOperation::ScanNext);
         std::lock_guard lock(Mutex_);
         if (Failed_) {
+            metrics.Error(Failed_->code);
             return std::unexpected(*Failed_);
         }
         try {
-            return ReadNext();
+            auto result = ReadNext();
+            const auto rows = result && *result ? static_cast<std::uint64_t>((*result)->num_rows()) : 0;
+            return metrics.Finish(std::move(result), rows);
         } catch (const Failure& error) {
             // Explicit admission fails before consuming the next batch/file.
             // Preserve pending descriptors and the current decoder for retry.
@@ -321,6 +333,7 @@ public:
             if (error.detail.code != "CANCELLED") {
                 Failed_ = error.detail;
             }
+            metrics.Error(error.detail.code);
             return std::unexpected(error.detail);
         } catch (const std::bad_alloc& error) {
             Release();
@@ -328,6 +341,7 @@ public:
                 State_ = ScanState::Failed;
             }
             Failed_ = ErrorDetail{"RESOURCE_EXHAUSTED", BoundedDiagnostic(error.what()), RetryHint::OperatorAction};
+            metrics.Error(Failed_->code);
             return std::unexpected(*Failed_);
         } catch (const std::exception& error) {
             Release();
@@ -335,13 +349,16 @@ public:
                 State_ = ScanState::Failed;
             }
             Failed_ = ErrorDetail{"INTERNAL", BoundedDiagnostic(error.what()), RetryHint::OperatorAction};
+            metrics.Error(Failed_->code);
             return std::unexpected(*Failed_);
         }
     }
 
     void Cancel() override
     {
+        NGlamDB::NTelemetry::TReadOperationScope metrics(NGlamDB::NTelemetry::EReadOperation::ScanCancel);
         Cancelled_ = true;
+        metrics.Finish();
     }
 
     ScanProfile Profile() const override

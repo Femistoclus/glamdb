@@ -1,0 +1,60 @@
+Synchronize CivetWeb stop flag access during Exposer teardown.
+
+The pinned default uses volatile loads/stores between mg_stop and its
+master/worker threads. TSan reports a race in native_metrics teardown.
+Use compiler atomics on the supported Clang/GCC toolchains and route the
+alternative queue's reads through the same accessors. This preserves the
+0 (running), 1 (stopping), 2 (stopped) protocol and existing thread joins.
+
+Pinned revision: jupp0r/prometheus-cpp e5fada43131d251e9c4786b04263ce98b6767ba5
+(v1.3.0), bundled civetweb d7ba35bbb649209c66e582d5a0244ba988a15159.
+Remove this patch when the pinned dependency includes a synchronized flag.
+
+diff --git a/3rdparty/civetweb/src/civetweb.c b/3rdparty/civetweb/src/civetweb.c
+--- a/3rdparty/civetweb/src/civetweb.c
++++ b/3rdparty/civetweb/src/civetweb.c
+@@ -2286,10 +2286,16 @@
+ };
+ 
+ 
+-/* Stop flag can be "volatile" or require a lock.
+- * MSDN uses volatile for "Interlocked" operations, but also explicitly
+- * states a read operation for int is always atomic. */
+-#if defined(STOP_FLAG_NEEDS_LOCK)
++/* The stop flag is shared by mg_stop, master and worker threads.
++ * Volatile accesses alone do not synchronize these threads. */
++#if (defined(__GNUC__) || defined(__clang__)) && !defined(NO_ATOMICS)
++
++typedef int stop_flag_t;
++#define STOP_FLAG_IS_ZERO(f) (__atomic_load_n((f), __ATOMIC_SEQ_CST) == 0)
++#define STOP_FLAG_IS_TWO(f) (__atomic_load_n((f), __ATOMIC_SEQ_CST) == 2)
++#define STOP_FLAG_ASSIGN(f, v) __atomic_store_n((f), (v), __ATOMIC_SEQ_CST)
++
++#elif defined(STOP_FLAG_NEEDS_LOCK)
+ 
+ typedef ptrdiff_t volatile stop_flag_t;
+ 
+@@ -19561,12 +19567,12 @@
+ {
+ 	unsigned int i;
+ 
+-	while (!ctx->stop_flag) {
++	while (STOP_FLAG_IS_ZERO(&ctx->stop_flag)) {
+ 		for (i = 0; i < ctx->cfg_worker_threads; i++) {
+ 			/* find a free worker slot and signal it */
+ 			if (ctx->client_socks[i].in_use == 2) {
+ 				(void)pthread_mutex_lock(&ctx->thread_mutex);
+-				if ((ctx->client_socks[i].in_use == 2) && !ctx->stop_flag) {
++				if ((ctx->client_socks[i].in_use == 2) && STOP_FLAG_IS_ZERO(&ctx->stop_flag)) {
+ 					ctx->client_socks[i] = *sp;
+ 					ctx->client_socks[i].in_use = 1;
+ 					/* socket has been moved to the consumer */
+@@ -19598,7 +19604,7 @@
+ 
+ 	(void)pthread_mutex_lock(&ctx->thread_mutex);
+ 	*sp = ctx->client_socks[thread_index];
+-	if (ctx->stop_flag) {
++	if (!STOP_FLAG_IS_ZERO(&ctx->stop_flag)) {
+ 		(void)pthread_mutex_unlock(&ctx->thread_mutex);
+ 		if (sp->in_use == 1) {
+ 			/* must consume */

@@ -77,6 +77,51 @@ def test_public_reads_use_bearer_auth_exact_routes_and_preserve_cursor_parameter
     ]
 
 
+@pytest.mark.parametrize("trailing_slash", ["", "/"])
+@pytest.mark.parametrize("operation,args,kwargs,method,path", [
+    ("capabilities", (), {}, "GET", "/capabilities"),
+    ("list_collections", (), {}, "GET", "/collections"),
+    ("resolve_collection", ("exact",), {}, "GET", "/collections:resolve"),
+    ("get_collection", (CID,), {}, "GET", f"/collections/{CID}"),
+    ("get_schema", (CID,), {}, "GET", f"/collections/{CID}/schema"),
+    ("stats", (CID,), {}, "GET", f"/collections/{CID}/stats"),
+    ("snapshots", (CID,), {}, "GET", f"/collections/{CID}/snapshots"),
+    ("files", (CID,), {}, "GET", f"/collections/{CID}/files"),
+    ("file", (CID, "file-1"), {}, "GET", f"/collections/{CID}/files/file-1"),
+    ("create_collection", ("exact", SCHEMA), {"collection_id": CID}, "POST", "/collections"),
+    ("append", (CID, [{"key": "a"}]), {"operation_id": OP, "schema": SCHEMA}, "POST", f"/collections/{CID}/append"),
+    ("find_append_outcome", (CID, OP), {}, "GET", f"/collections/{CID}/operations/{OP}"),
+    ("explain", (CID,), {}, "POST", f"/collections/{CID}/explain"),
+    ("scan_json", (CID,), {}, "POST", f"/collections/{CID}/scan/open"),
+    ("scan_batches", (CID,), {}, "POST", f"/collections/{CID}/scan/open"),
+])
+def test_token_provider_preserves_database_prefix_for_every_route(trailing_slash, operation, args, kwargs, method, path):
+    seen = []
+    def handler(request):
+        seen.append(request)
+        return reply({"error": {"code": "FORBIDDEN", "message": "database access denied"}}, 403)
+    with Client("https://example.test/databases/sales" + trailing_slash, token_provider=lambda: "secret-value",
+                transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AuthenticationError):
+            getattr(client, operation)(*args, **kwargs)
+    assert len(seen) == 1
+    assert (seen[0].method, seen[0].url.path) == (method, "/databases/sales" + path)
+    assert seen[0].headers.get_list("authorization") == ["Bearer secret-value"]
+
+
+def test_username_none_keeps_bearer_auth_with_a_long_token_and_scoped_base_url():
+    seen = []
+    def handler(request):
+        seen.append(request)
+        return reply({"mode": "append"})
+    with Client("https://example.test/databases/sales", "x" * 73, username=None,
+                transport=httpx.MockTransport(handler)) as client:
+        client.capabilities()
+    assert len(seen) == 1
+    assert seen[0].headers.get_list("authorization") == ["Bearer " + "x" * 73]
+    assert seen[0].url.path == "/databases/sales/capabilities"
+
+
 def test_append_is_owned_and_retry_reuses_identical_operation_and_body_after_lost_response():
     seen = []
     def handler(request):

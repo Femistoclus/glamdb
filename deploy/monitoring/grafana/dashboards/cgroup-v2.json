@@ -1,0 +1,1029 @@
+{
+  "uid": "glamdb-cgroup-v2",
+  "title": "GlamDB · exact Podman cgroups",
+  "description": "Official cgroup-exporter 0.3.3 reads only read-only VM cgroup-v2 sysfs without privilege, API socket or host namespaces. Only direct-run machine.slice/libpod-*.scope/container and Quadlet system.slice/*.service/libpod-payload-* leaves are selected. Names join actual Podman inventory via the first 12 hex ID characters; this is a single-VM mapping. No Kubernetes labels or pod-parent equivalence. Anonymous/file/unevictable are literal memory.stat categories, not RSS renames; file includes tmpfs/shared memory and unevictable includes more than mlock. PSI some/full records time with at least one/all runnable tasks stalled; it is not unconstrained demand or generic I/O latency. The exporter can log partial collection errors while HTTP stays healthy: absent fields remain No data, and the presence panel must be checked.",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "tags": [
+    "glamdb",
+    "local",
+    "standard-collectors"
+  ],
+  "refresh": "15s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "container",
+        "label": "Container",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(podman_container_info{job=\"podman\"},name)",
+        "query": {
+          "query": "label_values(podman_container_info{job=\"podman\"},name)",
+          "refId": "container"
+        },
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 1,
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Source and scope",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 4
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Official cgroup-exporter 0.3.3 reads only read-only VM cgroup-v2 sysfs without privilege, API socket or host namespaces. Only direct-run machine.slice/libpod-*.scope/container and Quadlet system.slice/*.service/libpod-payload-* leaves are selected. Names join actual Podman inventory via the first 12 hex ID characters; this is a single-VM mapping. No Kubernetes labels or pod-parent equivalence. Anonymous/file/unevictable are literal memory.stat categories, not RSS renames; file includes tmpfs/shared memory and unevictable includes more than mlock. PSI some/full records time with at least one/all runnable tasks stalled; it is not unconstrained demand or generic I/O latency. The exporter can log partial collection errors while HTTP stays healthy: absent fields remain No data, and the presence panel must be checked."
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Collector HTTP scrape",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=\"cgroup\"}",
+          "legendFormat": "{{instance}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Charged memory",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 4,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(cgroup_memory_current_bytes{job=\"cgroup\"}, \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Anonymous memory",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(cgroup_memory_anon_bytes{job=\"cgroup\"}, \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Unevictable memory",
+      "description": "Literal memory.stat unevictable, including mlocked pages; not a dedicated mlock-only measurement.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 4,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(cgroup_memory_unevictable_bytes{job=\"cgroup\"}, \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Current, anonymous and file memory",
+      "description": "Charged current includes kernel and other overhead. File includes tmpfs/shared-memory pages; do not add shared memory to file.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(cgroup_memory_current_bytes{job=\"cgroup\"}, \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} charged",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "label_replace(cgroup_memory_anon_bytes{job=\"cgroup\"}, \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} anonymous",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "label_replace(cgroup_memory_file_bytes{job=\"cgroup\"}, \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} file incl shmem",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Dirty, writeback, mapped and shared file memory",
+      "description": "These subsets overlap. Do not add them to derive cache or current.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(cgroup_memory_file_dirty_bytes{job=\"cgroup\"}, \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} dirty",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "label_replace(cgroup_memory_file_writeback_bytes{job=\"cgroup\"}, \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} writeback",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "label_replace(cgroup_memory_file_mapped_bytes{job=\"cgroup\"}, \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} mapped",
+          "range": true
+        },
+        {
+          "refId": "D",
+          "expr": "label_replace(cgroup_memory_shmem_bytes{job=\"cgroup\"}, \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} shmem",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Kernel memory",
+      "description": "Page tables and kernel stacks are subsets; no summation.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 15,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(cgroup_memory_kernel_bytes{job=\"cgroup\"}, \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} kernel",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "label_replace(cgroup_memory_pagetables_bytes{job=\"cgroup\"}, \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} page tables",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "label_replace(cgroup_memory_kernel_stack_bytes{job=\"cgroup\"}, \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} kernel stack",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Cgroup tasks",
+      "description": "Linux tasks, including threads. A distinct process-leader count is unsupported.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 15,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(cgroup_pids_current{job=\"cgroup\"}, \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Exact CPU use",
+      "description": "100% equals one logical CPU. Actual cpu.stat usec / 1e6; corrects no upstream series.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(rate(cgroup_cpu_usage_seconds_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"} * 100",
+          "legendFormat": "{{name}} total",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "label_replace(rate(cgroup_cpu_user_seconds_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"} * 100",
+          "legendFormat": "{{name}} user",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "label_replace(rate(cgroup_cpu_system_seconds_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"} * 100",
+          "legendFormat": "{{name}} system",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "CPU throttling and burst time",
+      "description": "Counter seconds per second, possibly across schedulers; not CPU utilization or unconstrained demand.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 22,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(rate(cgroup_cpu_throttled_seconds_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} throttled",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "label_replace(rate(cgroup_cpu_burst_seconds_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} burst",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "CPU throttle events",
+      "description": "Absent quota counters remain No data. Zero means the actual kernel counter is present and zero.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 29,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(rate(cgroup_cpu_throttled_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} throttled periods",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "label_replace(rate(cgroup_cpu_periods_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} periods",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "label_replace(rate(cgroup_cpu_bursts_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} bursts",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "CPU pressure",
+      "description": "PSI wall time; not a direct count of waiting threads, scheduler latency, or unconstrained demand.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 29,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(rate(cgroup_cpu_pressure_waiting_seconds_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"} * 100",
+          "legendFormat": "{{name}} some",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "label_replace(rate(cgroup_cpu_pressure_stalled_seconds_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"} * 100",
+          "legendFormat": "{{name}} full",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Memory pressure",
+      "description": "PSI memory stall time. Does not identify a particular allocation or database action.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 36,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(rate(cgroup_memory_pressure_waiting_seconds_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"} * 100",
+          "legendFormat": "{{name}} some",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "label_replace(rate(cgroup_memory_pressure_stalled_seconds_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"} * 100",
+          "legendFormat": "{{name}} full",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "I/O pressure",
+      "description": "PSI I/O stall wall time, not disk service time or per-request latency.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 36,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(rate(cgroup_io_pressure_waiting_seconds_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"} * 100",
+          "legendFormat": "{{name}} some",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "label_replace(rate(cgroup_io_pressure_stalled_seconds_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"} * 100",
+          "legendFormat": "{{name}} full",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Device block throughput",
+      "description": "Linux block-device major:minor scope; do not sum layered devices without a verified topology.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 43,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(rate(cgroup_io_read_bytes_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} {{device}} read",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "label_replace(rate(cgroup_io_write_bytes_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} {{device}} write",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Device IOPS",
+      "description": "Exact io.stat rios/wios derivative per device. Does not measure cached reads.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 43,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(rate(cgroup_io_read_operations_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} {{device}} reads",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "label_replace(rate(cgroup_io_write_operations_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} {{device}} writes",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "iops",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Major page faults",
+      "description": "Literal cumulative memory.stat pgmajfault. This upstream version declares it a gauge; the panel shows the raw count.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 50,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(cgroup_memory_pgmajfault{job=\"cgroup\"}, \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Memory boundary and OOM events",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 50,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(rate(cgroup_memory_events_high_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} high",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "label_replace(rate(cgroup_memory_events_max_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} max",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "label_replace(rate(cgroup_memory_events_oom_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} OOM",
+          "range": true
+        },
+        {
+          "refId": "D",
+          "expr": "label_replace(rate(cgroup_memory_events_oom_kill_total{job=\"cgroup\"}[$__rate_interval]), \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\") * on(id) group_left(name) podman_container_info{job=\"podman\",name=~\"$container\"}",
+          "legendFormat": "{{name}} OOM kill",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Expected containers missing exact memory fields",
+      "description": "Includes stopped inventory containers, which normally have no live leaf. Inspect Podman state before interpreting. An empty result means no missing selected entries.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 57,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "podman_container_info{job=\"podman\",name=~\"$container\"} unless on(id) label_replace(cgroup_memory_current_bytes{job=\"cgroup\"}, \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\")",
+          "legendFormat": "{{name}} no current",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "podman_container_info{job=\"podman\",name=~\"$container\"} unless on(id) label_replace(cgroup_memory_anon_bytes{job=\"cgroup\"}, \"id\", \"$1\", \"cgroup\", \"(?:machine[.]slice/libpod-|system[.]slice/[^/]+/libpod-payload-)([0-9a-f]{12})[0-9a-f]+(?:[.]scope/container)?\")",
+          "legendFormat": "{{name}} no anon",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ]
+}

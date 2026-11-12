@@ -141,27 +141,18 @@ for (const change of ['collection', 'snapshot', 'connection']) {
 }
 
 test('a late post-create listing cannot restore the previous session', async ({ page }) => {
-    let created = false,
-        secondSession = false,
-        release,
-        seen;
-    const held = new Promise((resolve) => (release = resolve));
-    const captured = new Promise((resolve) => (seen = resolve));
+    let secondSession = false;
     await page.route(apiRoute, async (route) => {
         const request = route.request();
         const collectionList = new URL(request.url()).pathname === '/collections';
         if (collectionList && request.method() === 'POST') {
-            created = true;
             await route.fulfill({ json: request.postDataJSON() });
             return;
         }
         const response = await route.fetch({
             headers: { ...request.headers(), authorization: `Bearer ${token}` },
         });
-        if (collectionList && created && !secondSession) {
-            seen();
-            await held;
-        } else if (collectionList && secondSession) {
+        if (collectionList && secondSession) {
             const body = await response.json();
             body.items = body.items.filter((item) => item.name === 'pink_inventory');
             body.next_cursor = null;
@@ -176,13 +167,21 @@ test('a late post-create listing cannot restore the previous session', async ({ 
     await page.evaluate(async (oldToken) => {
         const { WorkbenchAPI } = await import('/assets/api.js');
         const original = WorkbenchAPI.prototype.json;
+        const held = new Promise((resolve) => (window.releaseOldList = resolve));
+        window.oldListReady = false;
         window.oldListFinished = 0;
         WorkbenchAPI.prototype.json = async function (path, options) {
+            const oldList = this.token === oldToken && path.startsWith('/collections?');
             try {
-                return await original.call(this, path, options);
+                const result = await original.call(this, path, options);
+                if (oldList) {
+                    // Hold a parsed result so cancellation cannot replace the stale-result check.
+                    window.oldListReady = true;
+                    await held;
+                }
+                return result;
             } finally {
-                if (this.token === oldToken && path.startsWith('/collections?'))
-                    window.oldListFinished++;
+                if (oldList) window.oldListFinished++;
             }
         };
     }, token);
@@ -190,14 +189,15 @@ test('a late post-create listing cannot restore the previous session', async ({ 
         await page.getByRole('button', { name: 'New collection', exact: true }).click();
         await page.getByLabel('Collection name').fill('previous_session_create');
         await page.getByRole('button', { name: 'Create collection', exact: true }).click();
-        await captured;
+        await expect.poll(() => page.evaluate(() => window.oldListReady)).toBe(true);
         await page.getByRole('button', { name: 'Close dialog' }).click();
         await disconnect(page);
         secondSession = true;
         await page.getByLabel('Access token').fill('second-session-only-token');
         await page.getByRole('button', { name: 'Open my workspace' }).click();
         await expect(page.locator('.breadcrumb strong')).toHaveText('pink_inventory');
-        release();
+        expect(await page.evaluate(() => window.oldListFinished)).toBe(0);
+        await page.evaluate(() => window.releaseOldList());
         await expect.poll(() => page.evaluate(() => window.oldListFinished)).toBe(1);
         await expect(page.locator('.collection-list button')).toHaveCount(1);
         await expect(page.locator('.collection-list')).not.toContainText('dreamhouse_events');
@@ -205,7 +205,7 @@ test('a late post-create listing cannot restore the previous session', async ({ 
         await expect(page.getByRole('dialog')).not.toBeVisible();
         await expect(page.locator('#toast')).toBeEmpty();
     } finally {
-        release();
+        await page.evaluate(() => window.releaseOldList?.()).catch(() => {});
     }
 });
 

@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "name": "glamdb-observe",
+  "cluster": "production",
+  "node": "server-1",
+  "state_dir": "/var/lib/glamdb-observability/server-1",
+  "ui_bind": "127.0.0.1",
+  "metrics": {
+    "core": {"url": "http://127.0.0.1:9094/metrics"},
+    "gateway": null,
+    "edge": null
+  },
+  "logs": {
+    "directory": "/var/log/glamdb",
+    "uid": 1000,
+    "gid": 1000
+  },
+  "loki": {
+    "mount_path": "/srv/glamdb-loki",
+    "max_bytes": 4294967296
+  },
+  "telegram": null,
+  "retention": {
+    "prometheus_size": "2GB",
+    "prometheus_time": "7d"
+  }
+}

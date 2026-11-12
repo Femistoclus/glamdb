@@ -1,0 +1,15 @@
+[Unit]
+Description=GlamDB private read-only cgroup v2 metrics collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/podman start glamdb-collectors-cgroup
+ExecStop=/usr/bin/podman stop --ignore --time 10 glamdb-collectors-cgroup
+TimeoutStartSec=60
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

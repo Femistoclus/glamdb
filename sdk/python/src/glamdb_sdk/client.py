@@ -1,11 +1,12 @@
 """Synchronous network-only client for the v0 public HTTP adapter contract."""
 
 import hmac
+import ipaddress
 import math
 import re
 import ssl
 import weakref
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import quote
 from uuid import UUID
 
@@ -21,6 +22,18 @@ from .request import AppendRequest, json_bytes, schema_fingerprint, uuid_string
 from .recovery import validate_append_recovery, validate_create_recovery
 from .transport import JSON_ACCEPT_ENCODING, Deadline, read_json, translate_transport
 from .write_settings import canonical_write_settings, write_settings_version
+
+
+def _bearer_token(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or any(ord(c) < 33 or ord(c) > 126 for c in value)
+    ):
+        raise ValidationError(
+            "a nonempty ASCII bearer token without whitespace is required"
+        )
+    return value
 
 
 class _ScanPages:
@@ -75,10 +88,15 @@ class Client:
 
     ``timeout`` sets HTTP connect/read/write/pool timeouts. Each method's optional
     ``deadline`` adds a total cooperative budget, checked across body reads.
+    Supply a direct Bearer token or a callable ``token_provider``. Provider
+    failures happen before the API request; HTTP authentication failures never
+    replay a mutating request.
     """
 
-    def __init__(self, base_url: str, token: str, *, verify: bool | ssl.SSLContext = True,
-                 timeout: float = 30.0, database_id: str | UUID | None = None, transport: httpx.BaseTransport | None = None,
+    def __init__(self, base_url: str, token: str | None = None, *, username: str | None = None,
+                 token_provider: Callable[[], str] | None = None,
+                 verify: bool | ssl.SSLContext = True, timeout: float = 30.0,
+                 database_id: str | UUID | None = None, transport: httpx.BaseTransport | None = None,
                  max_json_bytes: int = 16 * 1024**2, max_arrow_read_bytes: int = 64 * 1024**2):
         try:
             url = httpx.URL(base_url)
@@ -86,8 +104,25 @@ class Client:
             raise ValidationError("base_url must be an absolute HTTP or HTTPS URL") from exc
         if url.scheme not in ("http", "https") or not url.host or url.username or url.password or url.query or url.fragment:
             raise ValidationError("base_url must be HTTP(S), with no credentials, query, or fragment")
-        if not isinstance(token, str) or not token or any(ord(c) < 33 or ord(c) > 126 for c in token):
-            raise ValidationError("a nonempty ASCII bearer token without whitespace is required")
+        if username is not None:
+            raise ValidationError(
+                "HTTP Basic username mode was removed; use an OAuth access token or token_provider"
+            )
+        if token_provider is not None:
+            if token is not None or not callable(token_provider):
+                raise ValidationError(
+                    "supply either a direct Bearer token or a callable token_provider"
+                )
+            try:
+                loopback = ipaddress.ip_address(url.host).is_loopback
+            except ValueError:
+                loopback = url.host == "localhost"
+            if url.scheme != "https" and not loopback:
+                raise ValidationError(
+                    "token_provider requires HTTPS or an explicit loopback URL"
+                )
+        else:
+            _bearer_token(token)
         if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
             raise ValidationError("timeout must be positive finite seconds")
         if not isinstance(verify, (bool, ssl.SSLContext)):
@@ -103,7 +138,9 @@ class Client:
         self._streams = weakref.WeakSet()
         self._cleanup = CleanupQueue()
         self._closed = False
-        self._http = httpx.Client(base_url=str(url).rstrip("/") + "/", headers={"Authorization": f"Bearer {token}"},
+        self._token_provider = token_provider
+        headers = {"Authorization": f"Bearer {token}"} if token_provider is None else {}
+        self._http = httpx.Client(base_url=str(url).rstrip("/") + "/", headers=headers,
                                   verify=verify, timeout=timeout, transport=transport, follow_redirects=False)
 
     def __enter__(self) -> "Client":
@@ -146,9 +183,21 @@ class Client:
         if self._closed:
             raise TransportError("client is closed", collection_id=budget.collection_id, operation_id=budget.operation_id)
         self._cleanup.drain()
+        budget.check()
+        headers = {"Accept": accept, "Accept-Encoding": JSON_ACCEPT_ENCODING}
+        if self._token_provider is not None:
+            try:
+                headers["Authorization"] = "Bearer " + _bearer_token(
+                    self._token_provider()
+                )
+            except Exception:
+                raise TransportError(
+                    "token provider failed; no API request was sent",
+                    collection_id=budget.collection_id,
+                    operation_id=budget.operation_id,
+                ) from None
         remaining = budget.check()
         timeout = self._timeout if remaining is None else min(self._timeout, remaining)
-        headers = {"Accept": accept, "Accept-Encoding": JSON_ACCEPT_ENCODING}
         if accept == "application/vnd.apache.arrow.stream":
             headers["Accept-Encoding"] = "identity"
         if body is not None:
@@ -165,7 +214,7 @@ class Client:
                 raise
             if response.is_redirect:
                 response.close()
-                raise ProtocolError("redirects are disabled to preserve endpoint and bearer identity")
+                raise ProtocolError("redirects are disabled to preserve endpoint and authentication identity")
             return response
         except httpx.HTTPError as exc:
             raise translate_transport(exc, budget) from exc

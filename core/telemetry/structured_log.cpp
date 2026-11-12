@@ -4,13 +4,16 @@
 #include <quill/Frontend.h>
 #include <quill/Logger.h>
 #include <quill/sinks/JsonSink.h>
+#include <quill/sinks/RotatingJsonFileSink.h>
 
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <cstdio>
 #include <fcntl.h>
+#include <filesystem>
 #include <mutex>
 #include <pthread.h>
 #include <signal.h>
@@ -172,6 +175,8 @@ const char* GetEventName(ELogEvent event) noexcept
             return "recovery_required";
         case ELogEvent::LoggerHealth:
             return "logger_health";
+        case ELogEvent::OperationCompleted:
+            return "operation_completed";
     }
     return "request_completed";
 }
@@ -202,6 +207,34 @@ const char* GetOperationName(ELogOperation operation) noexcept
         case ELogOperation::Auth:
             return "auth";
         case ELogOperation::Other:
+            return "other";
+        case ELogOperation::Databases:
+            return "databases";
+        case ELogOperation::Capabilities:
+            return "capabilities";
+        case ELogOperation::Readiness:
+            return "readiness";
+        case ELogOperation::OpenStore:
+            return "open_store";
+        case ELogOperation::CloseStore:
+            return "close_store";
+        case ELogOperation::Reconcile:
+            return "reconcile";
+        case ELogOperation::CreateCollection:
+            return "create_collection";
+        case ELogOperation::Schema:
+            return "schema";
+        case ELogOperation::ScanOpen:
+            return "scan_open";
+        case ELogOperation::ScanNext:
+            return "scan_next";
+        case ELogOperation::ScanCancel:
+            return "scan_cancel";
+        case ELogOperation::Stats:
+            return "stats";
+        case ELogOperation::Files:
+            return "files";
+        case ELogOperation::Count:
             return "other";
     }
     return "other";
@@ -234,7 +267,79 @@ const char* GetLevel(const TLogEvent& event) noexcept
     return event.Outcome == ELogOutcome::Ok ? "info" : "warn";
 }
 
+constexpr std::array<const char*, 10> LogPhaseNames{"none",
+    "validation",
+    "binding",
+    "data",
+    "metadata",
+    "catalog_transaction",
+    "catalog_commit",
+    "recording_failure",
+    "reconciling",
+    "complete"};
+constexpr std::array<const char*, 14> LogErrorNames{"none",
+    "INVALID_ARGUMENT",
+    "RESOURCE_EXHAUSTED",
+    "DEADLINE_EXCEEDED",
+    "CANCELLED",
+    "IO_ERROR",
+    "CORRUPTION",
+    "RECOVERY_REQUIRED",
+    "OPERATION_CONFLICT",
+    "PRECONDITION_FAILED",
+    "DEPENDENCY_UNAVAILABLE",
+    "SCHEMA_MISMATCH",
+    "INTERNAL",
+    "OTHER"};
+thread_local TStructuredLogger* ContextLogger = nullptr;
+thread_local std::uint64_t ContextRequestID = 0;
+
 } // namespace
+
+const char* LogOperationName(ELogOperation operation) noexcept
+{
+    return GetOperationName(operation);
+}
+
+ELogError LogErrorCode(std::string_view code) noexcept
+{
+    if (code.empty()) {
+        return ELogError::None;
+    }
+    for (std::size_t index = 1; index < LogErrorNames.size(); ++index) {
+        if (code == LogErrorNames[index]) {
+            return static_cast<ELogError>(index);
+        }
+    }
+    return ELogError::Other;
+}
+
+TScopedLogContext::TScopedLogContext(TStructuredLogger* logger, std::uint64_t requestID) noexcept
+    : PreviousLogger_(ContextLogger)
+    , PreviousRequestID_(ContextRequestID)
+    , RequestID_(logger != nullptr && requestID == 0 ? logger->NewRequestID() : requestID)
+{
+    ContextLogger = logger;
+    if (logger != nullptr) {
+        // Keep rejected callers visible through TryLog's existing drop counters.
+        logger->RegisterProducerThread();
+    }
+    ContextRequestID = RequestID_;
+}
+
+TScopedLogContext::~TScopedLogContext()
+{
+    ContextLogger = PreviousLogger_;
+    ContextRequestID = PreviousRequestID_;
+}
+
+void LogCurrent(TLogEvent event) noexcept
+{
+    if (ContextLogger != nullptr) {
+        event.RequestID = ContextRequestID;
+        ContextLogger->TryLog(event);
+    }
+}
 
 struct TStructuredLogger::TImpl
 {
@@ -243,7 +348,7 @@ struct TStructuredLogger::TImpl
     quill::LoggerImpl<TFrontendOptions>* Logger = nullptr;
     std::atomic<bool> Stopped{false};
     std::atomic<std::uint64_t> InFlight{0};
-    std::atomic<std::uint64_t> Sequence{0};
+    std::array<std::atomic<std::uint64_t>, 2> Sequences{};
     std::atomic<std::uint64_t> RequestID{0};
     // One packed monotonic second/count permits a bounded CAS admission attempt.
     std::atomic<std::uint64_t> SuccessWindow{0};
@@ -251,12 +356,13 @@ struct TStructuredLogger::TImpl
         static_cast<std::uint64_t>(std::chrono::system_clock::now().time_since_epoch().count());
 
     explicit TImpl(TLogOptions options)
-        : Options(options)
+        : Options(std::move(options))
     { }
 
-    bool AdmitSuccess() noexcept
+    bool AdmitSuccess(ELogEvent event) noexcept
     {
-        if (Sequence.fetch_add(1, std::memory_order_relaxed) % Options.SuccessSampleEvery != 0) {
+        const auto index = event == ELogEvent::OperationCompleted ? 1U : 0U;
+        if (Sequences[index].fetch_add(1, std::memory_order_relaxed) % Options.SuccessSampleEvery != 0) {
             Count(*Stats, &TAtomicStats::Sampled);
             return false;
         }
@@ -319,7 +425,23 @@ std::expected<std::unique_ptr<TStructuredLogger>, std::error_code> TStructuredLo
         if (masked) {
             ::pthread_sigmask(SIG_SETMASK, &previous, nullptr);
         }
-        auto sink = TFrontend::create_or_get_sink<TStderrJsonSink>("glamdb.stderr");
+        std::shared_ptr<quill::Sink> sink;
+        if (options.Directory.empty()) {
+            sink = TFrontend::create_or_get_sink<TStderrJsonSink>("glamdb.stderr");
+        } else {
+            const std::filesystem::path directory(options.Directory);
+            if (std::filesystem::create_directories(directory)) {
+                std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
+            }
+            quill::RotatingFileSinkConfig config;
+            config.set_open_mode('a');
+            config.set_rotation_max_file_size(MaxFileBytes);
+            config.set_max_backup_files(MaxBackupFiles);
+            config.set_overwrite_rolled_files(true);
+            config.set_write_buffer_size(0);
+            sink = TFrontend::create_or_get_sink<quill::RotatingJsonFileSink>((directory / "glamdb.jsonl").string(),
+                config);
+        }
         impl->Logger = TFrontend::create_or_get_logger("glamdb",
             std::move(sink),
             quill::PatternFormatterOptions{"", "%H:%M:%S.%Qns", quill::Timezone::GmtTime},
@@ -368,7 +490,9 @@ bool TStructuredLogger::TryLog(const TLogEvent& event) noexcept
         Count(*impl.Stats, &TAtomicStats::DroppedUnregistered);
         return false;
     }
-    if (event.Event == ELogEvent::RequestCompleted && event.Outcome == ELogOutcome::Ok && !impl.AdmitSuccess()) {
+    if ((event.Event == ELogEvent::RequestCompleted || event.Event == ELogEvent::OperationCompleted) &&
+        event.Outcome == ELogOutcome::Ok && !impl.AdmitSuccess(event.Event))
+    {
         return false;
     }
     try {
@@ -381,7 +505,7 @@ bool TStructuredLogger::TryLog(const TLogEvent& event) noexcept
         static constexpr quill::MacroMetadata Metadata{"structured_log:0",
             "TryLog",
             "{schema} {service} {event} {level} {operation} {outcome} {request_id} {duration_us} {row_count} "
-            "{status_code}",
+            "{status_code} {byte_count} {phase} {error_code}",
             nullptr,
             quill::LogLevel::Info,
             quill::MacroMetadata::Event::Log};
@@ -395,7 +519,14 @@ bool TStructuredLogger::TryLog(const TLogEvent& event) noexcept
             requestID,
             event.DurationUs,
             event.RowCount,
-            event.StatusCode);
+            event.StatusCode,
+            event.ByteCount,
+            LogPhaseNames[static_cast<std::size_t>(event.Phase) < LogPhaseNames.size()
+                    ? static_cast<std::size_t>(event.Phase)
+                    : 0],
+            LogErrorNames[static_cast<std::size_t>(event.ErrorCode) < LogErrorNames.size()
+                    ? static_cast<std::size_t>(event.ErrorCode)
+                    : LogErrorNames.size() - 1]);
         Count(*impl.Stats, admitted ? &TAtomicStats::Accepted : &TAtomicStats::DroppedFull);
         return admitted;
     } catch (...) {
@@ -447,6 +578,7 @@ TLogScope::TLogScope(TStructuredLogger* logger, ELogOperation operation, std::ui
     , Operation_(operation)
     , RequestID_(requestID)
     , Previous_(Current_)
+    , Context_(logger, requestID)
 {
     Current_ = this;
 }

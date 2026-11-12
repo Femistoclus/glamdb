@@ -1,0 +1,777 @@
+{
+  "rule_files": [
+    "../generated/states.yml"
+  ],
+  "evaluation_interval": "15s",
+  "tests": [
+    {
+      "name": "healthy -> down -> missing must never resolve as OK",
+      "interval": "15s",
+      "input_series": [
+        {
+          "series": "up{job=\"glamdb-gateway\",cluster=\"local\",service=\"glamdb\"}",
+          "values": "1+0x11 0+0x7 stale _x20"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "max(glamdb_alert_state{check=\"gateway_availability\"})",
+          "eval_time": "2m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "expr": "count(ALERTS{check=\"gateway_availability\",state=\"OK\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "2m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 1
+            }
+          ]
+        },
+        {
+          "expr": "max(glamdb_alert_state{check=\"gateway_availability\"})",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 2
+            }
+          ]
+        },
+        {
+          "expr": "count(ALERTS{check=\"gateway_availability\",state=\"ALARM\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 1
+            }
+          ]
+        },
+        {
+          "expr": "max(glamdb_alert_state{check=\"gateway_availability\"})",
+          "eval_time": "5m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 3
+            }
+          ]
+        },
+        {
+          "expr": "count(ALERTS{check=\"gateway_availability\",state=\"OK\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "5m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "expr": "count(ALERTS{check=\"gateway_availability\",state=\"NODATA\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "7m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 1
+            }
+          ]
+        },
+        {
+          "expr": "count(glamdb_alert_state)",
+          "eval_time": "7m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 32
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "fresh zero traffic is healthy for ratios but latency is NODATA",
+      "interval": "15s",
+      "input_series": [
+        {
+          "series": "up{job=\"glamdb-gateway\",cluster=\"local\",service=\"glamdb\"}",
+          "values": "1+0x30"
+        },
+        {
+          "series": "glamdb_gateway_http_requests_total{job=\"glamdb-gateway\",cluster=\"local\",service=\"glamdb\",route=\"metadata\",method=\"GET\",status_class=\"2xx\"}",
+          "values": "100+0x30"
+        },
+        {
+          "series": "glamdb:http_requests:rate5m{cluster=\"local\",service=\"glamdb\"}",
+          "values": "0+0x30"
+        },
+        {
+          "series": "glamdb:http_errors:rate5m{cluster=\"local\",service=\"glamdb\"}",
+          "values": "0+0x30"
+        },
+        {
+          "series": "glamdb:http_request_duration_seconds:p95{cluster=\"local\",service=\"glamdb\"}",
+          "values": "NaN+0x30"
+        },
+        {
+          "series": "glamdb_gateway_http_request_duration_seconds_bucket{job=\"glamdb-gateway\",cluster=\"local\",service=\"glamdb\",route=\"metadata\",le=\"+Inf\"}",
+          "values": "100+0x30"
+        },
+        {
+          "series": "glamdb_gateway_http_request_duration_seconds_count{job=\"glamdb-gateway\",cluster=\"local\",service=\"glamdb\",route=\"metadata\"}",
+          "values": "100+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "max(glamdb_alert_state{check=\"http_error_ratio\"})",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "expr": "max(glamdb_alert_state{check=\"http_latency_p95\"})",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 3
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "stale raw data cannot be hidden by freshly evaluated recordings",
+      "interval": "15s",
+      "input_series": [
+        {
+          "series": "up{job=\"glamdb-gateway\",cluster=\"local\",service=\"glamdb\"}",
+          "values": "1+0x30"
+        },
+        {
+          "series": "glamdb_gateway_http_requests_total{job=\"glamdb-gateway\",cluster=\"local\",service=\"glamdb\",route=\"metadata\",method=\"GET\",status_class=\"2xx\"}",
+          "values": "100+0x8 _x30"
+        },
+        {
+          "series": "glamdb:http_requests:rate5m{cluster=\"local\",service=\"glamdb\"}",
+          "values": "1+0x30"
+        },
+        {
+          "series": "glamdb:http_errors:rate5m{cluster=\"local\",service=\"glamdb\"}",
+          "values": "0+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "max(glamdb_alert_state{check=\"http_error_ratio\"})",
+          "eval_time": "2m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "expr": "max(glamdb_alert_state{check=\"http_error_ratio\"})",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 3
+            }
+          ]
+        },
+        {
+          "expr": "count(ALERTS{check=\"http_error_ratio\",state=\"OK\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "removed target and empty startup inventory are NODATA",
+      "interval": "15s",
+      "input_series": [],
+      "promql_expr_test": [
+        {
+          "expr": "max(glamdb_alert_state{check=\"gateway_availability\"})",
+          "eval_time": "3m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 3
+            }
+          ]
+        },
+        {
+          "expr": "max(glamdb_alert_state{check=\"admin_anomalies\"})",
+          "eval_time": "3m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 3
+            }
+          ]
+        },
+        {
+          "expr": "count(glamdb_alert_state)",
+          "eval_time": "3m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 32
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "strict threshold boundaries and minimum traffic",
+      "interval": "15s",
+      "input_series": [
+        {
+          "series": "up{job=\"glamdb-gateway\",cluster=\"local\",service=\"glamdb\"}",
+          "values": "1+0x40"
+        },
+        {
+          "series": "glamdb_gateway_http_requests_total{job=\"glamdb-gateway\",cluster=\"local\",service=\"glamdb\",route=\"metadata\",method=\"GET\",status_class=\"2xx\"}",
+          "values": "100+0x40"
+        },
+        {
+          "series": "glamdb:http_requests:rate5m{cluster=\"local\",service=\"glamdb\"}",
+          "values": "1+0x40"
+        },
+        {
+          "series": "glamdb:http_errors:rate5m{cluster=\"local\",service=\"glamdb\"}",
+          "values": "0.01+0x11 0.05+0x28"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "max(glamdb_alert_state{check=\"http_error_ratio\"})",
+          "eval_time": "2m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 1
+            }
+          ]
+        },
+        {
+          "expr": "max(glamdb_alert_state{check=\"http_error_ratio\"})",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 2
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "low traffic errors do not page",
+      "interval": "15s",
+      "input_series": [
+        {
+          "series": "up{job=\"glamdb-gateway\",cluster=\"local\",service=\"glamdb\"}",
+          "values": "1+0x30"
+        },
+        {
+          "series": "glamdb_gateway_http_requests_total{job=\"glamdb-gateway\",cluster=\"local\",service=\"glamdb\",route=\"metadata\",method=\"GET\",status_class=\"2xx\"}",
+          "values": "100+0x30"
+        },
+        {
+          "series": "glamdb:http_requests:rate5m{cluster=\"local\",service=\"glamdb\"}",
+          "values": "0.1+0x30"
+        },
+        {
+          "series": "glamdb:http_errors:rate5m{cluster=\"local\",service=\"glamdb\"}",
+          "values": "0.1+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "max(glamdb_alert_state{check=\"http_error_ratio\"})",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "known target up with missing histogram is not fabricated zero traffic",
+      "interval": "15s",
+      "input_series": [
+        {
+          "series": "up{job=\"glamdb-gateway\",cluster=\"local\",service=\"glamdb\"}",
+          "values": "1+0x30"
+        },
+        {
+          "series": "glamdb:http_requests:rate5m{cluster=\"local\",service=\"glamdb\"}",
+          "values": "0+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "max(glamdb_alert_state{check=\"http_error_ratio\"})",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 3
+            }
+          ]
+        },
+        {
+          "expr": "max(glamdb_alert_state{check=\"http_latency_p95\"})",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 3
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "short spike is ALARM state but does not pass notification hold",
+      "interval": "15s",
+      "input_series": [
+        {
+          "series": "up{job=\"glamdb-gateway\",cluster=\"local\",service=\"glamdb\"}",
+          "values": "1+0x11 0 1+0x20"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "max(glamdb_alert_state{check=\"gateway_availability\"})",
+          "eval_time": "3m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 2
+            }
+          ]
+        },
+        {
+          "expr": "count(ALERTS{check=\"gateway_availability\",state=\"ALARM\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "3m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "expr": "max(glamdb_alert_state{check=\"gateway_availability\"})",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "stale native measurement stays NODATA despite a fresh private endpoint scrape",
+      "interval": "15s",
+      "input_series": [
+        {
+          "series": "up{job=\"glamdb-core\",cluster=\"local\",service=\"glamdb\"}",
+          "values": "1+0x30"
+        },
+        {
+          "series": "glamdb_admission_pending_calls{cluster=\"local\",service=\"glamdb\",service_instance=\"core\"}",
+          "values": "100+0x8 _x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "max(glamdb_alert_state{check=\"admission_backlog\"})",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 3
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "fresh container statistics do not depend on the scrape-time last_seen metric",
+      "interval": "15s",
+      "input_series": [
+        {
+          "series": "up{job=\"loki\",cluster=\"local\"}",
+          "values": "1+0x30"
+        },
+        {
+          "series": "loki_ingester_wal_disk_usage_percent{job=\"loki\",cluster=\"local\"}",
+          "values": "0.93+0x30"
+        },
+        {
+          "series": "container_memory_usage_bytes{cluster=\"local\",namespace=\"default\",pod=\"glamdb\",container=\"core\"}",
+          "values": "1000000+0x8 _x30"
+        },
+        {
+          "series": "up{job=\"cadvisor\",cluster=\"local\"}",
+          "values": "1+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "max(glamdb_alert_state{check=\"loki_wal_disk_usage\"})",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 2
+            }
+          ]
+        },
+        {
+          "expr": "max(glamdb_alert_state{check=\"pod_memory\"})",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 3
+            }
+          ]
+        },
+        {
+          "expr": "max(glamdb_alert_state{check=\"pod_memory\"})",
+          "eval_time": "1m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a fresh cAdvisor scrape clock cannot make removed container statistics current",
+      "interval": "15s",
+      "input_series": [
+        {
+          "series": "up{job=\"cadvisor\",cluster=\"local\"}",
+          "values": "1+0x30"
+        },
+        {
+          "series": "container_memory_usage_bytes{cluster=\"local\",namespace=\"default\",pod=\"glamdb\",container=\"core\"}",
+          "values": "1000000+0x8 _x30"
+        },
+        {
+          "series": "container_last_seen{cluster=\"local\",namespace=\"default\",pod=\"glamdb\",container=\"core\"}",
+          "values": "0+15x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "max(glamdb_alert_state{check=\"pod_memory\"})",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 3
+            }
+          ]
+        },
+        {
+          "expr": "count(ALERTS{check=\"pod_memory\",state=\"OK\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "core scrape stays healthy while engine readiness closes then target disappears",
+      "interval": "15s",
+      "input_series": [
+        {
+          "series": "up{job=\"glamdb-core\",cluster=\"local\",service=\"glamdb\"}",
+          "values": "1+0x19 0+0x7 stale _x20"
+        },
+        {
+          "series": "glamdb_server_ready{cluster=\"local\",service=\"glamdb\",service_instance=\"core\"}",
+          "values": "1+0x11 0+0x15 stale _x20"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "max(glamdb_alert_state{check=\"core_availability\"})",
+          "eval_time": "2m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "expr": "max(glamdb_alert_state{check=\"core_readiness\"})",
+          "eval_time": "2m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "expr": "count(ALERTS{check=\"core_readiness\",state=\"OK\",notify_nodata=\"true\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "2m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 1
+            }
+          ]
+        },
+        {
+          "expr": "max(glamdb_alert_state{check=\"core_availability\"})",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "expr": "max(glamdb_alert_state{check=\"core_readiness\"})",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 2
+            }
+          ]
+        },
+        {
+          "expr": "count(ALERTS{check=\"core_readiness\",state=\"ALARM\",notify_nodata=\"true\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 1
+            }
+          ]
+        },
+        {
+          "expr": "max(glamdb_alert_state{check=\"core_availability\"})",
+          "eval_time": "6m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 2
+            }
+          ]
+        },
+        {
+          "expr": "max(glamdb_alert_state{check=\"core_readiness\"})",
+          "eval_time": "6m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 3
+            }
+          ]
+        },
+        {
+          "expr": "count(ALERTS{check=\"core_availability\",state=\"ALARM\",notify_nodata=\"true\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "6m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 1
+            }
+          ]
+        },
+        {
+          "expr": "count(ALERTS{check=\"core_readiness\",state=\"OK\",notify_nodata=\"true\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "6m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "expr": "max(glamdb_alert_state{check=\"core_availability\"})",
+          "eval_time": "8m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 3
+            }
+          ]
+        },
+        {
+          "expr": "max(glamdb_alert_state{check=\"core_readiness\"})",
+          "eval_time": "8m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 3
+            }
+          ]
+        },
+        {
+          "expr": "count(ALERTS{check=\"core_availability\",state=\"NODATA\",notify_nodata=\"true\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "9m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 1
+            }
+          ]
+        },
+        {
+          "expr": "count(ALERTS{check=\"core_readiness\",state=\"NODATA\",notify_nodata=\"true\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "9m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "fresh core scrape cannot refresh stale engine readiness",
+      "interval": "15s",
+      "input_series": [
+        {
+          "series": "up{job=\"glamdb-core\",cluster=\"local\",service=\"glamdb\"}",
+          "values": "1+0x40"
+        },
+        {
+          "series": "glamdb_server_ready{cluster=\"local\",service=\"glamdb\",service_instance=\"core\"}",
+          "values": "1+0x8 _x35"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "max(glamdb_alert_state{check=\"core_readiness\"})",
+          "eval_time": "2m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "expr": "max(glamdb_alert_state{check=\"core_readiness\"})",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 3
+            }
+          ]
+        },
+        {
+          "expr": "max(glamdb_alert_state{check=\"core_availability\"})",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "expr": "count(ALERTS{check=\"core_readiness\",state=\"OK\",notify_nodata=\"true\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "4m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "core target without readiness instrumentation is not write ready",
+      "interval": "15s",
+      "input_series": [
+        {
+          "series": "up{job=\"glamdb-core\",cluster=\"local\",service=\"glamdb\"}",
+          "values": "1+0x20"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "max(glamdb_alert_state{check=\"core_availability\"})",
+          "eval_time": "3m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "expr": "max(glamdb_alert_state{check=\"core_readiness\"})",
+          "eval_time": "3m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 3
+            }
+          ]
+        },
+        {
+          "expr": "count(ALERTS{check=\"core_readiness\",state=\"NODATA\",notify_nodata=\"true\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "3m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

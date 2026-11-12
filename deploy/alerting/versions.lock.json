@@ -1,0 +1,20 @@
+{
+  "alertmanager": {
+    "version": "0.35.0",
+    "image": "prom/alertmanager:v0.35.0@sha256:e638797febd034838eca8b98cdbd46f951e9bf7f178777aa8669167406a9946c",
+    "darwin_arm64_archive_sha256": "06c0700ebdee77688eddc12e1c71c52e88efbb348f832ecb7a9ff699f9106fba",
+    "source": "https://github.com/prometheus/alertmanager/releases/tag/v0.35.0",
+    "license": "Apache-2.0",
+    "source_revision": "8cf67a8e75004bad6c3c6bacc829945cf8a3ee65",
+    "license_source": "https://github.com/prometheus/alertmanager/blob/v0.35.0/LICENSE",
+    "telegram_source": "https://github.com/prometheus/alertmanager/blob/v0.35.0/notify/telegram/telegram.go",
+    "linux_amd64_archive_sha256": "6c7752a903c40c8a749e0b29df9240437e4fbb8228068d0af8807377db32addd"
+  },
+  "prometheus": {
+    "image": "prom/prometheus:v3.13.5@sha256:aafa9d694e6a883c02db516d9f6e5b84e14195f49a2a6456a4cca815edda72b9",
+    "source": "https://github.com/prometheus/prometheus/releases/tag/v3.13.5",
+    "version": "3.13.5",
+    "license": "Apache-2.0",
+    "darwin_arm64_archive_sha256": "909a07556df18afccdc8eb2c80c0b14f347b631b0e34c95bcabfd6d6a0080c92"
+  }
+}

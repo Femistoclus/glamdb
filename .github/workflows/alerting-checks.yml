@@ -1,0 +1,60 @@
+name: Alerting checks
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  alerting:
+    name: Four-state rules and delivery integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the proposed change
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - name: Test deployment ownership, storage guards, and configuration
+        run: python3 -m unittest discover -s tools/observability/tests -v
+      - name: Extract native validators from digest-pinned images
+        run: |
+          set -euo pipefail
+          tool_dir="$RUNNER_TEMP/glamdb-alerting"
+          mkdir -p "$tool_dir"
+          for component in prometheus alertmanager; do
+            image="$(python3 -c 'import json,sys; print(json.load(open("deploy/alerting/versions.lock.json"))[sys.argv[1]]["image"])' "$component")"
+            container_id="$(docker create "$image")"
+            trap 'docker rm --force "$container_id" >/dev/null 2>&1 || true' EXIT
+            docker cp "$container_id:/bin/$component" "$tool_dir/$component"
+            if [[ "$component" == prometheus ]]; then
+              docker cp "$container_id:/bin/promtool" "$tool_dir/promtool"
+            else
+              docker cp "$container_id:/bin/amtool" "$tool_dir/amtool"
+            fi
+            docker rm "$container_id"
+            trap - EXIT
+          done
+      - name: Test real Prometheus and native Alertmanager Telegram delivery
+        run: |
+          tool_dir="$RUNNER_TEMP/glamdb-alerting"
+          python3 tools/alerting/check.py \
+            --promtool "$tool_dir/promtool" --prometheus "$tool_dir/prometheus" \
+            --alertmanager "$tool_dir/alertmanager" --amtool "$tool_dir/amtool"

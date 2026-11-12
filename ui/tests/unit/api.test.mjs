@@ -58,6 +58,67 @@ test('token is a header, never part of URL, and HTTP errors preserve code', asyn
     assert.equal(received.options.headers.Authorization, 'Bearer private-token');
     assert.ok(!received.url.includes('private-token'));
 });
+test('gateway requests use browser credentials without an Authorization header', async () => {
+    let received;
+    const client = new WorkbenchAPI(
+        'https://workbench.example/databases/alpha',
+        'must-not-be-sent',
+        async (url, options) => {
+            received = { url, options };
+            return Response.json({ collections: [] });
+        },
+        undefined,
+        { gateway: true },
+    );
+    await client.json('/v0/collections', {
+        headers: { authorization: 'must-not-be-sent-either' },
+    });
+    assert.equal(received.url, 'https://workbench.example/databases/alpha/v0/collections');
+    assert.equal(received.options.credentials, 'same-origin');
+    assert.equal(received.options.cache, 'no-store');
+    assert.equal(received.options.redirect, 'error');
+    assert.deepEqual(
+        Object.keys(received.options.headers).filter(
+            (name) => name.toLowerCase() === 'authorization',
+        ),
+        [],
+    );
+    assert.equal(client.token, '');
+});
+test('closing a client aborts requests and rejects a late successful response', async () => {
+    let finish, signal;
+    const client = new WorkbenchAPI('http://localhost', 'token', async (_url, options) => {
+        signal = options.signal;
+        return new Promise((resolve) => (finish = resolve));
+    });
+    const pending = client.json('/v0/collections');
+    client.close();
+    assert.equal(signal.aborted, true);
+    finish(Response.json({ collections: [{ name: 'private' }] }));
+    await assert.rejects(pending, { name: 'AbortError' });
+    await assert.rejects(client.json('/v0/collections'), { name: 'AbortError' });
+});
+test('closing a client during body streaming cannot publish a completed export', async () => {
+    let stream;
+    const client = new WorkbenchAPI(
+        'http://localhost',
+        'token',
+        async () =>
+            new Response(
+                new ReadableStream({
+                    start(controller) {
+                        stream = controller;
+                    },
+                }),
+            ),
+    );
+    const pending = client.arrow('/v0/collections/a/scan', {});
+    await Promise.resolve();
+    client.close();
+    stream.enqueue(new Uint8Array([1, 2, 3]));
+    stream.close();
+    await assert.rejects(pending, { name: 'AbortError' });
+});
 test('unknown outcome remains unresolved even with HTTP503', async () => {
     const client = new WorkbenchAPI(
         'http://localhost',
@@ -191,4 +252,53 @@ test('Arrow downloads forward cancellation to the real HTTP request', async () =
             { name: 'AbortError' },
         );
     });
+});
+
+test('unsafe gateway requests use only the current readable CSRF cookie', async () => {
+    const oldDocument = globalThis.document;
+    globalThis.document = { cookie: '__Host-glamdb-csrf=csrf-cookie-value; other=unrelated' };
+    let received;
+    try {
+        const client = new WorkbenchAPI(
+            'https://workbench.example/databases/00112233-4455-6677-8899-aabbccddeeff',
+            '',
+            async (url, options) => {
+                received = { url, options };
+                return Response.json({});
+            },
+            undefined,
+            { gateway: true },
+        );
+        await client.json('/v0/collections', {
+            method: 'POST',
+            body: {},
+            headers: { authorization: 'forged', 'x-csrftoken': 'forged' },
+        });
+        const headers = new Headers(received.options.headers);
+        assert.equal(headers.get('X-CSRFToken'), 'csrf-cookie-value');
+        assert.equal(headers.has('Authorization'), false);
+        assert.equal(received.options.credentials, 'same-origin');
+        assert.equal(received.options.redirect, 'error');
+        assert.equal(received.options.body, '{}');
+    } finally {
+        if (oldDocument === undefined) delete globalThis.document;
+        else globalThis.document = oldDocument;
+    }
+});
+
+test('gateway mode rejects a cross-origin destination before exposing a CSRF cookie', () => {
+    const previous = globalThis.location;
+    globalThis.location = { origin: 'https://workbench.example' };
+    try {
+        assert.throws(
+            () =>
+                new WorkbenchAPI('https://elsewhere.example', '', async () => {}, undefined, {
+                    gateway: true,
+                }),
+            /same.origin/i,
+        );
+    } finally {
+        if (previous === undefined) delete globalThis.location;
+        else globalThis.location = previous;
+    }
 });

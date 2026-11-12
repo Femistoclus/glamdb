@@ -1,0 +1,226 @@
+name: glamdb-access
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: '3'
+    mode: non-blocking
+    max-buffer-size: 1m
+
+services:
+  postgres:
+    image: postgres:18.6@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres.password
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ${GLAMDB_PRIVATE_DIR:?set GLAMDB_PRIVATE_DIR}/postgres.password:/run/secrets/postgres.password:ro
+    networks: [identity]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U postgres -d postgres']
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    mem_limit: 512m
+    pids_limit: 128
+    restart: unless-stopped
+    logging: *logging
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.2@sha256:723b1d6e254c0fc96d5cffec860c7e0744d6a3277822b865bb538cf891575e41
+    command: [start, --db=postgres]
+    env_file:
+      - ${GLAMDB_PRIVATE_DIR:?set GLAMDB_PRIVATE_DIR}/keycloak.env
+    environment:
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_HTTP_ENABLED: 'true'
+      KC_HOSTNAME: https://${GLAMDB_IDP_HOST:?set GLAMDB_IDP_HOST}
+      KC_HOSTNAME_ADMIN: https://keycloak-admin:18080
+      KC_HOSTNAME_STRICT: 'true'
+      KC_PROXY_HEADERS: xforwarded
+      KC_PROXY_TRUSTED_ADDRESSES: 172.30.82.2/32
+      KC_HEALTH_ENABLED: 'true'
+      KC_METRICS_ENABLED: 'true'
+      KC_CACHE: local
+      JAVA_OPTS_KC_HEAP: -Xms256m -Xmx768m
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # The official Keycloak image has Bash but deliberately omits curl.
+      test: [CMD, bash, -ec, "exec 3<>/dev/tcp/127.0.0.1/9000; printf 'HEAD /health/ready HTTP/1.0\\r\\n\\r\\n' >&3; IFS= read -r status <&3; [[ \"$$status\" == *' 200 '* ]]"]
+      interval: 10s
+      timeout: 3s
+      start_period: 90s
+      retries: 18
+    networks: [identity]
+    mem_limit: 1280m
+    pids_limit: 256
+    restart: unless-stopped
+    logging: *logging
+
+  cerbos:
+    image: ghcr.io/cerbos/cerbos:0.57.0@sha256:e5e3b150b3cb0090975605254f255164567d67e233634199fb20972e3eaff300
+    command: [server, --config=/config/cerbos.yaml]
+    user: ${GLAMDB_UID:?set GLAMDB_UID}:${GLAMDB_GID:?set GLAMDB_GID}
+    volumes:
+      - ./cerbos.yaml:/config/cerbos.yaml:ro
+      - ./policies:/policies:ro
+    networks: [control]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    pids_limit: 64
+    restart: unless-stopped
+    logging: *logging
+
+  gateway:
+    image: glamdb-access-gateway:local
+    build:
+      context: ../..
+      dockerfile: deploy/access/Dockerfile
+    user: ${GLAMDB_UID:?set GLAMDB_UID}:${GLAMDB_GID:?set GLAMDB_GID}
+    command: [python, -m, apps.workbench_access, --config, /etc/glamdb/gateway.json, --host, 0.0.0.0, --port, '8080', --operator-socket, /state/operator.sock]
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      cerbos:
+        condition: service_started
+      caddy:
+        condition: service_started
+    volumes:
+      - ${GLAMDB_PRIVATE_DIR:?set GLAMDB_PRIVATE_DIR}/gateway.json:/etc/glamdb/gateway.json:ro
+      - ${GLAMDB_PRIVATE_DIR:?set GLAMDB_PRIVATE_DIR}/secrets:/run/secrets/glamdb:ro
+      - ${GLAMDB_PRIVATE_DIR:?set GLAMDB_PRIVATE_DIR}/pki:/etc/glamdb/pki:ro
+      - ${GLAMDB_STATE_DIR:?set GLAMDB_STATE_DIR}:/state
+      - ${GLAMDB_UI_DIR:?set GLAMDB_UI_DIR}:/srv/glamdb/ui:ro
+    networks:
+      ingress: {}
+      control: {}
+      observability:
+        aliases: [glamdb-gateway]
+    read_only: true
+    tmpfs: [/tmp:size=64m,mode=1777]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    init: true
+    stop_grace_period: 45s
+    mem_limit: 512m
+    pids_limit: 128
+    restart: unless-stopped
+    logging: *logging
+
+  session-store:
+    image: valkey/valkey:9.1.3-alpine3.24@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b
+    command: [valkey-server, /config/valkey.conf]
+    user: ${GLAMDB_UID:?set GLAMDB_UID}:${GLAMDB_GID:?set GLAMDB_GID}
+    volumes:
+      - ./valkey.conf:/config/valkey.conf:ro
+      - ${GLAMDB_PRIVATE_DIR:?set GLAMDB_PRIVATE_DIR}/secrets/session-store.acl:/run/secrets/glamdb/session-store.acl:ro
+      - ${GLAMDB_PRIVATE_DIR:?set GLAMDB_PRIVATE_DIR}/secrets/session-store.password:/run/secrets/glamdb/session-store.password:ro
+    networks: [session]
+    healthcheck:
+      test: [CMD-SHELL, 'VALKEYCLI_AUTH="$$(cat /run/secrets/glamdb/session-store.password)" valkey-cli --no-auth-warning --user oauth2-proxy -e ping | grep -qx PONG']
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    read_only: true
+    tmpfs: [/data:size=96m,mode=1777]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ulimits:
+      core: 0
+    mem_limit: 128m
+    pids_limit: 64
+    restart: unless-stopped
+    logging: *logging
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.6@sha256:c3415e8660af553f5e18f5d90db050614c02493c0ac6260ac59442f6d9b12048
+    command: [--config=/config/oauth2-proxy.cfg]
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      caddy:
+        condition: service_started
+      session-store:
+        condition: service_healthy
+    user: ${GLAMDB_UID:?set GLAMDB_UID}:${GLAMDB_GID:?set GLAMDB_GID}
+    env_file:
+      - ${GLAMDB_PRIVATE_DIR:?set GLAMDB_PRIVATE_DIR}/oauth2-proxy.env
+    environment:
+      OAUTH2_PROXY_OIDC_ISSUER_URL: https://${GLAMDB_IDP_HOST:?set GLAMDB_IDP_HOST}/realms/glamdb
+      OAUTH2_PROXY_REDIRECT_URL: https://${GLAMDB_SITE_HOST:?set GLAMDB_SITE_HOST}/oauth2/callback
+    volumes:
+      - ./oauth2-proxy.cfg:/config/oauth2-proxy.cfg:ro
+      - ${GLAMDB_PRIVATE_DIR:?set GLAMDB_PRIVATE_DIR}/secrets/workbench.secret:/run/secrets/glamdb/workbench.secret:ro
+      - ${GLAMDB_PRIVATE_DIR:?set GLAMDB_PRIVATE_DIR}/secrets/cookie.secret:/run/secrets/glamdb/cookie.secret:ro
+    networks: [ingress, session]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    pids_limit: 64
+    restart: unless-stopped
+    logging: *logging
+
+  caddy:
+    image: caddy:2.11.9-alpine@sha256:0bbb055bda6793c999bde78b1b5ce3e89f829fb031af2cf50056ea1246559fee
+    environment:
+      GLAMDB_SITE_HOST: ${GLAMDB_SITE_HOST:?set GLAMDB_SITE_HOST}
+      GLAMDB_IDP_HOST: ${GLAMDB_IDP_HOST:?set GLAMDB_IDP_HOST}
+      GLAMDB_ACME_EMAIL: ${GLAMDB_ACME_EMAIL:?set GLAMDB_ACME_EMAIL}
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp'
+      - '127.0.0.1:18080:18080'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      ingress:
+        ipv4_address: 172.30.80.2
+        aliases: ['${GLAMDB_IDP_HOST:?set GLAMDB_IDP_HOST}']
+      control:
+        ipv4_address: 172.30.81.2
+        aliases: [keycloak-admin]
+      identity:
+        ipv4_address: 172.30.82.2
+      observability:
+        aliases: [glamdb-edge]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    pids_limit: 128
+    restart: unless-stopped
+    logging: *logging
+
+networks:
+  ingress:
+    ipam:
+      config: [{subnet: 172.30.80.0/24}]
+  control:
+    internal: true
+    ipam:
+      config: [{subnet: 172.30.81.0/24}]
+  identity:
+    ipam:
+      config: [{subnet: 172.30.82.0/24}]
+  session:
+    internal: true
+  observability:
+    external: true
+    name: ${GLAMDB_OBSERVABILITY_NETWORK:-glamdb-observability}
+
+volumes:
+  postgres-data:
+  caddy-data:
+  caddy-config:

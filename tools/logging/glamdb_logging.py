@@ -21,11 +21,19 @@ MAX_RECORD_BYTES = 4096
 
 EVENTS = frozenset({"runtime_started", "runtime_stopped", "request_completed", "storage_failed",
                     "recovery_required", "logger_health", "access_denied", "org_created", "org_updated",
-                    "org_deleted", "database_created", "database_deleted", "session_started", "session_ended"})
+                    "org_deleted", "database_created", "database_deleted", "session_started", "session_ended",
+                    "operation_completed"})
 OPERATIONS = frozenset({"other", "create_store", "inspect_store", "health", "collections", "snapshots",
-                        "append", "scan", "operation", "auth", "organization", "database", "session"})
+                        "append", "scan", "operation", "auth", "organization", "database", "session",
+                        "databases", "capabilities", "readiness", "open_store", "close_store", "reconcile",
+                        "create_collection", "schema", "scan_open", "scan_next", "scan_cancel", "stats", "files"})
 OUTCOMES = frozenset({"ok", "error", "unknown", "denied", "cancelled"})
-NUMBERS = frozenset({"duration_us", "row_count", "status_code", "revision"})
+NUMBERS = frozenset({"duration_us", "row_count", "status_code", "revision", "byte_count"})
+PHASES = frozenset({"none", "validation", "binding", "data", "metadata", "catalog_transaction",
+                    "catalog_commit", "recording_failure", "reconciling", "complete"})
+ERRORS = frozenset({"none", "INVALID_ARGUMENT", "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED", "CANCELLED",
+                    "IO_ERROR", "CORRUPTION", "RECOVERY_REQUIRED", "OPERATION_CONFLICT", "PRECONDITION_FAILED",
+                    "DEPENDENCY_UNAVAILABLE", "SCHEMA_MISMATCH", "INTERNAL", "OTHER"})
 UUID_PATTERN = re.compile(r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\Z")
 SLUG_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 REQUEST_PATTERN = re.compile(r"[a-f0-9]{32}\Z")
@@ -53,6 +61,10 @@ def sanitize_record(event, **fields):
         value = fields.get(key)
         if type(value) is int and 0 <= value <= 2**63 - 1:
             record[key] = value
+    if "phase" in fields:
+        record["phase"] = _enum(fields["phase"], PHASES, "none")
+    if "error_code" in fields:
+        record["error_code"] = _enum(fields["error_code"], ERRORS, "OTHER")
     for key in ("org_id", "database_id"):
         value = fields.get(key)
         if isinstance(value, str) and len(value) <= 64 and (UUID_PATTERN.fullmatch(value) or SLUG_PATTERN.fullmatch(value)):
@@ -65,7 +77,7 @@ class _JsonFormatter(JsonFormatter):
         # The stdlib metadata and exception strings are deliberately not a domain event.
         return {key: value for key, value in record.items()
                 if key in {"schema", "timestamp", "service", "event", "level", "operation", "outcome",
-                           "request_id", "org_id", "database_id"} | NUMBERS}
+                           "request_id", "org_id", "database_id", "phase", "error_code"} | NUMBERS}
 
 
 class _QueueHandler(QueueHandler):
@@ -186,7 +198,7 @@ class StructuredLogger:
                 self._count("dropped_stopped")
                 return False
             record = sanitize_record(event, **fields)
-            if record["event"] == "request_completed" and record["outcome"] == "ok":
+            if record["event"] in {"request_completed", "operation_completed"} and record["outcome"] == "ok":
                 self._sequence += 1
                 if (self._sequence - 1) % self._sample_every:
                     self._count("sampled")

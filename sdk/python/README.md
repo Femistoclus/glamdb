@@ -63,6 +63,117 @@ Use `examples/quickstart.py COLLECTION_UUID OPERATION_UUID` with
 `GLAMDB_URL` and `GLAMDB_TOKEN` set for a runnable version of this flow. The
 example does not create new UUIDs or retry a write automatically.
 
+## Gateway and OAuth authentication
+
+Pass an **access token**, including for direct-server connections:
+
+```python
+import os
+from glamdb_sdk import Client
+
+with Client(
+    "https://database.example/databases/00112233-4455-6677-8899-aabbccddeeff",
+    token=os.environ["GLAMDB_ACCESS_TOKEN"],
+) as client:
+    print(client.list_collections().items)
+```
+
+HTTP Basic `username=` mode has been removed and raises a migration
+`ValidationError`. Organization passwords are managed by the identity provider.
+An ID token is not an API access token. Configure the registered client and
+identity provider to issue the API's required audience and roles; the gateway
+validates those claims and current organization/database access.
+
+All SDK paths remain relative to the base URL. The `/databases/UUID` prefix is
+preserved for metadata, writes, outcomes, JSON scans and Arrow scans; a trailing
+slash is optional. Keep credentials out of URLs. Direct Bearer behavior remains
+compatible, including explicit local HTTP adapters; use HTTPS for deployed
+connections and retain certificate verification.
+
+For automatic acquisition, install `python -m pip install '.[oauth]'`.
+The optional **Authlib 1.9.5** dependency uses its
+[BSD-3-Clause license](https://github.com/authlib/authlib/blob/v1.9.5/LICENSE).
+Its [OAuth client](https://docs.authlib.org/en/stable/client/oauth2.html)
+owns token acquisition, expiry checks, client-credentials reacquisition and
+refresh-token requests. HTTPX 0.28 remains supported by this pinned release;
+Authlib emits a deprecation notice about its future HTTPX migration.
+
+For a registered service account, use a callable token provider:
+
+```python
+import os
+from glamdb_sdk import Client
+from glamdb_sdk.oauth import ClientCredentialsTokenProvider
+
+with ClientCredentialsTokenProvider(
+    "https://identity.example/realms/glamdb/protocol/openid-connect/token",
+    client_id=os.environ["GLAMDB_OAUTH_CLIENT_ID"],
+    client_secret=os.environ["GLAMDB_OAUTH_CLIENT_SECRET"],
+) as credentials:
+    with Client(
+        "https://database.example/databases/00112233-4455-6677-8899-aabbccddeeff",
+        token_provider=credentials,
+    ) as client:
+        print(client.capabilities())
+```
+
+For a human native client, enable the identity provider's Device Authorization
+flow for a public client and display the returned instructions to that user:
+
+```python
+from glamdb_sdk import Client
+from glamdb_sdk.oauth import DeviceAuthorizationClient
+
+with DeviceAuthorizationClient(
+    "https://identity.example/realms/glamdb/protocol/openid-connect/token",
+    "https://identity.example/realms/glamdb/protocol/openid-connect/auth/device",
+    client_id="registered-native-client",
+    scope="openid",
+) as credentials:
+    challenge = credentials.begin()
+    print("Open", challenge.verification_uri, "and enter", challenge.user_code)
+    credentials.poll(challenge, timeout=300)
+    with Client(
+        "https://database.example/databases/00112233-4455-6677-8899-aabbccddeeff",
+        token_provider=credentials,
+    ) as client:
+        print(client.list_collections().items)
+```
+
+The identity provider supplies device codes; the SDK does not generate or sign
+tokens and has no password, callback or session service. The small device poller
+uses Authlib's native device-code grant and follows
+[RFC 8628](https://www.rfc-editor.org/rfc/rfc8628#section-3.5): pending responses
+wait the advertised interval; `slow_down` adds five seconds for subsequent polls,
+including after a caller timeout/resume. Polling ends at the earlier of the
+caller timeout and device-code expiry. A denied/expired grant stops immediately.
+A terminal error requires a new `begin()` and explicit user authorization.
+
+Authlib owns access/refresh token state in memory. No token/secret is written to
+files or included in helper/challenge representations or error descriptions.
+Display verification instructions only to the intended user; do not persist
+the device challenge. `OAuthError.code` contains a sanitized failure category;
+server error descriptions, raw response bodies and request URLs are omitted.
+OAuth redirects are refused. Helpers require verified HTTPS, with
+`allow_insecure_loopback=True` available only for literal loopback/localhost
+test endpoints. `verify=False` is likewise restricted to that explicit test
+case. Token HTTP operations default to 30-second per-phase timeouts (maximum
+300); each device poll is also capped by its remaining budget. Polling timeout
+and server-reported device lifetime are capped at 900 seconds. OAuth helpers do
+not inherit proxy or trust configuration from environment variables; pass an
+explicit trusted `ssl.SSLContext` when the IdP uses a private CA.
+
+`token_provider` accepts any synchronous callable returning a nonempty ASCII
+Bearer access-token string. Supply exactly one of `token` and `token_provider`.
+The provider is called before each HTTP request, including before a single
+mutating POST. Provider failure sends no API request; the cooperative operation
+deadline is checked again afterwards. A generic provider must enforce its own
+network/time limits. API 401/403 and token refresh never trigger automatic replay
+of a POST. A refreshed token changes the next explicit call's authorization
+header. The SDK client does not close a caller-owned token provider; use both
+context managers as shown. Token renewal does not change the gateway's current
+access checks or make revoked access valid.
+
 ## Write outcomes and recovery
 
 `append` returns `AppendOutcome` with `outcome` equal to `committed`,
@@ -298,11 +409,12 @@ after network reads, with the initial HTTP timeout capped by the remaining
 budget. It cannot interrupt an uninterruptible OS call. A deadline is never
 translated into a fabricated failed server outcome.
 
-## Executed validation
+## Validation
 
 From the repository root:
 
 ```sh
+python -m pip install -e 'sdk/python[test]'
 .venv/bin/python -m pytest -q -c sdk/python/pyproject.toml sdk/python/tests
 ```
 
@@ -322,8 +434,16 @@ all-type golden vectors. `test_prepare_plan.py` differentially checks payload
 hashes, bodies and error type/message/order against that frozen pre-plan
 implementation (all types, NULL/missing fields, UTF-8, int64 and timestamp
 bounds, -0.0, permuted field IDs, generators, mutation after preparation).
-Repository-level actual HTTP integration is maintained separately from these
-isolated SDK tests:
+The focused suite uses real codec, canonical hashes and PyArrow IPC buffers.
+HTTP transport doubles verify all route prefixes, error identities, redirects,
+single-send writes and Arrow ownership. OAuth tests use real Authlib against
+explicit loopback-only protocol peers. They cover client credentials,
+concurrent renewal, device pending/slow_down/resume/timeout/denial, refresh tokens,
+TLS configuration, redirects and secret-safe failures. These peers are not
+Keycloak and do not establish real realm/policy or native engine integration.
+The direct Bearer path does not require the optional OAuth dependency.
+
+Actual HTTP/HTTPS adapter tests are maintained separately:
 
 ```sh
 PYTHONPATH=sdk/python/src:apps/mock_server/src:tools/verification/src \

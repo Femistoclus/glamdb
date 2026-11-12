@@ -1,0 +1,43 @@
+name: glamdb-alerting
+
+services:
+  alertmanager:
+    image: prom/alertmanager:v0.35.0@sha256:e638797febd034838eca8b98cdbd46f951e9bf7f178777aa8669167406a9946c
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --data.retention=120h
+      - --web.listen-address=:9093
+      - --cluster.listen-address=
+      - --web.external-url=http://localhost:9093
+      - --alerts.per-alertname-limit=1000
+      - --silences.max-silences=1000
+    ports: ["127.0.0.1:${ALERTMANAGER_PORT:-9093}:9093"]
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    secrets: [telegram_bot_token, telegram_chat_id]
+    networks: [observability]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+secrets:
+  telegram_bot_token:
+    file: ${ALERTING_SECRETS_DIR:-../../artifacts/alerting/secrets}/telegram_bot_token
+  telegram_chat_id:
+    file: ${ALERTING_SECRETS_DIR:-../../artifacts/alerting/secrets}/telegram_chat_id
+
+volumes:
+  alertmanager-data:
+
+networks:
+  observability:
+    name: glamdb-observability
+    external: true

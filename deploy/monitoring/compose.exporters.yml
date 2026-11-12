@@ -1,0 +1,42 @@
+name: glamdb-exporters
+services:
+  node-exporter:
+    image: prom/node-exporter:v1.12.1@sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0
+    command:
+      - --path.rootfs=/host
+      - --web.listen-address=${GLAMDB_NODE_LISTEN:?Set a private host IP and port reachable from Prometheus}
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/containers/.+)($|/)
+    network_mode: host
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    mem_limit: 128m
+  cadvisor:
+    image: ghcr.io/google/cadvisor:0.60.6@sha256:b8e7d1093144fd088f425ff003d75a4aa405de075db78dae3bc563730b1bd07a
+    command:
+      - --housekeeping_interval=15s
+      - --max_housekeeping_interval=15s
+      - --store_container_labels=false
+      - --whitelisted_container_labels=io.kubernetes.pod.namespace,io.kubernetes.pod.name,io.kubernetes.container.name
+      - --enable_metrics=cpu,memory,disk,diskIO,network,process,sched,tcp,advtcp,oom_event
+    privileged: true
+    pid: host
+    cgroup: host
+    devices: ['/dev/kmsg:/dev/kmsg']
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+    networks: [observability]
+    restart: unless-stopped
+    mem_limit: 512m
+networks:
+  observability:
+    name: glamdb-observability
+    external: true

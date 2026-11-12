@@ -1,0 +1,344 @@
+{
+  "selectors": {
+    "mac": "job=\"macos-node\",cluster=\"local\"",
+    "containers": "job=\"cgroup\",cluster=\"local\"",
+    "containerup": "job=\"cgroup\",cluster=\"local\"",
+    "inventory": "job=\"podman\",cluster=\"local\""
+  },
+  "checks": [
+    {
+      "id": "edge_availability",
+      "query": "1-min(up{$edge})",
+      "warn": 0.5,
+      "alarm": 1,
+      "fresh": [
+        "up{$edge}"
+      ],
+      "guards": [],
+      "summary": "Outer-edge metrics availability",
+      "description": "Missing target is NODATA; a configured failing scrape is ALARM. This is not an end-to-end application probe.",
+      "scope": {
+        "service": "glamdb"
+      },
+      "notify_nodata": true
+    },
+    {
+      "id": "gateway_readiness",
+      "query": "1-min(glamdb_gateway_ready{$gateway})",
+      "warn": 0.5,
+      "alarm": 1,
+      "fresh": [
+        "up{$gateway}",
+        "glamdb_gateway_ready{$gateway}"
+      ],
+      "guards": [
+        "min(up{$gateway}) == 1"
+      ],
+      "summary": "Gateway catalog readiness",
+      "description": "The gateway readiness gauge does not replace database Engine::GetHealth or an external authenticated probe.",
+      "scope": {
+        "service": "glamdb"
+      },
+      "notify_nodata": true
+    },
+    {
+      "id": "core_http_errors",
+      "query": "sum(rate(glamdb_http_requests_total{$native,status_class=\"5xx\"}[5m])) / clamp_min(sum(rate(glamdb_http_requests_total{$native}[5m])),0.000001) * (sum(rate(glamdb_http_requests_total{$native}[5m])) * 300 >= bool 100)",
+      "warn": 0.01,
+      "alarm": 0.05,
+      "fresh": [
+        "up{$coretarget}",
+        "glamdb_http_requests_total{$native}"
+      ],
+      "guards": [
+        "min(up{$coretarget}) == 1"
+      ],
+      "summary": "Native HTTP 5xx fraction",
+      "description": "Completed native HTTP results; minimum100 requests over5minutes gates alerting. Idle initialized counters are valid; these are not durable commit outcomes.",
+      "scope": {
+        "service": "glamdb"
+      },
+      "notify_nodata": true
+    },
+    {
+      "id": "core_http_cancelled",
+      "query": "sum(rate(glamdb_http_requests_total{$native,status_class=\"cancelled\"}[5m]))",
+      "warn": 1,
+      "alarm": 5,
+      "fresh": [
+        "up{$coretarget}",
+        "glamdb_http_requests_total{$native}"
+      ],
+      "guards": [
+        "min(up{$coretarget}) == 1"
+      ],
+      "summary": "Native HTTP cancellations per second",
+      "description": "Client disconnects and failed reads/writes have cancelled transport results. A cancelled response does not establish whether a database operation committed.",
+      "scope": {
+        "service": "glamdb"
+      },
+      "notify_nodata": true
+    },
+    {
+      "id": "core_http_latency_p95",
+      "query": "histogram_quantile(0.95,sum by(le)(rate(glamdb_http_request_duration_seconds_bucket{$native}[5m])))",
+      "warn": 0.5,
+      "alarm": 2,
+      "fresh": [
+        "up{$coretarget}",
+        "glamdb_http_request_duration_seconds_count{$native}"
+      ],
+      "guards": [
+        "min(up{$coretarget}) == 1",
+        "sum(rate(glamdb_http_request_duration_seconds_count{$native}[5m])) * 300 >= 100"
+      ],
+      "summary": "Native HTTP p95 latency",
+      "description": "Full accepted-connection through response-write lifetime. Fewer than100 observed requests is NODATA, not invented zero latency.",
+      "scope": {
+        "service": "glamdb"
+      },
+      "notify_nodata": true
+    },
+    {
+      "id": "macos_exporter",
+      "query": "1-min(node_scrape_collector_success{$mac})",
+      "warn": 0.5,
+      "alarm": 1,
+      "fresh": [
+        "up{$mac}",
+        "node_scrape_collector_success{$mac}"
+      ],
+      "guards": [
+        "min(up{$mac}) == 1"
+      ],
+      "summary": "macOS enabled collectors",
+      "description": "Each enabled Darwin collector must report success. Unsupported thermal collection is explicitly disabled; missing producer is NODATA.",
+      "scope": {
+        "service": "host"
+      },
+      "notify_nodata": true
+    },
+    {
+      "id": "macos_cpu",
+      "query": "max(1-avg by(instance)(rate(node_cpu_seconds_total{$mac,mode=\"idle\"}[5m])))",
+      "warn": 0.8,
+      "alarm": 0.95,
+      "fresh": [
+        "up{$mac}",
+        "node_cpu_seconds_total{$mac,mode=\"idle\"}"
+      ],
+      "guards": [
+        "min(up{$mac}) == 1"
+      ],
+      "summary": "macOS CPU busy fraction",
+      "description": "Measured on actual macOS host rather than its Linux VM.",
+      "scope": {
+        "service": "host"
+      },
+      "notify_nodata": true
+    },
+    {
+      "id": "macos_anonymous_memory",
+      "query": "max(node_memory_internal_bytes{$mac}/node_memory_total_bytes{$mac})",
+      "warn": 0.7,
+      "alarm": 0.85,
+      "fresh": [
+        "up{$mac}",
+        "node_memory_internal_bytes{$mac}",
+        "node_memory_total_bytes{$mac}"
+      ],
+      "guards": [
+        "min(up{$mac}) == 1"
+      ],
+      "summary": "macOS resident anonymous memory fraction",
+      "description": "Mach internal_page_count equals vm_stat Anonymous pages. Compressed pages and total committed/address-space memory are different quantities.",
+      "scope": {
+        "service": "host"
+      },
+      "notify_nodata": true
+    },
+    {
+      "id": "macos_disk_space",
+      "query": "max(1-node_filesystem_avail_bytes{$mac,fstype=\"apfs\"}/node_filesystem_size_bytes{$mac,fstype=\"apfs\"})",
+      "warn": 0.8,
+      "alarm": 0.9,
+      "fresh": [
+        "up{$mac}",
+        "node_filesystem_avail_bytes{$mac,fstype=\"apfs\"}",
+        "node_filesystem_size_bytes{$mac,fstype=\"apfs\"}"
+      ],
+      "guards": [
+        "min(up{$mac}) == 1"
+      ],
+      "summary": "macOS APFS capacity",
+      "description": "Worst APFS mount available space; APFS snapshots and shared capacity can expose the same underlying container. Do not sum capacities.",
+      "scope": {
+        "service": "host"
+      },
+      "notify_nodata": true
+    },
+    {
+      "id": "container_collectors",
+      "query": "1-min(up{$containerup})",
+      "warn": 0.5,
+      "alarm": 1,
+      "fresh": [
+        "up{$containerup}"
+      ],
+      "guards": [],
+      "summary": "Exact cgroup exporters",
+      "description": "Both direct-run and Quadlet leaf exporters must scrape successfully. HTTP success alone does not qualify field coverage.",
+      "scope": {
+        "service": "monitoring"
+      },
+      "notify_nodata": true
+    },
+    {
+      "id": "podman_inventory",
+      "query": "1-min(up{$inventory})",
+      "warn": 0.5,
+      "alarm": 1,
+      "fresh": [
+        "up{$inventory}"
+      ],
+      "guards": [],
+      "summary": "Podman inventory exporter",
+      "description": "Named container inventory and conventional working-set/network statistics. The Podman API socket is local to a trusted collector.",
+      "scope": {
+        "service": "monitoring"
+      },
+      "notify_nodata": true
+    },
+    {
+      "id": "container_memory_limit",
+      "query": "max(clamp_min(cgroup_memory_current_bytes{$containers} - cgroup_memory_inactive_file_bytes{$containers},0)/(cgroup_memory_max_bytes{$containers} > 0 < 1e18))",
+      "warn": 0.85,
+      "alarm": 0.95,
+      "fresh": [
+        "up{$containerup}",
+        "cgroup_memory_current_bytes{$containers}",
+        "cgroup_memory_inactive_file_bytes{$containers}",
+        "cgroup_memory_max_bytes{$containers}"
+      ],
+      "guards": [
+        "min(up{$containerup}) == 1"
+      ],
+      "summary": "Container working-set convention against finite hard limit",
+      "description": "Current minus inactive_file, floored at zero, against actual finite positive memory.max. This common working-set convention is not exact unreclaimable or anonymous memory. Charged memory including cache remains visible separately; unlimited cgroups are excluded.",
+      "scope": {
+        "service": "monitoring"
+      },
+      "notify_nodata": true
+    },
+    {
+      "id": "container_oom_kills",
+      "query": "sum(increase(cgroup_memory_events_oom_kill_total{$containers}[5m]))",
+      "warn": 0.5,
+      "alarm": 1,
+      "fresh": [
+        "up{$containerup}",
+        "cgroup_memory_events_oom_kill_total{$containers}"
+      ],
+      "guards": [
+        "min(up{$containerup}) == 1"
+      ],
+      "summary": "Container OOM kills",
+      "description": "Actual leaf memory.events OOM kill counters over5minutes; no artificial OOM is induced by verification.",
+      "scope": {
+        "service": "monitoring"
+      },
+      "notify_nodata": true
+    },
+    {
+      "id": "container_cpu_throttle",
+      "query": "max(rate(cgroup_cpu_throttled_seconds_total{$containers}[5m]))",
+      "warn": 0.1,
+      "alarm": 0.5,
+      "fresh": [
+        "up{$containerup}",
+        "cgroup_cpu_throttled_seconds_total{$containers}"
+      ],
+      "guards": [
+        "min(up{$containerup}) == 1"
+      ],
+      "summary": "Container CPU throttled seconds per second",
+      "description": "Cgroup cpu.stat throttled_usec converted to seconds. This is not percentage of configured CPU quota.",
+      "scope": {
+        "service": "monitoring"
+      },
+      "notify_nodata": true
+    },
+    {
+      "id": "container_cpu_pressure",
+      "query": "max(rate(cgroup_cpu_pressure_waiting_seconds_total{$containers}[5m]))",
+      "warn": 0.2,
+      "alarm": 0.5,
+      "fresh": [
+        "up{$containerup}",
+        "cgroup_cpu_pressure_waiting_seconds_total{$containers}"
+      ],
+      "guards": [
+        "min(up{$containerup}) == 1"
+      ],
+      "summary": "Container CPU some-stall fraction",
+      "description": "Kernel PSI elapsed some-stall time. It does not measure unconstrained demand or per-thread scheduler latency.",
+      "scope": {
+        "service": "monitoring"
+      },
+      "notify_nodata": true
+    },
+    {
+      "id": "log_source_unavailable",
+      "query": "1-clamp_max(sum(loki_source_file_files_active_total{$alloy}),1)",
+      "warn": 0.5,
+      "alarm": 1,
+      "fresh": [
+        "up{$alloy}",
+        "loki_source_file_files_active_total{$alloy}"
+      ],
+      "guards": [
+        "min(up{$alloy}) == 1"
+      ],
+      "summary": "Native log file source availability",
+      "description": "The active native structured log file must be open in Alloy. A healthy HTTP exporter with no file is not a healthy log pipeline.",
+      "scope": {
+        "service": "logging"
+      },
+      "notify_nodata": true
+    },
+    {
+      "id": "log_schema_drops",
+      "query": "sum(rate(loki_process_dropped_lines_total{$alloy}[5m]))",
+      "warn": 0.1,
+      "alarm": 1,
+      "fresh": [
+        "up{$alloy}",
+        "loki_process_dropped_lines_total{$alloy}",
+        "loki_source_file_files_active_total{$alloy}"
+      ],
+      "guards": [
+        "min(up{$alloy}) == 1",
+        "sum(loki_source_file_files_active_total{$alloy}) > 0"
+      ],
+      "summary": "Rejected structured log records",
+      "description": "Actual allowlist/schema pipeline rejection counters. Missing source remains NODATA.",
+      "scope": {
+        "service": "logging"
+      },
+      "notify_nodata": true
+    }
+  ],
+  "overrides": {
+    "log_drops": {
+      "fresh": [
+        "up{$alloy}",
+        "loki_write_dropped_entries_total{$alloy}",
+        "loki_source_file_files_active_total{$alloy}"
+      ],
+      "guards": [
+        "min(up{$alloy}) == 1",
+        "sum(loki_source_file_files_active_total{$alloy}) > 0"
+      ]
+    }
+  }
+}

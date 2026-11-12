@@ -48,7 +48,11 @@ glamdb/
 │   ├── vertical/
 │   └── installed_consumer/
 ├── fixtures/
+├── deploy/alerting/
+├── tools/alerting/
 ├── tools/verification/
+├── tools/monitoring/
+├── deploy/monitoring/
 ├── probes/
 ├── benchmarks/
 ├── sdk/
@@ -87,7 +91,9 @@ glamdb/
 | `tests/` | Component/storage pipeline tests, catalog/coordinator tests, process recovery, VFS faults, installed consumers, tooling, and independent client/verification suites. |
 | `fixtures/` | Shared deterministic test inputs and expected outputs. |
 | `apps/mock_server/` | Disposable in-memory adapter with real HTTP/Arrow and runtime config. |
+| `apps/workbench_access/` | Organization authorization catalog, local operator CLI, HTTPS authentication and database routing. |
 | `tools/verification/` | Literal canonical vectors, SQL 3VL oracle and receipt/fault-evidence tools. |
+| `deploy/alerting/`, `tools/alerting/` | Configurable four-state rules, native Alertmanager Telegram delivery, independent observer, captured outer-edge replay and transition tests; see [ALERTING.md](../ALERTING.md). |
 | `probes/` | Standalone installed-dependency consumer and libc++ sanitizer compatibility reproducer. |
 | `benchmarks/` | Performance and capacity measurements. |
 | `sdk/python/` | Independently installable network SDK, unit tests and quickstart. |

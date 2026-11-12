@@ -2,8 +2,9 @@
 
 The native server, offline administrator and Python adapter emit best-effort JSON to **stderr**.
 For a short operator guide, see [Reading server logs](READING_SERVER_LOGS.md).
-Server stdout remains its listening-address JSON; admin stdout remains its command result. The application has no
-file logging mode or file rotation. `GLAMDB_LOG_DIRECTORY` is no longer used.
+Server stdout remains its listening-address JSON; admin stdout remains its command result.
+The server also supports `--log-directory DIR`: Quill owns JSONL rotation at 8 MiB
+with three backups. `GLAMDB_LOG_DIRECTORY` is not used.
 The normal path is application → runtime journal → Alloy → Loki → Grafana.
 Administrative audit and storage outcomes remain in transactional metadata;
 a log admission or Loki acknowledgment never authorizes a committed response.
@@ -35,11 +36,12 @@ the Python adapter is not wired into a production service in this repository.
 
 Native logging uses [Quill 13.0.0](https://github.com/odygrd/quill/releases/tag/v13.0.0),
 MIT, pinned at `eb802a37c7d585840324886a3d8648c9c2159952` in
-`third_party/lock.json`. Its public JSON console sink owns JSON escaping,
+`third_party/lock.json`. Its public JSON console/file sinks own JSON escaping,
 serialization and writes. A small subclass redirects its inherited stream to an
 owned duplicate of stderr because the upstream default selects stdout. The
-stream is unbuffered; no application writer, queue, retry thread or rotation sits
-beside Quill. Darwin's duplicate uses `F_SETNOSIGPIPE`; the Linux backend inherits
+stream is unbuffered; no application writer, queue or retry thread sits beside Quill.
+The optional server file mode uses Quill's `RotatingJsonFileSink` directly.
+Darwin's stderr duplicate uses `F_SETNOSIGPIPE`; the Linux backend inherits
 a blocked SIGPIPE mask. Process-wide signal handlers are preserved.
 
 Python uses stdlib `logging`, `QueueHandler`, `QueueListener` and
@@ -52,7 +54,8 @@ global stderr buffer and change its exit status to 120. No custom worker,
 network transport or file writer remains.
 
 `TLogEvent` has finite event/operation/outcome enums, generated correlation,
-duration, row count and status. It accepts no text, paths, headers or payload.
+duration, row/byte counts, status, phase and a finite error code. It accepts no
+text, paths, headers or payload.
 Python `sanitize_record` projects the same fields plus a bounded revision and
 validated organization/database IDs (lowercase UUID or legacy slug up to 64
 characters). Integers are bounded at `2**63-1` in Python; native values retain
@@ -73,6 +76,26 @@ bodies, SQL/user rows, raw URL/query/path or arbitrary exception text to logs.
 Encoded secrets deliberately placed in allowed numeric/ID fields cannot be
 recognized reliably. Collector projection is additional defense, not permission
 to feed it raw access logs or credentials.
+
+## Native request and engine events
+
+The HTTP boundary generates a fresh correlation ID and retains it through the
+worker's engine calls. `TScopedLogContext` restores a previous thread context
+when it leaves scope; unscoped embedded calls do not invent an HTTP identity.
+Stable worker threads register once with Quill before accepting work.
+`operation_completed` records cover store create/open/close, collection creation,
+append/reconcile and scan open/next/cancel. Phase and error code come from typed
+engine results. Confirmed new publications increment row and compressed-data
+byte counters at the engine publication boundary; receipt replay does not
+increment them again. Counters reset on process restart and are not inventory.
+
+HTTP records describe the transport outcome. An incomplete response has
+`status_code=0` and an error outcome; it never fabricates an actual HTTP 499.
+Completed-body bytes count successful local socket writes, excluding headers;
+they do not establish peer consumption. A cancelled HTTP exchange can still
+have committed its write. Resolve that write using its original operation ID.
+Success sampling can omit either part of a correlated request/operation pair.
+Metrics remain unsampled and logging cannot authorize a durable commit.
 
 ## Resource and lifecycle contract
 
@@ -101,10 +124,14 @@ Python object overhead is additional. Thread count does not create more queues.
 The admission lock is acquired without waiting; `QueueHandler` uses
 `put_nowait`, so overflow cannot wait for the sink or recursively log failures.
 
-For both adapters, successful `request_completed` events sample one candidate
-per 100 successes and admit at most twenty candidates per monotonic second by
-default. Lifecycle, administrative events, denied/unknown outcomes and errors
-bypass success sampling but share bounded transport capacity. The native
+Successful request and native engine completion events share a success budget.
+Stderr defaults to one candidate per 100 successes and at most twenty candidates
+per monotonic second. HTTP and core completions have independent sampling
+sequences and share this per-second cap. Native file mode defaults to every success, still capped
+at twenty per second. The server exposes `--log-success-sample-every` and
+`--log-max-success-per-second` to configure these limits. Runtime lifecycle,
+administrative events, denied/unknown outcomes and errors bypass success
+sampling but share bounded transport capacity. The native
 cross-thread global limit uses a conservative atomic admission decision;
 per-call-site library rate macros would change that aggregate policy.
 
@@ -256,7 +283,7 @@ and a stuck sink must remain visible; sampled logs cannot establish request RPS.
 ```sh
 .venv/bin/python -m pip install --require-hashes --only-binary=:all: --no-deps -r tools/logging/requirements.txt
 .venv/bin/python -m unittest discover -s tests/logging -v
-cmake -S . -B build/logging -DGLAMDB_IO_ONLY=ON -DPython3_EXECUTABLE="$PWD/.venv/bin/python"
+cmake -S . -B build/logging -DGLAMDB_IO_ONLY=ON -DGLAMDB_BUILD_LOGGING=ON -DPython3_EXECUTABLE="$PWD/.venv/bin/python"
 cmake --build build/logging --parallel 2
 ctest --test-dir build/logging --output-on-failure
 ```
@@ -272,7 +299,14 @@ source is explicitly a **test runtime capture**, not application file logging:
   --probe build/logging/tests/glamdb_logging_probe --exercise-outage
 ```
 
-It queries actual native events/correlation, rejects malformed schema and
+Pass `--native-server build/native-observability/apps/server/glamdb` with an
+engine/server build to additionally exercise an actual HTTP request and its
+correlated engine completion through Alloy and Loki. Use `GLAMDB_TEST_TMPDIR`
+for a disposable parent on a filesystem that meets the engine disk reserve.
+Run `glamdb.server_observability`, `glamdb.native_metrics` and `glamdb.logging`
+through CTest for HTTP failure, retry/publication, sampling and native scope checks.
+
+The harness queries actual native events/correlation, rejects malformed schema and
 secret-marker fields, stops only its own Loki, checks finite retry loss and
 verifies new events after restart. `--wal-disk-threshold 0.99` is a tiny-fixture
 host override, never production configuration. Linux journald/Docker rotation

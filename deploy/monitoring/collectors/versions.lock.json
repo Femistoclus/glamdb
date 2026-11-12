@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "checked_at": "2026-11-11",
+  "scope": "Darwin host and one rootful Podman cgroup-v2 VM; no Kubernetes equivalence",
+  "node_exporter": {
+    "version": "1.12.1",
+    "platform": "darwin-arm64",
+    "source_commit": "6044da783597cc3b57aef7580ddcdcff58a4ee99",
+    "download": "https://github.com/prometheus/node_exporter/releases/download/v1.12.1/node_exporter-1.12.1.darwin-arm64.tar.gz",
+    "sha256": "35b246a34af55a8f0c3f11067f17aecf9836cfd4689bde364776b3a4ad3a84d6",
+    "license": "Apache-2.0",
+    "license_source": "https://github.com/prometheus/node_exporter/blob/v1.12.1/LICENSE",
+    "parent_lock": "../versions.lock.json"
+  },
+  "prometheus_podman_exporter": {
+    "version": "1.21.2",
+    "source_commit": "dafd81078ef7651bd541234adb2dd59216f19235",
+    "source": "https://github.com/containers/prometheus-podman-exporter/tree/dafd81078ef7651bd541234adb2dd59216f19235",
+    "image": "quay.io/navidys/prometheus-podman-exporter@sha256:0a9bfa9bd6260a47d3a0bbe2ce42f41ac98854f32dab5b4d7e28725075b0c187",
+    "platform": "linux/arm64",
+    "license": "Apache-2.0",
+    "license_source": "https://github.com/containers/prometheus-podman-exporter/blob/dafd81078ef7651bd541234adb2dd59216f19235/LICENSE",
+    "compatibility": "v1.11+ exporter line supports Podman v5; live verified with Podman5.7.1",
+    "license_sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+  },
+  "cgroup_exporter": {
+    "version": "0.3.3",
+    "source_commit": "9d9967ac99b61899030ffc24fcd99395bcd9a248",
+    "source": "https://github.com/arianvp/cgroup-exporter/tree/9d9967ac99b61899030ffc24fcd99395bcd9a248",
+    "image": "ghcr.io/arianvp/cgroup-exporter@sha256:3e427d53195d319a1aa5ff9ee65d76b5c6e6223d1d28db06f46e07c298c6228f",
+    "platform": "linux/arm64",
+    "license": "Apache-2.0",
+    "license_source": "https://github.com/arianvp/cgroup-exporter/blob/9d9967ac99b61899030ffc24fcd99395bcd9a248/LICENSE",
+    "license_sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "deployment_qualification": "Only selected real Podman container leaf cgroups on cgroup v2; not pod parents. Bounded64MiB/0.25CPU. Fields individually source/live qualified; absent/partial fields remain No data.",
+    "qualified_globs": [
+      "machine.slice/libpod-*.scope/container",
+      "system.slice/*.service/libpod-payload-*"
+    ]
+  },
+  "qualified_runtime": {
+    "podman_version": "5.7.1",
+    "podman_commit": "f845d14e941889ba4c071f35233d09b29d363c75",
+    "cgroup_version": 2,
+    "architecture": "aarch64",
+    "memory_usage_definition": "max(memory.current - memory.stat inactive_file,0)",
+    "podman_cpu_system_seconds": "Rejected: installed cgroup conversion misses microseconds-to-nanoseconds scaling. Exact cgroup_cpu_system_seconds_total is used instead."
+  }
+}
