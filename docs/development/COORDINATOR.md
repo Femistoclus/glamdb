@@ -384,7 +384,9 @@ backend availability and successful recovery are not qualification evidence.
 The [scalable history profile](SCALABLE_HISTORY.md) makes permanent-operation,
 catalog and aggregate retained-storage/recovery budgets configurable. Catalog
 inventory validation and interruption resolution use bounded keyset pages; native
-recovery streams receipts per collection. Healthy original-outcome lookup remains
+recovery streams receipts per collection, seeking each collection's key range.
+Binding checks the operation budget against an exact per-connection count instead
+of counting the table. Healthy original-outcome lookup remains
 an indexed single-record query. Ordinary append and uncertainty contracts are unchanged.
 
 ## Explicit snapshot maintenance

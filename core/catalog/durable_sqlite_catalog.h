@@ -159,6 +159,9 @@ public:
     void DurabilityFence();
     int64_t FenceValue();
     void ValidateInventory();
+    // ValidateInventory unless this connection has run no transaction since
+    // its last complete validation.
+    void ValidateInventoryIfChanged();
 
     iceberg::Status Initialize() override;
     iceberg::Result<std::vector<std::string>> ListNamespaceNames() override;
@@ -201,6 +204,7 @@ private:
     void ValidateHeader();
     void Transaction(const std::function<void()>& body);
     void CheckCapacity(bool operation);
+    int64_t OperationCount();
     void CheckFreeBytes();
     bool HasWriteSettings();
     void EnsureWriteSettings();
@@ -232,6 +236,12 @@ private:
     bool transaction_ = false;
     bool rollback_only_ = false;
     bool uncertain_ = false;
+    // Exact row count of `operations`. The store has one owning process, so a
+    // count derived on this connection stays exact while committed bindings
+    // increment it; it is empty whenever that cannot be proven.
+    std::optional<int64_t> operation_count_;
+    // A complete ValidateInventory ran and no transaction has started since.
+    bool inventory_validated_ = false;
 };
 
 } // namespace glamdb::detail

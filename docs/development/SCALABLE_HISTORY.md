@@ -55,11 +55,25 @@ raising a stored count alone does not reserve unlimited memory or disk.
 ## Inventory, memory and recovery
 
 Catalog inventories use primary-key keyset pages of at most 256 records, retaining
-the existing per-query byte ceiling. Inventory validation and interrupted-operation
-resolution stream those pages. Native storage recovery reconstructs committed
-receipts for one collection at a time and checks their bijection with retained
-snapshots. The legacy vector-returning internal seam remains for custom/test
-backends; production recovery uses the streaming seam.
+the existing per-query byte ceiling. A collection's inventory seeks its own key
+range and reads no other collection's records. Inventory validation and
+interrupted-operation resolution stream those pages. Native storage recovery
+reconstructs committed receipts for one collection at a time and checks their
+bijection with retained snapshots. The legacy vector-returning internal seam
+remains for custom/test backends; production recovery uses the streaming seam.
+
+Bindings check the operation budget against an exact count that the catalog
+derives once per connection: the owning process increments it for each
+committed binding, and an uncertain binding commit discards it until reopening
+counts the table again. Opening or reconciling validates the whole catalog
+inventory (SQLite integrity and foreign keys, registry and every operation
+record) when the connection opens and again after the durability fence and
+interruption resolution; storage verification in between reuses the first
+validation because no catalog transaction intervenes. Finding interrupted
+(`Bound`) operations still reads every record: no index covers the state column,
+and adding one would change the catalog format. `glamdb_catalog_history_bench`
+measures open and append cost against the number of permanent receipts with a
+fixed small retained history.
 
 Healthy outcome lookup remains one indexed `(collection_id, operation_id)` query.
 It does not enumerate history, read warehouse files or reconcile automatically.

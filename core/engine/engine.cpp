@@ -819,7 +819,9 @@ struct Engine::Impl
     void VerifyStorage()
     {
         try {
-            catalog->ValidateInventory();
+            // Skipped when no catalog transaction ran since the last complete
+            // validation, such as the catalog (re)open that precedes recovery.
+            catalog->ValidateInventoryIfChanged();
             std::vector<CollectionView> views;
             for (const auto& collection : catalog->Collections()) {
                 views.push_back({collection,

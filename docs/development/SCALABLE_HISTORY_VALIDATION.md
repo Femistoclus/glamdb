@@ -216,9 +216,9 @@ which bounds latest manifest lists; the recorded measurements and earlier
 integration results do not qualify that newer producer's growth or performance.
 Retained snapshots and manifest rewrites still consume explicit budgets.
 A normalized snapshot index could accelerate recovery, but would introduce
-another publication/recovery invariant and migration. A dedicated equality query
-could avoid scanning unrelated collections during filtered inventories; the
-current keyset query remains bounded and correct with at most 64 collections.
+another publication/recovery invariant and migration. Collection-scoped
+inventories have since been changed to seek their own key range instead of
+filtering the store-wide keyset.
 
 The measured state qualifies 8,661 ordinary commits and 8,669 permanent
 operations under this profile and workload. Configured headroom of 12,000

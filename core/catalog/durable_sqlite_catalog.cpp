@@ -8,6 +8,7 @@
 #include <exception>
 #include <format>
 #include <limits>
+#include <map>
 
 namespace glamdb::detail {
 namespace {
@@ -157,6 +158,8 @@ DurableSqliteCatalogStore::Open(const std::filesystem::path& path, StoreInfo inf
 
 void DurableSqliteCatalogStore::OpenConnection(bool create)
 {
+    operation_count_.reset();
+    inventory_validated_ = false;
     Require(path_.is_absolute() && path_.string().find('\0') == std::string::npos && ValidUuid(info_.store_id) &&
             info_.format_version == 1,
         "INVALID_ARGUMENT",
@@ -321,6 +324,7 @@ void DurableSqliteCatalogStore::Transaction(const std::function<void()>& body)
 {
     Require(!uncertain_, "RECOVERY_REQUIRED", "catalog has an unresolved transaction");
     Require(!transaction_ && database_.Autocommit(), "INTERNAL", "unexpected nested outer transaction");
+    inventory_validated_ = false;
     database_.Execute("BEGIN IMMEDIATE");
     transaction_ = true;
     rollback_only_ = false;
@@ -386,6 +390,8 @@ void DurableSqliteCatalogStore::Close()
         database_.Execute("ROLLBACK");
     }
     database_.Close();
+    operation_count_.reset();
+    inventory_validated_ = false;
 }
 
 CatalogProfile DurableSqliteCatalogStore::Profile()
@@ -995,16 +1001,27 @@ void DurableSqliteCatalogStore::ForEachOperation(const OperationConsumer& consum
 {
     std::lock_guard lock(mutex_);
     Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
-    Require(database_.Integer("SELECT COUNT(*) FROM operations") <= limits_.max_operations,
+    Require(OperationCount() <= limits_.max_operations,
         "CONFIG_TOO_SMALL",
         "operation count exceeds configured capacity");
+    const auto select = "SELECT " + std::string(operation_columns) + " FROM operations WHERE ";
+    constexpr std::string_view order = " ORDER BY collection_id,operation_id LIMIT 256";
+    const std::string collection(collection_id);
     std::string last_collection;
     std::string last_operation;
-    while (true) {
-        const auto rows = database_.Query("SELECT " + std::string(operation_columns) +
-                " FROM operations WHERE (collection_id,operation_id)>(?,?) "
-                "AND (?='' OR collection_id=?) ORDER BY collection_id,operation_id LIMIT 256",
-            {last_collection, last_operation, std::string(collection_id), std::string(collection_id)});
+    for (bool first = true;; first = false) {
+        // One collection seeks its primary-key prefix instead of filtering all
+        // later keys of the store; pages and their order are unchanged.
+        std::vector<SqlRow> rows;
+        if (collection.empty()) {
+            rows = database_.Query(select + "(collection_id,operation_id)>(?,?)" + std::string(order),
+                {last_collection, last_operation});
+        } else if (first) {
+            rows = database_.Query(select + "collection_id=?" + std::string(order), {collection});
+        } else {
+            rows = database_.Query(select + "collection_id=? AND operation_id>?" + std::string(order),
+                {collection, last_operation});
+        }
         if (rows.empty()) {
             break;
         }
@@ -1043,11 +1060,21 @@ std::optional<OperationRecord> DurableSqliteCatalogStore::TryFindOperation(std::
 
 void DurableSqliteCatalogStore::CheckCapacity(bool operation)
 {
-    Require(database_.Integer(operation ? "SELECT COUNT(*) FROM operations" : "SELECT COUNT(*) FROM collections") <
+    Require((operation ? OperationCount() : database_.Integer("SELECT COUNT(*) FROM collections")) <
             (operation ? limits_.max_operations : limits_.max_collections),
         "RESOURCE_EXHAUSTED",
         "permanent catalog capacity is full");
     CheckFreeBytes();
+}
+
+int64_t DurableSqliteCatalogStore::OperationCount()
+{
+    // Only BindOperation inserts operations, after this count in its own
+    // transaction; a derivation here therefore sees committed rows only.
+    if (!operation_count_) {
+        operation_count_ = database_.Integer("SELECT COUNT(*) FROM operations");
+    }
+    return *operation_count_;
 }
 
 void DurableSqliteCatalogStore::CheckFreeBytes()
@@ -1077,24 +1104,36 @@ void DurableSqliteCatalogStore::BindOperation(const BoundOperation& binding, std
     Require(migrationOwner.empty() || (owner && population && migrationOwner == *owner),
         "OPERATION_CONFLICT",
         "migration population does not match target ownership");
-    Transaction([&] {
-        CheckCapacity(true);
-        if (population) {
-            database_.Execute("UPDATE migration_targets SET population_hash=? WHERE collection_id=? "
-                              "AND operation_id=? AND population_hash IS NULL",
-                {binding.payload_hash, binding.collection_id, binding.operation_id});
-            Require(database_.Changes() == 1, "CORRUPTION", "migration population identity is already bound");
+    try {
+        Transaction([&] {
+            CheckCapacity(true);
+            if (population) {
+                database_.Execute("UPDATE migration_targets SET population_hash=? WHERE collection_id=? "
+                                  "AND operation_id=? AND population_hash IS NULL",
+                    {binding.payload_hash, binding.collection_id, binding.operation_id});
+                Require(database_.Changes() == 1, "CORRUPTION", "migration population identity is already bound");
+            }
+            database_.Execute("INSERT INTO "
+                              "operations(collection_id,operation_id,payload_hash,"
+                              "hash_version,state,base_identity,attempt_id,receipt_"
+                              "version) VALUES(?,?,?,1,0,?,?,1)",
+                {binding.collection_id,
+                    binding.operation_id,
+                    binding.payload_hash,
+                    Blob{EncodeBase(binding.base)},
+                    binding.attempt_id});
+        });
+    } catch (...) {
+        // A rolled-back binding consumed nothing. An uncertain COMMIT may have
+        // inserted the row; Reopen derives the count from the table again.
+        if (uncertain_) {
+            operation_count_.reset();
         }
-        database_.Execute("INSERT INTO "
-                          "operations(collection_id,operation_id,payload_hash,"
-                          "hash_version,state,base_identity,attempt_id,receipt_"
-                          "version) VALUES(?,?,?,1,0,?,?,1)",
-            {binding.collection_id,
-                binding.operation_id,
-                binding.payload_hash,
-                Blob{EncodeBase(binding.base)},
-                binding.attempt_id});
-    });
+        throw;
+    }
+    if (operation_count_) {
+        ++*operation_count_;
+    }
 }
 
 void DurableSqliteCatalogStore::CheckBinding(const BoundOperation& binding)
@@ -1561,6 +1600,7 @@ void DurableSqliteCatalogStore::GuardPointer(PointerTarget target, std::string_v
 void DurableSqliteCatalogStore::ValidateInventory()
 {
     std::lock_guard lock(mutex_);
+    inventory_validated_ = false;
     Require(database_.Text("PRAGMA integrity_check") == "ok", "CORRUPTION", "SQLite integrity check failed");
     Require(database_.Query("PRAGMA foreign_key_check").empty(), "CORRUPTION", "catalog foreign key check failed");
     const auto collections = Collections();
@@ -1573,8 +1613,10 @@ void DurableSqliteCatalogStore::ValidateInventory()
             database_.Integer("SELECT COUNT(*) FROM iceberg_namespace_properties") == 1,
         "CORRUPTION",
         "internal namespace is missing or modified");
+    // Nothing changes under the lock, so each collection's base is read once.
+    std::map<std::string, BaseIdentity, std::less<>> bases;
     for (const auto& collection : collections) {
-        (void)Base(collection.collection_id);
+        bases.emplace(collection.collection_id, Base(collection.collection_id));
         (void)MigrationIdentity(collection.collection_id);
         if (collection.mode == CollectionMode::KeyValue) {
             Require(ExpiredSnapshots(collection.collection_id).empty() &&
@@ -1583,13 +1625,29 @@ void DurableSqliteCatalogStore::ValidateInventory()
                 "KV collections cannot have expiration or cleanup records");
         }
     }
+    int64_t operations = 0;
     ForEachOperation([&](const auto& record) {
-        const auto base = Base(record.binding.collection_id);
+        const auto known = bases.find(record.binding.collection_id);
+        const auto base = known != bases.end() ? known->second : Base(record.binding.collection_id);
         Require(record.binding.base.table_uuid == base.table_uuid && record.binding.base.schema_id == base.schema_id &&
                 record.binding.base.spec_id == base.spec_id,
             "CORRUPTION",
             "operation bound to a different table");
+        ++operations;
     });
+    if (operations != OperationCount()) {
+        operation_count_.reset();
+        throw Failure({"INTERNAL", "operation count differs from the catalog", RetryHint::OperatorAction});
+    }
+    inventory_validated_ = true;
+}
+
+void DurableSqliteCatalogStore::ValidateInventoryIfChanged()
+{
+    std::lock_guard lock(mutex_);
+    if (!inventory_validated_) {
+        ValidateInventory();
+    }
 }
 
 void DurableSqliteCatalogStore::DurabilityFence()
