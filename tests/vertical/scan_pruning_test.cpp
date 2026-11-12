@@ -26,8 +26,10 @@ constexpr int64_t MinTimestamp = -62135596800000000LL;
 constexpr int64_t MaxTimestamp = 253402300799999999LL;
 constexpr int Files = 6;
 constexpr int RowsPerFile = 40;
-// One large value per file bounds row groups to a few rows each.
+// Large values bound row groups to a few rows each; see the fixture row builder.
 constexpr size_t BlobBytes = 700 * 1024;
+constexpr int BlobEveryRows = 8;
+constexpr int64_t RowGroupBytes = 1LL << 20;
 
 const SchemaSpec WideSchema{{
     {"key", FieldType::String, false},
@@ -101,7 +103,10 @@ TRow MakeRow(int file, int row)
         default:
             cells[5] = row % 2 == 0 ? std::string() : std::string("a");
     }
-    if (row == 0) {
+    // One large value per BlobEveryRows rows: with the fixture's 1 MiB row
+    // group bound, a row group can hold only one of them, so every file has
+    // several small row groups.
+    if (row % BlobEveryRows == 0) {
         cells[6] = std::string(BlobBytes, static_cast<char>('a' + file));
     }
     return cells;
@@ -412,7 +417,9 @@ protected:
         auto created = detail::EngineFactory::CreateWith({test::store_id, (Temporary_.path / "store").string()},
             [](const std::filesystem::path& path,
                 const StoreInfo& info) -> Result<std::shared_ptr<detail::StorageBackend>> {
-                auto backend = detail::TLocalStorageBackend::Open(path, info);
+                detail::TLocalStorageOptions options;
+                options.Writer.MaxRowGroupBytes = RowGroupBytes;
+                auto backend = detail::TLocalStorageBackend::Open(path, info, options);
                 if (!backend) {
                     return std::unexpected(backend.error());
                 }
