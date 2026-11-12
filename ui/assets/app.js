@@ -21,6 +21,14 @@ import {
     queryMaxRows,
     storageNotice,
     validateQueryCapabilities,
+    parquetCapabilities,
+    canonicalWriteSettings,
+    sameWriteSettings,
+    writeSettingsFromChoices,
+    writeSettingsVersion,
+    describeCompression,
+    verifyCreatedCollection,
+    creationFingerprint,
 } from './model.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -68,6 +76,42 @@ const number = (value) =>
 const fields = () => state.schema?.fields ?? [];
 const json = (value) => e(JSON.stringify(value, null, 2));
 const badge = (text, kind = '') => `<span class="pill ${kind}">${e(text)}</span>`;
+// Parquet value compression controls appear only when the server advertises them.
+const parquetSettings = () => parquetCapabilities(state.capabilities);
+const defaultCodecLabel = (parquet) => describeCompression(null, parquet);
+function codecOptions(parquet, selected, emptyLabel) {
+    return `<option value="" ${selected ? '' : 'selected'}>${e(emptyLabel)}</option>${parquet.codecs.map(({ codec }) => `<option value="${e(codec)}" ${selected === codec ? 'selected' : ''}>${e(codec)}</option>`).join('')}`;
+}
+function levelAttributes(parquet, codec, level = null) {
+    const range = parquet.codecs.find((item) => item.codec === codec)?.level;
+    return range
+        ? `min="${range.min}" max="${range.max}" placeholder="default ${range.default}" title="Level ${range.min}–${range.max}; empty uses the codec default" value="${e(level ?? '')}"`
+        : 'disabled placeholder="—" value=""';
+}
+function syncParquetLevel(select) {
+    const input = select.closest('[data-parquet-choice]')?.querySelector('[data-parquet-level]');
+    const parquet = parquetSettings();
+    if (!input || !parquet) return;
+    const range = parquet.codecs.find((item) => item.codec === select.value)?.level;
+    input.disabled = !range;
+    if (range) {
+        input.min = String(range.min);
+        input.max = String(range.max);
+        input.placeholder = `default ${range.default}`;
+        input.title = `Level ${range.min}–${range.max}; empty uses the codec default`;
+    } else {
+        input.value = '';
+        input.placeholder = '—';
+        input.removeAttribute('title');
+    }
+}
+function readParquetChoice(container) {
+    const level = container?.querySelector('[data-parquet-level]');
+    return {
+        codec: container?.querySelector('[data-parquet-codec]')?.value ?? '',
+        level: level && !level.disabled ? level.value : '',
+    };
+}
 
 function toast(message) {
     const node = $('#toast');
@@ -538,7 +582,34 @@ function schemaView() {
         )
         .join(
             '',
-        )}</tbody></table></div></section><div class="notice" style="margin-top:20px">Append mode preserves duplicate keys. A field called key does not imply uniqueness. Schema evolution is not enabled.</div>`;
+        )}</tbody></table></div></section>${writeSettingsPanel()}<div class="notice" style="margin-top:20px">Append mode preserves duplicate keys. A field called key does not imply uniqueness. Schema evolution is not enabled.</div>`;
+}
+function writeSettingsPanel() {
+    const parquet = parquetSettings();
+    if (!parquet || !state.collection || state.collection.collection_id !== state.collectionId)
+        return '';
+    let version, current;
+    try {
+        version = writeSettingsVersion(state.collection.write_settings_version);
+        current = canonicalWriteSettings(state.collection.write_settings, state.schema, {
+            reported: true,
+        });
+    } catch (error) {
+        // Saving would drop options this workbench cannot represent; show them read-only.
+        return `<section class="panel write-settings-panel"><div class="panel-header"><h2>Parquet write settings</h2></div><div class="panel-body"><p class="notice">${e(error.message)}. Editing is disabled here; use a client that supports these settings.</p><pre class="json-block">${json(state.collection.write_settings ?? null)}</pre></div></section>`;
+    }
+    const collection = current.parquet.compression;
+    const overrides = new Map(
+        current.parquet.columns.map((item) => [item.field, item.compression]),
+    );
+    return `<section class="panel write-settings-panel"><div class="panel-header"><div><h2>Parquet write settings</h2><p>Value compression of data files written by later appends. Existing files keep their codecs. This is not HTTP compression.</p></div>${badge(`Version ${version}`, 'pink')}</div><div class="panel-body"><form id="write-settings-form" data-collection="${e(state.collectionId)}" data-version="${e(version)}"><div class="field-row" data-parquet-choice data-parquet-default><label class="field">Collection default<select name="parquet-codec" data-parquet-codec>${codecOptions(parquet, collection?.codec, defaultCodecLabel(parquet))}</select></label><label class="field">Level<input name="parquet-level" type="number" step="1" inputmode="numeric" data-parquet-level ${levelAttributes(parquet, collection?.codec, collection?.level)}></label></div><div class="table-wrap"><table class="write-settings-table" aria-label="Parquet column overrides"><thead><tr><th>Column</th><th>Override</th><th>Level</th><th>In effect</th></tr></thead><tbody>${fields()
+        .map((field) => {
+            const override = overrides.get(field.name);
+            return `<tr data-parquet-choice data-parquet-field="${e(field.name)}"><td><strong>${e(field.name)}</strong></td><td><select data-parquet-codec aria-label="Parquet compression for ${e(field.name)}">${codecOptions(parquet, override?.codec, 'Collection default')}</select></td><td><input type="number" step="1" inputmode="numeric" data-parquet-level aria-label="Parquet level for ${e(field.name)}" ${levelAttributes(parquet, override?.codec, override?.level)}></td><td>${e(describeCompression(override ?? collection, parquet))}</td></tr>`;
+        })
+        .join(
+            '',
+        )}</tbody></table></div><p class="modal-error" id="write-settings-error" role="alert"></p><div class="button-row"><button class="button primary" type="submit">Save write settings</button></div><details class="raw-metadata"><summary class="small">Current canonical settings</summary><pre class="json-block">${json(current)}</pre></details></form></div></section>`;
 }
 function snapshotsView() {
     const observed = !supportsFeature(state.capabilities, 'snapshots');
@@ -874,10 +945,11 @@ function showModal(title, body) {
 }
 let creationFields = [];
 function renderCreationFields() {
+    const parquet = parquetSettings();
     $('#schema-editor').innerHTML = creationFields
         .map(
             (field, i) =>
-                `<div class="schema-editor-row"><input name="field-name" value="${e(field.name)}" aria-label="Column name ${i + 1}" required><select name="field-type" aria-label="Column type ${i + 1}">${['string', 'int64', 'float64', 'bool', 'timestamp_us_utc'].map((type) => `<option ${field.type === type ? 'selected' : ''}>${type}</option>`).join('')}</select><label><input name="field-nullable" type="checkbox" ${field.nullable ? 'checked' : ''}>NULL</label><button class="icon-button" type="button" data-action="remove-field" data-index="${i}" aria-label="Remove field ${i + 1}">${icon('close')}</button></div>`,
+                `<div class="schema-editor-row${parquet ? ' with-parquet' : ''}" ${parquet ? 'data-parquet-choice' : ''}><input name="field-name" value="${e(field.name)}" aria-label="Column name ${i + 1}" required><select name="field-type" aria-label="Column type ${i + 1}">${['string', 'int64', 'float64', 'bool', 'timestamp_us_utc'].map((type) => `<option ${field.type === type ? 'selected' : ''}>${type}</option>`).join('')}</select><label><input name="field-nullable" type="checkbox" ${field.nullable ? 'checked' : ''}>NULL</label>${parquet ? `<select name="field-codec" data-parquet-codec aria-label="Parquet compression for column ${i + 1}">${codecOptions(parquet, field.codec, 'Collection default')}</select><input name="field-level" type="number" step="1" inputmode="numeric" data-parquet-level aria-label="Parquet level for column ${i + 1}" ${levelAttributes(parquet, field.codec, field.level)}>` : ''}<button class="icon-button" type="button" data-action="remove-field" data-index="${i}" aria-label="Remove field ${i + 1}">${icon('close')}</button></div>`,
         )
         .join('');
 }
@@ -886,11 +958,40 @@ function readCreationFields() {
         name: row.querySelector('[name=field-name]').value,
         type: row.querySelector('[name=field-type]').value,
         nullable: row.querySelector('[name=field-nullable]').checked,
+        ...readParquetChoice(row),
     }));
 }
+// Returns canonical settings, or null when no Parquet compression was chosen.
+function creationWriteSettings(form, rows, schema) {
+    const parquet = parquetSettings(),
+        choice = form.querySelector('[data-parquet-default]');
+    if (!parquet || !choice) return null;
+    const settings = writeSettingsFromChoices(
+        parquet,
+        readParquetChoice(choice),
+        rows.map((row) => ({ field: row.name, codec: row.codec, level: row.level })),
+    );
+    return settings && canonicalWriteSettings(settings, schema);
+}
+function creationParquetControls(parquet, settings) {
+    const compression = settings?.parquet?.compression ?? null;
+    if (!parquet)
+        return settings
+            ? `<p class="notice">Parquet write settings of this request: <code>${e(JSON.stringify(settings))}</code></p>`
+            : '';
+    return `<div class="parquet-settings"><div class="field-row" data-parquet-choice data-parquet-default><label class="field">Parquet compression<select name="parquet-codec" data-parquet-codec>${codecOptions(parquet, compression?.codec, defaultCodecLabel(parquet))}</select></label><label class="field">Level<input name="parquet-level" type="number" step="1" inputmode="numeric" data-parquet-level ${levelAttributes(parquet, compression?.codec, compression?.level)}></label></div><small>Value compression of Parquet data files written by appends (not HTTP compression). Columns can override it below.</small></div>`;
+}
 function openCreate() {
+    const frozenSettings = state.creation?.body.write_settings;
+    const overrides = new Map(
+        (frozenSettings?.parquet?.columns ?? []).map((item) => [item.field, item.compression]),
+    );
     creationFields = state.creation
-        ? structuredClone(state.creation.body.schema.fields)
+        ? structuredClone(state.creation.body.schema.fields).map((field) => ({
+              ...field,
+              codec: overrides.get(field.name)?.codec ?? '',
+              level: overrides.get(field.name)?.level ?? '',
+          }))
         : [
               { name: 'key', type: 'string', nullable: false },
               { name: 'label', type: 'string', nullable: false },
@@ -898,7 +999,7 @@ function openCreate() {
           ];
     showModal(
         'A new collection, just for you.',
-        `<form id="create-form"><label class="field">Collection name<input name="name" placeholder="my_collection" pattern="[a-z][a-z0-9_]{0,62}" required autofocus><small>Lowercase letters, numbers and underscores. Schema stays fixed.</small></label><div style="margin-top:20px"><label>Columns</label><div id="schema-editor"></div><button type="button" class="text-button" data-action="add-field">+ Add column</button></div><div id="create-outcome" role="status"></div><p class="modal-error" id="modal-error" role="alert"></p><div class="modal-actions"><button type="button" class="button" data-action="close-modal">Cancel</button>${state.creation ? '<button type="button" class="button" data-action="export-pending" data-kind="create">Export pending request</button>' : ''}<button class="button primary" type="submit">Create collection${icon('arrow')}</button></div></form>`,
+        `<form id="create-form"><label class="field">Collection name<input name="name" placeholder="my_collection" pattern="[a-z][a-z0-9_]{0,62}" required autofocus><small>Lowercase letters, numbers and underscores. Schema stays fixed.</small></label>${creationParquetControls(parquetSettings(), frozenSettings)}<div style="margin-top:20px"><label>Columns</label><div id="schema-editor"></div><button type="button" class="text-button" data-action="add-field">+ Add column</button></div><div id="create-outcome" role="status"></div><p class="modal-error" id="modal-error" role="alert"></p><div class="modal-actions"><button type="button" class="button" data-action="close-modal">Cancel</button>${state.creation ? '<button type="button" class="button" data-action="export-pending" data-kind="create">Export pending request</button>' : ''}<button class="button primary" type="submit">Create collection${icon('arrow')}</button></div></form>`,
     );
     renderCreationFields();
     if (state.creation) {
@@ -921,19 +1022,11 @@ function releaseCreationForm(form) {
         'select,input[type=checkbox],button[data-action="add-field"],button[data-action="remove-field"]',
     ))
         input.disabled = false;
+    form.querySelectorAll('[data-parquet-codec]').forEach(syncParquetLevel);
     form.querySelector('[data-action="export-pending"]')?.remove();
 }
 function verifyCreated(created, body) {
-    if (
-        created.collection_id !== body.collection_id ||
-        created.name !== body.name ||
-        !Array.isArray(created.schema?.fields) ||
-        schemaSignature(created.schema) !== schemaSignature(body.schema)
-    )
-        throw new Error(
-            'Resolved collection identity or schema differs from the original create request. Keep its UUID for recovery.',
-        );
-    return created;
+    return verifyCreatedCollection(created, body);
 }
 async function createForm(form) {
     const button = form.querySelector('[type=submit]');
@@ -942,14 +1035,21 @@ async function createForm(form) {
         epoch = state.epoch;
     let draft, created;
     try {
-        const content = state.creation
-            ? { name: state.creation.body.name, schema: state.creation.body.schema }
-            : { name: form.elements.name.value, schema: { fields: readCreationFields() } };
-        draft = state.creation ?? {
-            fingerprint: JSON.stringify(content),
-            body: { collection_id: crypto.randomUUID(), ...content },
-            scope: recoveryScope(),
-        };
+        draft = state.creation;
+        if (!draft) {
+            const rows = readCreationFields();
+            const schema = {
+                fields: rows.map(({ name, type, nullable }) => ({ name, type, nullable })),
+            };
+            const writeSettings = creationWriteSettings(form, rows, schema);
+            const body = {
+                collection_id: crypto.randomUUID(),
+                name: form.elements.name.value,
+                schema,
+                ...(writeSettings ? { write_settings: writeSettings } : {}),
+            };
+            draft = { fingerprint: creationFingerprint(body), body, scope: recoveryScope() };
+        }
         state.creation = draft;
         try {
             const received = await api.json('/collections', {
@@ -1035,6 +1135,94 @@ async function createForm(form) {
     } finally {
         setBusy(button, false);
         if (created) button.disabled = true;
+    }
+}
+async function saveWriteSettings(form) {
+    const api = state.api,
+        epoch = state.epoch,
+        id = form.dataset.collection,
+        version = form.dataset.version;
+    const button = form.querySelector('[type=submit]');
+    const current = () => api === state.api && epoch === state.epoch && id === state.collectionId;
+    const message = (text) => {
+        const node = $('#write-settings-error');
+        if (node) node.textContent = text;
+    };
+    message('');
+    setBusy(button, true);
+    try {
+        const parquet = parquetSettings();
+        if (!parquet || !current() || state.collection?.collection_id !== id)
+            throw new Error('Reload this collection before changing its write settings');
+        const schema = state.schema;
+        const settings = canonicalWriteSettings(
+            writeSettingsFromChoices(
+                parquet,
+                readParquetChoice(form.querySelector('[data-parquet-default]')),
+                [...form.querySelectorAll('tr[data-parquet-field]')].map((row) => ({
+                    field: row.dataset.parquetField,
+                    ...readParquetChoice(row),
+                })),
+            ),
+            schema,
+        );
+        // Each applied request creates a new version; do not create one for nothing.
+        if (sameWriteSettings(settings, state.collection.write_settings, schema)) {
+            message('No changes to save.');
+            return;
+        }
+        let updated;
+        try {
+            updated = await api.json(`/collections/${encodeURIComponent(id)}/write-settings`, {
+                method: 'POST',
+                body: { expected_version: version, write_settings: settings },
+            });
+        } catch (error) {
+            if (!current()) return;
+            if (error.status === 409 && error.code === 'WRITE_SETTINGS_CONFLICT') {
+                // Someone else changed them (or an earlier lost save applied):
+                // show the current version instead of overwriting it.
+                await refreshSelection();
+                if (!current()) return;
+                const text = `Write settings changed after version ${version}. Reloaded version ${state.collection?.write_settings_version ?? 'unknown'}; review it and save again.`;
+                message(text);
+                toast(text);
+                return;
+            }
+            if (error.status && error.status < 500 && error.status !== 408) throw error;
+            throw new Error(
+                `Write settings outcome is unknown (${error.message}). ${error.code === 'RECOVERY_REQUIRED' ? 'Reconcile the database, then save' : 'Save'} the same settings again; an identical request that was applied is confirmed unchanged.`,
+            );
+        }
+        if (!current()) return;
+        let confirmed = false;
+        try {
+            confirmed =
+                updated?.collection_id === id &&
+                writeSettingsVersion(updated.write_settings_version) ===
+                    (BigInt(version) + 1n).toString() &&
+                sameWriteSettings(updated.write_settings, settings, schema);
+        } catch {
+            confirmed = false;
+        }
+        if (!confirmed)
+            throw new Error(
+                'The server returned different write settings. Refresh the workspace before editing them again.',
+            );
+        state.collection = updated;
+        state.collections = state.collections.map((item) =>
+            item.collection_id === id ? updated : item,
+        );
+        renderView();
+        toast(
+            `Parquet write settings saved (version ${updated.write_settings_version}). Later appends use them; existing files keep their codecs.`,
+        );
+    } catch (error) {
+        if (!current()) return;
+        message(error.message);
+        throw error;
+    } finally {
+        setBusy(button, false);
     }
 }
 function recoveryScope() {
@@ -1441,6 +1629,7 @@ document.addEventListener('submit', async (event) => {
             'write-form',
             'operation-lookup-form',
             'recovery-form',
+            'write-settings-form',
         ].includes(event.target.id)
     )
         return;
@@ -1480,6 +1669,7 @@ document.addEventListener('submit', async (event) => {
         else if (form.id === 'append-form' || form.id === 'write-form') await appendForm(form);
         else if (form.id === 'create-form') await createForm(form);
         else if (form.id === 'recovery-form') await importRecovery(form);
+        else if (form.id === 'write-settings-form') await saveWriteSettings(form);
         else if (form.id === 'operation-lookup-form')
             await lookupOperation(form.elements.operation.value.trim());
     } catch (error) {
@@ -1637,6 +1827,7 @@ document.addEventListener('change', async (event) => {
                 state.collectionId,
                 target.value === 'latest' ? null : target.value,
             );
+        else if (target.matches('[data-parquet-codec]')) syncParquetLevel(target);
         else if (target.dataset.themeColor) {
             state.theme = structuredClone(state.theme);
             state.theme.colors[target.dataset.themeColor] = target.value;

@@ -122,14 +122,70 @@ carry no recovery state, otherwise it is a `ProtocolError`.
 `create_collection` requires a caller collection UUID. Its returned
 `CreateOutcome.info` contains collection metadata. For a lost create response,
 `resolve_create(name, schema, collection_id=original_id)` performs exact-name
-lookup **and checks the original UUID and schema**. A name match alone is
-insufficient.
+lookup **and checks the original UUID and schema** (plus any original
+`write_settings`, see below). A name match alone is insufficient.
 
 The omitted `expected_snapshot` means `Any`. Pass `None` for `NoSnapshot`, or an
 int64 snapshot ID for an exact precondition. The same distinction applies to
 read selectors: omitted selects latest once; explicit `snapshot_id=None` selects
 the initial view. Snapshot IDs are opaque int64 values, not row counts or
 sequences. The SDK preserves their decimal-string wire form in metadata.
+
+## Parquet write settings
+
+Collections can choose the **Parquet value compression** of the data files that
+later appends write. This is unrelated to HTTP transport compression
+(`Content-Encoding`). Check `client.capabilities()` first:
+`features.write_settings` must be true, and the top-level `parquet` object lists
+the codecs of the server build with their level ranges (`level` is `null` for
+codecs without levels) and `default_compression`. The development mock does not
+support write settings and rejects them.
+
+```python
+settings = {"parquet": {
+    "compression": {"codec": "zstd", "level": 3},  # collection default; level None = codec default
+    "columns": [{"field": "at", "compression": {"codec": "uncompressed"}}],  # a field of `schema`
+}}
+created = client.create_collection("example", schema, collection_id=collection_id,
+                                   write_settings=settings)
+info = client.get_collection(collection_id)
+print(info["write_settings"], info["write_settings_version"])  # canonical form, "1"
+
+updated = client.update_write_settings(collection_id, info["write_settings_version"],
+                                       {"parquet": {"compression": {"codec": "snappy"}}})
+print(updated["write_settings_version"])  # "2"; existing files keep their codecs
+```
+
+Settings are plain JSON objects in the wire shape; codecs are `uncompressed`,
+`snappy`, `gzip`, `lz4_raw` and `zstd`. The SDK rejects unknown keys or codecs,
+non-integer levels, duplicate columns and column entries without `compression`
+before sending; level ranges are checked by the server (400 `INVALID_ARGUMENT`).
+`canonical_write_settings(value, schema)` returns the form the server reports:
+columns in schema order, `level` explicit (`None` selects the codec's default)
+and `compression` `None` when unset. Without `write_settings`, create sends
+exactly the same body as before.
+
+Write settings are part of the collection definition. Repeat a lost create with
+the same value: a different value is refused with 409 `WRITE_SETTINGS_MISMATCH`.
+`write_settings_version` is `"0"` for a collection created without settings and
+`"1"` after a creation with non-default settings; each applied update adds one.
+`create_collection` and `resolve_create(..., write_settings=...)` compare the
+returned settings with the canonical request while the version is still the
+creation version. A higher version means later updates replaced the creation
+settings; only the UUID, name and schema remain comparable then (a version-1
+collection created with defaults and updated once cannot be told apart).
+
+`update_write_settings(collection_id, expected_version, write_settings)` is a
+compare-and-set that replaces the complete settings object: it returns the
+collection with version `expected_version + 1` and the requested settings,
+otherwise `ProtocolError`. Reported settings may contain newer options unknown
+to this SDK; unset (`null`) ones are ignored, set ones raise `ProtocolError`. A stale version raises
+`HTTPError` 409 `WRITE_SETTINGS_CONFLICT`; reload the collection before deciding
+again. A lost response (`TransportError`) or a 5xx such as 503
+`RECOVERY_REQUIRED` (`OutcomeUnknownError`) leaves the result unknown: reconcile
+if requested, then repeat the same call; an identical request that was already
+applied returns the collection unchanged. File details report the codec actually
+used by each column chunk as `compression`.
 
 ## Scalars, predicates and metadata
 

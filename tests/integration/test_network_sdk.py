@@ -262,6 +262,30 @@ def test_runnable_quickstart_uses_actual_http_and_reports_verified_mock_stream(s
         assert client.stats(collection_id)["rows"] == 2
 
 
+def test_mock_without_parquet_write_settings_refuses_them_explicitly(server):
+    # Native write settings are covered by native HTTP tests. The mock must not
+    # look as if it applied Parquet compression it does not implement.
+    settings = {"parquet": {"compression": {"codec": "zstd", "level": 3}}}
+    with Client(server.url, TOKEN) as client:
+        capabilities = client.capabilities()
+        assert capabilities.get("parquet") is None
+        assert not capabilities.get("features", {}).get("write_settings")
+        cid = str(uuid4())
+        with pytest.raises(HTTPError) as refused:
+            client.create_collection("parquet_settings", SCHEMA, collection_id=cid, write_settings=settings)
+        assert refused.value.status_code == 422 and refused.value.collection_id == cid
+        with pytest.raises(HTTPError) as absent:
+            client.get_collection(cid)
+        assert absent.value.status_code == 404
+        create(client, name="parquet_settings", collection_id=cid)
+        assert client.resolve_create("parquet_settings", SCHEMA, collection_id=cid)["collection_id"] == cid
+        with pytest.raises(ProtocolError):
+            client.resolve_create("parquet_settings", SCHEMA, collection_id=cid, write_settings=settings)
+        with pytest.raises(HTTPError) as missing:
+            client.update_write_settings(cid, "0", settings)
+        assert missing.value.status_code == 404
+
+
 def test_actual_https_accepts_explicit_trusted_test_ca(tmp_path, tls_material):
     with MockHTTPServer(tmp_path, tls=tls_material) as server:
         with Client(server.url, TOKEN, verify=tls_material.trusted_context()) as client:
