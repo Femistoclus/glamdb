@@ -165,3 +165,13 @@ with fresh-process verification, lost COMMIT replies, lower-limit reopen,
 compatibility without the setting and KV rejection.
 `SnapshotArchiveCost.*` measures root bytes and catalog work per append at two
 history lengths; `GLAMDB_ARCHIVE_COST=1008,5004` selects the campaign lengths.
+
+Measured on 2026-11-12 (Release, Linux arm64 container, tmpfs store, one run,
+`hot_snapshots=8`): after 1,008 and 5,004 three-row appends the root held 9
+snapshots in 9,389 and 9,398 bytes, one 9-append archive cycle executed the same
+743 catalog statements (45 rows changed, 500 returned, 9,990 SQLite VM steps),
+and appends averaged 3.04 and 2.85 ms. The same history without the setting
+grew the root to 929,886 and 4,565,674 bytes with 7.40 and 43.38 ms appends
+(after lifting `max_snapshots`, which otherwise refuses appends at 4,096).
+Reopen took 865 ms with 5,004 archived snapshots versus 5,920 ms with all of
+them in the root. These runs do not qualify durability or power loss.
