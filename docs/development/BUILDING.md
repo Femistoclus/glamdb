@@ -79,8 +79,10 @@ ctest --test-dir build/io --output-on-failure --no-tests=error
 ```
 
 The I/O target contains filesystem access, directory/URI checks, attempts and
-receipts, SHA-256, and durable file copying. GoogleTest comes from the pinned
-submodule; missing sources produce a configure error with the initialization
+receipts, SHA-256, and durable file copying. SHA-256 uses runtime-gated x86/ARM
+instructions with a portable fallback and no additional library dependency.
+See [SHA-256](SHA256.md) for path tests and the manual native hashing benchmark.
+GoogleTest comes from the pinned submodule; missing sources produce a configure error with the initialization
 command, without downloading during configuration. `BUILD_TESTING=OFF` does
 not require GoogleTest. Tooling tests check runner failure propagation, source
 isolation, optional tests, static libraries, and the I/O-only install boundary.

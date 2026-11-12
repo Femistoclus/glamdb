@@ -566,6 +566,11 @@ inside the development virtualenv. Run `python3 -m unittest discover -s
 tests/logging -v` or `glamdb.logging` CTest. Tests exercise real Quill, blocked /
 closed stderr, overload, thread churn, shutdown and secret projection.
 
+The shared SHA-256 compressor uses runtime-gated x86 SHA-NI or ARMv8 SHA2,
+with a portable fallback and no new I/O-only dependency. Read
+[SHA-256 validation and measurements](docs/development/SHA256.md) for forced-path
+tests, compatibility checks and the manual `glamdb_sha256_bench` target.
+
 For dependency work, read [third_party/README.md](third_party/README.md).
 Verify checked-out revisions without building them:
 

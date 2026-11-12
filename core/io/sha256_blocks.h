@@ -1,13 +1,19 @@
 #pragma once
 
 // SHA-256 compression over whole 64-byte blocks, shared by the payload
-// fingerprint and the durable-file receipts. Uses the ARMv8 SHA2 instructions
-// when the CPU reports them and a portable implementation otherwise.
+// fingerprint and the durable-file receipts. Uses x86 SHA or ARMv8 SHA2
+// instructions when the CPU reports them and a portable implementation otherwise.
 
 #include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+
+#if defined(__x86_64__) && (defined(__clang__) || defined(__GNUC__))
+#include <cpuid.h>
+#include <immintrin.h>
+#define GLAMDB_SHA256_X86 1
+#endif
 
 #if defined(__aarch64__) && (defined(__clang__) || defined(__GNUC__))
 #include <arm_neon.h>
@@ -124,6 +130,64 @@ inline void PortableBlocks(std::uint32_t* state, const unsigned char* data, std:
     }
 }
 
+#ifdef GLAMDB_SHA256_X86
+// Based on Jeffrey Walton's public-domain SHA-Intrinsics/sha256-x86.c,
+// derived from Intel's and Sean Gulley's SHA extensions examples.
+// https://github.com/noloader/SHA-Intrinsics/blob/master/sha256-x86.c
+__attribute__((target("sha,ssse3,sse4.1"))) inline void
+X86Blocks(std::uint32_t* state, const unsigned char* data, std::size_t blocks) noexcept
+{
+    // SHA256RNDS2 uses ABEF/CDGH rather than the ordinary ABCD/EFGH layout.
+    auto abcd = _mm_shuffle_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(state)), 0xb1);
+    auto cdgh = _mm_shuffle_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(state + 4)), 0x1b);
+    auto abef = _mm_alignr_epi8(abcd, cdgh, 8);
+    cdgh = _mm_blend_epi16(cdgh, abcd, 0xf0);
+    const auto byteOrder = _mm_set_epi64x(0x0c0d0e0f08090a0b, 0x0405060700010203);
+    for (; blocks != 0; --blocks, data += 64) {
+        const auto savedAbef = abef;
+        const auto savedCdgh = cdgh;
+        __m128i message[4];
+        for (std::size_t i = 0; i < 4; ++i) {
+            message[i] = _mm_shuffle_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(data + 16 * i)), byteOrder);
+        }
+        for (std::size_t group = 0; group < 16; ++group) {
+            auto& words = message[group & 3];
+            if (group >= 4) {
+                words = _mm_sha256msg1_epu32(words, message[(group + 1) & 3]);
+                words = _mm_add_epi32(words, _mm_alignr_epi8(message[(group + 3) & 3], message[(group + 2) & 3], 4));
+                words = _mm_sha256msg2_epu32(words, message[(group + 3) & 3]);
+            }
+            auto schedule = _mm_add_epi32(words,
+                _mm_loadu_si128(reinterpret_cast<const __m128i*>(RoundConstants.data() + 4 * group)));
+            cdgh = _mm_sha256rnds2_epu32(cdgh, abef, schedule);
+            schedule = _mm_shuffle_epi32(schedule, 0x0e);
+            abef = _mm_sha256rnds2_epu32(abef, cdgh, schedule);
+        }
+        abef = _mm_add_epi32(abef, savedAbef);
+        cdgh = _mm_add_epi32(cdgh, savedCdgh);
+    }
+    abcd = _mm_shuffle_epi32(abef, 0x1b);
+    cdgh = _mm_shuffle_epi32(cdgh, 0xb1);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(state), _mm_blend_epi16(abcd, cdgh, 0xf0));
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(state + 4), _mm_alignr_epi8(cdgh, abcd, 8));
+}
+
+inline bool HasX86Instructions() noexcept
+{
+    // Check every extension used by X86Blocks. CPUID is executed only once;
+    // no global ISA flags or AVX/OSXSAVE state are needed for these XMM operations.
+    static const bool supported = [] {
+        unsigned eax = 0, ebx = 0, ecx = 0, edx = 0;
+        constexpr unsigned required = bit_SSSE3 | bit_SSE4_1;
+        if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx) || (ecx & required) != required) {
+            return false;
+        }
+        return __get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx) && (ebx & bit_SHA) != 0;
+    }();
+    return supported;
+}
+#endif
+
 #ifdef GLAMDB_SHA256_ARM
 #if defined(__clang__)
 __attribute__((target("sha2")))
@@ -177,6 +241,12 @@ inline bool HasArmInstructions() noexcept
 // Compresses `blocks` consecutive 64-byte blocks into `state`.
 inline void CompressBlocks(std::uint32_t* state, const unsigned char* data, std::size_t blocks) noexcept
 {
+#ifdef GLAMDB_SHA256_X86
+    if (HasX86Instructions()) {
+        X86Blocks(state, data, blocks);
+        return;
+    }
+#endif
 #ifdef GLAMDB_SHA256_ARM
     if (HasArmInstructions()) {
         ArmBlocks(state, data, blocks);

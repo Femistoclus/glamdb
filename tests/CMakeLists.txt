@@ -27,6 +27,11 @@ add_test(NAME glamdb.tooling
 set_tests_properties(glamdb.tooling PROPERTIES LABELS "tooling" TIMEOUT 240)
 
 if(NOT GLAMDB_IO_ONLY)
+    # Manual CPU-only comparison of both shared-compressor wrappers.
+    add_executable(glamdb_sha256_bench "${PROJECT_SOURCE_DIR}/benchmarks/sha256.cpp")
+    target_include_directories(glamdb_sha256_bench PRIVATE "${PROJECT_SOURCE_DIR}")
+    target_link_libraries(glamdb_sha256_bench PRIVATE glamdb::core glamdb_io glamdb_build_options)
+
     add_test(NAME glamdb.smoke COMMAND glamdb_cli)
     set_tests_properties(glamdb.smoke PROPERTIES LABELS "smoke" TIMEOUT 10)
 
