@@ -1,153 +1,220 @@
+<p align="center">
+  <img src="ui/assets/brand/wordmark.png" alt="GlamDB" width="720">
+</p>
+
 # GlamDB
 
-An open-source C++23 columnar key-value storage engine in early development.
+GlamDB is an open-source columnar database written in C++23. It stores typed
+records in Parquet files, manages snapshots with Apache Iceberg, and uses SQLite
+for its catalog and write outcomes. Use it as an embedded C++ library or through
+the HTTP server, browser workbench, command-line client, and Python SDK.
 
-GlamDB combines Arrow batches, immutable Parquet files, Iceberg snapshots, and a
-persistent SQLite catalog. The C++ core owns writes, commit ordering, recovery,
-and snapshot reads; the native HTTP server and clients use that same core.
+**GlamDB is in early development.** The current engine is an append-only store
+for local disk, with one owning process, one serialized writer per store, and
+concurrent snapshot readers. Power-loss durability qualification is still pending.
 
-The first engine milestone is an embedded, synchronous **append store** on
-Linux and local persistent storage, with one owning process and one writer.
-Append preserves duplicate keys. Key-value upserts and deletes follow after
-local durability qualification, with further network capabilities and S3
-as separate extensions.
-See the [architecture](docs/ARCHITECTURE.md) for semantics and the
-[roadmap](docs/ROADMAP.md) for scope and acceptance criteria.
+## Features
 
-## Current status
+- **Typed collections.** Fixed schemas with strings, booleans, int64, float64,
+  UTC microsecond timestamps, and nullable fields. Appends preserve every row,
+  including duplicate keys.
+- **Snapshot reads.** Query the latest committed view or a retained historical
+  snapshot. Select columns, limit results, and combine comparisons, membership,
+  and NULL predicates with AND, OR, and NOT.
+- **Explicit write outcomes.** Persistent operation IDs support exact retries
+  and outcome lookup after restart. Writes distinguish committed, definitely
+  not committed, and unknown outcomes.
+- **Open columnar formats.** Arrow batches in memory, immutable Parquet data
+  files, and Iceberg v2 tables with retained snapshot history.
+- **Data inspection.** Browse schemas, snapshot history, statistics, files,
+  Parquet row groups, scan plans, and execution profiles.
+- **Connected tools.** Manage multiple databases through one authenticated
+  server. Read and write through the UI, CLI, or Python SDK; retrieve scan results
+  as JSON or Arrow IPC with fixed-snapshot pagination.
 
-The SQLite catalog, write/recovery coordinator, canonical Arrow input, public
-C++ facade, outcome JSON and network CLI are implemented. Independent
-storage primitives implement durable local I/O, Parquet writing, Iceberg append
-staging, publication validation, reachable-file recovery, and capacity checks.
-Tests cover real files, injected failures and fresh-process recovery.
+Queries use a typed predicate API; there is no SQL query interface. Collections
+are currently unpartitioned and append-only. Upsert, delete, schema evolution,
+compaction, snapshot expiration, object storage, and replication are not available.
 
-A storage backend connecting these primitives to the coordinator and a minimal
-scanner (`Engine::Scan`) are implemented and tested through `glamdb_vertical`;
-see [SCANNER.md](docs/development/SCANNER.md).
-Native scans reuse an immutable [verified membership index](docs/development/SCAN_INDEX.md)
-for fixed latest, historical and initial-empty views. Publication and reopen
-derive it from authoritative Iceberg metadata; healthy scan planning reads no manifests.
-Shared scan budgets cover planning, decoding and retained output descriptors;
-[profiles](docs/development/METADATA.md) separate memory, filtering and stop counters.
-Returned scan buffers retain allocator accounting, FileIO and engine ownership
-through slices and Arrow exports, including after shutdown.
-The [installed public API consumer](docs/development/BUILDING.md#build-and-install)
-checks real A/B appends, fixed-view scans, persisted receipts and retries after
-reopening in a new process, with a separate storage-disabled contour.
-Healthy terminal receipt lookups reuse the verified generation without rereading
-warehouse history; observed corruption and uncertainty still require recovery.
-See the [coordinator guide](docs/development/COORDINATOR.md)
-and [storage guide](docs/development/STORAGE_MODULE.md) for supported boundaries.
-The [shared resource budget matrix](docs/development/RESOURCE_BUDGETS.md) names
-limit units, owners and enforcement points, including retained buffers and
-completion/recovery reserves. A [process resource owner](docs/development/SHARED_RESOURCES.md)
-shares finite memory and device reservations across databases and HTTP work.
-[Measured multi-database tests](docs/development/SHARED_RESOURCES_VALIDATION.md)
-cover saturation, retained buffers and fresh-process reopen; the conservative
-upstream envelopes still require broader RSS and capacity qualification.
-Power-loss, capacity and ingestion qualification (G4) are **NOT RUN**. The
-[roadmap status](docs/ROADMAP.md#current-status) separates implemented code
-from executed evidence for each gate.
+### In development
 
-Available now: independent golden fixtures, a typed SQL-NULL reference oracle,
-receipt/fault-evidence tools, a network Python SDK, and a configurable pink
-browser workbench. The [native HTTP server](docs/development/HTTP_SERVER.md)
-connects them to persistent storage and serves the same UI. It supports typed
-create/append/scan operations, compound predicates and zero-column projections
-in JSON and Arrow, selected-view statistics, retained
-snapshot history, actual file/row-group details and explain through explicit capabilities. A separate **disposable in-memory mock**
-remains available for development. Its data files,
-snapshots and commits are synthetic and disappear on restart.
+Current work focuses on qualifying and improving the existing append engine:
 
-The embedded C++ facade also exposes [native metadata](docs/development/METADATA.md):
-capabilities, receipt-backed snapshot history, selected-view statistics,
-snapshot-bound file and row-group details, fixed-view collection/history/file
-pages, scan explain and execution profiles. The HTTP, SDK and workbench adapters use this
-same facade, including precise int64 identities and unknown/null measurements.
+- Recovery and power-loss qualification, including controlled physical failures
+  ([#66](https://github.com/glamourdb/glamdb/issues/66)).
+- Performance and concurrent sessions: configurable scan quotas, lower append
+  overhead, and measured capacity limits
+  ([#109](https://github.com/glamourdb/glamdb/issues/109)).
+- Bounded Parquet reads and file/row-group pruning for selective scans
+  ([#46](https://github.com/glamourdb/glamdb/issues/46)).
 
-Run the [installed cross-client acceptance recipe](docs/development/NATIVE_ACCEPTANCE.md)
-for one persistent 1,000 + 10-row store, browser views, restart/exact retry,
-physical Parquet/Avro inspection and quiesced whole-store backup/restore.
+### Planned
 
-The workbench also has a **public browser demo** requiring no token or Python
-server. Each page instance owns its sample data; visitors can create/append,
-filter, explore snapshots and export JSON. Reload resets only that visitor's
-demo. See [public demo and publishing](docs/development/PUBLIC_DEMO.md).
-The supplied wordmark/transparent mark are used in login, sidebar, avatar and
-favicon; artwork paths and sizes remain runtime theme settings.
+- Streaming bulk ingestion with one atomic publication
+  ([#100](https://github.com/glamourdb/glamdb/issues/100)).
+- An explicit key-value mode with copy-on-write upserts, deletes, and batched
+  point lookups ([#101](https://github.com/glamourdb/glamdb/issues/101)).
+- Configurable Parquet compression, encodings, and dictionary policies
+  ([#97](https://github.com/glamourdb/glamdb/issues/97),
+  [#98](https://github.com/glamourdb/glamdb/issues/98)).
+- An opt-in small-write buffering and write-ahead log extension
+  ([#68](https://github.com/glamourdb/glamdb/issues/68)).
 
-**[Open the public demo](https://nnrpi.github.io/glamdb/)** — anyone can try it.
+These extensions are not part of the current API. Development is tracked in
+[GitHub issues](https://github.com/glamourdb/glamdb/issues).
 
-For persistent data, [run the native server locally](#run-locally).
-Launch the disposable mock workbench (Python 3.13 and Node 22+):
+## Get started
+
+Clone the repository and start a local server:
 
 ```sh
-bash scripts/bootstrap-workbench.sh
-export GLAMDB_TOKEN='choose-a-local-development-token'
-.venv/bin/python -m glamdb_mock --ui-dir ui --seed-demo
+git clone --recurse-submodules https://github.com/glamourdb/glamdb.git
+cd glamdb
+export GLAMDB_TOKEN="$(openssl rand -hex 32)"
+./scripts/glamdb-local.sh up
+./scripts/glamdb-local.sh status
 ```
 
-Open **http://127.0.0.1:8765** and enter that token. Edit
-[`ui/config/theme.json`](ui/config/theme.json) for live colors, fonts, layout,
-branding and bows/sparkles/kisses. No compilation or restart is needed.
+The helper builds the server and its pinned dependencies, then starts it in the
+background. On Linux, it uses the native toolchain described under
+[Build from source](#build-from-source); on macOS, it uses a running Docker
+daemon. Allow 30–60 minutes for the first dependency build.
 
-See the [workbench guide](docs/development/WORKBENCH.md),
-[SDK](sdk/python/README.md), [independent tools](tools/verification/README.md),
-[adapter contract](docs/development/HTTP_MOCK_CONTRACT.md), and
-[validation report](docs/development/WORKBENCH_VALIDATION.md).
+Open **http://127.0.0.1:8080** and enter the value of `GLAMDB_TOKEN`.
+The server starts with no databases. Create a database, create a collection with
+its schema, then append and query rows in the workbench. The same UI provides
+snapshot selection, storage inspection, and scan explain views.
 
-## Run locally
-
-`scripts/glamdb-local.sh` builds what changed and runs the native server `glamdb`
-in the background: natively on Linux (GCC 14+ or Clang 18+, CMake 3.28+, Ninja,
-OpenSSL and zlib headers), in Docker elsewhere (Docker Desktop or
-[Colima](docs/development/BUILDING.md#linux-tests-with-docker)). The first run
-also initializes submodules and builds the pinned dependencies (30–60 minutes).
+Data survives server restarts. The default location is
+`~/.local/share/glamdb/data` on Linux, or the `glamdb-data` Docker volume.
+Set `GLAMDB_DATA` to choose another directory or volume and `GLAMDB_PORT` to
+change the port. Writes require free space of at least the larger of 1 GiB or
+5% of the data filesystem, plus a 512 MiB reserve.
 
 ```sh
-export GLAMDB_PORT=8080                       # optional, default 8080
-export GLAMDB_TOKEN=$(openssl rand -hex 16)   # optional, else generated once
-./scripts/glamdb-local.sh up                  # build, (re)start, wait until healthy
-./scripts/glamdb-local.sh status              # URL, token and data location
-./scripts/glamdb-local.sh logs -f
-./scripts/glamdb-local.sh down                # stop; data is kept
+./scripts/glamdb-local.sh logs -f  # Follow server logs
+./scripts/glamdb-local.sh down     # Stop the server and keep its data
 ```
 
-Open the printed URL and enter the token. Without `GLAMDB_TOKEN`, `up` keeps a
-generated owner-only token in `~/.local/share/glamdb/token`. Data lives in
-`GLAMDB_DATA` (default `~/.local/share/glamdb/data` or Docker volume `glamdb-data`)
-and survives restarts. Writes need max(1 GiB, 5% of the data filesystem) plus
-512 MiB free, otherwise they fail with HTTP 507; `up` warns about that.
-`./scripts/glamdb-local.sh --help` lists all settings.
+Keep the token for subsequent starts, or omit `GLAMDB_TOKEN` and let the helper
+generate and reuse a token file; `status` shows its location. The service token
+grants access to all databases. Remote connections use HTTPS through a TLS proxy;
+see the [server guide](docs/development/HTTP_SERVER.md) for deployment and API details.
 
-Call the API with curl (int64 values are decimal strings) or the bundled CLI:
+## Use GlamDB
+
+The examples below use the local server and token from the quick start. Run
+commands from the repository root.
+
+### Command line
+
+`glamdb-cli` is a standalone HTTP/HTTPS client. The local helper runs it with the
+server's address and token. Create a database, define a collection, append two
+rows, and read them back:
 
 ```sh
-export GLAMDB_TOKEN=${GLAMDB_TOKEN:-$(cat ~/.local/share/glamdb/token)}
-api() { curl -sS -H "Authorization: Bearer $GLAMDB_TOKEN" -H 'Content-Type: application/json' "http://127.0.0.1:${GLAMDB_PORT:-8080}$@"; echo; }
-api /databases -d '{"name":"demo","database_id":"11111111-1111-4111-8111-111111111111"}'
-D=/databases/11111111-1111-4111-8111-111111111111
-api $D/collections -d '{"collection_id":"22222222-2222-4222-8222-222222222222","name":"events",
-  "schema":{"fields":[{"name":"key","type":"string","nullable":false},{"name":"n","type":"int64","nullable":true}]}}'
-C=$D/collections/22222222-2222-4222-8222-222222222222
-api $C/append -d '{"operation_id":"33333333-3333-4333-8333-333333333333","rows":[{"key":"a","n":"1"},{"key":"b"}]}'
-api $C/scan -d '{}'
-./scripts/glamdb-local.sh cli request --path /databases
+./scripts/glamdb-local.sh cli request --path /databases --body - <<'JSON'
+{"name":"cli-example","database_id":"11111111-1111-4111-8111-111111111111"}
+JSON
+
+COLLECTION=/databases/11111111-1111-4111-8111-111111111111/collections
+./scripts/glamdb-local.sh cli request --path "$COLLECTION" --body - <<'JSON'
+{
+  "collection_id": "22222222-2222-4222-8222-222222222222",
+  "name": "events",
+  "schema": {"fields": [
+    {"name": "key", "type": "string", "nullable": false},
+    {"name": "value", "type": "int64", "nullable": true}
+  ]}
+}
+JSON
+
+COLLECTION=$COLLECTION/22222222-2222-4222-8222-222222222222
+./scripts/glamdb-local.sh cli request --path "$COLLECTION/append" --body - <<'JSON'
+{
+  "operation_id": "33333333-3333-4333-8333-333333333333",
+  "rows": [{"key": "a", "value": "1"}, {"key": "b", "value": "2"}]
+}
+JSON
+
+printf '%s' '{}' | ./scripts/glamdb-local.sh cli request \
+  --path "$COLLECTION/scan" --body -
 ```
 
-See the [server guide](docs/development/HTTP_SERVER.md) for manual startup and all
-routes, and the [CLI guide](apps/cli/README.md) for HTTPS and Arrow output.
-The service token grants access to all its databases; remote access uses a TLS
-proxy with a private loopback upstream. See the [access policy](docs/development/HTTP_SERVER.md#remote-access-through-tls).
-The server queues calls fairly across databases, keeps readers separate from
-publishers, and reserves replay space before admitting a scan. SDK cleanup and
-database-list failures preserve operation and cursor ownership.
+Int64 values use decimal strings in JSON to preserve precision. The `request`
+command exposes every HTTP route; `--body` implies POST. Scan responses include
+`next_cursor` when another page is available. For scripts that consume complete
+results, the Python SDK handles pagination automatically.
 
-## Build and test
+### Python SDK
 
-Build the pinned dependencies once, then build and test the native C++ core on
-Linux:
+Install the SDK from the checkout with Python 3.10 or later:
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install ./sdk/python
+```
+
+```python
+import os
+from uuid import UUID
+
+from glamdb_sdk import Client, Field, Schema, col
+
+url = "http://127.0.0.1:8080"
+token = os.environ["GLAMDB_TOKEN"]
+schema = Schema([Field("key", "string", False), Field("value", "int64", True)])
+collection_id = UUID("44444444-4444-4444-8444-444444444444")
+operation_id = UUID("55555555-5555-4555-8555-555555555555")
+
+with Client(url, token=token) as admin:
+    database = admin.create_database("python-example")
+
+with Client(url, token=token, database_id=database["database_id"]) as client:
+    created = client.create_collection("events", schema, collection_id=collection_id)
+    if created.outcome != "committed":
+        raise RuntimeError(created.raw)
+
+    request = client.prepare_append(
+        collection_id,
+        [{"key": "a", "value": 1}, {"key": "b", "value": 2}],
+        operation_id=operation_id,
+        schema=schema,
+    )
+    outcome = client.append(request)
+    if outcome.outcome != "committed":
+        raise RuntimeError(outcome.raw)
+
+    result = client.scan_json(collection_id, predicate=col("value", "int64").ge(2))
+    print(result.rows)  # [{"key": "b", "value": 2}]
+
+    with client.scan_batches(collection_id) as batches:
+        for batch in batches:
+            print(batch.to_pylist())
+```
+
+These fixed UUIDs make the example repeatable. In an application, generate and
+save a collection ID and an operation ID before submitting each new create or
+append. Preserve the original IDs and payload if a response is lost; look up
+the outcome before deciding to retry. The SDK never retries writes implicitly.
+See the [SDK guide](sdk/python/README.md) for historical reads, metadata, streaming,
+and recovery handling.
+
+### Embedded C++
+
+The installed `glamdb::core` CMake target provides `CreateStore`, `OpenExisting`,
+`Engine::CreateCollection`, `Engine::AppendDurable`, and `Engine::Scan` through
+`<storage/engine.h>`. Input and output use Arrow batches. The embedded library
+and HTTP server share the same engine; an embedded owner must have exclusive
+ownership of its store directory.
+
+## Build from source
+
+Native builds require Linux, CMake 3.28+, Ninja, Python 3.10+, OpenSSL and zlib
+development headers, and a C++23 compiler with `std::expected` support: GCC 14+
+or Clang 18+ with a matching standard library. Build dependencies and GlamDB
+with the same compiler and C++ ABI.
 
 ```sh
 git submodule update --init --recursive
@@ -158,35 +225,64 @@ cmake --build --preset local
 ctest --preset local
 ```
 
-On macOS, `./scripts/test-in-docker.sh asan-ubsan` tests independent I/O in Linux
-without the full dependency prefix. To include the engine and storage adapters:
+To run the resulting server directly, with `GLAMDB_TOKEN` set:
+
+```sh
+./build/local/apps/server/glamdb --data-dir "$PWD/build/data" --ui-root "$PWD/ui"
+```
+
+The build also produces `build/local/apps/cli/glamdb-cli`. Use the `release`
+or `asan-ubsan` preset instead of `local` for release or sanitizer builds.
+`cmake --install build/local` installs binaries, UI assets, public headers, and
+the CMake package into `build/install/local`.
+
+For the full native test suite in Docker, including on macOS:
 
 ```sh
 ./scripts/build-deps-in-docker.sh
 ./scripts/test-storage-in-docker.sh asan-ubsan
 ```
 
-The full build installs `glamdb::core` and public headers. Storage adapters
-(`GLAMDB_BUILD_STORAGE`) are on by default; `GLAMDB_IO_ONLY=ON` provides a separate
-lightweight build. See the build guide for Docker setup.
+See the [build guide](docs/development/BUILDING.md) for toolchain setup, standalone
+client builds, and embedding the installed library.
 
-Store readiness is available through authenticated
-`GET /databases/{id}/readyz` (legacy single-store mode: `/readyz`) and scoped
-capabilities. It reports read availability separately from write readiness;
-`/healthz` remains process liveness. All backends explicitly remain
-`durability_qualified=false`. See the [health contract](docs/development/HTTP_SERVER.md).
+### Client and UI tests
 
-- [Project structure](docs/PROJECT_STRUCTURE.md)
-- [Build and quality checks](docs/development/BUILDING.md)
-- [C++ style guide](docs/development/CPP_STYLE_GUIDE.md)
-- [Dependencies](third_party/README.md)
-- [Agent guide](AGENTS.md)
-- [Contributing](CONTRIBUTING.md)
-- [Security policy](SECURITY.md)
+The workbench development environment requires Python 3.13, Node.js 22+, and
+OpenSSL. It includes the SDK, Python tests, Node tests, and Playwright browser tests:
 
-Operational logging emits bounded structured events independently of store writes.
-See [the logging guide](docs/development/LOGGING.md) for bounded Quill/Python stderr
-events, runtime journal collection, Loki/Alloy, private Grafana search,
-retention/quota setup and overload tests.
+```sh
+bash scripts/bootstrap-workbench.sh
+npm --prefix ui exec -- playwright install chromium
+bash scripts/check-workbench.sh
+```
 
-For server debugging, see [Reading server logs](docs/development/READING_SERVER_LOGS.md).
+On Linux, add `--with-deps` to the Playwright install command to install browser
+system dependencies. Tests use localhost sockets and disposable stores.
+
+## Contributing
+
+Bug reports, documentation improvements, tests, and code contributions are welcome.
+Use [issues](https://github.com/glamourdb/glamdb/issues) to report a reproducible
+problem or discuss a proposed feature.
+
+1. Fork `glamourdb/glamdb` and create a branch in your fork.
+2. Make a focused change, add tests for behavior changes, and update affected docs.
+3. Run the relevant tests. For C++ changes, also run the quality checks with
+   LLVM 18 `clang-format` and `clang-tidy`:
+
+   ```sh
+   cmake --build --preset local --target format-check tidy-check quality-negative-check
+   ```
+
+4. Open a pull request against `glamourdb/glamdb:main`, describing the change and
+   how you tested it. Storage changes should address recovery and compatibility.
+
+Pull requests require passing checks and approval from another maintainer.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for review and merge requirements.
+Report security vulnerabilities privately through the
+[security policy](SECURITY.md).
+
+## License
+
+GlamDB is licensed under the [Apache License 2.0](LICENSE).
