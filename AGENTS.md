@@ -249,6 +249,14 @@ check script runs real HTTP/HTTPS tests and Chromium, not only transport doubles
 Node API tests also open localhost sockets to exercise Fetch gzip/Brotli decoding
 and Arrow cancellation. Session-isolation browser tests delay responses across
 collection, snapshot and connection changes.
+Client conformance uses `GLAMDB_TEST_BACKEND=mock|native`; native requires an
+executable `GLAMDB_NATIVE_SERVER` and fails on setup/identity/storage errors.
+The same SDK TCP/TLS scenarios and `shared-contract.spec.mjs` run against both;
+native checks inspect catalog-selected JSON/Avro/Parquet after closing storage.
+`GLAMDB_TEST_BACKEND=static` runs only the browser demo, without an API server.
+See [client conformance](docs/development/CLIENT_CONFORMANCE.md) for commands,
+documented response differences and separate evidence. Normal native acceptance
+runs the shared SDK suite before Chromium and propagates either failure.
 The check script also packages/serves the public demo under /glamdb/ and verifies no API
 requests, token prompt, cross-visitor state or credential files are introduced.
 See [validation](docs/development/WORKBENCH_VALIDATION.md) for exact evidence and

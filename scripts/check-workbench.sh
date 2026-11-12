@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+export GLAMDB_TEST_BACKEND="${GLAMDB_TEST_BACKEND:-mock}"
 
 suite=${1:-all}
 if [[ $# -gt 1 || ! $suite =~ ^(all|python|node|browser)$ ]]; then

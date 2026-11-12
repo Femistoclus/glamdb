@@ -484,7 +484,7 @@ GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 \
 ctest --preset local -R 'glamdb\.(native_http|http_security|scan_http|database_limits|transport\.|routes\.|cli)'
 # With workbench Python dependencies, also exercise SDK JSON/Arrow decoding:
 .venv/bin/python tests/server/native_http_test.py build/local/apps/server/glamdb build/local/apps/cli/glamdb-cli ui
-GLAMDB_NATIVE_SERVER="$PWD/build/local/apps/server/glamdb" \
+GLAMDB_TEST_BACKEND=native GLAMDB_NATIVE_SERVER="$PWD/build/local/apps/server/glamdb" \
 npm --prefix ui run test:e2e
 ```
 
@@ -493,6 +493,9 @@ through HTTP without an offline CLI. It covers isolation, close/open/reconcile,
 restart and process crashes, missing-store preservation, real HTTP, exact scalar checks,
 repeat-ID conflicts, fixed snapshots, lost-response lookup, reopen, owner locking,
 request framing/auth/limits and UI assets. Mock/client suites remain separate.
+The [shared client conformance suite](CLIENT_CONFORMANCE.md) additionally runs
+the same SDK TCP/TLS and browser contract scenarios against explicit mock and
+native backends, with required catalog-selected physical files for native runs.
 Passing these tests does not qualify physical power-loss durability.
 
 The native SDK test drops successful create/append responses before the client

@@ -1,4 +1,48 @@
-# Workbench validation record — 2026-11-11
+# Workbench validation record
+
+## Shared client conformance — 2026-11-12
+
+Executed on Linux x86-64 (Ubuntu 24.04), Python 3.13.18, Node 24.13.0 and pinned
+Playwright 1.56.1/Chromium 1194. The native Debug server was rebuilt from upstream
+base `135651d`; no native runtime source or persistent format changed.
+
+- **PASS — 878 repository Python tests** with the explicit mock profile.
+- **PASS — 18 native SDK/setup tests**: eight shared TCP/TLS scenarios and ten
+  selection, identity, readiness-deadline and cleanup regressions. Native writes
+  require independent SQLite → Iceberg JSON → Avro → Parquet inspection.
+- **PASS — 136 Node tests** and eight native CI-runner tests. SDK failures stop
+  browser acceptance, and its separate JUnit filename matches the CI upload glob.
+- **PASS — six native Chromium scenarios**, including the shared contract and
+  the five existing native recovery/database cases. The shared Arrow download
+  is parsed and compared with the expected row and exact int64 value. Native
+  physical inspection occurs after closing the test database.
+- **PASS — five standalone static Chromium scenarios**, with an invalid inherited
+  native executable, proving the static profile does not start an API backend.
+- **PASS — 40 mock/static Chromium scenarios** with Python 3.13 selected through
+  PATH, including isolated editor mock processes and the shared contract.
+- **PASS — UI formatting, shell syntax, local documentation links and whitespace.**
+
+A fresh independent review identified three harness regressions: partial startup
+output could outlive the readiness timeout, a bare Python executable name was
+incorrectly resolved as a relative file, and extracted mock tests lost proxy
+isolation. Regressions were observed failing, then passing after a single bounded
+readiness deadline, consistent interpreter selection and shared loopback fixture
+were added. The mock scenarios also pass with a deliberately broken inherited
+HTTP proxy. Review additionally caught the JUnit upload mismatch, which is fixed.
+The shared-scenario design was retained to prevent separate backend suites from
+drifting; mock-only fault injection and unsupported collection pagination stay
+separate. A pre-existing stale mock logo expectation was updated to the supplied
+transparent wordmark so the complete mock Python suite passes.
+
+Commands are in [CLIENT_CONFORMANCE.md](CLIENT_CONFORMANCE.md). Native browser
+verification additionally used `GLAMDB_E2E_PYTHON=python3` with the development
+virtualenv on PATH, exercising the interpreter regression in a real browser.
+Raw evidence is in ignored `artifacts/issue53-*.log` and `artifacts/issue53-*.xml`;
+backend browser reports are separate. Chromium libraries were prepared locally;
+no host trust store or system packages changed. Python reports the existing
+Starlette/httpx deprecation warning. Sanitizer, restart/restore and G4 physical
+power-loss qualification campaigns were **NOT RUN** for this test-harness change.
+The earlier records below retain their original dates and scope.
 
 ## Native workbench and request recovery — 2026-11-11
 

@@ -1,10 +1,11 @@
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 
-test.skip(!process.env.GLAMDB_NATIVE_SERVER, 'native server profile only');
+const token = process.env.GLAMDB_E2E_TOKEN ?? 'e2e-only-local-token';
+
 test.afterEach(async ({ request }) => {
     // The disposable server is shared; release engine reservations between scenarios.
-    const headers = { Authorization: 'Bearer e2e-only-local-token' };
+    const headers = { Authorization: `Bearer ${token}` };
     const response = await request.get('/databases', { headers });
     expect(response.ok()).toBe(true);
     const { items } = await response.json();
@@ -20,7 +21,7 @@ test.afterEach(async ({ request }) => {
 });
 async function connect(page) {
     await page.goto('/');
-    await page.getByLabel('Access token').fill('e2e-only-local-token');
+    await page.getByLabel('Access token').fill(token);
     await page.getByRole('button', { name: 'Open my workspace' }).click();
     await expect(page.getByRole('heading', { name: 'Your databases' })).toBeVisible();
 }
@@ -43,7 +44,7 @@ test('native typed write and every metadata view survive browser reload', async 
     page.on('pageerror', (error) => errors.push(error.message));
     const capabilities = await (
         await page.request.get('/capabilities', {
-            headers: { Authorization: 'Bearer e2e-only-local-token' },
+            headers: { Authorization: `Bearer ${token}` },
         })
     ).json();
     expect(capabilities.backend).toBe('local');
@@ -152,7 +153,7 @@ test('native typed write and every metadata view survive browser reload', async 
     await expect(plan.getByText('Native scan', { exact: true })).toBeVisible();
     await expect(page.locator('.mock-banner')).toHaveCount(0);
     await page.reload();
-    await page.getByLabel('Access token').fill('e2e-only-local-token');
+    await page.getByLabel('Access token').fill(token);
     await page.getByRole('button', { name: 'Open my workspace' }).click();
     await useDatabase(page, 'browser_database');
     await expect(page.locator('.metrics .metric').first().locator('strong')).toHaveText('2');
@@ -236,7 +237,7 @@ test('native typed write and every metadata view survive browser reload', async 
 });
 
 test('the latest database selection wins when opens finish out of order', async ({ page }) => {
-    const headers = { Authorization: 'Bearer e2e-only-local-token' };
+    const headers = { Authorization: `Bearer ${token}` };
     const a = await (
         await page.request.post('/databases', { headers, data: { name: 'race_a' } })
     ).json();
@@ -246,7 +247,7 @@ test('the latest database selection wins when opens finish out of order', async 
     for (const db of [a, b])
         await page.request.post(`/databases/${db.database_id}/close`, { headers, data: {} });
     await page.goto('/');
-    await page.getByLabel('Access token').fill('e2e-only-local-token');
+    await page.getByLabel('Access token').fill(token);
     await page.getByRole('button', { name: 'Open my workspace' }).click();
     await expect(page.getByRole('heading', { name: 'Your databases' })).toBeVisible();
     await page.evaluate(async () => {
@@ -311,7 +312,7 @@ test('unknown append survives database switching and reconciliation with its ori
     page,
 }) => {
     await page.goto('/');
-    await page.getByLabel('Access token').fill('e2e-only-local-token');
+    await page.getByLabel('Access token').fill(token);
     await page.getByRole('button', { name: 'Open my workspace' }).click();
     await page.getByLabel('Database name').fill('pending_database');
     await page.getByRole('button', { name: 'Create database', exact: true }).click();
@@ -428,14 +429,14 @@ test('native lost receipt exports and imports after reload without changing the 
         .click();
     const recovery = await readFile(await (await downloaded).path());
     const exported = JSON.parse(recovery);
-    expect(recovery.toString()).not.toContain('e2e-only-local-token');
+    expect(recovery.toString()).not.toContain(token);
     expect(exported.scope.backend).toBe('local');
     expect(exported.scope.mock).toBe(false);
     expect(exported.scope.store_id).toMatch(/^[0-9a-f-]{36}$/);
     expect(exported.request.operation_id).toBe(bodies[0].operation_id);
     await page.unrouteAll({ behavior: 'wait' });
     await page.reload();
-    await page.getByLabel('Access token').fill('e2e-only-local-token');
+    await page.getByLabel('Access token').fill(token);
     await page.getByRole('button', { name: 'Open my workspace' }).click();
     await useDatabase(page, 'reload_pending_database');
     await page.getByRole('button', { name: 'Pending requests', exact: true }).click();
