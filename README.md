@@ -258,6 +258,8 @@ See the [build guide](docs/development/BUILDING.md) for toolchain setup, standal
 client builds, and embedding the installed library.
 The [native capacity campaign](docs/development/CAPACITY_CAMPAIGN.md) measures
 ingestion, backpressure and fresh-process recovery while preserving history caps.
+The [combined recovery harness](docs/development/COORDINATOR.md#combined-storage-faults)
+exercises real file/SQLite failures and abrupt process exits; it does not qualify power-loss durability.
 
 ### Client and UI tests
 

@@ -275,30 +275,60 @@ OS-cache-loss/power-cut qualification remain NOT RUN.
 
 ### Combined storage faults
 
-`tests/vertical/storage_fault_test.cpp` uses `EngineFactory::CreateWith` to
+`tests/vertical/storage_fault_test.cpp` and `storage_crash_test.cpp` share
+`storage_fault_support.{h,cpp}` and use `EngineFactory::CreateWith/OpenWith` to
 combine the real local backend's `TLocalStorageOptions::Fs` adapter with
 `JournalFaultVfs`. Neither hook is installed or exposed through product settings.
 The fault filesystem delegates to POSIX; Parquet, Avro manifests, Avro manifest
 lists and metadata JSON are real files.
 
-`TCombinedStorageFaultTest` injects file sync failures in each file class and a
-metadata directory sync failure, then loses the SQLite result while recording
-the failed append. Reconciliation preserves the original error and committed
-rows, keeps the write latch closed, and returns the same failed outcome on retry.
-`TCatalogStorageFaultTest` fails publication before and after journal unlink;
-a fresh process opens through the public factory, resolves the outcome, checks
-rows and retries without producing new files. The combined cases also verify
-persisted outcomes and rows in a fresh process after reconciliation.
+`TCombinedStorageFaultTest` covers EIO/ENOSPC writes, positive short writes
+followed by ENOSPC, zero-progress writes, checked close, file sync and directory
+sync across all four file classes. Each failure combines with a lost SQLite
+failure-recording result before or after journal unlink, followed by either live
+reconciliation or direct fresh-process recovery. Live reconciliation retains
+the original error; direct recovery reports `INTERRUPTED` when the failure
+receipt never committed. Syscall EIO stays latched until reopen; ENOSPC and
+zero-progress writes fail the current attempt without poisoning the store.
+
+`TShortWriteStorageFaultTest` verifies successful completion of short writes
+before uncertain publication. It also fails recovery reads of each file class,
+then the SQLite durability fence: neither failure may reopen admission. A VFS
+counter confirms the fence fault actually fired; clearing the one-shot faults
+permits live reconciliation. Recovery-generated failure-recording COMMIT
+uncertainty is covered separately.
+`TCatalogStorageFaultTest` covers binding, publication, recovery fences and a
+Parquet finalization write selected from an exact-input baseline trace.
+`TProcessCrashStorageFaultTest` abruptly exits a child without destructors,
+shutdown or reconciliation after uncertain binding, failure recording,
+publication or fencing, on both sides of journal unlink.
+
+Recovery always opens through the public production factory in a fresh process.
+The oracle checks literal row multisets (including duplicates, NULLs and Unicode),
+the acknowledged receipt, latest/historical/initial views, complete snapshot
+history and parentage, and exact/conflicting retries with unchanged warehouse
+paths and contents. Instrumented live cases also reject file creation/write events
+on terminal retries and refused new IDs.
+An absent rolled-back binding can be retried once; a registered failed operation
+keeps its permanent ID and never replays input.
 
 Run the native cases with:
 
 ```sh
-cmake --build --preset local --target glamdb_vertical
-ctest --preset local -R 'TCombinedStorageFaultTest|TCatalogStorageFaultTest'
+cmake --build --preset local --target glamdb_io_test glamdb_vertical
+ctest --preset local -R 'ZeroProgress|TCombinedStorageFaultTest|TCatalogStorageFaultTest|TShortWriteStorageFaultTest|TProcessCrashStorageFaultTest'
 ```
 
-These are injected syscall/result failures, not a model of OS-cache loss or
-physical power cuts. Mock-backend tests remain separate evidence; G4 is NOT RUN.
+The 2026-11-12 Linux development run passed all 146 native recovery cases and
+three existing zero-progress checks. The full normal profile had no failures
+among 896 enabled tests (eight parent-invoked/helper checks skipped; two manual
+benchmarks disabled). The independent I/O-only ASan/UBSan configuration passed
+179 tests using the documented static C++ runtime. Mock planner/cursor evidence
+remains separate from these real-file recovery cases.
+
+These are injected syscall/result failures and process exits, not a model of
+OS-cache loss or physical power cuts. Mock-backend tests remain separate evidence;
+G4 is NOT RUN.
 
 ## Public health observation
 
