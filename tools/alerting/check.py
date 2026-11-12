@@ -23,6 +23,7 @@ def main():
         if not getattr(args, name):
             parser.error("provide --" + name + " (official release binary or PATH)")
     env = {**os.environ, "PROMETHEUS_BIN": str(Path(args.prometheus).resolve()),
+           "AMTOOL_BIN": str(Path(args.amtool).resolve()),
            "ALERTMANAGER_BIN": str(Path(args.alertmanager).resolve())}
     commands = [
         [sys.executable, "tools/alerting/generate.py", "--check"],

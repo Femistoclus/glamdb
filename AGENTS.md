@@ -686,6 +686,8 @@ from Kubernetes. The live Grafana overview separates transport, engine outcomes
 and edge/gateway layers. `tools/monitoring/extend_checks.py` applies optional
 source checks to alerting config; unavailable producers remain NODATA. Validate
 Prometheus and Loki dashboard queries with their respective engines.
+Telegram summaries use bounded, escaped native Alertmanager HTML groups; run
+`tools/alerting/check.py` for template rendering and loopback delivery checks.
 
 ## Validation and reporting
 

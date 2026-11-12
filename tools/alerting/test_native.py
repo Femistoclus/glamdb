@@ -201,9 +201,11 @@ class NativeDeliveryTest(NativeProcess, unittest.TestCase):
         path, body, _ = self.peer.calls[0]
         self.assertEqual(path, "/bot12345:FAKE_TEST_TOKEN/sendMessage")
         self.assertEqual(int(body["chat_id"]), -10012345)
-        self.assertIn("ALARM GlamDB cpu", body["text"])
+        self.assertIn("ALARM · CPU", body["text"])
         self.assertIn("1794300000", body["text"])
-        self.assertFalse(body.get("parse_mode"))
+        self.assertEqual(body["parse_mode"], "HTML")
+        self.assertIn("<b>CPU</b>", body["text"])
+        self.assertNotIn("&lt;b&gt;", body["text"])
         self.post("ALARM", chat_id="999")
         time.sleep(1.1)
         self.assertEqual(len(self.peer.calls), 1)
@@ -227,7 +229,7 @@ class NativeDeliveryTest(NativeProcess, unittest.TestCase):
         self.post("WARN")
         wait_until(lambda: len(self.peer.calls) >= 2)
         wait_until(lambda: self.metric("alertmanager_notification_requests_failed_total") >= 1)
-        self.assertIn("WARN GlamDB cpu", self.peer.calls[-1][1]["text"])
+        self.assertIn("WARN · CPU", self.peer.calls[-1][1]["text"])
 
     def test_request_timeout_is_bounded_and_retried(self):
         self.peer.replies = [(200, {"ok": True, "result": {}}, 0.6)]
@@ -274,19 +276,19 @@ class NativeDeliveryTest(NativeProcess, unittest.TestCase):
         self.assertEqual(len(self.peer.calls), count)
         self.post("NODATA")
         wait_until(lambda: len(self.peer.calls) == count + 1)
-        self.assertIn("NODATA GlamDB cpu", self.peer.calls[-1][1]["text"])
+        self.assertIn("NODATA · CPU", self.peer.calls[-1][1]["text"])
 
     def test_inhibition_suppresses_lower_states_and_nodata_inhibits_alarm(self):
         self.alert_start = datetime.now(timezone.utc).isoformat()
         api(self.am_url + "/api/v2/alerts", self.alerts("OK") + self.alerts("WARN") + self.alerts("ALARM"))
         wait_until(lambda: len(self.peer.calls) == 1)
-        self.assertIn("ALARM GlamDB cpu", self.peer.calls[0][1]["text"])
-        self.assertNotIn("WARN GlamDB", self.peer.calls[0][1]["text"])
-        self.assertNotIn("OK GlamDB", self.peer.calls[0][1]["text"])
+        self.assertIn("ALARM · CPU", self.peer.calls[0][1]["text"])
+        self.assertNotIn("WARN ·", self.peer.calls[0][1]["text"])
+        self.assertNotIn("OK ·", self.peer.calls[0][1]["text"])
         self.post("NODATA")
         wait_until(lambda: len(self.peer.calls) == 2)
-        self.assertIn("NODATA GlamDB cpu", self.peer.calls[1][1]["text"])
-        self.assertNotIn("ALARM GlamDB", self.peer.calls[1][1]["text"])
+        self.assertIn("NODATA · CPU", self.peer.calls[1][1]["text"])
+        self.assertNotIn("ALARM ·", self.peer.calls[1][1]["text"])
 
     def test_grouping_batches_same_identity_and_repeats_at_configured_interval(self):
         self.am.terminate()
@@ -298,7 +300,7 @@ class NativeDeliveryTest(NativeProcess, unittest.TestCase):
         alerts = self.alerts("ALARM", replica="one") + self.alerts("ALARM", replica="two")
         api(self.am_url + "/api/v2/alerts", alerts)
         wait_until(lambda: len(self.peer.calls) == 1)
-        self.assertEqual(self.peer.calls[0][1]["text"].count("ALARM GlamDB cpu"), 2)
+        self.assertEqual(self.peer.calls[0][1]["text"].count("ALARM · CPU"), 2)
         wait_until(lambda: len(self.peer.calls) >= 2)
 
     def test_startup_batches_fifty_checks_in_one_service_without_truncation(self):
@@ -315,7 +317,7 @@ class NativeDeliveryTest(NativeProcess, unittest.TestCase):
         wait_until(lambda: len(self.peer.calls) >= 1)
         text = self.peer.calls[0][1]["text"]
         for index in range(50):
-            self.assertIn(f"ALARM GlamDB check_{index:02}", text)
+            self.assertIn(f"ALARM · check {index:02}", text)
         self.assertLessEqual(len(text), 4096)
         time.sleep(1.1)
         self.assertEqual(len(self.peer.calls), 1)
@@ -332,9 +334,9 @@ class NativeDeliveryTest(NativeProcess, unittest.TestCase):
         self.post("ALARM", resolved=True)
         self.post("NODATA")
         wait_until(lambda: len(self.peer.calls) == 1)
-        self.assertIn("NODATA GlamDB cpu", self.peer.calls[0][1]["text"])
-        self.assertNotIn("WARN GlamDB", self.peer.calls[0][1]["text"])
-        self.assertNotIn("ALARM GlamDB", self.peer.calls[0][1]["text"])
+        self.assertIn("NODATA · CPU", self.peer.calls[0][1]["text"])
+        self.assertNotIn("WARN ·", self.peer.calls[0][1]["text"])
+        self.assertNotIn("ALARM ·", self.peer.calls[0][1]["text"])
 
 
 @unittest.skipUnless(os.environ.get("ALERTMANAGER_BIN"), "set ALERTMANAGER_BIN or run tools/alerting/check.py")
@@ -393,7 +395,7 @@ class DailySummaryTest(NativeProcess, unittest.TestCase):
         wait_until(lambda: len(self.peer.calls) >= 1)
         text = self.peer.calls[0][1]["text"]
         for index in range(50):
-            self.assertIn(f"{states[index % 4]} GlamDB check_{index:02}", text)
+            self.assertIn(f"{states[index % 4]} · check {index:02}", text)
         self.assertLessEqual(len(text), 4096)
         self.post("ALARM", check="new_problem_after_summary")
         # Exercise a complete real production polling interval and closure of

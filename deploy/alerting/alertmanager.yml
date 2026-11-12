@@ -32,16 +32,91 @@ receivers:
         bot_token_file: /run/secrets/telegram_bot_token
         chat_id_file: /run/secrets/telegram_chat_id
         send_resolved: false
-        parse_mode: ""
+        parse_mode: HTML
         timeout: 15s
-        # One combined daily snapshot across services, including healthy checks.
-        # Compact lines keep the usual inventory within Telegram's limit.
+        # One combined snapshot; omit empty groups and escape every dynamic value.
+        # Bound the complete HTML before the receiver's character truncation.
         message: |-
-          GlamDB daily summary ({{ len .Alerts.Firing }} checks)
-          {{ with index .Alerts 0 }}Observed at (Unix seconds): {{ .Annotations.observed_at }}{{ end }}
-          {{ range .Alerts.Firing }}{{ .Labels.state }} GlamDB {{ .Labels.check }} · {{ .Labels.cluster }}/{{ .Labels.service }}{{ with .Labels.namespace }}/{{ . }}{{ end }}{{ with .Labels.pod }}/{{ . }}{{ end }}{{ with .Labels.node }} · {{ . }}{{ end }}
-          {{ end }}
-          {{ with index .Alerts 0 }}{{ .Annotations.runbook_url }}{{ end }}
+          {{- $alerts := .Alerts.Firing -}}
+          {{- $header := printf "<b>GlamDB daily summary (%d checks)</b>" (len $alerts) -}}
+          {{- range $key := stringSlice "cluster" "service" "namespace" "pod" "node" -}}
+            {{- $value := index $.CommonLabels $key -}}
+            {{- if and $value (not (and (eq $key "service") (eq $value "glamdb"))) -}}
+              {{- $header = printf "%s · %s" $header (html (printf "%.48s" $value)) -}}
+            {{- end -}}
+          {{- end -}}
+          {{- if $alerts -}}
+            {{- with index $alerts 0 -}}
+              {{- $header = printf "%s\nObserved at (Unix seconds): %s" $header (html (printf "%.32s" .Annotations.observed_at)) -}}
+            {{- end -}}
+          {{- end -}}
+          {{- $message := $header -}}
+          {{- $ok := "" -}}{{- $warn := "" -}}{{- $alarm := "" -}}{{- $nodata := "" -}}{{- $unknown := "" -}}
+          {{- range $alerts -}}
+            {{- if eq .Labels.state "OK" -}}{{- $ok = print $ok "." -}}
+            {{- else if eq .Labels.state "WARN" -}}{{- $warn = print $warn "." -}}
+            {{- else if eq .Labels.state "ALARM" -}}{{- $alarm = print $alarm "." -}}
+            {{- else if eq .Labels.state "NODATA" -}}{{- $nodata = print $nodata "." -}}
+            {{- else -}}{{- $unknown = print $unknown "." -}}{{- end -}}
+          {{- end -}}
+          {{- range $group := stringSlice "Database / API" "CPU" "Memory" "Disk" "Network" "Logs" "Monitoring / delivery" "Other" -}}
+            {{- $lines := "" -}}
+            {{- range $alert := $alerts -}}
+              {{- $check := .Labels.check -}}
+              {{- $category := "Other" -}}
+              {{- if match "^(core_|gateway_|http_|admission_|commit_unknown$|engine_errors$|admin_anomalies$|edge_availability$)" $check -}}
+                {{- $category = "Database / API" -}}
+              {{- else if match "^(cpu$|host_cpu$|macos_cpu$|pod_cpu_|container_cpu_)" $check -}}
+                {{- $category = "CPU" -}}
+              {{- else if match "^(host_memory$|major_page_faults$|oom_kills$|pod_memory$|pod_anonymous_memory$|macos_anonymous_memory$|container_memory_|container_oom_)" $check -}}
+                {{- $category = "Memory" -}}
+              {{- else if match "^(disk_|macos_disk_)" $check -}}
+                {{- $category = "Disk" -}}
+              {{- else if match "^network_" $check -}}
+                {{- $category = "Network" -}}
+              {{- else if match "^(log_|loki_)" $check -}}
+                {{- $category = "Logs" -}}
+              {{- else if match "^(alertmanager_|prometheus_|podman_|container_collectors$|macos_exporter$)" $check -}}
+                {{- $category = "Monitoring / delivery" -}}
+              {{- end -}}
+              {{- if eq $category $group -}}
+                {{- $label := reReplaceAll "_" " " $check -}}
+                {{- $label = reReplaceAll "^core " "Native " $label -}}
+                {{- $label = reReplaceAll "^gateway " "Gateway " $label -}}
+                {{- $label = reReplaceAll "(^| )http( |$)" "${1}HTTP${2}" $label -}}
+                {{- $label = reReplaceAll "(^| )cpu( |$)" "${1}CPU${2}" $label -}}
+                {{- $label = reReplaceAll "(^| )oom( |$)" "${1}OOM${2}" $label -}}
+                {{- $label = reReplaceAll "^host " "Host " $label -}}
+                {{- $label = reReplaceAll "^container " "Container " $label -}}
+                {{- $label = reReplaceAll "^alertmanager " "Alerts " $label -}}
+                {{- $label = reReplaceAll "^prometheus " "Prometheus " $label -}}
+                {{- $label = reReplaceAll "^loki " "Loki " $label -}}
+                {{- $label = reReplaceAll "^podman " "Podman " $label -}}
+                {{- $scope := "" -}}
+                {{- range $key := stringSlice "cluster" "service" "namespace" "pod" "node" -}}
+                  {{- $value := index $alert.Labels $key -}}
+                  {{- if and $value (not (and (eq $key "service") (eq $value "glamdb"))) (ne $value (index $.CommonLabels $key)) -}}
+                    {{- $scope = printf "%s · %s" $scope (html (printf "%.32s" $value)) -}}
+                  {{- end -}}
+                {{- end -}}
+                {{- $lines = printf "%s\n%s · %s%s" $lines (html (printf "%.16s" .Labels.state)) (html (printf "%.48s" $label)) $scope -}}
+              {{- end -}}
+            {{- end -}}
+            {{- if $lines -}}{{- $message = printf "%s\n\n<b>%s</b>%s" $message $group $lines -}}{{- end -}}
+          {{- end -}}
+          {{- if not $alerts -}}
+            {{- $message = printf "%s\n\nNo current checks." $message -}}
+          {{- end -}}
+          {{- if le (len $message) 3800 -}}
+            {{- $message | safeHtml -}}
+          {{- else -}}
+            {{- $header | safeHtml }}
+
+          <b>Inventory too large</b>
+          Full check list exceeds Telegram's message limit.
+          OK: {{ len $ok }} · WARN: {{ len $warn }} · ALARM: {{ len $alarm }} · NODATA: {{ len $nodata }}{{ if $unknown }} · Other states: {{ len $unknown }}{{ end }}
+          Full inventory: Alertmanager / Grafana.
+          {{- end -}}
         http_config:
           follow_redirects: false
 

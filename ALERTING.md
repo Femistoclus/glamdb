@@ -205,9 +205,24 @@ the chat reads it. In particular:
 
 The application deliberately adopts the native Alertmanager contract. It does
 not promise equivalence to the removed outbox or delivery-time recovery query.
-A compact daily summary lists each check's current state and scope, with an
-observation timestamp in the header. A batch of 50 checks across services is
-covered by a native receiver test without message truncation. A separate native
+A compact daily summary uses Telegram HTML with bold Database / API, CPU,
+Memory, Disk, Network, Logs, Monitoring / delivery and Other headings. Empty
+groups are omitted, and a blank line separates groups. Each check reaching the
+receiver appears once with its four-state value and a readable label; common scope is
+shown once in the header and differing scope stays on the check's line. Dynamic
+labels are HTML-escaped after bounding their display length (48 characters for
+check/common scope, 32 for differing scope). The observation timestamp remains
+in the header. Unknown checks appear under Other.
+
+The complete rendered HTML is limited to 3,800 UTF-8 bytes, below the native
+receiver's 4,096-character truncation boundary. If the full inventory is larger,
+the message explicitly reports that the list is too large, includes totals for
+all four states, and directs the reader to Alertmanager / Grafana. It does not
+silently cut checks or HTML tags. The full inventory remains in those UIs.
+A batch of 50 checks across services is covered by a native receiver test
+without message truncation. Native template tests cover every current Linux
+check, unknown checks, empty groups, hostile labels and oversized inventories.
+A separate native
 test keeps the real one-minute production cadence, shortens only the repeat
 horizon, and verifies one snapshot followed by silence through closure of the
 window. The tests use their own processes and a loopback Telegram peer.

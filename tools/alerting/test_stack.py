@@ -1,6 +1,7 @@
 """Real Prometheus rules and Alertmanager with synthetic loopback metric sources."""
 
 import importlib.util
+from html import unescape
 import json
 import os
 from pathlib import Path
@@ -67,7 +68,7 @@ class StackTest(NativeProcess, unittest.TestCase):
             before = len(self.peer.calls)
             exporter.metrics = f"glamdb_test_value {value}\n"
             wait_until(lambda: state(value))
-            wait_until(lambda: any(public + " GlamDB metric" in c[1]["text"] for c in self.peer.calls[before:]))
+            wait_until(lambda: any(public + " · metric" in c[1]["text"] for c in self.peer.calls[before:]))
             active = self.query(url, 'ALERTS{check="metric",alertstate="firing"}')
             self.assertEqual([a["metric"]["state"] for a in active], [public])
         alarm_count = len(self.peer.calls)
@@ -75,17 +76,17 @@ class StackTest(NativeProcess, unittest.TestCase):
         path.write_text(json.dumps(config))
         api(url + "/-/reload", {}, method="POST")
         wait_until(lambda: state(3), seconds=25)
-        wait_until(lambda: any("NODATA GlamDB metric" in c[1]["text"] for c in self.peer.calls[alarm_count:]))
-        self.assertFalse(any("OK GlamDB" in c[1]["text"] for c in self.peer.calls[alarm_count:]))
+        wait_until(lambda: any("NODATA · metric" in c[1]["text"] for c in self.peer.calls[alarm_count:]))
+        self.assertFalse(any("OK ·" in c[1]["text"] for c in self.peer.calls[alarm_count:]))
         # Recovery is a new explicit healthy measurement, never a resolved alert.
         before = len(self.peer.calls)
         exporter.metrics = "glamdb_test_value 0\n"
         config["scrape_configs"] = [{"job_name": "metric", "static_configs": [{"targets": [target]}]}]
         path.write_text(json.dumps(config))
         api(url + "/-/reload", {}, method="POST")
-        wait_until(lambda: any("OK GlamDB metric" in c[1]["text"] for c in self.peer.calls[before:]))
+        wait_until(lambda: any("OK · metric" in c[1]["text"] for c in self.peer.calls[before:]))
         text = self.peer.calls[-1][1]["text"]
-        observed = float(text.split("Observed at (Unix seconds): ")[1].splitlines()[0])
+        observed = float(unescape(text.split("Observed at (Unix seconds): ")[1].splitlines()[0]))
         self.assertLess(abs(time.time() - observed), 15)
 
     def test_old_healthy_sample_is_nodata_despite_recent_instant_query_timestamp(self):
@@ -102,8 +103,8 @@ class StackTest(NativeProcess, unittest.TestCase):
         raw = self.query(url, "glamdb_test_value")[0]
         self.assertGreater(float(raw["value"][0]), time.time() - 15)
         self.assertLess(float(self.query(url, "timestamp(glamdb_test_value)")[0]["value"][1]), time.time() - 90)
-        wait_until(lambda: any("NODATA GlamDB stale" in c[1]["text"] for c in self.peer.calls))
-        self.assertFalse(any("OK GlamDB" in c[1]["text"] for c in self.peer.calls))
+        wait_until(lambda: any("NODATA · stale" in c[1]["text"] for c in self.peer.calls))
+        self.assertFalse(any("OK ·" in c[1]["text"] for c in self.peer.calls))
 
     def test_real_caddy_fixture_keeps_gateway_auth_check_fresh(self):
         exporter = TelegramPeer()
@@ -117,7 +118,7 @@ class StackTest(NativeProcess, unittest.TestCase):
         wait_until(lambda: bool(self.query(url, "caddy_http_request_duration_seconds_count")))
         wait_until(lambda: bool(self.query(url, 'glamdb_alert_state{check="http_auth_failures"}')) and
                    float(self.query(url, 'glamdb_alert_state{check="http_auth_failures"}')[0]["value"][1]) == 0)
-        wait_until(lambda: any("OK GlamDB http_auth_failures" in c[1]["text"] for c in self.peer.calls))
+        wait_until(lambda: any("OK · HTTP auth failures" in c[1]["text"] for c in self.peer.calls))
 
 
     def test_independent_observer_reports_loss_of_main_prometheus_and_alertmanager(self):
@@ -153,8 +154,8 @@ class StackTest(NativeProcess, unittest.TestCase):
         source_prom.wait(5)
         source_am.terminate()
         source_am.wait(5)
-        wait_until(lambda: any("NODATA GlamDB prometheus_external" in c[1]["text"] for c in self.peer.calls))
-        wait_until(lambda: any("NODATA GlamDB alertmanager_external" in c[1]["text"] for c in self.peer.calls))
+        wait_until(lambda: any("NODATA · Prometheus external" in c[1]["text"] for c in self.peer.calls))
+        wait_until(lambda: any("NODATA · Alerts external" in c[1]["text"] for c in self.peer.calls))
         with urlopen(self.am_url + "/-/ready", timeout=1) as response:
             self.assertEqual(response.status, 200)
         # These are independent local processes. Physical host/fault-domain
@@ -173,7 +174,7 @@ class StackTest(NativeProcess, unittest.TestCase):
         config["scrape_configs"] = [{"job_name": "prometheus", "static_configs": [
             {"targets": [f"127.0.0.1:{port}"], "labels": {"cluster": "local", "service": "monitoring"}}]}]
         _, url, _ = self.start_prom(config, port=port)
-        wait_until(lambda: any("ALARM GlamDB prometheus_rule_failures" in c[1]["text"] for c in self.peer.calls))
+        wait_until(lambda: any("ALARM · Prometheus rule failures" in c[1]["text"] for c in self.peer.calls))
         groups = api(url + "/api/v1/rules")["data"]["groups"]
         errors = [r for g in groups for r in g["rules"] if r["name"] == "loopback_invalid_match"]
         self.assertEqual(len(errors), 1)
