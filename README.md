@@ -93,7 +93,11 @@ background. On Linux, it uses the native toolchain described under
 daemon. Allow 30–60 minutes for the first dependency build.
 
 Open **http://127.0.0.1:8080** and enter the value of `GLAMDB_TOKEN`.
-The server starts with no databases. Create a database, create a collection with
+The server starts with no databases. Initialized managed databases can be
+explicitly removed through the SDK or `glamdb-cli drop-database` using their
+recorded store UUID; `glamdb-cli bench tpch clean --state RUN_STATE` supports
+dedicated benchmark cleanup. See the [deletion and retry contract](docs/development/DATABASE_DROP.md).
+Create a database, create a collection with
 its schema, then append and query rows in the workbench. The same UI provides
 snapshot selection, storage inspection, and scan explain views.
 

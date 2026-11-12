@@ -136,6 +136,39 @@ void Write(const std::filesystem::path& path, std::string_view bytes, TTemporary
         temporary->Publish(path, bytes);
     }
 }
+
+void ValidateDropIdentity(std::string_view database, std::string_view store)
+{
+    if (database != store) {
+        throw std::runtime_error("--store-id must match the original --database UUID");
+    }
+    if (database.size() != 36) {
+        throw std::runtime_error("database drop requires the original canonical UUIDs");
+    }
+    for (size_t index = 0; index < database.size(); ++index) {
+        const auto value = database[index];
+        const bool valid = index == 8 || index == 13 || index == 18 || index == 23
+            ? value == '-'
+            : (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
+        if (!valid) {
+            throw std::runtime_error("database drop requires the original canonical UUIDs");
+        }
+    }
+}
+
+void ValidateDropResponse(const glamdb::NClient::TResponse& response, const std::string& database)
+{
+    if (response.Status < 200 || response.Status >= 300) {
+        return;
+    }
+    const auto value = nlohmann::json::parse(response.Body, nullptr, false);
+    if (!value.is_object() || !value.contains("database_id") || value["database_id"] != database ||
+        !value.contains("store_id") || value["store_id"] != database || !value.contains("dropped") ||
+        !value["dropped"].is_boolean() || value["dropped"] != true)
+    {
+        throw std::runtime_error("invalid database drop response; retry only the original database and store IDs");
+    }
+}
 }
 int main(int argc, char** argv)
 try {
@@ -148,12 +181,14 @@ try {
     glamdb::NClient::AddWorkloadCommands(app, workloadExitCode);
     auto* request = app.add_subcommand("request", "Call any server API route; write exact response bytes");
     auto* create = app.add_subcommand("create-store", "Create a database through the running server");
+    auto* drop = app.add_subcommand("drop-database", "Drop one database using its original saved UUIDs");
     glamdb::NClient::TDataCommand data;
     auto commands = glamdb::NClient::AddDataCommands(app, data);
     commands.push_back(request);
     commands.push_back(create);
+    commands.push_back(drop);
     glamdb::NClient::TRequest input;
-    std::string url, host = "127.0.0.1", path, file, output, headers, name;
+    std::string url, host = "127.0.0.1", path, file, output, headers, name, database, store;
     uint16_t port = 8080;
     for (auto* command : commands) {
         command->add_option("--url", url, "Full http(s) URL (create-store: server base URL)");
@@ -170,6 +205,8 @@ try {
     request->add_option("--accept", input.Accept, "Response media type, including application/vnd.apache.arrow.stream");
     request->add_option("--content-type", input.ContentType, "Request media type");
     create->add_option("--name", name, "Database name")->required();
+    drop->add_option("--database", database, "Original saved database UUID; never a name")->required();
+    drop->add_option("--store-id", store, "Original saved store UUID; must match --database")->required();
     if (argc == 1) {
         std::cout << app.help();
         return 0;
@@ -199,6 +236,11 @@ try {
         path = "/databases";
         input.Method = "POST";
         input.Body = nlohmann::json{{"name", name}}.dump();
+    } else if (drop->parsed()) {
+        ValidateDropIdentity(database, store);
+        path = "/databases/" + database + "/drop";
+        input.Method = "POST";
+        input.Body = nlohmann::json{{"store_id", store}}.dump();
     } else if (!file.empty()) {
         std::ifstream source;
         if (file != "-") {
@@ -250,6 +292,9 @@ try {
     auto headerOutput = PrepareOutput(headers);
     const auto response =
         data.Command.empty() ? glamdb::NClient::SendRequest(input) : glamdb::NClient::SendDataRequest(input, data);
+    if (drop->parsed()) {
+        ValidateDropResponse(response, database);
+    }
     const auto result = data.Command.empty() ? (response.Status >= 200 && response.Status < 300 ? 0 : 1)
                                              : glamdb::NClient::DataExitCode(response);
     try {

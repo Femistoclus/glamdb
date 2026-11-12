@@ -1249,6 +1249,7 @@
             "closing",
             "opening",
             "reconciling",
+            "dropping",
             "error"
           ]
         },
@@ -2779,6 +2780,38 @@
       "required": [
         "expected_version",
         "write_settings"
+      ],
+      "additionalProperties": false
+    },
+    "databaseDrop": {
+      "type": "object",
+      "properties": {
+        "store_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      },
+      "required": [
+        "store_id"
+      ],
+      "additionalProperties": false
+    },
+    "databaseDropped": {
+      "type": "object",
+      "properties": {
+        "database_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "store_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "dropped": {
+          "const": true
+        }
+      },
+      "required": [
+        "database_id",
+        "store_id",
+        "dropped"
       ],
       "additionalProperties": false
     }

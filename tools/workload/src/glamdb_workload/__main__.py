@@ -40,6 +40,11 @@ def parser():
     generate.add_argument("--part-rows", type=positive, default=1000)
     generate.add_argument("--part-bytes", type=positive, default=4 * 1024**2)
     benches = commands.add_parser("bench").add_subparsers(dest="mode", required=True)
+    tpch = benches.add_parser("tpch").add_subparsers(dest="tpch_command", required=True)
+    clean = tpch.add_parser("clean")
+    clean.add_argument("--state", required=True)
+    clean.add_argument("--ca-file")
+    clean.add_argument("--timeout", type=float, default=30.0)
     for mode in ("write", "read", "verify", "resolve"):
         command = benches.add_parser(mode)
         command.add_argument("--url", required=True)
@@ -89,6 +94,12 @@ def _extra(name, package):
 
 
 def _bench(args):
+    if args.mode == "tpch":
+        from .tpch import clean
+
+        result = clean(args.state, timeout=args.timeout, ca_file=args.ca_file)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
     from glamdb_sdk import Schema
     from glamdb_sdk.request import uuid_string
     from .dataset import Dataset, write_json

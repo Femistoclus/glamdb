@@ -22,6 +22,7 @@ There is no certificate-verification bypass and redirects are never followed.
 ```sh
 export GLAMDB_TOKEN='replace-with-your-token'
 build/client/glamdb-cli create-store --url https://db.example.test --name analytics
+build/client/glamdb-cli drop-database --url https://db.example.test --database DATABASE_UUID --store-id ORIGINAL_STORE_UUID
 build/client/glamdb-cli request --url https://db.example.test/databases
 build/client/glamdb-cli request --host localhost --port 8080 --path /capabilities
 ```
@@ -97,6 +98,20 @@ A header-output failure after a complete response returns `4`, even when the
 server already committed. Destination preflight failures return `1` before sending.
 Header and body output files are replaced independently; they are not one atomic
 multi-file transaction.
+
+`drop-database` deletes an entire dedicated managed database and its history.
+Save its original canonical `database_id` and `store_id` from creation; these
+UUIDs must match. The command sends one authenticated
+`POST /databases/{database_id}/drop` with `{"store_id":"ORIGINAL_STORE_UUID"}`.
+It validates both returned UUIDs and `dropped: true` before producing successful
+output. A malformed success reply fails without claiming deletion. No Python
+installation is needed for this command.
+
+After a timeout or lost response, retry with exactly the same URL and saved
+UUIDs. The completed deletion receipt makes a repeated request safe, even if
+another database reused the old name. Never resolve a name for cleanup. There
+is no automatic retry, force option, or local filesystem removal. See
+[managed database deletion](../../docs/development/DATABASE_DROP.md).
 
 The optional `glamdb-admin` executable retains local `create-store --root ...
 --store-id ...` and `inspect-store` for offline administration. Build the full

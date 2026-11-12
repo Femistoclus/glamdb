@@ -519,3 +519,16 @@ engine limits. `open_database(database_id, limits={"max_collections": 3})` chang
 them for a closed database. Omit `limits` to preserve the stored configuration;
 responses include all normalized limits. See the [native server contract](../../docs/development/HTTP_SERVER.md)
 for ranges, retry semantics and persistence.
+
+Use `root.drop_database(database_id, store_id=original_store_id)` to delete one
+entire managed database, including its collections and history. Retain both
+original UUIDs from database creation; `store_id` must match `database_id`.
+The client sends one authenticated `POST /databases/{id}/drop` with only the
+saved `store_id`, and validates both returned identities and `dropped: true`.
+Malformed or mismatched success replies raise `ProtocolError`.
+
+A timeout, transport failure or lost reply is ambiguous. The SDK never retries
+the drop automatically. Call `drop_database` again with the **same saved UUIDs**
+to retrieve or finish that deletion. Never resolve a name for cleanup: another
+database may already have reused it. This is a network operation; the SDK does
+not remove local files. See [managed database deletion](../../docs/development/DATABASE_DROP.md).

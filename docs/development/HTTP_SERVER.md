@@ -73,12 +73,13 @@ system OpenSSL Crypto for page SHA-256 checksums.
 | `POST /databases/{id}/close` | Stop new calls, drain admitted calls and shut down |
 | `POST /databases/{id}/reconcile` | Run core reconciliation for an open engine |
 | `POST /databases/{id}/discard` | Remove an uninitialized reservation and verified disposable initialization files |
+| `POST /databases/{id}/drop` | Remove an initialized store using its recorded `store_id`, durable intent and a retained retry receipt |
 
-Close/reconcile/discard take `{}`; open accepts `{limits?:object}`. All routes require the bearer token. Collection
+Close/reconcile/discard take `{}`; open accepts `{limits?:object}`; drop requires `{store_id:UUID}` matching the original database identity. All routes require the bearer token. Collection
 routes in the next table are relative to `/databases/{id}` in managed mode;
 `GET /capabilities` at the server root advertises `features.database_management`.
 A database response contains `{database_id,name,state,limits,store?,error?}`; states are
-`open`, `closed`, `opening`, `closing`, `reconciling`, `error`. Lists contain `{items,next_cursor:null}`.
+`open`, `closed`, `opening`, `closing`, `reconciling`, `dropping`, `error`. Lists contain `{items,next_cursor:null}`.
 Names are unique, case-sensitive UTF-8 (1–128 bytes, no NUL or path separators).
 At most 64 databases are registered. Paths are generated from UUIDs under
 `--data-dir/databases`; clients cannot provide filesystem paths. Database and
@@ -100,8 +101,12 @@ remain protected even if their identity differs from the reservation. Unknown
 contents require inspection; existing unregistered `incomplete-...` siblings are
 not swept. A registry write with an uncertain outcome requires restart before reuse;
 after restart, inspect the original ID (404 means the reservation was removed).
-Discard never removes an initialized or ready store. There is no drop/import/rename
-endpoint for initialized databases in this release.
+Discard never removes an initialized or ready store. Explicit initialized-store
+deletion uses [the managed drop protocol](DATABASE_DROP.md), including admission
+draining, crash recovery, filesystem safety and exact-identity retries.
+`features.database_drop` advertises this operator capability in managed mode.
+Deleted UUIDs remain retired; names and live registry capacity are reclaimed.
+Import and rename remain unsupported.
 
 Optional `limits` configure the public engine limits. Creation merges omitted
 fields with defaults; an omitted limits object on retry preserves the existing
@@ -123,7 +128,7 @@ entry and open again with sufficient limits; data is never discarded.
 
 Values are JSON integers; booleans, fractions, unknown fields and values outside
 these bounds are rejected before reserving a database. Every database response
-includes normalized limits, including closed/error states. The service registry is created directly in version 2; core store formats are unchanged.
+includes normalized limits, including closed/error states. The service registry is created directly in version 3; version 2 is migrated transactionally to add deletion receipts. Core store formats are unchanged.
 
 A separate `registry.sqlite` records identities and intended open state, using
 verified SQLite DELETE/EXTRA settings. The registry does not contain collection
@@ -443,7 +448,7 @@ Ordinary header allowances are 64 globally and 32 per peer; excess accepted
 connections have a 100 ms header probe so complete requests can still progress.
 At most 16 request bodies are read at once, including at most 12 ordinary uploads.
 The remaining four readers are reserved for authenticated database
-create/open/close/reconcile/discard and scan cancellation; these control bodies
+create/open/close/reconcile/discard/drop and scan cancellation; these control bodies
 can also use other free readers. Public/static POSTs cannot spend the reserve.
 Additional headers wait within the connection ceiling and original read deadline;
 eligible control bodies can pass ordinary waiters when only reserved capacity is

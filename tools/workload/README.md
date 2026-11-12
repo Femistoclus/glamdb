@@ -5,6 +5,8 @@
 the rows actually committed; `bench resolve` looks up uncertain operations.
 These commands use the running native server. They never create or open a
 database implicitly, reconcile it, or switch to a mock backend.
+`bench tpch clean` drops the dedicated database identified by an explicit saved
+run-state file; TPC-H generation and loading commands are not implemented.
 
 ## Install
 
@@ -176,6 +178,45 @@ and batch mode adds in-memory `arrow_batch_bytes`.
 Only loopback HTTP is permitted. Other endpoints require verified HTTPS.
 `--ca-file CA.pem` adds the test/private CA; certificate verification cannot be
 disabled. Redirects follow the SDK's rejection policy.
+
+## TPC-H database cleanup
+
+Save the server URL and both original UUIDs when creating a dedicated benchmark
+database. The minimal run-state JSON format is:
+
+```json
+{
+  "version": 1,
+  "url": "http://127.0.0.1:8080",
+  "database_id": "11111111-2222-4333-8444-555555555555",
+  "store_id": "11111111-2222-4333-8444-555555555555"
+}
+```
+
+Additional benchmark fields such as table identities may be retained in this
+file. Keep credentials out of it; the command reads `GLAMDB_TOKEN` from the
+environment. `database_id` and `store_id` must be the same original UUID.
+Only loopback HTTP is allowed; other saved endpoints require verified HTTPS.
+
+```sh
+glamdb-cli bench tpch clean --state run/tpch.json
+```
+
+`--ca-file CA.pem` and `--timeout 30` are optional. This command needs the SDK
+and workload package; it does not need Mimesis, Locust, or a new dependency.
+It validates the saved state before sending one authenticated
+`POST /databases/{database_id}/drop` with only `store_id` in its body. It prints
+`dropped: true` only after the response contains the same saved identities and
+confirms completed deletion. The entire database, including all eight TPC-H
+tables and history, is removed. It does not perform row deletion, RF2,
+`TRUNCATE`, or benchmark generation/loading.
+
+A timeout or lost reply is ambiguous. The command leaves the state file
+unchanged after every outcome, and sends no automatic retry. Run the same
+command again with the same saved state to retrieve or finish the original
+deletion. No name lookup is performed, so reusing the old database name cannot
+redirect cleanup. Failed HTTP or protocol checks return a nonzero exit without
+claiming cleanup. There is no force option or client filesystem removal.
 
 ## Reports and recovery
 

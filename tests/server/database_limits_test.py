@@ -136,7 +136,7 @@ class DatabaseLimits(unittest.TestCase):
         self.api(base + '/close', {})
         self.stop()
         with sqlite3.connect(Path(self.directory) / 'registry.sqlite') as registry:
-            self.assertEqual(registry.execute('PRAGMA user_version').fetchone()[0], 2)
+            self.assertEqual(registry.execute('PRAGMA user_version').fetchone()[0], 3)
             limits = registry.execute('SELECT limits FROM databases').fetchone()[0]
             self.assertEqual(json.loads(limits), DEFAULTS)
         self.start()

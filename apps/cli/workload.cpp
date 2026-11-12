@@ -132,6 +132,13 @@ void AddWorkloadCommands(CLI::App& app, std::optional<int>& exitCode)
     Value(*generate, *generation, "--part-bytes", "Maximum bytes per part (default 4194304)");
     auto* bench = app.add_subcommand("bench", "Run Locust SDK workloads and resolve/verify their journals");
     bench->require_subcommand(1);
+    auto* tpch = bench->add_subcommand("tpch", "Manage a dedicated TPC-H benchmark database");
+    tpch->require_subcommand(1);
+    auto* clean = tpch->add_subcommand("clean", "Drop the exact database identity saved in a run state file");
+    auto cleanup = Command(*clean, {"bench", "tpch", "clean"}, exitCode);
+    Value(*clean, *cleanup, "--state", "Saved version-1 run state JSON file; never a database name", true);
+    Value(*clean, *cleanup, "--ca-file", "Additional PEM certificate authority");
+    Value(*clean, *cleanup, "--timeout", "SDK deadline in seconds (default 30)");
     for (const auto* mode : {"write", "read", "verify", "resolve"}) {
         auto* command = bench->add_subcommand(mode);
         auto args = Command(*command, {"bench", mode}, exitCode);

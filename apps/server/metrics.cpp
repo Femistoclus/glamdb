@@ -91,7 +91,9 @@ size_t ClassifyRoute(std::string_view path)
             return FindLabel(Routes, "database");
         }
         suffix.remove_prefix(split);
-        if (suffix == "/open" || suffix == "/close" || suffix == "/reconcile" || suffix == "/discard") {
+        if (suffix == "/open" || suffix == "/close" || suffix == "/reconcile" || suffix == "/discard" ||
+            suffix == "/drop")
+        {
             return FindLabel(Routes, "database_lifecycle");
         }
     }

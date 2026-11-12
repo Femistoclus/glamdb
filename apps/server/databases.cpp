@@ -1,4 +1,5 @@
 #include "apps/server/databases.h"
+#include "apps/server/drop_store.h"
 
 #include "core/api/canonical.h"
 #include "core/catalog/sqlite.h"
@@ -96,6 +97,8 @@ struct TEntry
     std::optional<ErrorDetail> Error;
     bool RegistryFence = false;
     bool Retired = false;
+    std::optional<TDropIdentity> DropIdentity;
+    std::optional<TDropIdentity> RootIdentity;
     std::shared_ptr<const TJson> Descriptor;
 };
 TJson Describe(const TEntry& entry)
@@ -122,7 +125,9 @@ void Publish(TEntry& entry)
 TJson Current(const TEntry& entry)
 {
     const auto descriptor = std::atomic_load(&entry.Descriptor);
-    Require(descriptor->at("state") != "discarded", "database not found", "DATABASE_NOT_FOUND");
+    Require(descriptor->at("state") != "discarded" && descriptor->at("state") != "dropped",
+        "database not found",
+        "DATABASE_NOT_FOUND");
     return *descriptor;
 }
 void ConfigureRegistry(detail::Database& registry)
@@ -142,6 +147,32 @@ void SyncDirectory(const std::filesystem::path& path)
     Require(directory.Descriptor >= 0 && fsync(directory.Descriptor) == 0,
         "cannot sync registry directory",
         "IO_ERROR");
+}
+constexpr std::string_view DropSchema =
+    "CREATE TABLE database_drops(database_id TEXT PRIMARY KEY NOT NULL, device TEXT NOT NULL, "
+    "inode TEXT NOT NULL, token TEXT NOT NULL, completed INTEGER NOT NULL CHECK(completed IN (0,1))) STRICT";
+
+void RequireDroppedPathAbsent(int root, int databaseParent, const std::filesystem::path& path, const std::string& id)
+{
+    struct stat pinnedRoot
+    {
+    }, namedRoot{}, pinnedParent{}, namedParent{};
+    Require(fstat(root, &pinnedRoot) == 0 && fstatat(AT_FDCWD, path.c_str(), &namedRoot, AT_SYMLINK_NOFOLLOW) == 0 &&
+            S_ISDIR(namedRoot.st_mode) && pinnedRoot.st_dev == namedRoot.st_dev &&
+            pinnedRoot.st_ino == namedRoot.st_ino && fstat(databaseParent, &pinnedParent) == 0 &&
+            fstatat(root, "databases", &namedParent, AT_SYMLINK_NOFOLLOW) == 0 && S_ISDIR(namedParent.st_mode) &&
+            pinnedParent.st_dev == namedParent.st_dev && pinnedParent.st_ino == namedParent.st_ino,
+        "managed database parent was redirected; operator inspection required",
+        "PRECONDITION_FAILED");
+    TDirectoryLock parent;
+    parent.Descriptor = openat(root, "databases", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    Require(parent.Descriptor >= 0, "database parent is unavailable or redirected", "PRECONDITION_FAILED");
+    struct stat status
+    { };
+    const auto result = fstatat(parent.Descriptor, id.c_str(), &status, AT_SYMLINK_NOFOLLOW);
+    Require(result != 0 && errno == ENOENT,
+        "a directory entry appeared at a deleted database identity; operator inspection required",
+        "PRECONDITION_FAILED");
 }
 void InitializeRegistry(const std::filesystem::path& directory, const std::string& vfs)
 {
@@ -173,7 +204,8 @@ void InitializeRegistry(const std::filesystem::path& directory, const std::strin
                          "initialized INTEGER NOT NULL CHECK(initialized IN (0,1)), auto_open INTEGER NOT NULL "
                          "CHECK(auto_open IN (0,1)), limits TEXT NOT NULL DEFAULT '" +
             EncodeLimits(Limits{}).dump() + "') STRICT");
-        registry.Execute("PRAGMA user_version=2");
+        registry.Execute(DropSchema);
+        registry.Execute("PRAGMA user_version=3");
         registry.Execute("COMMIT");
         registry.Close();
     }
@@ -319,6 +351,7 @@ struct TDatabases::TImpl
     std::shared_ptr<ResourceOwner> Resources;
     std::vector<std::shared_ptr<ResourceReservation>> Reservations;
     TDirectoryLock DirectoryLock;
+    TDirectoryLock DatabaseParent;
     std::filesystem::path Root;
     detail::Database Registry;
     mutable std::mutex Mutex;
@@ -327,6 +360,14 @@ struct TDatabases::TImpl
     using TEntries = std::vector<std::shared_ptr<TEntry>>;
     std::shared_ptr<const TEntries> PublishedEntries = std::make_shared<const TEntries>();
     std::function<void(const std::string&)> ScanCanceller;
+    std::function<void(std::string_view)> DropCheckpoint;
+
+    void Checkpoint(std::string_view stage)
+    {
+        if (DropCheckpoint) {
+            DropCheckpoint(stage);
+        }
+    }
 
     void CancelScans(const std::string& id)
     {
@@ -397,6 +438,7 @@ struct TDatabases::TImpl
     void Open(TEntry& entry, bool create)
     {
         Require(!entry.Retired, "database not found", "DATABASE_NOT_FOUND");
+        Require(!entry.DropIdentity, "database deletion is pending; retry drop", "PRECONDITION_FAILED");
         RequireRegistryHealthy(!create || entry.Initialized || Healthy);
         RequireRegistryHealthy(!entry.RegistryFence || Healthy,
             "database registry intent is uncertain; restart before reopening");
@@ -416,6 +458,13 @@ struct TDatabases::TImpl
                 : Unwrap(OpenExisting(
                       {path.string(), entry.ID, "local-delete-extra-v1", entry.ResourceLimits, Resources}));
             entry.Instance = std::move(engine);
+            struct stat status
+            { };
+            Require(fstatat(DatabaseParent.Descriptor, entry.ID.c_str(), &status, AT_SYMLINK_NOFOLLOW) == 0 &&
+                    S_ISDIR(status.st_mode),
+                "managed store directory changed while opening",
+                "PRECONDITION_FAILED");
+            entry.RootIdentity = TDropIdentity{std::to_string(status.st_dev), std::to_string(status.st_ino), {}};
             if (!entry.Initialized || !entry.AutoOpen) {
                 std::lock_guard lock(Mutex);
                 Write("UPDATE databases SET initialized=1, auto_open=1 WHERE id=?", {entry.ID});
@@ -438,14 +487,136 @@ struct TDatabases::TImpl
             throw TFailure(*entry.Error);
         }
     }
+
+    TJson Drop(const std::string& id)
+    {
+        TJson response{{"database_id", id}, {"store_id", id}, {"dropped", true}};
+        std::shared_ptr<TEntry> entry;
+        {
+            std::lock_guard registryLock(Mutex);
+            RequireRegistryHealthy(Healthy);
+            const auto found = Entries.find(id);
+            if (found == Entries.end()) {
+                const auto receipts = Registry.Query("SELECT completed FROM database_drops WHERE database_id=?", {id});
+                Require(receipts.size() == 1, "database not found", "DATABASE_NOT_FOUND");
+                Require(detail::Required(receipts.front(), 0) == "1",
+                    "pending deletion has no database reservation",
+                    "CORRUPTION");
+                RequireDroppedPathAbsent(DirectoryLock.Descriptor, DatabaseParent.Descriptor, Root, id);
+                return response;
+            }
+            entry = found->second;
+        }
+        Checkpoint("drop-found");
+        std::lock_guard lifecycle(entry->Lifecycle);
+        if (entry->Retired) {
+            std::lock_guard registryLock(Mutex);
+            RequireRegistryHealthy(Healthy);
+            const auto receipts = Registry.Query("SELECT completed FROM database_drops WHERE database_id=?", {id});
+            Require(receipts.size() == 1 && detail::Required(receipts.front(), 0) == "1",
+                "database not found",
+                "DATABASE_NOT_FOUND");
+            RequireDroppedPathAbsent(DirectoryLock.Descriptor, DatabaseParent.Descriptor, Root, id);
+            return response;
+        }
+        RequireRegistryHealthy(Healthy);
+        entry->Accepting = false;
+        entry->State = "dropping";
+        Publish(*entry);
+        std::unique_lock gate(entry->Gate);
+        try {
+            CancelScans(id);
+            if (entry->Instance) {
+                const auto closed = entry->Instance->Shutdown(std::chrono::seconds(60));
+                if (!closed && closed.error().code == "DEADLINE_EXCEEDED") {
+                    throw TFailure(closed.error());
+                }
+                entry->Instance.reset();
+            }
+            entry->Closing = false;
+            TDropStore store(Root,
+                id,
+                entry->DropIdentity ? entry->DropIdentity : entry->RootIdentity,
+                DirectoryLock.Descriptor,
+                DatabaseParent.Descriptor);
+            if (!entry->DropIdentity) {
+                const auto identity = store.Prepare();
+                std::optional<TDropIdentity> confirmedIdentity(identity);
+                std::lock_guard registryLock(Mutex);
+                Write("INSERT INTO database_drops(database_id,device,inode,token,completed) VALUES(?,?,?,?,0)",
+                    {id, identity.Device, identity.Inode, identity.Token});
+                entry->DropIdentity.swap(confirmedIdentity);
+            }
+            Checkpoint("drop-intent");
+            store.Remove(DropCheckpoint);
+            Checkpoint("drop-removed");
+            auto descriptor = Describe(*entry);
+            descriptor["state"] = "dropped";
+            descriptor.erase("error");
+            auto retired = std::make_shared<const TJson>(std::move(descriptor));
+            std::lock_guard registryLock(Mutex);
+            auto entries = std::make_shared<TEntries>();
+            for (const auto& [registered, candidate] : Entries) {
+                if (registered != id) {
+                    entries->push_back(candidate);
+                }
+            }
+            try {
+                Write("BEGIN IMMEDIATE");
+                Write("DELETE FROM databases WHERE id=?", {id});
+                Require(Registry.Changes() == 1, "database reservation changed during deletion", "CORRUPTION");
+                Write("UPDATE database_drops SET completed=1 WHERE database_id=? AND completed=0", {id});
+                Require(Registry.Changes() == 1, "database deletion receipt changed", "CORRUPTION");
+                Write("COMMIT");
+            } catch (...) {
+                Healthy = false;
+                throw;
+            }
+            entry->Retired = true;
+            entry->State = "dropped";
+            entry->Error.reset();
+            std::atomic_store(&entry->Descriptor, std::move(retired));
+            Entries.erase(id);
+            std::atomic_store(&PublishedEntries, std::shared_ptr<const TEntries>(std::move(entries)));
+            Checkpoint("drop-finished");
+            return response;
+        } catch (...) {
+            if (entry->Retired) {
+                throw;
+            }
+            // Once intent is durable, no lifecycle action may reopen the partial store.
+            entry->RegistryFence = !Healthy;
+            entry->State = entry->DropIdentity ? "dropping" : "error";
+            try {
+                throw;
+            } catch (const TFailure& failure) {
+                entry->Error = failure.Detail;
+            } catch (const detail::Failure& failure) {
+                entry->Error = failure.detail;
+            } catch (...) {
+                entry->Error = ErrorDetail{"IO_ERROR",
+                    "database deletion did not complete; operator inspection required",
+                    RetryHint::OperatorAction};
+            }
+            if (!Healthy) {
+                entry->Error = ErrorDetail{"RECOVERY_REQUIRED",
+                    "database deletion registry result is uncertain; restart before retrying",
+                    RetryHint::OperatorAction};
+            }
+            Publish(*entry);
+            throw;
+        }
+    }
 };
 
 TDatabases::TDatabases(const std::filesystem::path& directory,
     const std::string& registryVfs,
-    std::shared_ptr<ResourceOwner> resources)
+    std::shared_ptr<ResourceOwner> resources,
+    std::function<void(std::string_view)> dropCheckpoint)
     : Impl_(std::make_unique<TImpl>())
 {
     auto& self = *Impl_;
+    self.DropCheckpoint = std::move(dropCheckpoint);
     self.Resources = resources ? std::move(resources) : ResourceOwner::ProcessDefault();
     self.Reservations.push_back(Unwrap(self.Resources->Reserve(ResourceClass::Metadata, 16ULL << 20)));
     self.Reservations.push_back(Unwrap(self.Resources->Reserve(ResourceClass::Recovery, 16ULL << 20)));
@@ -471,10 +642,19 @@ TDatabases::TDatabases(const std::filesystem::path& directory,
     }
     self.Registry.Open(registry, SQLITE_OPEN_READWRITE, registryVfs);
     ConfigureRegistry(self.Registry);
-    Require(self.Registry.Integer("PRAGMA user_version") == 2, "unsupported server registry version", "CORRUPTION");
+    if (self.Registry.Integer("PRAGMA user_version") == 2) {
+        self.Registry.Execute("BEGIN IMMEDIATE");
+        self.Registry.Execute(DropSchema);
+        self.Registry.Execute("PRAGMA user_version=3");
+        self.Registry.Execute("COMMIT");
+    }
+    Require(self.Registry.Integer("PRAGMA user_version") == 3, "unsupported server registry version", "CORRUPTION");
     Require(std::filesystem::is_directory(std::filesystem::symlink_status(directory / "databases")),
         "database parent is absent or a symlink",
         "CORRUPTION");
+    self.DatabaseParent.Descriptor =
+        openat(self.DirectoryLock.Descriptor, "databases", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    Require(self.DatabaseParent.Descriptor >= 0, "cannot retain database parent identity", "IO_ERROR");
     for (const auto& row :
         self.Registry.Query("SELECT id,name,initialized,auto_open,limits FROM databases ORDER BY name"))
     {
@@ -502,12 +682,45 @@ TDatabases::TDatabases(const std::filesystem::path& directory,
             "invalid or oversized registry",
             "CORRUPTION");
     }
+    Require(self.Registry.Integer("SELECT count(*) FROM database_drops JOIN databases "
+                                  "ON database_drops.database_id=databases.id WHERE completed=1") == 0,
+        "deleted database identity was reused",
+        "CORRUPTION");
+    for (const auto& row :
+        self.Registry.Query("SELECT database_id,device,inode,completed,token FROM database_drops WHERE completed=0"))
+    {
+        const auto id = detail::Required(row, 0);
+        Require(detail::ValidUuid(id), "invalid deletion receipt identity", "CORRUPTION");
+        const auto completed = detail::Required(row, 3);
+        Require(completed == "0" || completed == "1", "invalid deletion receipt state", "CORRUPTION");
+        const auto found = self.Entries.find(id);
+        if (completed == "0") {
+            Require(found != self.Entries.end(), "pending deletion has no reservation", "CORRUPTION");
+            found->second->DropIdentity =
+                TDropIdentity{detail::Required(row, 1), detail::Required(row, 2), detail::Required(row, 4)};
+            found->second->State = "dropping";
+        } else {
+            Require(found == self.Entries.end(), "deleted database identity was reused", "CORRUPTION");
+        }
+    }
     for (const auto& [id, entry] : self.Entries) {
         (void)id;
         Publish(*entry);
     }
     self.PublishEntries();
     for (const auto& entry : self.Snapshot()) {
+        if (entry->DropIdentity) {
+            try {
+                self.Drop(entry->ID);
+            } catch (const TFailure&) {
+                continue;
+            } catch (const detail::Failure&) {
+                continue;
+            } catch (const std::filesystem::filesystem_error&) {
+                continue;
+            }
+            continue;
+        }
         if (entry->AutoOpen) {
             try {
                 self.Open(*entry, false);
@@ -532,7 +745,7 @@ TJson TDatabases::List() const
     auto items = TJson::array();
     for (const auto& entry : Impl_->Snapshot()) {
         const auto descriptor = std::atomic_load(&entry->Descriptor);
-        if (descriptor->at("state") != "discarded") {
+        if (descriptor->at("state") != "discarded" && descriptor->at("state") != "dropped") {
             items.push_back(*descriptor);
         }
     }
@@ -580,7 +793,7 @@ try {
     for (const auto& entry : Impl_->Snapshot()) {
         const auto descriptor = std::atomic_load(&entry->Descriptor);
         const auto state = descriptor->at("state").get<std::string>();
-        if (state == "closed" || state == "discarded") {
+        if (state == "closed" || state == "discarded" || state == "dropped") {
             continue;
         }
         std::shared_lock lock(entry->Gate, std::try_to_lock);
@@ -625,6 +838,9 @@ TJson TDatabases::Create(const TJson& body)
             entry = std::make_shared<TEntry>();
             entry->Name = name;
             entry->ID = supplied.empty() ? detail::NewUuid() : supplied;
+            Require(Impl_->Registry.Query("SELECT 1 FROM database_drops WHERE database_id=?", {entry->ID}).empty(),
+                "deleted database IDs cannot be reused",
+                "ALREADY_EXISTS");
             entry->ResourceLimits = requestedLimits;
             Impl_->Write("INSERT INTO databases(id,name,initialized,auto_open,limits) VALUES(?,?,0,1,?)",
                 {entry->ID, entry->Name, EncodeLimits(entry->ResourceLimits).dump()});
@@ -669,8 +885,16 @@ TJson TDatabases::Create(const TJson& body)
 }
 TJson TDatabases::Change(const std::string& id, std::string_view action, const TJson& body)
 {
-    Require(action == "open" || action == "close" || action == "reconcile" || action == "discard",
+    Require(action == "open" || action == "close" || action == "reconcile" || action == "discard" || action == "drop",
         "unknown database action");
+    if (action == "drop") {
+        CheckKeys(body, {"store_id"});
+        Require(detail::ValidUuid(id), "invalid database ID");
+        const auto store = body.at("store_id").get<std::string>();
+        Require(detail::ValidUuid(store), "invalid store ID");
+        Require(store == id, "store identity does not match the selected database", "PRECONDITION_FAILED");
+        return Impl_->Drop(id);
+    }
     if (action == "open") {
         CheckKeys(body, {"limits"});
         if (body.contains("limits")) {
@@ -697,6 +921,7 @@ TJson TDatabases::Change(const std::string& id, std::string_view action, const T
     }
     std::lock_guard lifecycle(entry->Lifecycle);
     Require(!entry->Retired, "database not found", "DATABASE_NOT_FOUND");
+    Require(!entry->DropIdentity, "database deletion is pending; retry drop", "PRECONDITION_FAILED");
     if (action == "discard") {
         Require(!entry->Initialized && !entry->Instance && !entry->Closing,
             "only an uninitialized, unowned reservation can be discarded",
@@ -865,7 +1090,8 @@ TResponse TDatabases::Use(const std::string& id,
                 "database admission is fenced until registry recovery",
                 Impl_->Healthy ? RetryHint::SameIdAfterReconcile : RetryHint::OperatorAction});
         }
-        const bool busy = state == "opening" || state == "closing" || state == "reconciling" || state == "open";
+        const bool busy = state == "opening" || state == "closing" || state == "reconciling" || state == "open" ||
+            state == "dropping";
         throw TFailure({busy ? "DATABASE_BUSY" : "DATABASE_CLOSED",
             busy ? "database lifecycle is busy; retry the same request" : "database is closed",
             busy ? RetryHint::SameIdAfterReconcile : RetryHint::OperatorAction});

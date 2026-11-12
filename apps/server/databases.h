@@ -10,10 +10,11 @@ namespace glamdb::NServer {
 class TDatabases
 {
 public:
-    // Optional VFS is an internal seam for deterministic registry fault tests.
+    // Internal VFS/checkpoint seams support deterministic registry/filesystem interruption tests.
     explicit TDatabases(const std::filesystem::path& directory,
         const std::string& registryVfs = {},
-        std::shared_ptr<ResourceOwner> resources = {});
+        std::shared_ptr<ResourceOwner> resources = {},
+        std::function<void(std::string_view)> dropCheckpoint = {});
     ~TDatabases();
     TDatabases(const TDatabases&) = delete;
     TDatabases& operator=(const TDatabases&) = delete;

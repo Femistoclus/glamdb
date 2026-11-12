@@ -15,6 +15,35 @@ namespace glamdb::NServer {
 using namespace NTransport;
 using namespace std::chrono_literals;
 
+TEST(Databases, DropInitializedStoreReclaimsNameAndKeepsIdentityReceipt)
+{
+    test::TempDir temporary;
+    const auto root = temporary.path / "server";
+    std::string id;
+    TJson result;
+    {
+        TDatabases databases(root);
+        id = databases.Create({{"name", "benchmark"}}).at("database_id").get<std::string>();
+        EXPECT_THROW(databases.Change(id, "discard"), TFailure);
+        result = databases.Change(id, "drop", {{"store_id", id}});
+        EXPECT_EQ(result, (TJson{{"database_id", id}, {"store_id", id}, {"dropped", true}}));
+        EXPECT_FALSE(std::filesystem::exists(root / "databases" / id));
+        EXPECT_TRUE(databases.List().at("items").empty());
+        EXPECT_THROW(databases.Get(id), TFailure);
+        EXPECT_EQ(databases.Change(id, "drop", {{"store_id", id}}), result);
+        EXPECT_THROW(databases.Create({{"name", "benchmark"}, {"database_id", id}}), TFailure);
+        const auto replacement = databases.Create({{"name", "benchmark"}}).at("database_id").get<std::string>();
+        EXPECT_NE(replacement, id);
+        EXPECT_EQ(databases.Change(id, "drop", {{"store_id", id}}), result);
+        EXPECT_EQ(databases.Get(replacement).at("state"), "open");
+        databases.Shutdown();
+    }
+    TDatabases reopened(root);
+    EXPECT_EQ(reopened.Change(id, "drop", {{"store_id", id}}), result);
+    EXPECT_EQ(reopened.List().at("items").size(), 1);
+    reopened.Shutdown();
+}
+
 TEST(Databases, ServiceReadinessReadsCoreHealth)
 {
     test::TempDir temporary;
@@ -30,6 +59,258 @@ TEST(Databases, ServiceReadinessReadsCoreHealth)
     // The service descriptor is still open: readiness must consult the owned engine.
     EXPECT_EQ(databases.Get(id).at("state"), "open");
     EXPECT_FALSE(databases.IsReady());
+    databases.Shutdown();
+}
+
+TEST(Databases, DropDrainsOnlySelectedDatabaseAndFencesNewCalls)
+{
+    test::TempDir temporary;
+    TDatabases databases(temporary.path / "server");
+    const auto a = databases.Create({{"name", "drop"}}).at("database_id").get<std::string>();
+    const auto b = databases.Create({{"name", "keep"}}).at("database_id").get<std::string>();
+    std::promise<void> entered, release;
+    auto released = release.get_future();
+    auto reader = std::async(std::launch::async, [&] {
+        return databases.Use(a, [&](const auto&) {
+            entered.set_value();
+            released.wait();
+            return TResponse{200, "accepted"};
+        });
+    });
+    entered.get_future().wait();
+    auto drop = std::async(std::launch::async, [&] {
+        return databases.Change(a, "drop", {{"store_id", a}});
+    });
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (databases.Get(a).at("state") != "dropping" && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    EXPECT_EQ(databases.Get(a).at("state"), "dropping");
+    EXPECT_EQ(drop.wait_for(0ms), std::future_status::timeout);
+    EXPECT_THROW(databases.Use(a,
+                     [](const auto&) {
+                         return TResponse{};
+                     }),
+        TFailure);
+    EXPECT_NO_THROW(databases.Use(b, [](const auto&) {
+        return TResponse{};
+    }));
+    release.set_value();
+    EXPECT_EQ(reader.get().Body, "accepted");
+    EXPECT_EQ(drop.get().at("dropped"), true);
+    EXPECT_EQ(databases.Get(b).at("state"), "open");
+    databases.Shutdown();
+}
+
+TEST(Databases, DropRequiresReleaseOfRetainedEngineLease)
+{
+    test::TempDir temporary;
+    TDatabases databases(temporary.path / "server");
+    const auto id = databases.Create({{"name", "retained"}}).at("database_id").get<std::string>();
+    std::shared_ptr<Engine> retained;
+    databases.Use(id, [&](const auto& engine) {
+        retained = engine;
+        return TResponse{};
+    });
+    EXPECT_THROW(databases.Change(id, "drop", {{"store_id", id}}), TFailure);
+    EXPECT_TRUE(std::filesystem::exists(temporary.path / "server/databases" / id / "store.ready"));
+    retained.reset();
+    EXPECT_EQ(databases.Change(id, "drop", {{"store_id", id}}).at("dropped"), true);
+}
+
+TEST(Databases, DropRecoveryCompletesEveryPersistedTransition)
+{
+    for (const auto* stage : {"drop-intent",
+             "file-unlinked",
+             "directory-unlinked",
+             "root-synced",
+             "root-unlinked",
+             "parent-synced",
+             "drop-removed",
+             "drop-finished"})
+    {
+        SCOPED_TRACE(stage);
+        test::TempDir temporary;
+        const auto root = temporary.path / "server";
+        std::string id;
+        bool armed = false, interrupted = false;
+        {
+            TDatabases databases(root, {}, {}, [&](std::string_view actual) {
+                if (armed && !interrupted && actual == stage) {
+                    interrupted = true;
+                    throw TFailure({"IO_ERROR", "interrupted cleanup", RetryHint::OperatorAction});
+                }
+            });
+            id = databases.Create({{"name", "recover"}}).at("database_id").get<std::string>();
+            armed = true;
+            EXPECT_THROW(databases.Change(id, "drop", {{"store_id", id}}), TFailure);
+            EXPECT_TRUE(interrupted);
+            if (std::string_view(stage) != "drop-finished") {
+                EXPECT_THROW(databases.Change(id, "open"), TFailure);
+                EXPECT_THROW(databases.Change(id, "discard"), TFailure);
+            }
+        }
+        TDatabases reopened(root);
+        EXPECT_TRUE(reopened.List().at("items").empty());
+        EXPECT_FALSE(std::filesystem::exists(root / "databases" / id));
+        EXPECT_EQ(reopened.Change(id, "drop", {{"store_id", id}}).at("dropped"), true);
+        EXPECT_NO_THROW(reopened.Create({{"name", "recover"}}));
+        reopened.Shutdown();
+    }
+}
+
+TEST(Databases, DropRegistryFaultsNeverRemoveBeforeConfirmedIntentOrLoseReceipts)
+{
+    for (const int commit : {1, 2}) {
+        for (const bool after : {false, true}) {
+            SCOPED_TRACE(std::to_string(commit) + (after ? " after" : " before"));
+            test::TempDir temporary;
+            const auto root = temporary.path / "server";
+            test::JournalFaultVfs vfs;
+            std::string id;
+            {
+                TDatabases databases(root, vfs.Name());
+                id = databases.Create({{"name", "faulted"}}).at("database_id").get<std::string>();
+                vfs.Arm(commit, after);
+                EXPECT_THROW(databases.Change(id, "drop", {{"store_id", id}}), detail::Failure);
+                EXPECT_EQ(std::filesystem::exists(root / "databases" / id), commit == 1);
+                EXPECT_THROW(databases.Change(id, "drop", {{"store_id", id}}), TFailure);
+            }
+            vfs.Disarm();
+            TDatabases reopened(root, vfs.Name());
+            EXPECT_EQ(std::filesystem::exists(root / "databases" / id), commit == 1 && !after);
+            EXPECT_EQ(reopened.Change(id, "drop", {{"store_id", id}}).at("dropped"), true);
+            EXPECT_FALSE(std::filesystem::exists(root / "databases" / id));
+            reopened.Shutdown();
+        }
+    }
+}
+
+TEST(Databases, DropRejectsReappearedPathAndReplacedPendingDirectory)
+{
+    test::TempDir temporary;
+    const auto root = temporary.path / "server";
+    bool armed = false;
+    TDatabases databases(root, {}, {}, [&](std::string_view stage) {
+        if (armed && stage == "drop-intent") {
+            armed = false;
+            throw TFailure({"IO_ERROR", "interrupted cleanup", RetryHint::OperatorAction});
+        }
+    });
+    const auto id = databases.Create({{"name", "replace"}}).at("database_id").get<std::string>();
+    const auto path = root / "databases" / id;
+    armed = true;
+    EXPECT_THROW(databases.Change(id, "drop", {{"store_id", id}}), TFailure);
+    std::filesystem::rename(path, root / "original");
+    std::filesystem::create_directory(path);
+    std::ofstream(path / "unrelated") << "keep";
+    EXPECT_THROW(databases.Change(id, "drop", {{"store_id", id}}), TFailure);
+    EXPECT_TRUE(std::filesystem::exists(path / "unrelated"));
+    std::filesystem::remove(path / "unrelated");
+    std::filesystem::remove(path);
+    std::filesystem::rename(root / "original", path);
+    EXPECT_EQ(databases.Change(id, "drop", {{"store_id", id}}).at("dropped"), true);
+    std::filesystem::create_directory(path);
+    EXPECT_THROW(databases.Change(id, "drop", {{"store_id", id}}), TFailure);
+    EXPECT_TRUE(std::filesystem::exists(path));
+}
+
+TEST(Databases, DropRejectsReplacementOfLiveRootAndLifetimeParents)
+{
+    for (const auto* replaced : {"root", "parent", "service"}) {
+        SCOPED_TRACE(replaced);
+        test::TempDir temporary;
+        const auto service = temporary.path / "server";
+        TDatabases databases(service);
+        const auto id = databases.Create({{"name", "preserve"}}).at("database_id").get<std::string>();
+        const auto original = std::string_view(replaced) == "root" ? service / "databases" / id
+            : std::string_view(replaced) == "parent"               ? service / "databases"
+                                                                   : service;
+        const auto saved = temporary.path / "saved";
+        std::filesystem::rename(original, saved);
+        std::filesystem::copy(saved, original, std::filesystem::copy_options::recursive);
+        EXPECT_THROW(databases.Change(id, "drop", {{"store_id", id}}), TFailure);
+        EXPECT_TRUE(std::filesystem::exists(service / "databases" / id / "catalog.sqlite"));
+        const auto originalCatalog = std::string_view(replaced) == "root" ? saved / "catalog.sqlite"
+            : std::string_view(replaced) == "parent"                      ? saved / id / "catalog.sqlite"
+                                                                          : saved / "databases" / id / "catalog.sqlite";
+        EXPECT_TRUE(std::filesystem::exists(originalCatalog));
+    }
+}
+
+TEST(Databases, DropReclaimsLiveCapacityBeyondTheRegistrySlotLimit)
+{
+    test::TempDir temporary;
+    const auto root = temporary.path / "server";
+    TDatabases databases(root);
+    for (int index = 0; index < 65; ++index) {
+        const auto id = databases.Create({{"name", "repeatable"}}).at("database_id").get<std::string>();
+        ASSERT_EQ(databases.Change(id, "drop", {{"store_id", id}}).at("dropped"), true);
+        ASSERT_TRUE(databases.List().at("items").empty());
+    }
+    EXPECT_TRUE(std::filesystem::is_empty(root / "databases"));
+    detail::Database registry;
+    registry.Open(root / "registry.sqlite", SQLITE_OPEN_READONLY, {});
+    EXPECT_EQ(registry.Integer("SELECT count(*) FROM databases"), 0);
+    EXPECT_EQ(registry.Integer("SELECT count(*) FROM database_drops WHERE completed=1"), 65);
+}
+
+TEST(Databases, VersionTwoRegistryMigrationPreservesExistingStore)
+{
+    test::TempDir temporary;
+    const auto root = temporary.path / "server";
+    std::string id;
+    {
+        TDatabases databases(root);
+        id = databases.Create({{"name", "existing"}}).at("database_id").get<std::string>();
+        databases.Shutdown();
+    }
+    {
+        detail::Database registry;
+        registry.Open(root / "registry.sqlite", SQLITE_OPEN_READWRITE, {});
+        registry.Execute("DROP TABLE database_drops");
+        registry.Execute("PRAGMA user_version=2");
+    }
+    TDatabases upgraded(root);
+    EXPECT_EQ(upgraded.Get(id).at("state"), "open");
+    EXPECT_TRUE(std::filesystem::exists(root / "databases" / id / "store.ready"));
+    EXPECT_EQ(upgraded.Change(id, "drop", {{"store_id", id}}).at("dropped"), true);
+}
+
+TEST(Databases, ConcurrentDiscardCannotFabricateCompletedDropReceipt)
+{
+    test::TempDir temporary;
+    const auto root = temporary.path / "server";
+    {
+        TDatabases initialized(root);
+    }
+    {
+        detail::Database registry;
+        registry.Open(root / "registry.sqlite", SQLITE_OPEN_READWRITE, {});
+        registry.Execute("INSERT INTO databases(id,name,initialized,auto_open) VALUES(?,?,0,0)",
+            {std::string(test::store_id), std::string("reservation")});
+    }
+    std::promise<void> found, release;
+    auto released = release.get_future();
+    TDatabases databases(root, {}, {}, [&](std::string_view stage) {
+        if (stage == "drop-found") {
+            found.set_value();
+            released.wait();
+        }
+    });
+    auto drop = std::async(std::launch::async, [&] {
+        return databases.Change(test::store_id, "drop", {{"store_id", test::store_id}});
+    });
+    found.get_future().wait();
+    EXPECT_EQ(databases.Change(test::store_id, "discard").at("discarded"), true);
+    release.set_value();
+    try {
+        drop.get();
+        FAIL() << "discard must not manufacture a successful drop receipt";
+    } catch (const TFailure& error) {
+        EXPECT_EQ(error.Detail.code, "DATABASE_NOT_FOUND");
+    }
+    EXPECT_EQ(databases.Create({{"name", "reservation"}, {"database_id", test::store_id}}).at("state"), "open");
     databases.Shutdown();
 }
 

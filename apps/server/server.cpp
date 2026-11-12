@@ -32,7 +32,8 @@ bool IsControlBody(const TRequest& request)
     const auto suffix = split == std::string::npos ? path : path.substr(split);
     return path == "/databases" ||
         (split != std::string::npos &&
-            (suffix == "/open" || suffix == "/close" || suffix == "/reconcile" || suffix == "/discard")) ||
+            (suffix == "/open" || suffix == "/close" || suffix == "/reconcile" || suffix == "/discard" ||
+                suffix == "/drop")) ||
         (suffix.starts_with("/collections/") && suffix.ends_with("/scan/cancel"));
 }
 ELogOperation ClassifyOperation(const TRequest& request) noexcept
@@ -522,7 +523,7 @@ private:
         }
         const bool lifecycle = Request_.Method == "POST" &&
             (path == "/databases" || suffix == "/open" || suffix == "/close" || suffix == "/reconcile" ||
-                suffix == "/discard");
+                suffix == "/discard" || suffix == "/drop");
         const bool control = !lifecycle &&
             (path == "/databases" || (path.starts_with("/databases/") && split == std::string::npos) ||
                 !suffix.starts_with("/collections") || suffix.find("/operations/") != std::string::npos ||

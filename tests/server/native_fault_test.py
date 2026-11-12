@@ -23,6 +23,95 @@ TOKEN = 'fault-test-token'
 
 
 class NativeFaultHTTP(unittest.TestCase):
+    def test_drop_drains_admitted_publication_before_removal(self):
+        path = self.collection()
+        other = self.api('/databases', {'name': 'keep-during-publication'})['database_id']
+        body = {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'admitted'}]}
+        self.arm('pause', 2, False)
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            append = workers.submit(self.api, path + '/append', body)
+            self.wait_for_publication()
+            drop = workers.submit(self.api, self.base + '/drop', {'store_id': self.database})
+            try:
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    if self.api(self.base)['state'] == 'dropping':
+                        break
+                    time.sleep(0.01)
+                else:
+                    self.fail('drop did not close admission')
+                self.assertFalse(drop.done())
+                self.api(self.base + '/collections', status=429)
+                self.assertTrue((self.directory / 'databases' / self.database).exists())
+                self.assertEqual(self.api('/databases/' + other + '/collections')['items'], [])
+            finally:
+                self.arm('release', 0, False)
+            self.assertEqual(append.result(timeout=10)['outcome'], 'committed')
+            self.assertTrue(drop.result(timeout=10)['dropped'])
+        self.assertFalse((self.directory / 'databases' / self.database).exists())
+
+    def test_drop_missing_seal_after_interruption_is_reported_without_deletion(self):
+        root = self.directory / 'databases' / self.database
+        self.assertEqual(self.control('drop-pause seal-unlinked'), 'armed')
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            pending = worker.submit(self.request, self.base + '/drop', {'store_id': self.database})
+            self.assertEqual(self.control('drop-wait'), 'paused')
+            self.process.kill()
+            self.process.communicate(timeout=20)
+            with self.assertRaises((OSError, http.client.HTTPException)):
+                pending.result(timeout=20)
+        self.assertTrue(root.is_dir())
+        (root / 'catalog.sqlite').write_bytes(b'unrelated replacement must survive')
+        self.start()
+        self.assertEqual((root / 'catalog.sqlite').read_bytes(), b'unrelated replacement must survive')
+        self.assertEqual(self.api(self.base)['state'], 'dropping')
+        self.api(self.base + '/drop', {'store_id': self.database}, status=412)
+        self.assertEqual((root / 'catalog.sqlite').read_bytes(), b'unrelated replacement must survive')
+
+    def test_drop_process_interruption_recovers_each_transition(self):
+        other = self.api('/databases', {'name': 'keep-during-drop'})['database_id']
+        for stage in ('drop-intent', 'file-unlinked', 'directory-unlinked',
+                      'root-synced', 'root-unlinked', 'parent-synced', 'drop-removed', 'drop-finished'):
+            with self.subTest(stage=stage):
+                self.database = self.api('/databases', {'name': 'interrupted-benchmark'})['database_id']
+                self.base = '/databases/' + self.database
+                path = self.collection()
+                self.api(path + '/append', {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'deleted'}]})
+                root = self.directory / 'databases' / self.database
+                self.assertTrue(list(root.rglob('*.parquet')))
+                self.assertEqual(self.control('drop-pause ' + stage), 'armed')
+                with ThreadPoolExecutor(max_workers=1) as worker:
+                    pending = worker.submit(self.request, self.base + '/drop', {'store_id': self.database})
+                    self.assertEqual(self.control('drop-wait'), 'paused')
+                    self.assertEqual(self.api('/databases/' + other + '/collections')['items'], [])
+                    self.process.kill()
+                    self.process.communicate(timeout=20)
+                    with self.assertRaises((OSError, http.client.HTTPException)):
+                        pending.result(timeout=20)
+                self.start()
+                self.assertFalse(root.exists())
+                self.api(self.base, status=404)
+                self.assertTrue(self.api(self.base + '/drop', {'store_id': self.database})['dropped'])
+                self.assertEqual(self.api('/databases/' + other)['state'], 'open')
+
+    def test_drop_registry_commit_errors_recover_in_fresh_process(self):
+        for commit in (1, 2):
+            for after in (False, True):
+                with self.subTest(commit=commit, after=after):
+                    database = self.api('/databases', {'name': str(uuid.uuid4())})['database_id']
+                    path = '/databases/' + database
+                    root = self.directory / 'databases' / database
+                    self.arm('registry', commit, after)
+                    self.api(path + '/drop', {'store_id': database}, status=503)
+                    self.assertEqual(root.exists(), commit == 1)
+                    self.api(path + '/drop', {'store_id': database}, status=503)
+                    self.arm('registry', 0, False)
+                    self.stop()
+                    self.start()
+                    self.assertEqual(root.exists(), commit == 1 and not after)
+                    self.assertTrue(self.api(path + '/drop', {'store_id': database})['dropped'])
+                    self.assertFalse(root.exists())
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='glamdb-http-fault-', dir=str(Path(os.environ.get('GLAMDB_TEST_TMPDIR', '/tmp')).resolve()))
         self.addCleanup(self.tmp.cleanup)

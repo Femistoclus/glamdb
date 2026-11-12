@@ -49,7 +49,13 @@ is process liveness only. Health never qualifies durability.
 Independent verification tools, a Python network SDK and a browser workbench
 are implemented. They can use the native Asio HTTP server over the public Engine facade.
 `--data-dir` starts with no databases; authenticated API/UI operations create,
-list, open, close and reconcile databases. A separate SQLite service registry
+list, open, close and reconcile databases. Authenticated native operators can
+explicitly drop an initialized database with its original store identity;
+the SDK/CLI expose exact retries and `bench tpch clean --state`. See
+[managed deletion](docs/development/DATABASE_DROP.md) for durable tombstones,
+admission draining, safe filesystem removal and startup recovery. Discard still
+refuses initialized stores. A separate SQLite service registry (version 3,
+transactionally migrated from version 2)
 stores identities, persisted engine limits and open intent; collection/data writes remain in core.
 Scans use bounded fixed-view pages with validated configurable global/per-database
 live, completed replay, byte and lifetime limits. Each admitted cursor reserves
@@ -566,7 +572,8 @@ parent for native test directories without disabling disk reserves.
 
 ## Code and dependency conventions
 
-The network CLI's `generate` and `bench write/read/verify/resolve` use the optional
+The network CLI's `generate`, `bench write/read/verify/resolve` and
+`bench tpch clean --state RUN_STATE` use the optional
 Python package through reproc; the CLI still builds without engine dependencies.
 See [the workload guide](tools/workload/README.md). Install its hash-pinned
 `tools/workload/requirements.txt` and local package before testing. Run

@@ -2,12 +2,14 @@
 
 import json
 import os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import select
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -97,6 +99,72 @@ class BridgeTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 4)
         self.assertIn("GLAMDB_PYTHON", result.stderr)
+
+    def test_tpch_clean_forwards_saved_state_path_without_identity_overrides(self):
+        self.module.write_text("import json,sys\nprint(json.dumps(sys.argv[1:]))\n")
+        state = str(self.root / "tpch run.json")
+        result = subprocess.run(
+            [CLI, "bench", "tpch", "clean", "--state", state, "--timeout", "9", "--ca-file", "ca.pem"],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), [
+            "bench", "tpch", "clean", "--state", state, "--ca-file", "ca.pem", "--timeout", "9"
+        ])
+        self.assertNotIn(self.env["GLAMDB_TOKEN"], result.stdout + result.stderr)
+
+    def test_standalone_drop_checks_saved_identity_and_success_result(self):
+        database = "11111111-2222-4333-8444-555555555555"
+        other = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        calls = []
+        responses = [
+            {"database_id": database, "store_id": database, "dropped": True},
+            {"database_id": other, "store_id": other, "dropped": True},
+        ]
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                calls.append((self.path, self.headers.get("Authorization"),
+                              json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+                body = json.dumps(responses.pop(0)).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            args = [CLI, "drop-database", "--url", f"http://127.0.0.1:{server.server_port}",
+                    "--database", database, "--store-id", database]
+            result = subprocess.run(args, env=self.env, text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout),
+                             {"database_id": database, "store_id": database, "dropped": True})
+            result = subprocess.run(args, env=self.env, text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("invalid database drop response", result.stderr)
+            for invalid in (other, "tpch-name"):
+                result = subprocess.run(args[:-1] + [invalid], env=self.env, text=True,
+                                        capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(calls, [(f"/databases/{database}/drop",
+                                     "Bearer bridge-secret-never-in-argv", {"store_id": database})] * 2)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
 
     def test_missing_extra_is_actionable(self):
         self.module.write_text(

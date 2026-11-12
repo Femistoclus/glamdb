@@ -566,8 +566,9 @@ class NativeHTTP(unittest.TestCase):
         for route in fixture['routes']:
             path = route['path'].format(**fixture)
             request = route.get('request')
-            if request and isinstance(request.get('cursor'), str):
-                request = dict(request, cursor=request['cursor'].format(**fixture))
+            for parameter in ('cursor', 'store_id'):
+                if request and isinstance(request.get(parameter), str):
+                    request = dict(request, **{parameter: request[parameter].format(**fixture)})
             with self.subTest(path=path, method=route['method']):
                 if validator and 'request_schema' in route:
                     validator(dict(wire_schema, **{'$ref': '#/$defs/' + route['request_schema']})).validate(request)

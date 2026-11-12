@@ -354,6 +354,23 @@ class Client:
     def reconcile_database(self, database_id: str | UUID, *, deadline: float | None = None) -> dict[str, Any]:
         return self._database_post(f"databases/{uuid_string(database_id, 'database_id')}/reconcile", {}, deadline)
 
+    def drop_database(self, database_id: str | UUID, *, store_id: str | UUID,
+                      deadline: float | None = None) -> dict[str, Any]:
+        """Drop the saved database/store identity once; retry manually with the same IDs.
+
+        A lost reply or timeout is ambiguous. Never resolve a database by name
+        to recover this request: that name may already refer to another store.
+        """
+        database = uuid_string(database_id, "database_id")
+        store = uuid_string(store_id, "store_id")
+        if store != database:
+            raise ValidationError("store_id must match the original database_id")
+        value = self._database_post(f"databases/{database}/drop", {"store_id": store}, deadline)
+        if (value.get("database_id") != database or value.get("store_id") != store
+                or value.get("dropped") is not True):
+            raise ProtocolError("invalid database drop response identity or result", raw=value)
+        return value
+
     def list_collections(self, *, page_size: int = 100, cursor: str | None = None,
                          deadline: float | None = None) -> Page:
         return self._page(self._read("collections", params=self._page_params(page_size, cursor), deadline=deadline))

@@ -477,6 +477,22 @@
       "response_schema": "database",
       "request": {},
       "request_schema": "databaseOpen"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/drop",
+      "core": "Managed lifecycle: drain, durable deletion intent, physical reclamation and retained receipt",
+      "status": 200,
+      "request": {
+        "store_id": "{database_id}"
+      },
+      "request_schema": "databaseDrop",
+      "response_fields": {
+        "database_id": "string",
+        "store_id": "string",
+        "dropped": "boolean"
+      },
+      "response_schema": "databaseDropped"
     }
   ]
 }

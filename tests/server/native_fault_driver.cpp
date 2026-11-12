@@ -9,8 +9,10 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <thread>
 
@@ -35,7 +37,22 @@ try {
         limits.memory_bytes[4] = 8ULL << 30;
         resources = std::make_shared<glamdb::ResourceOwner>(limits);
     }
-    auto databases = std::make_shared<glamdb::NServer::TDatabases>(argv[1], registry.Name(), resources);
+    std::mutex dropMutex;
+    std::condition_variable dropChanged;
+    std::string dropPause;
+    bool dropWaiting = false, dropReleased = true;
+    const auto checkpoint = [&](std::string_view stage) {
+        std::unique_lock lock(dropMutex);
+        if (stage != dropPause || dropReleased) {
+            return;
+        }
+        dropWaiting = true;
+        dropChanged.notify_all();
+        dropChanged.wait(lock, [&] {
+            return dropReleased;
+        });
+    };
+    auto databases = std::make_shared<glamdb::NServer::TDatabases>(argv[1], registry.Name(), resources, checkpoint);
     glamdb::NServer::TRoutes routes(databases, {}, "fault-test-token");
     // RunServer owns cout's formatting state. Control replies use synchronized
     // stdio, and reading commands must not implicitly flush cout on this thread.
@@ -54,6 +71,32 @@ try {
             std::string target;
             int commit = 0, after = 0;
             command >> target;
+            if (target == "drop-pause") {
+                std::lock_guard lock(dropMutex);
+                command >> dropPause;
+                dropWaiting = false;
+                dropReleased = false;
+                reply("armed\n");
+                continue;
+            }
+            if (target == "drop-wait") {
+                std::unique_lock lock(dropMutex);
+                reply(dropChanged.wait_for(lock,
+                          std::chrono::seconds(10),
+                          [&] {
+                              return dropWaiting;
+                          })
+                        ? "paused\n"
+                        : "timeout\n");
+                continue;
+            }
+            if (target == "drop-release") {
+                std::lock_guard lock(dropMutex);
+                dropReleased = true;
+                dropChanged.notify_all();
+                reply("armed\n");
+                continue;
+            }
             if (target == "server-state") {
                 reply(drained.load() ? "drained\n" : "running\n");
                 continue;
@@ -123,6 +166,9 @@ try {
             reply("armed\n");
         }
         core.Release();
+        std::lock_guard lock(dropMutex);
+        dropReleased = true;
+        dropChanged.notify_all();
     });
     glamdb::NServer::RunServer(routes,
         "127.0.0.1",

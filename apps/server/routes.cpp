@@ -244,6 +244,7 @@ TJson TRoutes::DescribeCapabilities(const EngineCapabilities& capabilities,
     const std::string& storeID) const
 {
     auto value = CapabilitiesJson(capabilities, health, databaseManagement, storeID, Scans_->GetLimits());
+    value["features"]["database_drop"] = static_cast<bool>(Databases_);
     value["scan_sessions"] = Scans_->GetStatistics(storeID);
     const auto usage = Resources_->GetUsage();
     value["shared_resources"] = {{"memory_limits_bytes", Resources_->GetLimits().memory_bytes},
@@ -426,8 +427,10 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
             }
         }
         if (parts.size() == 3 && request.Method == "POST" &&
-            (parts[2] == "open" || parts[2] == "close" || parts[2] == "reconcile" || parts[2] == "discard"))
+            (parts[2] == "open" || parts[2] == "close" || parts[2] == "reconcile" || parts[2] == "discard" ||
+                parts[2] == "drop"))
         {
+            Require(query.empty(), "unknown lifecycle query parameter");
             return JsonResponse(Databases_->Change(parts[1], parts[2], body));
         }
         Require(parts.size() >= 3 &&
