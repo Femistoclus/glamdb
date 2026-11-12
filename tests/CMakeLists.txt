@@ -176,7 +176,7 @@ if(NOT GLAMDB_IO_ONLY)
             "${CMAKE_CURRENT_SOURCE_DIR}/integration/scan_process_test.py" "$<TARGET_FILE:glamdb_scan_driver>")
         set_tests_properties(glamdb.scan_process PROPERTIES LABELS "integration;scan" TIMEOUT 120)
     endif()
-    add_executable(glamdb_public_consumer_compile installed_consumer/main.cpp)
+    add_executable(glamdb_public_consumer_compile installed_consumer/main.cpp installed_consumer/negotiation.cpp)
     target_link_libraries(glamdb_public_consumer_compile PRIVATE glamdb::core glamdb_build_options Arrow::arrow_static)
     if(NOT GLAMDB_ENABLE_ASAN AND NOT GLAMDB_ENABLE_UBSAN)
         add_test(NAME glamdb.installed_consumer COMMAND "${CMAKE_COMMAND}"

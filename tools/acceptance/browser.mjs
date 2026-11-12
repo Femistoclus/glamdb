@@ -54,6 +54,7 @@ try {
         if (statistics.rows === '0') {
             await navigate('Data studio');
             const form = page.locator('#write-form');
+            await form.locator('[data-write-row] summary').first().click();
             await form.getByLabel('key row 1', { exact: true }).fill('browser-written');
             await form.getByLabel('n row 1', { exact: true }).fill('9223372036854775807');
             await form.getByLabel('label row 1 NULL', { exact: true }).uncheck();
@@ -134,10 +135,12 @@ assert Counter(tuple(row[name] for name in ('key','n','label')) for row in t.to_
     await page.getByText(config.operation_id, { exact: true }).first().waitFor();
     await screenshot('operation-outcome');
     await page.getByRole('dialog').locator('[data-action="close-modal"]').first().click();
-    await navigate('Style studio');
-    await screenshot('style-studio');
+    await page.getByRole('button', { name: 'Switch to dark theme', exact: true }).click();
+    assert.equal(await page.locator('html').getAttribute('data-appearance'), 'dark');
+    await screenshot('dark-theme');
     // Reconnect after a true document reload. Metadata must come from the server.
     await page.reload();
+    assert.equal(await page.locator('html').getAttribute('data-appearance'), 'dark');
     await page.getByLabel('Access token').fill(token);
     await page.getByRole('button', { name: 'Open my workspace', exact: true }).click();
     await page.locator('.collection-list').getByRole('button', { name: 'acceptance_ab', exact: true }).click();

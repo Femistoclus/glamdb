@@ -290,7 +290,7 @@ support `plain` and dictionary policies across precisions 1–38. An explicit en
 turns that column's dictionary off and overrides the collection policy, so it
 cannot be combined with `enabled` (or `auto` on a non-`bool` column). A
 collection `enabled` policy requires every `bool` column to set its own
-`dictionary` or `encoding`. See the [native HTTP contract](../../docs/development/HTTP_SERVER.md)
+`dictionary` or `encoding`. See the [native HTTP contract](../../docs/HTTP_SERVER.md)
 ("Requests and results") for the authoritative rules.
 
 Settings are plain JSON objects in the wire shape. The SDK rejects unknown keys,
@@ -417,7 +417,7 @@ Native file IDs are opaque and usable only in a view containing that file.
 physical measurements remain null; metadata/index presence is not pruning.
 History and file cursors are finite, scoped and expiring. Reuse their original
 parameters; a rejected token is not permission to silently restart at latest.
-The [installed cross-client recipe](../../docs/development/NATIVE_ACCEPTANCE.md)
+The [installed cross-client recipe](../../tools/acceptance/README.md)
 checks this SDK alongside CLI and UI on the same persistent data and restored copy.
 
 ## Streaming and transport ownership
@@ -482,30 +482,10 @@ python -m pip install -e 'sdk/python[test]'
 .venv/bin/python -m pytest -q -c sdk/python/pyproject.toml sdk/python/tests
 ```
 
-The SDK tests first failed for missing codec/client/stream implementations, then
-passed incrementally: 42 codec tests; 81 codec/client/predicate/request tests;
-32 Arrow tests; followed by targeted failing regressions for bounded input
-copying, canonical output scalars, identity on schema-fetch timeout, and closing
-all streams after a close error. Receipt-validation regressions first exposed
-39 failures for invalid hashes, versions and receipt fields before the fix.
-The current SDK unit suite has 523 tests, including cursor abandonment, sticky
-iteration failures, first-page replay, distinct operation absence and uncertain
-5xx write failures. Transport doubles isolate the HTTP boundary; codec, HTTP
-client logic, canonical hash and PyArrow IPC encoding/decoding are real. Native
-HTTP and browser suites separately exercise the C++ server. The
-canonical append hash is independently checked against fixed single-type and
-all-type golden vectors. `test_prepare_plan.py` differentially checks payload
-hashes, bodies and error type/message/order against that frozen pre-plan
-implementation (all types, NULL/missing fields, UTF-8, int64 and timestamp
-bounds, -0.0, permuted field IDs, generators, mutation after preparation).
-The focused suite uses real codec, canonical hashes and PyArrow IPC buffers.
-HTTP transport doubles verify all route prefixes, error identities, redirects,
-single-send writes and Arrow ownership. OAuth tests use real Authlib against
-explicit loopback-only protocol peers. They cover client credentials,
-concurrent renewal, device pending/slow_down/resume/timeout/denial, refresh tokens,
-TLS configuration, redirects and secret-safe failures. These peers are not
-Keycloak and do not establish real realm/policy or native engine integration.
-The direct Bearer path does not require the optional OAuth dependency.
+Unit tests cover codecs, canonical hashes, outcomes and Arrow ownership.
+Transport doubles exercise protocol handling; native HTTP tests separately
+exercise persisted C++ storage. OAuth protocol peers are separate from a real
+Keycloak deployment.
 
 Actual HTTP/HTTPS adapter tests are maintained separately:
 
@@ -553,7 +533,7 @@ iterators promptly. Completed replay caches may be evicted to admit new scans.
 Managed `create_database(name, limits={"max_collections": 2})` accepts partial
 engine limits. `open_database(database_id, limits={"max_collections": 3})` changes
 them for a closed database. Omit `limits` to preserve the stored configuration;
-responses include all normalized limits. See the [native server contract](../../docs/development/HTTP_SERVER.md)
+responses include all normalized limits. See the [native server contract](../../docs/HTTP_SERVER.md)
 for ranges, retry semantics and persistence.
 
 Use `root.drop_database(database_id, store_id=original_store_id)` to delete one
@@ -567,7 +547,7 @@ A timeout, transport failure or lost reply is ambiguous. The SDK never retries
 the drop automatically. Call `drop_database` again with the **same saved UUIDs**
 to retrieve or finish that deletion. Never resolve a name for cleanup: another
 database may already have reused it. This is a network operation; the SDK does
-not remove local files. See [managed database deletion](../../docs/development/DATABASE_DROP.md).
+not remove local files. See [managed database deletion](../../docs/DATABASE_DROP.md).
 
 The native collection range is 1–64, with eight as the default. Use
 `create_database("comparison", limits={"max_collections": 64})` to opt in;
@@ -585,7 +565,7 @@ while True:
         break
 ```
 
-See [collection profiles](../../docs/development/COLLECTION_PROFILES.md) for the
+See [collection profiles](../../docs/COLLECTION_PROFILES.md) for the
 native restart, refusal, inventory and measured larger-profile evidence.
 
 ## Native streaming bulk append
@@ -599,7 +579,7 @@ Set `Client(..., timeout=650)` when the server may use its ten-minute execution
 budget. Ordinary append keeps its 10,000-row/16 MiB limits. Bulk permits declared
 totals up to 25,600,000 rows, subject to 4 GiB wire/canonical, file and device limits;
 each batch remains within ordinary row/canonical limits and 16 MiB wire. The
-[native bulk guide](../../docs/development/BULK_INGESTION.md#native-http-sdk-and-cli)
+[native bulk guide](../../docs/BULK_INGESTION.md#native-http-sdk-and-cli)
 specifies framing, memory/disk ownership, interrupted upload and retry semantics.
 The mock, UI import and organization gateway do not expose this upload route.
 

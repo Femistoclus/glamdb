@@ -154,6 +154,9 @@ class BulkHTTP(NativeHTTP):
         def rss():
             return int(next(value.split()[1] for value in Path(f'/proc/{self.proc.pid}/status').read_text().splitlines()
                             if value.startswith('VmRSS:'))) * 1024
+        # Initialize the same lookup/read paths used while the upload is held.
+        self.api(path + '/operations/' + operation, status=404)
+        self.assertEqual(self.api(path + '/stats')['rows'], '0')
         baseline = rss()
         with socket.create_connection(('127.0.0.1', self.port), timeout=120) as stream:
             stream.sendall((f'POST /databases/{self.store_id}{path}/bulk-append HTTP/1.1\r\nHost: local\r\n'
@@ -161,7 +164,7 @@ class BulkHTTP(NativeHTTP):
                             f'Content-Length: {length}\r\n\r\n').encode() + header)
             for _ in range(40):
                 stream.sendall(line)
-            # A control request acts as a barrier while the bulk body remains incomplete.
+            # The incomplete body must leave control requests usable and rows unpublished.
             self.api(path + '/operations/' + operation, status=404)
             self.assertEqual(self.api(path + '/stats')['rows'], '0')
             growth = rss() - baseline

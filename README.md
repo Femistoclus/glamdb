@@ -20,9 +20,9 @@ concurrent snapshot readers. Power-loss durability qualification is still pendin
 
 - **Typed collections.** Fixed schemas with strings, booleans, int64, float64,
   UTC microsecond timestamps, exact decimal128 amounts and calendar dates,
-  and nullable fields. See [scalar types and compatibility](docs/development/SCALAR_TYPES.md).
+  and nullable fields. See [scalar types and compatibility](docs/SCALAR_TYPES.md).
   Appends preserve every row,
-  including duplicate keys. Explicit [KV collections](docs/development/KV_MODE.md)
+  including duplicate keys. Explicit [KV collections](docs/KV_MODE.md)
   provide full-row upserts, safe keyed deletes, fixed-snapshot batched lookups,
   bounded streaming bulk upsert and locality-preserving compaction.
 - **Snapshot reads.** Query the latest committed view or a retained historical
@@ -35,20 +35,20 @@ concurrent snapshot readers. Power-loss durability qualification is still pendin
 - **Open columnar formats.** Arrow batches in memory, immutable Parquet data
   files, and Iceberg v2 tables with retained snapshot history. Collection and
   per-column Parquet compression, levels, encodings and dictionary policies are
-  configurable through the SDK and [workbench](docs/development/WORKBENCH.md).
+  configurable through the SDK and [workbench](docs/WORKBENCH.md).
 - **Data inspection.** Browse schemas, snapshot history, statistics, files,
   Parquet row groups, scan plans, and execution profiles.
 - **Native compute contract.** Negotiate versions 1.0–1.4, operation support by append/KV
   mode and effective limits through the installed C++ API. See the
-  [storage contract](docs/development/STORAGE_CONTRACT.md). Contract 1.1 adds bounded
-  [native read views](docs/development/READ_VIEWS.md) for repeated scans across a
+  [storage contract](docs/STORAGE_CONTRACT.md). Contract 1.1 adds bounded
+  [native read views](docs/READ_VIEWS.md) for repeated scans across a
   coherent per-store snapshot vector. Contract 1.2 adds bounded, repeatable
-  [parallel scan splits](docs/development/SCAN_SPLITS.md). Contract 1.3 adds
-  [scan pushdown negotiation](docs/development/SCAN_NEGOTIATION.md) with explicit
+  [parallel scan splits](docs/SCAN_SPLITS.md). Contract 1.3 adds
+  [scan pushdown negotiation](docs/SCAN_NEGOTIATION.md) with explicit
   exact/necessary-condition/residual filters and safe global limits. Contract 1.4 adds
-  [durable write sessions](docs/development/WRITE_SESSIONS.md) for one-pass append/KV
+  [durable write sessions](docs/WRITE_SESSIONS.md) for one-pass append/KV
   output through a separate bounded staging journal and the existing Engine publisher.
-  Remote sessions, stable C ABI and Flight remain unsupported.
+  Remote sessions and read views, stable C ABI and Flight remain unsupported.
 - **Connected tools.** Manage multiple databases through one authenticated
   server. Read and write through the UI, CLI, or Python SDK; retrieve scan results
   as JSON or Arrow IPC with fixed-snapshot pagination.
@@ -57,39 +57,16 @@ Queries use a typed predicate API; there is no SQL query interface. Collections
 are unpartitioned with immutable append or KV mode. Schema evolution,
 general garbage collection, object storage and replication remain outside the
 supported profile. The embedded C++ API supports
-[explicit snapshot retention maintenance](docs/development/SNAPSHOT_RETENTION.md)
+[explicit snapshot retention maintenance](docs/SNAPSHOT_RETENTION.md)
 for append collections; history is retained forever unless a caller opts in.
 KV collections preserve all history and refuse snapshot expiration.
 
-### In development
-
-Current work focuses on qualifying and improving the existing append engine:
-
-- Recovery and power-loss qualification, including controlled physical failures
-  ([#66](https://github.com/glamourdb/glamdb/issues/66)).
-- Performance and concurrent sessions: configurable scan quotas, lower append
-  overhead, and measured capacity limits
-  ([#109](https://github.com/glamourdb/glamdb/issues/109)).
-- Page-level and Bloom-filter pruning and broader scan memory qualification
-  ([#46](https://github.com/glamourdb/glamdb/issues/46)).
-
-The C++ API, native HTTP service, Python SDK and CLI support [bounded streaming bulk append](docs/development/BULK_INGESTION.md):
-a replayable source produces multiple files with one atomic snapshot and receipt.
-Native uploads stream bounded batches through an anonymous disk spool. UI import and 1 TiB qualification remain future work.
-
-### Planned
-- An opt-in small-write buffering and write-ahead log extension
-  ([#68](https://github.com/glamourdb/glamdb/issues/68)).
-
-These extensions are not part of the current API. Development is tracked in
-[GitHub issues](https://github.com/glamourdb/glamdb/issues).
-
 **[Open the public demo](https://nnrpi.github.io/glamdb/)** — anyone can try it.
-The [organization workbench](docs/development/ORGANIZATIONS.md) uses Keycloak
+The [organization workbench](docs/ORGANIZATIONS.md) uses Keycloak
 sign-in, OAuth2 Proxy sessions and Cerbos policies for isolated database access.
-See the [deployment and operating guide](docs/development/SSO_OPERATIONS.md)
+See the [deployment and operating guide](docs/SSO_OPERATIONS.md)
 for HTTPS hosting, native account management and database ownership workflows.
-The [combined-login guide](docs/development/COMPACT_WORKBENCH.md) also documents
+The [combined-login guide](docs/COMBINED_LOGIN.md) also documents
 the explicit temporary `hello`/`world` setup for an existing demonstration account.
 The static Pages demo contains disposable sample data and remains a separate
 publication; it does not connect to protected database servers.
@@ -115,7 +92,7 @@ Open **http://127.0.0.1:8080** and enter the value of `GLAMDB_TOKEN`.
 The server starts with no databases. Initialized managed databases can be
 explicitly removed through the SDK or `glamdb-cli drop-database` using their
 recorded store UUID; `glamdb-cli bench tpch clean --state RUN_STATE` supports
-dedicated benchmark cleanup. See the [deletion and retry contract](docs/development/DATABASE_DROP.md).
+dedicated benchmark cleanup. See the [deletion and retry contract](docs/DATABASE_DROP.md).
 Create a database, create a collection with
 its schema, then append and query rows in the workbench. The same UI provides
 snapshot selection, storage inspection, and scan explain views.
@@ -134,7 +111,7 @@ change the port. Writes require free space of at least the larger of 1 GiB or
 Keep the token for subsequent starts, or omit `GLAMDB_TOKEN` and let the helper
 generate and reuse a token file; `status` shows its location. The service token
 grants access to all databases. Remote connections use HTTPS through a TLS proxy;
-see the [server guide](docs/development/HTTP_SERVER.md) for deployment and API details.
+see the [server guide](docs/HTTP_SERVER.md) for deployment and API details.
 
 ## Use GlamDB
 
@@ -192,8 +169,8 @@ formats and the distinct failure/unresolved exit codes.
 Databases default to eight collections and accept a resource-backed opt-in
 limit up to 64. Use `create-store --max-collections 64` or the managed SDK/HTTP
 `limits` object; managed limits survive restarts. Collection inventories support
-fixed-view pages. See [collection profiles](docs/development/COLLECTION_PROFILES.md)
-for configuration and native measurement evidence.
+fixed-view pages. See [collection profiles](docs/COLLECTION_PROFILES.md)
+for configuration and inventory semantics.
 
 ### Python SDK
 
@@ -250,6 +227,19 @@ the outcome before deciding to retry. The SDK never retries writes implicitly.
 See the [SDK guide](sdk/python/README.md) for historical reads, metadata, streaming,
 and recovery handling.
 
+### Bulk ingestion and benchmarks
+
+[Streaming bulk append](docs/BULK_INGESTION.md) accepts replayable batches as one
+operation and snapshot through C++, HTTP, Python and the CLI. Ordinary append
+keeps its separate 10,000-row/16 MiB limits. Bulk upsert and append-to-KV
+migration are embedded C++ operations.
+
+The optional [workload package](tools/workload/README.md) provides complete
+TPC-H and [ClickBench](tools/workload/CLICKBENCH.md) append/KV lifecycles,
+exact verification, saved-request recovery and benchmark cleanup. Scans use
+the typed API; reductions run in the client, including bounded DuckDB staging
+for ClickBench. These are not native SQL or official benchmark scores.
+
 ### Embedded C++
 
 The installed `glamdb::core` CMake target provides `CreateStore`, `OpenExisting`,
@@ -283,7 +273,7 @@ To run the resulting server directly, with `GLAMDB_TOKEN` set:
 For a smaller shared memory profile, `--http-readers 1
 --http-readers-per-database 1` queues heavy metadata reads without restricting
 control or publishing calls. Defaults remain four readers globally and two per
-database; see the [HTTP service profile](docs/development/HTTP_SERVER.md#http-service-profile)
+database; see the [HTTP service profile](docs/HTTP_SERVER.md#http-service-profile)
 for the finite memory settings and admission limits.
 
 The build also produces `build/local/apps/cli/glamdb-cli`. Use the `release`
@@ -298,28 +288,21 @@ For the full native test suite in Docker, including on macOS:
 ./scripts/test-storage-in-docker.sh asan-ubsan
 ```
 
-See the [build guide](docs/development/BUILDING.md) for toolchain setup, standalone
+See the [build guide](docs/BUILDING.md) for toolchain setup, standalone
 client builds, and embedding the installed library.
-The [native capacity campaign](docs/development/CAPACITY_CAMPAIGN.md) measures
-ingestion, backpressure and fresh-process recovery while preserving history caps.
-The [combined recovery harness](docs/development/COORDINATOR.md#combined-storage-faults)
-exercises real file/SQLite failures and abrupt process exits; it does not qualify power-loss durability.
-
 For four-state rules and native Telegram setup, see [the alerting guide](ALERTING.md).
 
-For metrics, Grafana dashboards and deployment steps, see [the monitoring guide](docs/development/MONITORING.md).
+For metrics, Grafana dashboards and deployment steps, see [the monitoring guide](docs/MONITORING.md).
 
 For a single Linux server, the [complete observability quickstart](deploy/observability/QUICKSTART.ru.md)
 provides one command for Prometheus, Grafana, Loki, Alloy, Alertmanager and host/container
 collectors. Real application endpoints and a dedicated Loki filesystem are inputs;
 repeated deployment preserves owned data and credentials.
 
-An opt-in [retained-history profile](docs/development/SCALABLE_HISTORY.md) lifts
+An opt-in [retained-history profile](docs/SCALABLE_HISTORY.md) lifts
 the default 4,096-operation/snapshot horizon with explicit aggregate storage and
 recovery budgets. The linked SF=10 recipe uses ordinary appends and preserves
 permanent outcomes, duplicate rows, historical views and exact retries.
-The [validation report](docs/development/SCALABLE_HISTORY_VALIDATION.md) records
-the measured campaign and its remaining limits.
 
 ### Client and UI tests
 
@@ -335,7 +318,7 @@ bash scripts/check-workbench.sh
 On Linux, add `--with-deps` to the Playwright install command to install browser
 system dependencies. Tests use localhost sockets and disposable stores.
 
-See [Metrics, Grafana dashboards and operator setup](docs/development/MONITORING.md) for monitoring.
+See the [documentation index](docs/README.md) for API references and operator guides.
 
 ## Contributing
 
@@ -363,8 +346,3 @@ Report security vulnerabilities privately through the
 ## License
 
 GlamDB is licensed under the [Apache License 2.0](LICENSE).
-
-Physical-capacity admission on supported Linux local filesystems uses a bounded
-[incremental warehouse inventory](docs/development/WAREHOUSE_INVENTORY.md),
-including orphan space, with exact fallback and an explicit exclusive-ownership
-contract. Recovery still inventories all retained physical files.

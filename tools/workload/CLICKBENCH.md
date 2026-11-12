@@ -201,7 +201,7 @@ There is no adapter-only 4096-operation ceiling. Before writes the actual frozen
 plan checks permanent operation count (including creation), retained snapshot,
 data-file/manifest and recovery-workspace lower bounds plus journal payload bytes
 against effective persisted limits. A larger run must raise the coordinated
-budgets described in [scalable history](../../docs/development/SCALABLE_HISTORY.md),
+budgets described in [scalable history](../../docs/SCALABLE_HISTORY.md),
 not only `max_operations`. Byte-dependent server storage/device/shared-resource
 admission remains authoritative; no receipts/history are silently discarded and
 there is no automatic switch to bulk or sharding.
@@ -209,8 +209,9 @@ there is no automatic switch to bulk or sharding.
 The full source needs at least 10,000 ordinary writes; row/wire splits can require
 many more. Select finite budgets for the **actual plan**, with capacity headroom,
 and retain failed bound operations. This benchmark exposes engine limits rather
-than hiding them. See [executed validation](../../docs/development/CLICKBENCH_VALIDATION.md)
-for the measured scale and checks; full-data acceptance must be reported separately.
+than hiding them. Small authentic-source prefix runs have been exercised; the
+full 99,997,497-row source and 1M/10M campaigns have not been run. Full-data
+acceptance and resource measurements must be reported separately.
 
 ## Sizes and provenance
 
@@ -218,7 +219,7 @@ Size output separates source/converted/journal bytes, selected-snapshot Parquet
 file lengths, file/history counts and optional compressed/uncompressed chunks.
 Parquet-only bytes are never labelled complete database size. Servers advertising
 `storage_footprint` also return the complete current physical owned-store inventory
-separately from the selected snapshot. [Inventory semantics](../../docs/development/STORAGE_FOOTPRINT.md)
+separately from the selected snapshot. [Inventory semantics](../../docs/STORAGE_FOOTPRINT.md)
 cover historical/unreferenced files, catalog and allocated blocks. An explicit
 `size --owned-store-dir /srv/glamdb/databases/STORE_UUID` can independently inspect
 caller-owned same-host files; the walk is not atomic under concurrent writes.

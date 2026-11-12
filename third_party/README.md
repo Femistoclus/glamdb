@@ -62,10 +62,8 @@ Iceberg uses the same installed Arrow/Parquet and the pinned SQLite library.
 SQL catalog support is enabled; REST, Hive, and S3 are disabled. CMake 3.28 is
 required by Iceberg's built-in SQL connector.
 
-The lock covers direct dependencies. Transitive dependency recipes belong to the
-pinned upstream sources; a complete Linux toolchain and integration receipt is
-part of G1. A configured superbuild is not evidence of an installed engine API
-or a passing dependency integration probe.
+The lock covers direct dependencies. Transitive dependency recipes belong to
+the pinned upstream sources. Build and installation use those exact recipes.
 
 To update a submodule, change its checkout and matching lock entry together.
 For SQLite, verify the upstream archive checksum and update the version, URL,
@@ -73,9 +71,8 @@ hashes, and source ID. Preserve upstream licenses and notices in the submodules.
 
 ## Engine integration requirements
 
-These boundaries include implemented catalog integration and pending production
-file I/O, writer and scanner work. See the
-[architecture](../docs/ARCHITECTURE.md) and [G1 requirements](../docs/ROADMAP.md#g1-integration-experiments).
+The native backend integrates the catalog, durable file I/O, writer and scanner
+through these boundaries. See [architecture](../docs/ARCHITECTURE.md).
 
 - Use one installed Arrow/Parquet runtime shared with Iceberg. C++ dependencies
   come from the locked source builds, not a PyArrow wheel or a second bundled
@@ -109,7 +106,7 @@ JSON serialization was quadratic in retained snapshots). The same change is
 upstream as
 [`36e0d1a`](https://github.com/apache/iceberg-cpp/commit/36e0d1a791f8868bb827986ae48199cced0be52f)
 ([apache/iceberg-cpp#1111](https://github.com/apache/iceberg-cpp/pull/1111)),
-which is after v0.4.0 and not yet released. Delete the patch in the change
+which is after the pinned v0.4.0 revision. Delete the patch in the change
 that moves the pin to a revision containing that commit: the patch no longer
 applies there, so the dependency build fails until it is removed.
 `iceberg-cpp/0002-parquet-column-compression.patch` adds column-scoped
