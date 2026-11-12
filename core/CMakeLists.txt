@@ -18,6 +18,7 @@ if(NOT GLAMDB_IO_ONLY)
     find_package(iceberg CONFIG REQUIRED GLOBAL)
     find_package(Arrow 25 CONFIG REQUIRED GLOBAL)
     add_library(glamdb_core STATIC resources/resources.cpp resources/arrow_pool.cpp resources/metadata_result.cpp api/canonical.cpp api/codec.cpp api/arrow_input.cpp
+        api/write_settings.cpp
         catalog/sqlite.cpp catalog/durable_sqlite_catalog.cpp
         engine/storage_mapping.cpp engine/store_lease.cpp engine/engine.cpp engine/metadata_pages.cpp
         scan/predicate.cpp)

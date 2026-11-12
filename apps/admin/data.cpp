@@ -100,10 +100,17 @@ NClient::TResponse RunDataCommand(Engine& engine, const NClient::TDataCommand& d
     const auto& collection = data.CollectionID;
     if (data.Command == "create-collection") {
         const auto body = ParseJson(request.Body);
-        CheckKeys(body, {"collection_id", "name", "schema"});
+        CheckKeys(body, {"collection_id", "name", "schema", "write_settings"});
         return Outcome(json_adapter::ToJson(engine.CreateCollection({body.at("collection_id").get<std::string>(),
             body.at("name").get<std::string>(),
-            ParseSchema(body.at("schema"))})));
+            ParseSchema(body.at("schema")),
+            body.contains("write_settings") ? ParseWriteSettings(body["write_settings"]) : WriteSettings{}})));
+    }
+    if (data.Command == "write-settings") {
+        const auto body = ParseJson(request.Body);
+        CheckKeys(body, {"expected_version", "write_settings"});
+        return Reply(Collection(Unwrap(engine.UpdateWriteSettings(
+            {collection, ParseInt64(body.at("expected_version")), ParseWriteSettings(body.at("write_settings"))}))));
     }
     if (data.Command == "append") {
         TJsonRows rows;

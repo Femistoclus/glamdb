@@ -1,5 +1,6 @@
 #include "apps/server/databases.h"
 #include "apps/server/server.h"
+#include "storage/resources.h"
 
 #include <CLI/CLI.hpp>
 
@@ -15,6 +16,9 @@ try {
     std::string address = "127.0.0.1";
     uint16_t port = 8080;
     int timeoutMs = 10000;
+    glamdb::NServer::TScanLimits scanLimits;
+    glamdb::ResourceLimits resourceLimits;
+    int64_t scanIdle = 60, scanLifetime = 0, completedTtl = 60;
     app.add_option("--data-dir", dataDir, "Server directory for managed databases");
     app.add_option("--root", root, "Legacy single-store path");
     app.add_option("--store-id", storeID, "Expected legacy store UUID");
@@ -22,6 +26,31 @@ try {
     app.add_option("--port", port, "HTTP port; zero selects an available port");
     app.add_option("--ui-root", uiRoot, "Workbench directory (defaults to installed share/glamdb/ui)");
     app.add_option("--request-timeout-ms", timeoutMs, "Total header/body read timeout")->check(CLI::Range(100, 60000));
+    app.add_option("--scan-live-limit", scanLimits.Live, "Global live scan cursor limit")->check(CLI::Range(1, 4096));
+    app.add_option("--scan-live-per-database", scanLimits.LivePerDatabase, "Live scan limit per database")
+        ->check(CLI::Range(1, 4096));
+    app.add_option("--scan-completed-limit", scanLimits.Completed, "Global completed replay retention limit")
+        ->check(CLI::Range(0, 4096));
+    app.add_option("--scan-completed-per-database", scanLimits.CompletedPerDatabase, "Completed replays per database")
+        ->check(CLI::Range(0, 4096));
+    app.add_option("--scan-replay-bytes", scanLimits.ReplayBytes, "Global serialized replay reservation limit");
+    app.add_option("--scan-replay-bytes-per-database",
+        scanLimits.ReplayBytesPerDatabase,
+        "Replay reservation per database");
+    app.add_option("--scan-idle-seconds", scanIdle, "Live cursor idle timeout")->check(CLI::Range(1, 86400));
+    app.add_option("--scan-lifetime-seconds", scanLifetime, "Absolute cursor lifetime; zero disables")
+        ->check(CLI::Range(0, 31536000));
+    app.add_option("--scan-completed-ttl-seconds", completedTtl, "Completed replay TTL; replay does not refresh it")
+        ->check(CLI::Range(1, 86400));
+    app.add_option("--resource-data-bytes", resourceLimits.memory_bytes[0], "Process data reservation cap");
+    app.add_option("--resource-metadata-bytes", resourceLimits.memory_bytes[1], "Process metadata reservation cap");
+    app.add_option("--resource-control-bytes",
+        resourceLimits.memory_bytes[2],
+        "Process ordinary control reservation cap");
+    app.add_option("--resource-completion-bytes",
+        resourceLimits.memory_bytes[3],
+        "Protected completion reservation cap");
+    app.add_option("--resource-recovery-bytes", resourceLimits.memory_bytes[4], "Protected recovery reservation cap");
     app.add_option("--log-success-sample-every", logOptions.SuccessSampleEvery, "Log one in N successful requests")
         ->check(CLI::PositiveNumber);
     app.add_option("--log-max-success-per-second",
@@ -29,6 +58,11 @@ try {
            "Maximum sampled successes per second")
         ->check(CLI::Range(1, 1000000));
     CLI11_PARSE(app, argc, argv);
+    scanLimits.Idle = std::chrono::seconds(scanIdle);
+    scanLimits.Lifetime = std::chrono::seconds(scanLifetime);
+    scanLimits.CompletedTtl = std::chrono::seconds(completedTtl);
+    glamdb::NServer::ValidateScanLimits(scanLimits, &resourceLimits);
+    auto resources = std::make_shared<glamdb::ResourceOwner>(resourceLimits);
     TLogRuntime logging(logOptions);
     TLogScope scope(logging.Get(), ELogOperation::Other, logging.Get() ? logging.Get()->NewRequestID() : 0);
     glamdb::NTransport::Require((!dataDir.empty() && root.empty() && storeID.empty()) ||
@@ -47,16 +81,17 @@ try {
         }
     }
     if (!dataDir.empty()) {
-        auto databases = std::make_shared<glamdb::NServer::TDatabases>(dataDir);
-        glamdb::NServer::TRoutes routes(databases, uiRoot, token);
+        auto databases = std::make_shared<glamdb::NServer::TDatabases>(dataDir, "", resources);
+        glamdb::NServer::TRoutes routes(databases, uiRoot, token, scanLimits);
         glamdb::NServer::RunServer(routes, address, port, std::chrono::milliseconds(timeoutMs), 96, logging.Get());
         routes.CancelScans();
         databases->Shutdown();
         logging.SetResult(true);
         return 0;
     }
-    auto engine = glamdb::NTransport::Unwrap(glamdb::OpenExisting({root, storeID}));
-    glamdb::NServer::TRoutes routes(engine, uiRoot, token);
+    auto engine = glamdb::NTransport::Unwrap(
+        glamdb::OpenExisting({.absolute_root = root, .expected_store_id = storeID, .resources = resources}));
+    glamdb::NServer::TRoutes routes(engine, uiRoot, token, scanLimits);
     glamdb::NServer::RunServer(routes, address, port, std::chrono::milliseconds(timeoutMs), 96, logging.Get());
     routes.CancelScans();
     const auto closed = engine->Shutdown(std::chrono::milliseconds(60000));

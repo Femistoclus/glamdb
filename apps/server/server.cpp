@@ -89,6 +89,7 @@ struct TState
     asio::io_context IO;
     void PumpBodies();
     void ReapWorkers();
+    void ObserveActivity();
     TCallQueue Readers{4, 2};
     TCallQueue Writers{4, 1};
     TCallQueue Control{2, 1};
@@ -499,6 +500,7 @@ private:
         // Health observation is bounded and does no I/O. Keep it available even
         // when operation lookups occupy every control worker behind a writer.
         if (Request_.Method == "GET" && (path == "/healthz" || suffix == "/capabilities" || suffix == "/readyz")) {
+            State_.ObserveActivity();
             TLogScope scope(State_.Logger, Operation_, RequestID_);
             Write(State_.Routes.Handle(Request_));
             return;
@@ -643,6 +645,25 @@ void TState::ReapWorkers()
             finished[i]->Finish();
         });
     }
+}
+
+void TState::ObserveActivity()
+{
+    TRoutes::THttpActivity activity;
+    activity.BodyWaiters = BodyWaiters.size();
+    const auto now = std::chrono::steady_clock::now();
+    for (const auto& session : Sessions) {
+        activity.Connected += session->Closed_ ? 0 : 1;
+        activity.Executing += session->Active_ ? 1 : 0;
+        if (session->Queued_) {
+            ++activity.Pending;
+            const auto age =
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - (session->QueueExpires_ - Timeout)).count();
+            activity.OldestQueueAgeMs =
+                std::max(activity.OldestQueueAgeMs, static_cast<uint64_t>(std::max<int64_t>(0, age)));
+        }
+    }
+    Routes.SetHttpActivity(activity);
 }
 
 void TState::PumpBodies()

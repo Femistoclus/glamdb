@@ -4,7 +4,11 @@
 native service. Set the trailing `resources` member of `CreateStoreRequest` and
 `OpenStoreRequest` to the same owner. Omitting it selects one finite process
 singleton. Managed databases, HTTP connections, request decoding, responses and
-scan replay use that same parent. Resource limits are host policy; the registry
+scan replay use that same parent. The native [scan session policy](SCAN_SESSIONS.md)
+configures live/completed quotas, per-database/global replay bytes, expiry and
+process memory caps. Each open cursor reserves its full replay memory before
+planning; EOF releases cursor/schema leases while completed replay remains charged.
+Resource limits are host policy; the registry
 continues to persist each database's existing engine limits.
 
 The default memory reservation caps are data 2 GiB, metadata 8 GiB, ordinary
@@ -54,6 +58,13 @@ A failed cursor remains failed; release retained results and open a new cursor
 to resume. No unread files count as pruning because a scan reached its limit
 or was cancelled.
 
+Explicit manifest, file-source/footer and output-descriptor admission is a
+retryable exception to terminal failure: `RESOURCE_EXHAUSTED` with
+`SameIdAfterReconcile` leaves the cursor open before consuming the next batch.
+Release pressure and retry that same cursor. Native HTTP assembly retains and
+restores buffered rows on that refusal; snapshot, token and last replay remain
+unchanged. Actual decode, I/O and allocator failures remain terminal.
+
 Compound scan predicates reserve metadata before compilation: 4 MiB plus twice
 the measured tree capacity covers compiled vectors, literal copies and transient
 work. The compiled program retains that reservation until cursor destruction.
@@ -80,8 +91,10 @@ completion memory, bounded by the 96-connection ceiling, so ordinary control
 pressure does not prevent accepting an outcome lookup. Control bodies up to
 64 KiB use protected admission; larger bodies use ordinary
 data admission and retain the existing 16 MiB wire limit. Ordinary HTTP parsing
-reserves 32 times the body plus 128 MiB for JSON/Arrow/encoding work. Scan page
-assembly, replay and each outgoing copy have distinct reservations.
+reserves 32 times the body plus 128 MiB for JSON/Arrow/encoding work. Scan requests
+reserve 32 times the body plus 64 KiB for parsing, then admit the separate
+128 MiB assembly envelope in `TScans`, where completed replay can be reclaimed.
+Replay and each outgoing copy have distinct reservations.
 
 Device reservations serialize free-space observation and admission by `st_dev`.
 Different store/workspace paths on that device cannot spend the same pending

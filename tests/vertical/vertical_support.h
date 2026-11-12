@@ -275,6 +275,10 @@ public:
     {
         return Inner_->GetHealth();
     }
+    EngineCapabilities GetCapabilities() const override
+    {
+        return Inner_->GetCapabilities();
+    }
     Result<std::shared_ptr<iceberg::FileIO>> ReadOnlyFileIO() override
     {
         return Inner_->ReadOnlyFileIO();

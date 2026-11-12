@@ -41,7 +41,14 @@ from `VerifyReachable` or a previously confirmed publication.
    group's summed row estimates plus one 4-byte offset per string field stay
    within `MaxRowGroupBytes`; one wide row no longer sizes every group, and
    uniform rows keep the previous largest-row quotient. Variable-size groups
-   would need a row-group flush hook in the Iceberg Parquet wrapper.
+   would need a row-group flush hook in the Iceberg Parquet wrapper. A `TParquetWriteSpec`
+   selects the file-level codec/level and per-column overrides (exact top-level
+   field names); an empty spec adds no writer properties and keeps the pinned
+   defaults (zstd, default level). The writer rejects unknown columns,
+   unavailable codecs and out-of-range levels before creating the file, and
+   after closing it checks that every column chunk of the footer records the
+   requested codec. Parquet does not record levels, so levels are verified only
+   by range.
 3. Create an attempt and hold its `BindAttempt` scope across data writing,
    `StageAppend`, metadata writing, and publication checking. The attempt owns
    sticky errors, budgets, file state, durable receipts, and format verification.

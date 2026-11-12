@@ -42,6 +42,11 @@ public:
     // Plans and validates one fixed view without reading Parquet data.
     Result<ScanExplanation> ExplainScan(const ScanRequest& request) const;
     CreateOutcome CreateCollection(const CreateCollectionRequest& request);
+    // Changes the settings of data files that later appends write; existing
+    // files and snapshots are unchanged. Serialized with appends: an append
+    // that is already bound keeps the settings it read. Not part of any
+    // append's operation identity.
+    Result<CollectionInfo> UpdateWriteSettings(const UpdateWriteSettingsRequest& request);
     // Cache misses return OPERATION_IN_PROGRESS while a writer is active;
     // confirmed hits remain readable. Neither lookup waits for the writer.
     Result<CollectionInfo> GetCollection(std::string_view collection_id) const;

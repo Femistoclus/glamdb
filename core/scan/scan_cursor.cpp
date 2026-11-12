@@ -310,6 +310,12 @@ public:
         try {
             return ReadNext();
         } catch (const Failure& error) {
+            // Explicit admission fails before consuming the next batch/file.
+            // Preserve pending descriptors and the current decoder for retry.
+            if (error.detail.code == "RESOURCE_EXHAUSTED" && error.detail.retry_hint == RetryHint::SameIdAfterReconcile)
+            {
+                return std::unexpected(error.detail);
+            }
             Release();
             if (State_ == ScanState::Open) {
                 State_ = error.detail.code == "CANCELLED" ? ScanState::Cancelled : ScanState::Failed;
@@ -463,20 +469,34 @@ private:
         PendingMemory_.reset();
     }
 
+    std::shared_ptr<ResourceReservation> ReserveAdmission(ResourceClass resource, uint64_t bytes)
+    {
+        auto result = Context_.Resources->Reserve(resource, bytes);
+        if (!result) {
+            auto error = result.error();
+            if (error.code == "RESOURCE_EXHAUSTED") {
+                error.retry_hint = RetryHint::SameIdAfterReconcile;
+            }
+            throw Failure(std::move(error));
+        }
+        return std::move(*result);
+    }
+
     Result<std::shared_ptr<arrow::RecordBatch>> ReadNext()
     {
         CheckActive();
         while (!Remaining_ || *Remaining_ > 0) {
             CheckActive();
+            std::shared_ptr<ResourceReservation> outputMemory;
             if (!BatchReader_) {
                 bool opened = false;
                 while (!opened) {
-                    if (Plan_.Index && PendingFiles_.empty() && NextIndexedFile_ < Plan_.FileCount) {
+                    if (PendingFiles_.empty() && Plan_.Index && NextIndexedFile_ < Plan_.FileCount) {
                         PendingFiles_.push_back(Plan_.Index->Files[Plan_.FileCount - ++NextIndexedFile_]);
                     }
                     while (PendingFiles_.empty() && NextManifest_ < Plan_.Manifests.size()) {
                         CheckActive();
-                        auto memory = Take(Context_.Resources->Reserve(ResourceClass::Metadata, 256ULL << 20));
+                        auto memory = ReserveAdmission(ResourceClass::Metadata, 256ULL << 20);
                         auto files = Take(ManifestFiles(Context_.FileIO, Plan_, NextManifest_++));
                         ++ManifestsRead_;
                         CheckActive();
@@ -489,14 +509,22 @@ private:
                         break;
                     }
                     CheckActive();
-                    const auto file = std::move(PendingFiles_.front());
-                    PendingFiles_.pop_front();
-                    if (Prune_ && !FileMayMatch(file)) {
+                    if (Prune_ && !FileMayMatch(PendingFiles_.front())) {
+                        // Statistics exclude the file: no admission is taken for it.
                         ++ReadStats_.FilesPruned;
                     } else {
-                        opened = OpenFile(file);
+                        // Output admission precedes opening; a refusal here or in
+                        // OpenFile leaves the descriptor queued for a retry.
+                        outputMemory = ReserveAdmission(ResourceClass::Metadata,
+                            4096 + static_cast<uint64_t>(OutputFields_.size()) * 2048);
+                        opened = OpenFile(PendingFiles_.front());
+                        if (!opened) {
+                            // Every row group was excluded: only the footer was read.
+                            outputMemory.reset();
+                        }
                     }
-                    // The manifest's descriptors are consumed (opened or pruned).
+                    // The descriptor is consumed (opened or pruned).
+                    PendingFiles_.pop_front();
                     if (PendingFiles_.empty()) {
                         PendingMemory_.reset();
                     }
@@ -504,6 +532,10 @@ private:
                 if (!opened) {
                     break;
                 }
+            }
+            if (!outputMemory) {
+                outputMemory = ReserveAdmission(ResourceClass::Metadata,
+                    4096 + static_cast<uint64_t>(OutputFields_.size()) * 2048);
             }
             std::shared_ptr<arrow::RecordBatch> batch;
             DecodeData("read Parquet batch", [&] {
@@ -515,7 +547,7 @@ private:
             }
             RowsDecoded_ += batch->num_rows();
             CheckActive();
-            if (auto produced = Produce(*batch)) {
+            if (auto produced = Produce(*batch, std::move(outputMemory))) {
                 CheckActive();
                 if (Remaining_) {
                     *Remaining_ -= produced->num_rows();
@@ -642,9 +674,9 @@ private:
         // file length is held at once (the footer, then one column chunk per
         // read field). Arrow decoding is charged by Pool_.
         RequireInput(file.SizeBytes >= 0 && file.SizeBytes <= (32LL << 20), "invalid data file size");
-        auto bytesMemory = Take(Context_.Resources->Reserve(ResourceClass::Data,
-            static_cast<uint64_t>(file.SizeBytes) * 2 + (64ULL << 10)));
-        FileMemory_ = Take(Context_.Resources->Reserve(ResourceClass::Metadata, 256ULL << 20));
+        auto bytesMemory =
+            ReserveAdmission(ResourceClass::Data, static_cast<uint64_t>(file.SizeBytes) * 2 + (64ULL << 10));
+        FileMemory_ = ReserveAdmission(ResourceClass::Metadata, 256ULL << 20);
         // Only the footer and the column chunks of read fields are read, each
         // with one positioned read inside the length the manifest records
         // (writer limits bound one data file to 32 MiB in this profile).
@@ -724,7 +756,8 @@ private:
     }
 
     // Filters, projects and applies the limit. Returns nullptr for no rows.
-    std::shared_ptr<arrow::RecordBatch> Produce(const arrow::RecordBatch& batch)
+    std::shared_ptr<arrow::RecordBatch> Produce(const arrow::RecordBatch& batch,
+        std::shared_ptr<ResourceReservation> outputMemory)
     {
         // Validate every decoded column before any value can be evaluated or returned.
         std::vector<std::shared_ptr<arrow::Array>> readColumns;
@@ -768,9 +801,7 @@ private:
         // Flat output arrays need ArrayData, buffer wrappers and vector nodes.
         // Reserve before constructing any retained descriptors. The shared
         // cursor envelope separately covers schema fields and allocator state.
-        auto memory = Take(Context_.Resources->Reserve(ResourceClass::Metadata,
-            4096 + static_cast<uint64_t>(OutputFields_.size()) * 2048));
-        auto lease = std::make_shared<TOutputLease>(BufferLease_, std::move(memory), OutputUsage_, OutputSchema_);
+        auto lease = std::make_shared<TOutputLease>(BufferLease_, std::move(outputMemory), OutputUsage_, OutputSchema_);
         auto schema = std::shared_ptr<arrow::Schema>(lease, OutputSchema_.get());
         std::vector<std::shared_ptr<arrow::Array>> columns;
         columns.reserve(OutputFields_.size());

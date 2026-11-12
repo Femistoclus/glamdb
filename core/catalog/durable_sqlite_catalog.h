@@ -66,6 +66,10 @@ public:
     void BindOperation(const BoundOperation& binding);
     void RecordFailure(const BoundOperation& binding, const AppendOutcome& outcome);
     CollectionInfo PublishCreate(CollectionInfo collection, const Guard& guard, const Body& body);
+    // Settings the collection was created with (empty when none were given).
+    WriteSettings CreatedWriteSettings(std::string_view id);
+    // Compare-and-set of canonical settings; see UpdateWriteSettingsRequest.
+    CollectionInfo UpdateWriteSettings(std::string_view id, int64_t expected_version, WriteSettings settings);
     void PublishAppend(const BoundOperation& binding, const AppendResult& result, const Guard& guard, const Body& body);
     void DurabilityFence();
     int64_t FenceValue();
@@ -112,6 +116,9 @@ private:
     void ValidateHeader();
     void Transaction(const std::function<void()>& body);
     void CheckCapacity(bool operation);
+    void CheckFreeBytes();
+    bool HasWriteSettings();
+    void EnsureWriteSettings();
     void CheckBinding(const BoundOperation& binding);
     void Complete(const BoundOperation& binding, const AppendOutcome& outcome);
     struct PointerTarget

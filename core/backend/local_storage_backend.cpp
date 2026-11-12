@@ -2,6 +2,7 @@
 
 #include "core/api/binary.h"
 #include "core/api/canonical.h"
+#include "core/api/write_settings.h"
 #include "core/backend/inert_catalog.h"
 #include "core/backend/storage_errors.h"
 #include "core/engine/storage_mapping.h"
@@ -20,6 +21,7 @@
 #include "storage/resources.h"
 
 #include <arrow/record_batch.h>
+#include <arrow/util/compression.h>
 #include <iceberg/constants.h>
 #include <iceberg/manifest/manifest_entry.h>
 #include <iceberg/partition_spec.h>
@@ -246,6 +248,41 @@ NStorage::TTableProfile MakeProfile(const SchemaSpec& schema, std::string_view c
         Fail(code, "table profile", profile.error().message);
     }
     return std::move(*profile);
+}
+
+arrow::Compression::type ArrowCodec(ParquetCodec codec)
+{
+    switch (codec) {
+        case ParquetCodec::Uncompressed:
+            return arrow::Compression::UNCOMPRESSED;
+        case ParquetCodec::Snappy:
+            return arrow::Compression::SNAPPY;
+        case ParquetCodec::Gzip:
+            return arrow::Compression::GZIP;
+        case ParquetCodec::Lz4Raw:
+            return arrow::Compression::LZ4;
+        case ParquetCodec::Zstd:
+            return arrow::Compression::ZSTD;
+    }
+    Fail("INVALID_ARGUMENT", "write settings", "unknown Parquet codec");
+}
+
+// Settings the coordinator read with the collection before binding; empty
+// settings leave the writer defaults untouched.
+NStorage::TParquetWriteSpec WriterSpec(const WriteSettings& settings)
+{
+    NStorage::TParquetWriteSpec spec;
+    if (settings.compression) {
+        spec.Compression =
+            NStorage::TParquetCompressionSpec{ArrowCodec(settings.compression->codec), settings.compression->level};
+    }
+    for (const auto& column : settings.columns) {
+        if (column.compression) {
+            spec.Columns.emplace_back(column.field,
+                NStorage::TParquetCompressionSpec{ArrowCodec(column.compression->codec), column.compression->level});
+        }
+    }
+    return spec;
 }
 
 void CheckWriterInput(const SchemaSpec& schema, const NormalizedInput& input, const NStorage::TDataWriterLimits& limits)
@@ -498,6 +535,18 @@ TLocalStorageBackend::TLocalStorageBackend(StoreInfo store,
     , Catalog_(std::make_shared<TInertCatalog>())
 { }
 
+EngineCapabilities TLocalStorageBackend::GetCapabilities() const
+{
+    return {.backend = BackendKind::LocalStorage,
+        .append = true,
+        .scan = true,
+        .metadata = true,
+        .file_pruning = true,
+        .row_group_pruning = true,
+        .write_settings = true,
+        .parquet_codecs = ParquetCodecCapabilities()};
+}
+
 StorageBackend::Health TLocalStorageBackend::GetHealth() const
 {
     const bool latched = Dirs_->Latch()->IsSet();
@@ -563,7 +612,13 @@ Result<std::unique_ptr<StagedCreate>> TLocalStorageBackend::PrepareCreate(const 
             "IO_ERROR",
             "write initial metadata");
 
-        CollectionInfo info{request.collection_id, request.exact_name, metadata->table_uuid, request.schema, 0, {}};
+        CollectionInfo info{request.collection_id,
+            request.exact_name,
+            metadata->table_uuid,
+            request.schema,
+            0,
+            {},
+            request.write_settings};
         NStorage::TPublicationContext context{.Directories = Dirs_,
             .FileIO = FileIO_,
             .Attempt = attempt,
@@ -677,8 +732,13 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
         const auto location = TableLocation(Store_.store_id, binding.collection_id);
         const auto dataPath =
             std::format("{}/data/{}-{}-00000.parquet", location, binding.operation_id, binding.attempt_id);
-        const auto data = TakeIceberg(
-            NStorage::WriteDataFile(FileIO_, attempt, *base->Metadata, dataPath, {input.writer_batch}, Options_.Writer),
+        const auto data = TakeIceberg(NStorage::WriteDataFile(FileIO_,
+                                          attempt,
+                                          *base->Metadata,
+                                          dataPath,
+                                          {input.writer_batch},
+                                          Options_.Writer,
+                                          WriterSpec(collection.write_settings)),
             "IO_ERROR",
             "write data file");
         Require(data.DataFile != nullptr && data.DataFile->record_count == static_cast<int64_t>(input.rows.size()),

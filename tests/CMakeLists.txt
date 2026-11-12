@@ -75,6 +75,10 @@ if(NOT GLAMDB_IO_ONLY)
         add_test(NAME glamdb.capacity_campaign COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/integration/capacity_test.py" "$<TARGET_FILE:glamdb_capacity_bench>")
         set_tests_properties(glamdb.capacity_campaign PROPERTIES LABELS "integration;capacity" TIMEOUT 180)
+
+        add_executable(glamdb_parquet_settings_bench "${PROJECT_SOURCE_DIR}/benchmarks/parquet_settings.cpp")
+        target_include_directories(glamdb_parquet_settings_bench PRIVATE "${PROJECT_SOURCE_DIR}")
+        target_link_libraries(glamdb_parquet_settings_bench PRIVATE glamdb::core glamdb_build_options Arrow::arrow_static)
     endif()
 
     file(GLOB_RECURSE fault_test_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/fault/*.cpp")
@@ -190,6 +194,10 @@ if(TARGET glamdb_server)
         "$<TARGET_FILE:glamdb_server>" "${glamdb_test_cli}" "${PROJECT_SOURCE_DIR}/ui"
         "$<TARGET_FILE:glamdb_resource_profile_driver>")
     set_tests_properties(glamdb.scan_http PROPERTIES LABELS "integration;http;scan" TIMEOUT 420)
+    add_test(NAME glamdb.scan_policy COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/server/scan_policy_test.py"
+        "$<TARGET_FILE:glamdb_server>" "${glamdb_test_cli}" "${PROJECT_SOURCE_DIR}/ui")
+    set_tests_properties(glamdb.scan_policy PROPERTIES LABELS "integration;http;scan;resources" TIMEOUT 240)
 endif()
 if(TARGET glamdb_transport)
     find_package(OpenSSL REQUIRED COMPONENTS Crypto)

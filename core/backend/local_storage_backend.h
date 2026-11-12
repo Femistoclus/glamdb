@@ -87,15 +87,7 @@ public:
     Open(const std::filesystem::path& root, const StoreInfo& store, TLocalStorageOptions options = {});
 
     Health GetHealth() const override;
-    EngineCapabilities GetCapabilities() const override
-    {
-        return {.backend = BackendKind::LocalStorage,
-            .append = true,
-            .scan = true,
-            .metadata = true,
-            .file_pruning = true,
-            .row_group_pruning = true};
-    }
+    EngineCapabilities GetCapabilities() const override;
 
     Result<std::unique_ptr<StagedCreate>>
     PrepareCreate(const StoreInfo& store, const CreateCollectionRequest& request, std::string_view attempt_id) override;
