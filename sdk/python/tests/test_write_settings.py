@@ -144,30 +144,55 @@ def test_created_collection_with_different_or_invalid_settings_is_a_protocol_err
     assert error.value.collection_id == CID
 
 
-def test_lost_create_resolution_compares_settings_until_a_later_update_replaces_them():
-    current = {}
-    with client_with(lambda request: reply(current["info"])) as client:
-        current["info"] = collection()
-        assert client.resolve_create("exact", SCHEMA, collection_id=CID, write_settings=REQUEST)["name"] == "exact"
-        with pytest.raises(ProtocolError, match="write settings"):
-            client.resolve_create("exact", SCHEMA, collection_id=CID,
-                                  write_settings={"parquet": {"compression": {"codec": "snappy"}}})
-        # Version 1 is also a default creation after its first update, so a
-        # request without settings cannot be refuted here.
-        assert client.resolve_create("exact", SCHEMA, collection_id=CID)["collection_id"] == CID
-        # A collection created without settings reports canonical defaults at "0".
+def test_lost_create_resolution_trusts_current_settings_only_while_none_were_stored():
+    current, posts = {}, []
+
+    def handler(request):
+        if request.method == "POST":
+            posts.append(json.loads(request.content))
+            return current["post"]
+        return reply(current["info"])
+
+    mismatch = reply({"outcome": "definitely_not_committed", "phase": "validation",
+                      "error": {"code": "WRITE_SETTINGS_MISMATCH", "message": "differs", "retry_hint": "FixInput"}},
+                     409)
+    with client_with(handler) as client:
+        # Version "0": no settings were ever stored, so GET alone decides.
         current["info"] = collection(DEFAULT, version="0")
         assert client.resolve_create("exact", SCHEMA, collection_id=CID)["collection_id"] == CID
         assert client.resolve_create("exact", SCHEMA, collection_id=CID, write_settings={})["collection_id"] == CID
         with pytest.raises(ProtocolError, match="write settings"):
             client.resolve_create("exact", SCHEMA, collection_id=CID, write_settings=REQUEST)
-        # Version 2: creation settings were replaced by compare-and-set updates
-        # and are no longer reported; identity and schema remain checked.
-        current["info"] = collection(DEFAULT, version="2")
-        assert client.resolve_create("exact", SCHEMA, collection_id=CID, write_settings=REQUEST)["name"] == "exact"
+        assert posts == []
+        # A stored version cannot prove the creation settings: a default
+        # creation updated once looks like a creation with settings, and later
+        # updates replace them. The original create is repeated and the server
+        # compares the settings the collection was created with.
+        for version, settings in (("1", CANONICAL), ("2", DEFAULT)):
+            current["info"] = collection(settings, version=version)
+            current["post"] = reply({"outcome": "committed", "info": current["info"]})
+            assert client.resolve_create("exact", SCHEMA, collection_id=CID, write_settings=REQUEST)["name"] == "exact"
+            assert posts[-1]["write_settings"] == CANONICAL
+            current["post"] = mismatch
+            with pytest.raises(ProtocolError, match="write settings"):
+                client.resolve_create("exact", SCHEMA, collection_id=CID,
+                                      write_settings={"parquet": {"compression": {"codec": "gzip"}}})
+            with pytest.raises(ProtocolError, match="write settings"):
+                client.resolve_create("exact", SCHEMA, collection_id=CID)
+            assert "write_settings" not in posts[-1]
+        # A refused confirmation leaves the create unresolved.
+        current["post"] = reply({"outcome": "commit_unknown", "phase": "reconciling", "recovery_required": True,
+                                 "error": {"code": "RECOVERY_REQUIRED", "message": "blocked",
+                                           "retry_hint": "SameIdAfterReconcile"},
+                                 "recovery": {}}, 503)
+        with pytest.raises((OutcomeUnknownError, ProtocolError)):
+            client.resolve_create("exact", SCHEMA, collection_id=CID, write_settings=REQUEST)
+        # Identity and schema mismatches never need the server's comparison.
+        count = len(posts)
         with pytest.raises(ProtocolError):
             client.resolve_create("exact", Schema([Field("key", "string", False)]), collection_id=CID,
                                   write_settings={"parquet": {"compression": {"codec": "zstd", "level": 3}}})
+        assert len(posts) == count
         current["info"] = collection(DEFAULT, version="x")
         with pytest.raises(ProtocolError):
             client.resolve_create("exact", SCHEMA, collection_id=CID)

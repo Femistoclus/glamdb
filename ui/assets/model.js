@@ -425,10 +425,13 @@ export function describeCompression(compression, parquet = null) {
     return range ? `${compression.codec} · default level ${range.default}` : compression.codec;
 }
 // Write settings are part of a collection definition. Creation stores
-// non-default settings as version "1"; defaults store nothing (version "0").
-// A higher version means later compare-and-set updates replaced the creation
-// settings, so only identity and schema remain comparable.
-export function verifyCreatedCollection(created, body) {
+// non-default settings as version "1"; defaults store nothing (version "0");
+// every update adds one. A create response is authoritative: the server
+// compared the settings the collection was created with. A resolved (GET)
+// collection only shows current settings, which prove the creation settings
+// only while none were ever stored; otherwise the create stays unresolved and
+// only repeating the original request can confirm it.
+export function verifyCreatedCollection(created, body, { authoritative = true } = {}) {
     if (
         created?.collection_id !== body.collection_id ||
         created.name !== body.name ||
@@ -449,23 +452,30 @@ export function verifyCreatedCollection(created, body) {
         return created;
     }
     let matches;
+    let version = 0n;
     try {
-        const version = BigInt(writeSettingsVersion(created.write_settings_version));
+        version = BigInt(writeSettingsVersion(created.write_settings_version));
         const actual = JSON.stringify(
             canonicalWriteSettings(created.write_settings, body.schema, { reported: true }),
         );
-        const expected = canonicalWriteSettings(body.write_settings ?? null, body.schema);
-        const createdVersion =
-            expected.parquet.compression || expected.parquet.columns.length ? 1n : 0n;
+        const expected = JSON.stringify(
+            canonicalWriteSettings(body.write_settings ?? null, body.schema),
+        );
+        const createdVersion = expected === JSON.stringify(canonicalWriteSettings(null)) ? 0n : 1n;
         matches =
-            version > createdVersion ||
-            (version === createdVersion && actual === JSON.stringify(expected));
+            version >= createdVersion &&
+            (version === 0n || !authoritative || version > createdVersion || actual === expected) &&
+            (version !== 0n || actual === expected);
     } catch {
         matches = false;
     }
     if (!matches)
         throw new Error(
             'Resolved collection Parquet write settings differ from the original create request. Keep its UUID for recovery.',
+        );
+    if (!authoritative && version !== 0n)
+        throw new Error(
+            'Current Parquet write settings cannot prove the settings this collection was created with. Retry the same create request to confirm it.',
         );
     return created;
 }

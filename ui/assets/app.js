@@ -1025,8 +1025,8 @@ function releaseCreationForm(form) {
     form.querySelectorAll('[data-parquet-codec]').forEach(syncParquetLevel);
     form.querySelector('[data-action="export-pending"]')?.remove();
 }
-function verifyCreated(created, body) {
-    return verifyCreatedCollection(created, body);
+function verifyCreated(created, body, options) {
+    return verifyCreatedCollection(created, body, options);
 }
 async function createForm(form) {
     const button = form.querySelector('[type=submit]');
@@ -1088,6 +1088,7 @@ async function createForm(form) {
                         `/collections:resolve?name=${encodeURIComponent(draft.body.name)}`,
                     ),
                     draft.body,
+                    { authoritative: false },
                 );
             } catch {
                 ensurePendingExport(form, 'create');

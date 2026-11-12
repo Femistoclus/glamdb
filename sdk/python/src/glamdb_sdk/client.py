@@ -402,7 +402,7 @@ class Client:
             if kind == "committed":
                 if status not in (200, 201) or not isinstance(info, dict) or "error" in value:
                     raise ProtocolError("invalid committed create outcome", raw=value)
-                self._verify_created(info, cid, name, schema, requested)
+                self._verify_created(info, cid, name, schema, requested, authoritative=True)
                 self._schemas[cid] = schema
             elif kind == "definitely_not_committed":
                 if (not isinstance(value.get("error"), dict) or info is not None or not 400 <= status <= 599
@@ -424,7 +424,15 @@ class Client:
 
     @staticmethod
     def _verify_created(info: Mapping[str, Any], cid: str, name: str, schema: Schema,
-                        write_settings: dict[str, Any] | None = None) -> None:
+                        write_settings: dict[str, Any] | None = None, *, authoritative: bool = True) -> bool:
+        """Check a created or resolved collection against the original create.
+
+        ``authoritative`` responses come from the create POST itself: the
+        server compared the settings the collection was created with. A
+        resolved (GET) collection reports only its current settings, which
+        prove the creation settings only while none were ever stored (version
+        "0"). Returns False when only a repeated create can decide.
+        """
         try:
             actual_schema = Schema.from_dict(info["schema"])
             same = info.get("collection_id") == cid and info.get("name") == name and schema_fingerprint(actual_schema) == schema_fingerprint(schema)
@@ -437,7 +445,7 @@ class Client:
             # cannot have applied any; a request that carried them must not pass.
             if write_settings is not None:
                 raise ProtocolError("created collection does not report the requested write settings", raw=info)
-            return
+            return True
         try:
             version = write_settings_version(info["write_settings_version"])
             actual = canonical_write_settings(info["write_settings"], schema, reported=True)
@@ -445,24 +453,47 @@ class Client:
             raise ProtocolError("created collection has missing, invalid or unsupported write settings",
                                 raw=info) from exc
         # Creation stores non-default settings as version 1; defaults store
-        # nothing (version 0). A higher version means later compare-and-set
-        # updates replaced the creation settings, so only identity and schema
-        # remain comparable (the server compares them on a repeated create).
+        # nothing (version 0). Every update adds one, so a stored version can
+        # also be a default creation that was updated.
         default = canonical_write_settings(None)
         expected = write_settings or default
         created_version = 0 if expected == default else 1
-        if version < created_version or (version == created_version and actual != expected):
+        if version < created_version or (version == 0 and actual != expected):
             raise ProtocolError("resolved collection write settings do not match original create", raw=info)
+        if not authoritative:
+            return version == 0
+        if version == created_version and actual != expected:
+            raise ProtocolError("created collection write settings do not match the request", raw=info)
+        return True
 
     def resolve_create(self, name: str, schema: Schema | Mapping[str, Any], *, collection_id: str | UUID,
                        write_settings: Mapping[str, Any] | None = None,
                        deadline: float | None = None) -> dict[str, Any]:
+        """Resolve a lost create without guessing its write settings.
+
+        When the current collection cannot prove the creation settings (any
+        settings were ever stored), the original create is repeated: it changes
+        nothing for an existing collection, and the server compares it with the
+        settings the collection was created with.
+        """
         cid = uuid_string(collection_id, "collection_id")
         schema = self._schema(schema)
         requested = None if write_settings is None else canonical_write_settings(write_settings, schema)
         info = self.resolve_collection(name, deadline=deadline)
-        self._verify_created(info, cid, name, schema, requested)
-        return info
+        if self._verify_created(info, cid, name, schema, requested, authoritative=False):
+            return info
+        outcome = self.create_collection(name, schema, collection_id=cid, write_settings=requested, deadline=deadline)
+        if outcome.outcome == "committed":
+            return outcome.info
+        code = outcome.error.code if outcome.error else None
+        if code in ("WRITE_SETTINGS_MISMATCH", "SCHEMA_MISMATCH", "ALREADY_EXISTS"):
+            raise ProtocolError("resolved collection write settings do not match original create",
+                                raw=outcome.raw, collection_id=cid)
+        # Recovery or admission refused the confirmation; the create stays unresolved.
+        detail = outcome.error or ErrorDetail.from_dict({"code": "RECOVERY_REQUIRED",
+                                                         "message": "create confirmation is unresolved",
+                                                         "retry_hint": "SameIdAfterReconcile"})
+        raise OutcomeUnknownError(503, detail, raw=outcome.raw, collection_id=cid)
 
     def update_write_settings(self, collection_id: str | UUID, expected_version: int | str,
                               write_settings: Mapping[str, Any], *, deadline: float | None = None) -> dict[str, Any]:

@@ -287,6 +287,41 @@ test('created collection verification compares settings until a later update rep
     );
 });
 
+test('resolved (GET) collections confirm a lost create only while no settings were stored', () => {
+    const body = {
+        collection_id: collectionId,
+        name: 'events',
+        schema,
+        write_settings: model.canonicalWriteSettings(REQUEST, schema),
+    };
+    const plain = { collection_id: collectionId, name: 'events', schema };
+    const resolved = (value, request) =>
+        model.verifyCreatedCollection(value, request, { authoritative: false });
+    assert.ok(resolved(created(DEFAULT, '0'), plain));
+    assert.throws(() => resolved(created(DEFAULT, '0'), body), /differ from the original/);
+    // A stored version is never proof: create zstd, update to snappy (v2),
+    // then resolve a pending create that asked for gzip.
+    const gzip = {
+        ...body,
+        write_settings: model.canonicalWriteSettings(
+            { parquet: { compression: { codec: 'gzip' } } },
+            schema,
+        ),
+    };
+    for (const [value, request] of [
+        [created(DEFAULT, '2'), gzip],
+        [created(), body],
+        [created(), plain],
+        [created(DEFAULT, '3'), body],
+    ])
+        assert.throws(() => resolved(value, request), /Retry the same create request/);
+    // Identity/schema mismatches are still definite.
+    assert.throws(
+        () => resolved(created(DEFAULT, '2', { name: 'other' }), gzip),
+        /identity or schema/,
+    );
+});
+
 test('create fingerprint is unchanged without settings and binds settings when present', () => {
     const plain = { collection_id: collectionId, name: 'events', schema };
     assert.equal(model.creationFingerprint(plain), JSON.stringify({ name: 'events', schema }));
