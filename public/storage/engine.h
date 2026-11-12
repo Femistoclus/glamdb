@@ -42,6 +42,8 @@ public:
     // Plans and validates one fixed view without reading Parquet data.
     Result<ScanExplanation> ExplainScan(const ScanRequest& request) const;
     CreateOutcome CreateCollection(const CreateCollectionRequest& request);
+    // Cache misses return OPERATION_IN_PROGRESS while a writer is active;
+    // confirmed hits remain readable. Neither lookup waits for the writer.
     Result<CollectionInfo> GetCollection(std::string_view collection_id) const;
     Result<CollectionInfo> ResolveCollection(std::string_view exact_name) const;
     Result<std::vector<CollectionInfo>> ListCollections() const;

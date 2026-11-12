@@ -49,7 +49,8 @@ bool UsesProtectedAdmission(const TRequest& request)
     return path == "/healthz" || path == "/databases" ||
         (path.starts_with("/databases/") && split == std::string::npos) || suffix == "/readyz" ||
         suffix == "/capabilities" || suffix == "/open" || suffix == "/close" || suffix == "/reconcile" ||
-        suffix == "/discard" || suffix.find("/operations/") != std::string::npos || suffix.ends_with("/scan/cancel");
+        suffix == "/discard" || suffix.find("/operations/") != std::string::npos || suffix.ends_with("/scan/cancel") ||
+        (request.Method == "GET" && suffix == "/collections:resolve");
 }
 
 TRequest ParseHeaders(std::string_view bytes)

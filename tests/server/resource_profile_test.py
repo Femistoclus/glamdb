@@ -147,6 +147,10 @@ class ResourceProfile(unittest.TestCase):
                 self.start(directory, saturated=True)
                 for database, base, _, operation, receipt in databases:
                     self.assertEqual(self.request(base + '/operations/' + operation['operation_id']), receipt)
+                    resolved = self.request(f'/databases/{database}/collections:resolve?name=events')
+                    self.assertEqual(resolved['collection_id'], base.rsplit('/', 1)[1])
+                    absent = self.request(f'/databases/{database}/collections:resolve?name=absent', status=404)
+                    self.assertEqual(absent['error']['code'], 'COLLECTION_NOT_FOUND')
                     self.assertTrue(self.request(f'/databases/{database}/readyz')['write_ready'])
                     self.request(f'/databases/{database}/reconcile', {})
                 protected = self.stop()

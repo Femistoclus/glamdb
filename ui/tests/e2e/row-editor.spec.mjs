@@ -15,7 +15,7 @@ const test = base.extend({
             await once(socket, 'listening');
             const port = socket.address().port;
             await new Promise((resolve) => socket.close(resolve));
-            const python = path.resolve(process.env.GLAMDB_E2E_PYTHON ?? '../.venv/bin/python');
+            const python = process.env.GLAMDB_E2E_PYTHON ?? path.resolve('../.venv/bin/python');
             const child = spawn(
                 python,
                 ['-m', 'glamdb_mock', '--port', String(port), '--ui-dir', path.join(root, 'ui')],

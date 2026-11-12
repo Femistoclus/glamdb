@@ -6,6 +6,10 @@ incomplete. This preparation kit provides a read-only environment collector and
 a bounded I/O probe using disposable stores. Neither changes mounts, formats
 devices or switches power.
 
+The separate [native capacity campaign](CAPACITY_CAMPAIGN.md) records actual
+ingestion and fresh-process recovery under finite limits. Its narrow workload
+and retained OS cache do not complete the dedicated-device campaigns below.
+
 ## Test machines
 
 Prepare a Linux x86-64 host with a dedicated, disposable local ext4 volume.

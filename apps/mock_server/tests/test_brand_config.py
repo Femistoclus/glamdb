@@ -22,7 +22,7 @@ def test_theme_rejects_nonlocal_brand_assets(tmp_path, asset):
 
 def test_supplied_logo_paths_and_sizes_load():
     theme = load_theme(THEME)
-    assert theme["brand"]["wordmark"] == "assets/brand/wordmark.png"
+    assert theme["brand"]["wordmark"] == "assets/brand/wordmark-transparent.png"
     assert theme["brand"]["mark"] == "assets/brand/mark.png"
     assert theme["sizing"]["logo_width"] == "196px"
 

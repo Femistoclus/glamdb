@@ -51,7 +51,7 @@ class NativeHTTP(unittest.TestCase):
         self.assertEqual(self.proc.returncode, 0, out + err)
         self.assertNotIn(TOKEN, out + err)
 
-    def request(self, path, body=None, token=TOKEN, accept='application/json', method=None):
+    def request(self, path, body=None, token=TOKEN, accept='application/json', method=None, extra_headers=None):
         if path.startswith(('/collections', '/%63ollections')):
             path = '/databases/' + self.store_id + path
         # Normal API calls may use the core's 60-second append deadline.
@@ -63,6 +63,8 @@ class NativeHTTP(unittest.TestCase):
             headers['Authorization'] = 'Bearer ' + token
         if body is not None:
             headers['Content-Type'] = 'application/json'
+        if extra_headers:
+            headers.update(extra_headers)
         conn.request(method or ('POST' if body is not None else 'GET'), path,
                      None if body is None else json.dumps(body), headers)
         response = conn.getresponse()
@@ -258,6 +260,22 @@ class NativeHTTP(unittest.TestCase):
             slow.sendall(b'GET /healthz HTTP/1.1\r\n')
             self.assertIn(b' 408 ', slow.recv(4096))
         self.assertEqual(self.request('/healthz')[0], 200)
+
+    def test_workbench_is_same_origin_without_cors_or_credentials(self):
+        for path, content_type in (('/', 'text/html'), ('/workbench/config', 'application/json'),
+                                   ('/assets/app.js', 'text/javascript'), ('/assets/styles.css', 'text/css')):
+            with self.subTest(path=path):
+                status, headers, data = self.request(path, token=None,
+                    extra_headers={'Origin': 'https://other.example'})
+                self.assertEqual(status, 200, data)
+                self.assertTrue(headers['Content-Type'].startswith(content_type))
+                self.assertNotIn(TOKEN.encode(), data)
+                self.assertNotIn('access-control-allow-origin', {key.lower() for key in headers})
+        status, headers, _ = self.request('/collections', token=None, method='OPTIONS', extra_headers={
+            'Origin': 'https://other.example', 'Access-Control-Request-Method': 'POST',
+            'Access-Control-Request-Headers': 'authorization,content-type'})
+        self.assertEqual(status, 401)
+        self.assertNotIn('access-control-allow-origin', {key.lower() for key in headers})
 
     def test_validation_capabilities_and_arrow(self):
         caps = self.api('/capabilities')
@@ -752,6 +770,63 @@ class NativeHTTP(unittest.TestCase):
             self.assertCountEqual(encode_rows(schema, client.scan_json(cid).rows), fixture['expected_latest_rows'])
         self.assertEqual(self.api(path + '/scan', {})['snapshot_id'], latest)
         self.assertEqual(len(list(Path(self.root).rglob('*.parquet'))), 2)
+
+    def test_lost_create_and_append_responses_resolve_after_restart(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'sdk/python/src'))
+        try:
+            import httpx
+            from glamdb_sdk import Client, ProtocolError, Schema, TransportError
+        except ImportError:
+            if os.environ.get('GLAMDB_REQUIRE_NATIVE_CLIENTS') == '1':
+                raise
+            self.skipTest('SDK dependencies are tested in the workbench environment')
+
+        class DropWriteResponses(httpx.HTTPTransport):
+            def handle_request(self, request):
+                response = super().handle_request(request)
+                if request.method == 'POST':
+                    response.close()
+                    if response.status_code != 200:
+                        raise AssertionError(f'write did not commit: HTTP {response.status_code}')
+                    raise httpx.ReadError('response dropped after native commit', request=request)
+                return response
+
+        cid, operation = str(uuid.uuid4()), str(uuid.uuid4())
+        name = ' exact +&=/% имя\t'
+        schema = Schema.from_dict({'fields': [{'name': 'key', 'type': 'string', 'nullable': False}]})
+        rows = [{'key': 'duplicate'}, {'key': 'duplicate'}]
+        with Client(f'http://127.0.0.1:{self.port}', TOKEN, database_id=self.store_id,
+                    transport=DropWriteResponses(retries=0)) as client:
+            with self.assertRaises(TransportError) as lost_create:
+                client.create_collection(name, schema, collection_id=cid)
+            self.assertEqual(lost_create.exception.collection_id, cid)
+            created = client.resolve_create(name, schema, collection_id=cid)
+            self.assertEqual(created['name'], name)
+            with self.assertRaises(ProtocolError):
+                client.resolve_create(name, schema, collection_id=str(uuid.uuid4()))
+            with self.assertRaises(ProtocolError):
+                client.resolve_create(name, {'fields': [
+                    {'name': 'key', 'type': 'string', 'nullable': False},
+                    {'name': 'extra', 'type': 'int64', 'nullable': True}]}, collection_id=cid)
+            with self.assertRaises(TransportError) as lost_append:
+                client.append(cid, rows, operation_id=operation, schema=schema)
+            self.assertEqual(lost_append.exception.operation_id, operation)
+            committed = client.find_append_outcome(cid, operation)
+            self.assertEqual(committed.outcome, 'committed')
+            self.assertEqual(committed.result['rows_appended'], '2')
+
+        self.stop()
+        self.start()
+        with Client(f'http://127.0.0.1:{self.port}', TOKEN, database_id=self.store_id) as client:
+            resolved = client.resolve_create(name, schema, collection_id=cid)
+            self.assertEqual(resolved['collection_id'], cid)
+            self.assertEqual(resolved['schema'], created['schema'])
+            self.assertEqual(len(client.list_collections().items), 1)
+            self.assertEqual(client.create_collection(name, schema, collection_id=cid).info, resolved)
+            self.assertEqual(client.find_append_outcome(cid, operation), committed)
+            self.assertEqual(client.append(cid, rows, operation_id=operation, schema=schema), committed)
+            self.assertEqual(client.scan_json(cid).rows, rows)
+        self.assertEqual(len(list(Path(self.root).rglob('*.parquet'))), 1)
 
     def test_owner_invalid_json_disconnect_and_shutdown(self):
         owner = subprocess.run([SERVER, '--data-dir', self.data_dir, '--port', '0'],

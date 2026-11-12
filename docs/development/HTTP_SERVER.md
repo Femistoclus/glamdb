@@ -26,7 +26,8 @@ uses unscoped collection routes and does not offer database management.
 `glamdb-cli` is a standalone network client with DNS and verified HTTPS; it does
 not link the engine or storage libraries. `create-store --name analytics` calls
 the managed database API. The optional `glamdb-admin` contains offline
-`create-store`/`inspect-store`, bounded snapshot `read`, and `quiesce-store`, which acquire core ownership and fail with
+`create-store`/`inspect-store`, bounded snapshot `read`, `quiesce-store`, and named
+collection/schema/append/scan/operation/snapshot/file commands. Offline commands acquire core ownership and fail with
 `STATE_IN_USE` while the server owns the store. See the [client guide](../../apps/cli/README.md)
 for its independent build and TLS configuration. Online:
 
@@ -181,6 +182,12 @@ separate, broader development profile.
 
 CLI mapping: `create-store` → `POST /databases`; `request` exposes every route
 in the tables above. Offline `glamdb-admin` uses `CreateStore` / `OpenExisting`.
+Both CLIs also expose named data/inspection commands; admin `--url` mode uses
+HTTP exclusively. Named scans and snapshot/file inventories follow fixed-view
+pages within their result bounds. Named commands return `3` for complete native
+unknown or recovery-blocked outcomes, while `request` retains HTTP-level exits.
+See the [CLI guide](../../apps/cli/README.md). `glamdb serve` is an alias for
+server startup and preserves explicit creation and ownership rules.
 
 The transport owns HTTP parsing, codecs, authentication, connection admission
 and static UI assets. Core owns store identity/locking, schema validation,
@@ -345,6 +352,10 @@ filesystem plus 512 MiB for an attempt and journal. Database, collection and
 operation absence have distinct codes; only `OPERATION_NOT_FOUND` proves an
 operation lookup absent. Transport errors carry the shared retry policy; unexpected
 write failures preserve the original ID for outcome resolution.
+Collection ID/name/schema lookups return 503 `OPERATION_IN_PROGRESS` on a cache
+miss during an active writer. Confirmed collections remain readable; 404 requires
+rechecking absence with writer ownership. An absent lookup never cancels a queued
+request or proves that a disconnected request rolled back.
 `INPUT_TOO_LARGE` with `FixInput` denotes the deterministic 2 MiB decoded row or
 16 MiB decoded batch limit; reducing the input is required. Retrying an unresolved
 append still validates its canonical payload: changed content with the same ID
@@ -405,7 +416,8 @@ HTTP body bytes, parsed JSON/Arrow allocations and core canonical bytes have
 separate charges. Socket/header descriptors use protected completion capacity;
 lookup and lifecycle bodies up to 64 KiB also use it. Larger control bodies use
 ordinary data capacity within the existing 16 MiB wire limit. Ordinary data
-saturation preserves small outcome, readiness and reconciliation requests.
+saturation preserves exact-name create resolution, small append-outcome,
+readiness and reconciliation requests.
 The conservative working envelopes and [measured profile](SHARED_RESOURCES_VALIDATION.md)
 do not qualify a universal RSS bound.
 
@@ -479,7 +491,7 @@ GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 \
 ctest --preset local -R 'glamdb\.(native_http|http_security|scan_http|database_limits|transport\.|routes\.|cli)'
 # With workbench Python dependencies, also exercise SDK JSON/Arrow decoding:
 .venv/bin/python tests/server/native_http_test.py build/local/apps/server/glamdb build/local/apps/cli/glamdb-cli ui
-GLAMDB_NATIVE_SERVER="$PWD/build/local/apps/server/glamdb" \
+GLAMDB_TEST_BACKEND=native GLAMDB_NATIVE_SERVER="$PWD/build/local/apps/server/glamdb" \
 npm --prefix ui run test:e2e
 ```
 
@@ -488,7 +500,18 @@ through HTTP without an offline CLI. It covers isolation, close/open/reconcile,
 restart and process crashes, missing-store preservation, real HTTP, exact scalar checks,
 repeat-ID conflicts, fixed snapshots, lost-response lookup, reopen, owner locking,
 request framing/auth/limits and UI assets. Mock/client suites remain separate.
+The [shared client conformance suite](CLIENT_CONFORMANCE.md) additionally runs
+the same SDK TCP/TLS and browser contract scenarios against explicit mock and
+native backends, with required catalog-selected physical files for native runs.
 Passing these tests does not qualify physical power-loss durability.
+
+The native SDK test drops successful create/append responses before the client
+receives them, then resolves the original identity and receipt after restart.
+Create resolution rejects mismatched UUIDs and schemas. The native VFS suite
+checks 503 before reconciliation and 404 only after authoritative rollback.
+It also pauses a real create COMMIT and checks that ID/name/schema lookups return
+503 promptly until publication finishes.
+The resource profile checks exact-name resolution with ordinary memory full.
 
 `glamdb.http_review` also forwards exact request bytes through a disposable TLS
 terminator into the native server. It checks certificate verification, bearer
