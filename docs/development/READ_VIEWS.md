@@ -140,3 +140,8 @@ quota/resource release, scope checks, expiry/renewal, explicit release/cancel,
 shutdown/reopen and independent retained-buffer lifetime. Validation commands and
 results belong in `artifacts/modularity/task-2-report.md`; implementation and
 sanitizer checks do not establish physical power-loss durability.
+
+Contract 1.2 [scan splits](SCAN_SPLITS.md) retain the original shared view handle
+and use this same private planning bridge for bounded pages and repeatable
+physical file ranges. View release, cancellation and expiry stop new split
+admissions; already admitted cursors retain their independent leases.

@@ -10,6 +10,7 @@
 #include "core/engine/engine_factory.h"
 #include "core/engine/metadata_pages.h"
 #include "core/engine/read_views.h"
+#include "core/engine/scan_splits.h"
 #include "core/engine/storage_mapping.h"
 #include "core/engine/store_lease.h"
 #include "core/scan/read_budget.h"
@@ -19,6 +20,7 @@
 #include "core/backend/local_storage_backend.h"
 #include "core/scan/file_metadata.h"
 #include "core/scan/metadata.h"
+#include "core/scan/predicate.h"
 #include "core/scan/scan_cursor.h"
 #include "core/scan/scan_planner.h"
 #include "core/storage/base_state.h"
@@ -2574,7 +2576,8 @@ Result<std::shared_ptr<ScanCursor>> Engine::ScanImpl(const ScanRequest& request,
     bool chronologicalFiles,
     const TReadView* pinnedView,
     size_t entry,
-    std::string_view authorizationScope) const
+    std::string_view authorizationScope,
+    const TScanSplit* split) const
 {
     NGlamDB::NTelemetry::TReadOperationScope metrics(NGlamDB::NTelemetry::EReadOperation::ScanOpen);
     const auto impl = impl_;
@@ -2604,6 +2607,10 @@ Result<std::shared_ptr<ScanCursor>> Engine::ScanImpl(const ScanRequest& request,
                 Require(entry < captured.Info->Entries.size(),
                     "INVALID_ARGUMENT",
                     "read-view entry index out of range");
+                if (split) {
+                    Require(!split->State_->Cancelled, "SCAN_PLAN_CANCELLED", "scan plan was cancelled");
+                    context.FileRange = std::pair{split->Begin_, split->End_};
+                }
                 const auto& selected = captured.Info->Entries[entry];
                 context.Collection = selected.Collection;
                 context.Base = selected.Identity;
@@ -2653,6 +2660,7 @@ Result<std::shared_ptr<ScanCursor>> Engine::ScanImpl(const ScanRequest& request,
 #else
         (void)budget;
         (void)chronologicalFiles;
+        (void)split;
         (void)entry;
         (void)authorizationScope;
         throw Failure({"DEPENDENCY_UNAVAILABLE", "storage scanner is not built", RetryHint::OperatorAction});
@@ -2773,6 +2781,184 @@ Result<std::shared_ptr<ScanCursor>> Engine::ScanReadView(const TReadView& view,
         scan.limit = request.Limit;
         scan.batch_rows = request.BatchRows;
         return ScanImpl(scan, nullptr, false, &view, entry, authorizationScope);
+    } catch (const std::exception& error) {
+        return std::unexpected(ExceptionError(error));
+    }
+}
+
+const ScanInfo& TScanSplitPlan::Info() const
+{
+    return State_->Info;
+}
+
+uint64_t TScanSplit::EstimatedBytes() const
+{
+    return Bytes_;
+}
+
+size_t TScanSplit::FileCount() const
+{
+    return FileCount_;
+}
+
+Result<std::shared_ptr<TScanSplitPlan>> Engine::PlanScan(std::shared_ptr<const TReadView> view,
+    size_t entry,
+    const TReadViewScanRequest& request,
+    std::string_view authorizationScope,
+    const TScanPlanOptions& options) const
+{
+    try {
+        Require(view != nullptr, "INVALID_ARGUMENT", "scan planning requires a read view");
+        Require(!request.Limit, "UNSUPPORTED_FEATURE", "independent splits cannot apply a global limit");
+        const TScanSplitLimits limits;
+        Require(options.SplitsPerPage > 0 && options.SplitsPerPage <= limits.MaxSplitsPerPage &&
+                options.TargetBytes > 0 && options.TargetBytes <= limits.MaxTargetBytes,
+            "INVALID_ARGUMENT",
+            "scan split page or target size is outside the supported range");
+#if GLAMDB_HAS_STORAGE
+        {
+            // Reclaim expired pins before any new shared reservation.
+            std::lock_guard lock(impl_->state_mutex);
+            const auto& capture = impl_->read_views.Resolve(*view, impl_->info.store_id, authorizationScope);
+            impl_->CheckReady();
+            Require(entry < capture.Info->Entries.size(), "INVALID_ARGUMENT", "read-view entry index out of range");
+        }
+        const auto predicateBytes = Take(TPredicateResources::Measure(request.Filter));
+        Require(predicateBytes <= limits.MaxPredicateBytes, "RESOURCE_EXHAUSTED", "scan split predicate too large");
+        if (request.Projection) {
+            Require(request.Projection->size() <= MaxSchemaFields, "INVALID_ARGUMENT", "too many projected fields");
+            for (const auto& field : *request.Projection) {
+                Require(field.size() <= 128, "INVALID_ARGUMENT", "projected field name too long");
+            }
+        }
+        auto control = Take(impl_->resources->Reserve(ResourceClass::Control, TScanPlanState::ControlBytes));
+        auto memory = Take(impl_->resources->Reserve(ResourceClass::Metadata, (256ULL << 10) + 2 * predicateBytes));
+        // Reuse scanner binding/validation and its independently charged schema.
+        // Opening is metadata-only; no data files/footers are read or copied.
+        auto validation = Take(ScanReadView(*view, entry, request, authorizationScope));
+        auto state = std::make_shared<TScanPlanState>();
+        state->ControlMemory = std::move(control);
+        state->RequestMemory = std::move(memory);
+        state->View = std::move(view);
+        state->Entry = entry;
+        state->Request = request;
+        state->Options = options;
+        state->Info = validation->Info();
+        auto plan = std::shared_ptr<TScanSplitPlan>(new TScanSplitPlan());
+        plan->State_ = std::move(state);
+        {
+            // Binding may race expiry, explicit release or shutdown.
+            std::lock_guard lock(impl_->state_mutex);
+            (void)impl_->read_views.Resolve(*plan->State_->View, impl_->info.store_id, authorizationScope);
+            impl_->CheckReady();
+        }
+        return plan;
+#else
+        (void)entry;
+        (void)authorizationScope;
+        throw Failure({"UNSUPPORTED_FEATURE", "scan splits require the native local scanner"});
+#endif
+    } catch (const Failure& error) {
+        return std::unexpected(error.detail);
+    } catch (const std::exception& error) {
+        return std::unexpected(ExceptionError(error));
+    }
+}
+
+Result<TScanSplitPage> Engine::NextScanSplits(const TScanSplitPlan& plan, std::string_view authorizationScope) const
+{
+    try {
+        std::lock_guard lock(impl_->state_mutex);
+        auto& state = *plan.State_;
+        const auto& capture = impl_->read_views.Resolve(*state.View, impl_->info.store_id, authorizationScope);
+        impl_->CheckReady();
+        Require(!state.Cancelled, "SCAN_PLAN_CANCELLED", "scan plan was cancelled");
+#if GLAMDB_HAS_STORAGE
+        const auto& entry = capture.Info->Entries[state.Entry];
+        const auto membership =
+            Take(PlanVerifiedScan(*capture.States[state.Entry], entry.Identity, entry.SelectorResolved));
+        TScanSplitPage page;
+        auto position = state.Next;
+        size_t examined = 0;
+        while (position < membership.FileCount && page.Splits.size() < state.Options.SplitsPerPage &&
+            examined < TScanSplitLimits{}.MaxFilesExaminedPerPage)
+        {
+            const auto begin = position;
+            uint64_t bytes = 0;
+            size_t files = 0;
+            while (position < membership.FileCount && bytes < state.Options.TargetBytes &&
+                examined < TScanSplitLimits{}.MaxFilesExaminedPerPage)
+            {
+                const auto& file = membership.Index->Files[position++];
+                ++examined;
+                if (membership.Index->KeyValue &&
+                    (!membership.SequenceNumber || file.IntroducedSequence > *membership.SequenceNumber ||
+                        (file.RemovedSequence && *membership.SequenceNumber >= *file.RemovedSequence)))
+                {
+                    continue;
+                }
+                Require(file.SizeBytes > 0 &&
+                        static_cast<uint64_t>(file.SizeBytes) <= std::numeric_limits<uint64_t>::max() - bytes,
+                    "CORRUPTION",
+                    "invalid split file size");
+                bytes += static_cast<uint64_t>(file.SizeBytes);
+                ++files;
+            }
+            if (files != 0) {
+                // Each descriptor's charge includes its shared_ptr and page-vector slot.
+                // Failed pages destroy partial descriptors before committing position.
+                auto memory = Take(impl_->resources->Reserve(ResourceClass::Control, TScanPlanState::ControlBytes));
+                auto split = std::shared_ptr<TScanSplit>(new TScanSplit());
+                split->Memory_ = std::move(memory);
+                split->State_ = plan.State_;
+                split->Begin_ = begin;
+                split->End_ = position;
+                split->FileCount_ = files;
+                split->Bytes_ = bytes;
+                page.Splits.push_back(std::move(split));
+            }
+        }
+        // Expiry can cross while producing a page. Never commit a failed page.
+        (void)impl_->read_views.Resolve(*state.View, impl_->info.store_id, authorizationScope);
+        page.Done = position == membership.FileCount;
+        state.Next = position;
+        return page;
+#else
+        (void)capture;
+        throw Failure({"UNSUPPORTED_FEATURE", "scan splits require the native local scanner"});
+#endif
+    } catch (const Failure& error) {
+        impl_->CloseOnCorruption(error.detail);
+        return std::unexpected(error.detail);
+    } catch (const std::exception& error) {
+        return std::unexpected(ExceptionError(error));
+    }
+}
+
+Result<std::shared_ptr<ScanCursor>> Engine::ReadSplit(const TScanSplit& split,
+    std::string_view authorizationScope) const
+{
+    try {
+        const auto& state = *split.State_;
+        ScanRequest scan;
+        scan.projection = state.Request.Projection;
+        scan.predicate = state.Request.Filter;
+        scan.batch_rows = state.Request.BatchRows;
+        return ScanImpl(scan, nullptr, false, state.View.get(), state.Entry, authorizationScope, &split);
+    } catch (const std::exception& error) {
+        return std::unexpected(ExceptionError(error));
+    }
+}
+
+Status Engine::CancelScanPlan(const TScanSplitPlan& plan, std::string_view authorizationScope) const
+{
+    try {
+        std::lock_guard lock(impl_->state_mutex);
+        (void)impl_->read_views.Resolve(*plan.State_->View, impl_->info.store_id, authorizationScope);
+        plan.State_->Cancelled = true;
+        return {};
+    } catch (const Failure& error) {
+        return std::unexpected(error.detail);
     } catch (const std::exception& error) {
         return std::unexpected(ExceptionError(error));
     }

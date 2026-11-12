@@ -29,7 +29,9 @@ operation support by append/KV mode and effective limits. Discovery is separate
 from readiness. Contract 1.1 adds bounded, scope-bound native pinned read views
 with a coherent per-store snapshot vector; default 1.0 negotiation stays compatible.
 Read [read views](docs/development/READ_VIEWS.md) for TTL, quotas, release semantics
-and the private planning bridge. Splits, staged sessions, remote read views,
+and the private planning bridge. Contract 1.2 adds bounded [native scan splits](docs/development/SCAN_SPLITS.md)
+with repeatable independent workers over the original verified membership.
+Staged sessions, remote read views,
 stable C ABI and Flight are explicitly unsupported. Keep publication on the existing Engine path.
 Independent durable I/O and Arrow/Parquet/Iceberg
 storage primitives provide file production, staging, publication validation,
@@ -305,7 +307,9 @@ Preserve these boundaries when adding or changing engine behavior:
   the same state mutex. Delayed scans must reuse original verified-state aliasing
   ownership and resolved selectors. Never re-resolve Latest or remove a pinned
   root during retention/compaction. The registry shares the state mutex; its weak
-  destruction callbacks must run outside that lock. Facade destruction clears
+  destruction callbacks must run outside that lock. Split pages commit position only
+  after success; split admissions revalidate the original scope/incarnation/expiry.
+  Keep query-global limits in compute rather than applying them per split. Facade destruction clears
   pins without cancelling already admitted cursors; shutdown cancels cursors.
   Snapshot prefixes require the append-only profile; see
   [the index contract and benchmark](docs/development/SCAN_INDEX.md).

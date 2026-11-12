@@ -5,6 +5,7 @@
 #include "storage/metadata.h"
 #include "storage/read_view.h"
 #include "storage/scan.h"
+#include "storage/scan_split.h"
 #include "storage/types.h"
 
 #include <string_view>
@@ -100,6 +101,14 @@ public:
         size_t entry,
         const TReadViewScanRequest& request,
         std::string_view authorizationScope) const;
+    Result<std::shared_ptr<TScanSplitPlan>> PlanScan(std::shared_ptr<const TReadView> view,
+        size_t entry,
+        const TReadViewScanRequest& request,
+        std::string_view authorizationScope,
+        const TScanPlanOptions& options = {}) const;
+    Result<TScanSplitPage> NextScanSplits(const TScanSplitPlan& plan, std::string_view authorizationScope) const;
+    Result<std::shared_ptr<ScanCursor>> ReadSplit(const TScanSplit& split, std::string_view authorizationScope) const;
+    Status CancelScanPlan(const TScanSplitPlan& plan, std::string_view authorizationScope) const;
     // Renewal is capped at acquisition + MaxLifetime, never revives an expired pin.
     Status
     RenewReadView(const TReadView& view, std::string_view authorizationScope, std::chrono::milliseconds lifetime) const;
@@ -121,7 +130,8 @@ private:
         bool chronologicalFiles = false,
         const TReadView* view = nullptr,
         size_t entry = 0,
-        std::string_view authorizationScope = {}) const;
+        std::string_view authorizationScope = {},
+        const TScanSplit* split = nullptr) const;
     explicit Engine(std::shared_ptr<Impl> implementation);
     std::shared_ptr<Impl> impl_;
     friend struct detail::EngineFactory;

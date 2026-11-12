@@ -38,11 +38,12 @@ concurrent snapshot readers. Power-loss durability qualification is still pendin
   configurable through the SDK and [workbench](docs/development/WORKBENCH.md).
 - **Data inspection.** Browse schemas, snapshot history, statistics, files,
   Parquet row groups, scan plans, and execution profiles.
-- **Native compute contract.** Negotiate versions 1.0–1.1, operation support by append/KV
+- **Native compute contract.** Negotiate versions 1.0–1.2, operation support by append/KV
   mode and effective limits through the installed C++ API. See the
   [storage contract](docs/development/STORAGE_CONTRACT.md). Contract 1.1 adds bounded
   [native read views](docs/development/READ_VIEWS.md) for repeated scans across a
-  coherent per-store snapshot vector. Split execution, staging sessions, stable
+  coherent per-store snapshot vector. Contract 1.2 adds bounded, repeatable
+  [parallel scan splits](docs/development/SCAN_SPLITS.md). Staging sessions, stable
   C ABI, remote read views and Flight remain unsupported.
 - **Connected tools.** Manage multiple databases through one authenticated
   server. Read and write through the UI, CLI, or Python SDK; retrieve scan results

@@ -549,9 +549,12 @@ private:
             std::shared_ptr<ResourceReservation> outputMemory;
             if (!BatchReader_) {
                 if (PendingFiles_.empty() && Plan_.Index) {
-                    while (NextIndexedFile_ < Plan_.FileCount) {
-                        const auto offset =
-                            Context_.ChronologicalFiles ? NextIndexedFile_++ : Plan_.FileCount - ++NextIndexedFile_;
+                    while (NextIndexedFile_ <
+                        (Context_.FileRange ? Context_.FileRange->second - Context_.FileRange->first : Plan_.FileCount))
+                    {
+                        const auto offset = Context_.FileRange
+                            ? Context_.FileRange->first + NextIndexedFile_++
+                            : (Context_.ChronologicalFiles ? NextIndexedFile_++ : Plan_.FileCount - ++NextIndexedFile_);
                         const auto& file = Plan_.Index->Files[offset];
                         if (!Plan_.Index->KeyValue ||
                             (Plan_.SequenceNumber && file.IntroducedSequence <= *Plan_.SequenceNumber &&
@@ -944,6 +947,12 @@ Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanReq
                                              request.selector,
                                              context.Cache.get(),
                                              context.RootBytes));
+        if (context.FileRange) {
+            RequireInput(context.VerifiedState && plan.Index && !context.ChronologicalFiles &&
+                    context.FileRange->first <= context.FileRange->second &&
+                    context.FileRange->second <= plan.FileCount,
+                "split range requires verified membership within the captured view");
+        }
         if (context.ChronologicalFiles) {
             RequireInput(context.Collection.mode == CollectionMode::Append,
                 "chronological sources require an append collection");

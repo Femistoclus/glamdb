@@ -53,6 +53,8 @@ struct TScanContext
     int64_t RootBytes = HistoryLimits{}.max_root_file_bytes;
     // Internal migration source order: oldest append files first, preserving rows.
     bool ChronologicalFiles = false;
+    // Half-open offsets in the immutable verified inventory, never caller paths.
+    std::optional<std::pair<size_t, size_t>> FileRange{};
 };
 
 Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanRequest& request);

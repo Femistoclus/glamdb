@@ -211,3 +211,14 @@ reservations; uncertain attempts retain the appropriate envelope until recovery.
 root/manifest/list/footer and recovery budgets. Public larger root limits also
 reach metadata readers and their temporary memory envelopes; default admission
 units remain compatible.
+
+## Native split owners
+
+Contract 1.2 [scan splits](SCAN_SPLITS.md) share the original read-view pin and
+charge plan requests, retained output schema and opaque descriptors independently.
+Plans reserve 4 KiB Control plus 256 KiB + twice measured predicate capacity in
+Metadata, and retain the scanner schema’s 16 MiB Metadata envelope. Each descriptor
+reserves 4 KiB Control including its page-vector slot; no inventory is copied.
+Failed pages refund partial allocations before any position advance. Explicit
+view termination releases registry pins; surviving handles keep their own charges
+until final destruction. See the canonical [matrix](RESOURCE_BUDGETS.md).

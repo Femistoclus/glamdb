@@ -80,7 +80,7 @@ void CheckContract(glamdb::Engine& engine, bool storage)
             glamdb::EStorageFeature::PreserveAppendDuplicates};
     }
     const auto contract = Take(engine.NegotiateStorageContract(request), "negotiate native contract");
-    Check(contract.Version == glamdb::TStorageContractVersion{1, 1} &&
+    Check(contract.Version == glamdb::TStorageContractVersion{1, 2} &&
             contract.EffectiveLimits.Engine.max_collections == engine.GetLimits().max_collections &&
             contract.EffectiveLimits.SchemaFields == 128 && contract.EffectiveLimits.AppendRows == 10000 &&
             contract.HasOperation(glamdb::EStorageOperation::Scan) == storage &&
@@ -89,6 +89,15 @@ void CheckContract(glamdb::Engine& engine, bool storage)
     Check(contract.HasFeature(glamdb::EStorageFeature::IndependentReadView) == storage &&
             contract.EffectiveLimits.ReadViews.has_value() == storage,
         "native read-view feature and quotas are gated together");
+    Check(contract.HasFeature(glamdb::EStorageFeature::ScanSplits) == storage &&
+            contract.HasOperation(glamdb::EStorageOperation::ReadSplit) == storage &&
+            contract.EffectiveLimits.ScanSplits.has_value() == storage,
+        "native split discovery and limits are gated together");
+    auto version11 = request;
+    version11.MaxVersion = {1, 1};
+    const auto previous = Take(engine.NegotiateStorageContract(version11), "negotiate version 1.1");
+    Check(!previous.HasFeature(glamdb::EStorageFeature::ScanSplits) && !previous.EffectiveLimits.ScanSplits,
+        "version 1.1 does not expose splits");
     request.Mode = glamdb::CollectionMode::KeyValue;
     request.RequiredFeatures.clear();
     request.RequiredOperations.clear();
@@ -309,6 +318,8 @@ void Write(glamdb::Engine& engine, const std::string& receiptPath)
         {CollectionId, OperationA, {glamdb::SnapshotPreconditionKind::NoSnapshot, 0}, {MakeBatch(RowsA)}});
     const auto& receiptA = CheckReceipt(a, OperationA, 3);
     auto pinned = Take(engine.AcquireReadView({{{CollectionId}}, "installed-consumer"}), "acquire read view");
+    auto splitPlan = Take(engine.PlanScan(pinned, 0, {}, "installed-consumer", {.SplitsPerPage = 1, .TargetBytes = 1}),
+        "plan pinned split");
     Check(!receiptA.parent_snapshot_id, "first snapshot has no parent");
     auto fixedLatest = Take(engine.Scan({.collection_id = CollectionId, .batch_rows = 1}), "fixed latest scan");
     const auto b = engine.AppendDurable({CollectionId,
@@ -318,7 +329,20 @@ void Write(glamdb::Engine& engine, const std::string& receiptPath)
     const auto& receiptB = CheckReceipt(b, OperationB, 2);
     auto delayed = Take(engine.ScanReadView(*pinned, 0, {}, "installed-consumer"), "delayed pinned scan");
     CheckRows(*delayed, RowsA, glamdb::SnapshotSelector::Id(receiptA.snapshot_id));
+    const auto page = Take(engine.NextScanSplits(*splitPlan, "installed-consumer"), "page pinned splits after append");
+    Check(page.Done && page.Splits.size() == 1 && page.Splits[0]->FileCount() == 1 &&
+            page.Splits[0]->EstimatedBytes() > 0,
+        "bounded physical split covers original file");
+    splitPlan.reset();
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        auto split = Take(engine.ReadSplit(*page.Splits[0], "installed-consumer"), "replay split");
+        CheckRows(*split, RowsA, glamdb::SnapshotSelector::Id(receiptA.snapshot_id));
+    }
+    Check(!engine.ReadSplit(*page.Splits[0], "wrong-scope"), "split rejects wrong authorization scope");
+    auto admittedSplit = Take(engine.ReadSplit(*page.Splits[0], "installed-consumer"), "admit split before release");
     Check(engine.ReleaseReadView(*pinned, "installed-consumer").has_value(), "release read view");
+    Check(!engine.ReadSplit(*page.Splits[0], "installed-consumer"), "released view rejects split replay");
+    CheckRows(*admittedSplit, RowsA, glamdb::SnapshotSelector::Id(receiptA.snapshot_id));
     Check(receiptA.snapshot_id != receiptB.snapshot_id && receiptB.parent_snapshot_id == receiptA.snapshot_id,
         "second snapshot extends the first");
     CheckRows(*fixedLatest, RowsA, glamdb::SnapshotSelector::Id(receiptA.snapshot_id));

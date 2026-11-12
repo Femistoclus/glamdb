@@ -1,6 +1,6 @@
 # Compute-facing native storage contract
 
-The installed `storage/contract.h` defines native semantic contracts **1.0** and **1.1**.
+The installed `storage/contract.h` defines native semantic contracts **1.0**, **1.1** and **1.2**.
 `Engine::NegotiateStorageContract(request)` describes supported operations for an
 intended collection mode and returns the engine's effective limits. It is a
 convenience over the pure `glamdb::NegotiateStorageContract(request,
@@ -44,8 +44,8 @@ auto contract = engine.NegotiateStorageContract(request);
 
 Versions are `(Major, Minor)` pairs ordered lexicographically. The request range
 is inclusive and negotiation selects the highest implemented version in it.
-Versions 1.0 and 1.1 are implemented; a range spanning several majors selects
-1.1. The default request range remains [1.0, 1.0], preserving existing negotiation
+Versions 1.0, 1.1 and 1.2 are implemented; a range spanning several majors selects
+1.2. The default request range remains [1.0, 1.0], preserving existing negotiation
 and feature results. New view consumers must include 1.1 and require
 `IndependentReadView`; a 1.0-only request with that requirement fails.
 A new major denotes incompatible semantics; a minor may add optional capabilities
@@ -101,6 +101,8 @@ operations are conservatively withheld from custom backends.
 | `AcquireReadView` / `ReadViewInfo` | `AcquireReadView` / `GetReadViewInfo` (1.1, native only) | Yes | Yes |
 | `ScanReadView` | `ScanReadView` by captured entry index (1.1, native only) | Yes | Yes |
 | `RenewReadView` / `ReleaseReadView` / `CancelReadView` | Corresponding Engine methods (1.1, native only) | Yes | Yes |
+| `PlanScan` / `NextScanSplits` | Bounded opaque split planning (1.2, native only) | Yes | Yes |
+| `ReadSplit` / `CancelScanPlan` | Repeatable split cursors / plan cancellation (1.2, native only) | Yes | Yes |
 | `Append` | `AppendDurable` | Yes | No |
 | `BulkAppend` | `BulkAppendDurable` | Yes | No |
 | `Upsert` / `Delete` | `UpsertDurable` / `DeleteDurable` | No | Yes |
@@ -235,14 +237,16 @@ still fail due to `RECOVERY_REQUIRED`, `OPERATION_IN_PROGRESS`,
 `RESOURCE_EXHAUSTED`, cancellation, corruption or I/O errors. Discovery is not a
 reservation, a readiness result or a power-loss durability qualification.
 
-The following `EStorageFeature` values are reserved descriptions of future
-capabilities and are **never advertised by 1.0**: `IndependentReadView`,
-`ScanSplits`, `StagedWrites`, `StableCAbi`, `ArrowFlight`, `RemoteDescriptors`,
-`Overwrite`, `Merge`, `SqlMutations`, `SchemaEvolution` and
-`CrossCollectionTransactions`. Version 1.1 advertises only `IndependentReadView`
-from this list, only for the local scanner. Requiring any other listed feature
-fails explicitly in either version. Native
-scan cursors and bulk sources do not imply support for these protocols.
+Version 1.0 advertises neither `IndependentReadView` nor `ScanSplits`. Version
+1.1 adds `IndependentReadView` only for the local scanner; version 1.2 also adds
+`ScanSplits` and `EffectiveLimits.ScanSplits`. See [scan splits](SCAN_SPLITS.md)
+for paging, whole-file target size, original-view lifetime, quotas and explicit
+rejection of global LIMIT.
+
+`StagedWrites`, `StableCAbi`, `ArrowFlight`, `RemoteDescriptors`, `Overwrite`,
+`Merge`, `SqlMutations`, `SchemaEvolution` and `CrossCollectionTransactions`
+remain reserved and unimplemented. Requiring one fails explicitly in all three
+versions. Native scan cursors and bulk sources do not imply these protocols.
 
 ## Executable evidence
 
