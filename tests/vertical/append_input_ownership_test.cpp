@@ -1,8 +1,9 @@
 // Caller-owned Arrow buffers and what an append commits: the committed rows
 // and bound hash are those of the owned copy taken during the call, and input
-// changed while a call is queued is rejected before binding.
+// changed between fingerprinting and the owned copy is rejected before binding.
 
 #include "core/api/canonical.h"
+#include "tests/support/access_gate_vfs.h"
 #include "tests/vertical/vertical_support.h"
 
 #include <chrono>
@@ -19,6 +20,8 @@ using namespace glamdb::vertical;
 class AppendInputOwnershipTest : public ::testing::Test
 {
 protected:
+    // Declared first: destroyed after the engine closes its SQLite connection.
+    AccessGateVfs Gate_;
     test::TempDir Temporary_;
     std::shared_ptr<THookBackend> Hooks_;
     std::shared_ptr<Engine> Engine_;
@@ -26,7 +29,8 @@ protected:
     void SetUp() override
     {
         auto created = detail::EngineFactory::CreateWith({test::store_id, (Temporary_.path / "store").string()},
-            THookBackend::Factory(Hooks_));
+            THookBackend::Factory(Hooks_),
+            Gate_.Name());
         ASSERT_TRUE(created) << created.error().message;
         Engine_ = *created;
         ASSERT_EQ(Engine_->CreateCollection({test::collection_id, "events", Schema}).disposition,
@@ -125,56 +129,54 @@ TEST_F(AppendInputOwnershipTest, SlicedAndChunkedInputStoresExactValues)
     EXPECT_EQ(Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {batch}}), outcome);
 }
 
-// A queued call fingerprints its input before it waits for the writer. If the
-// caller changes the buffers meanwhile, the owned copy no longer matches the
-// fingerprint (or its reservation) and the call fails before binding.
-TEST_F(AppendInputOwnershipTest, InputChangedWhileQueuedIsRejectedBeforeBinding)
-{
-    for (const bool changeShape : {false, true}) {
-        SCOPED_TRACE(changeShape ? "shape" : "value");
-        const auto holderID = changeShape ? ThirdOperation : FirstOperation;
-        std::promise<void> entered;
-        std::promise<void> release;
-        auto released = release.get_future().share();
-        Hooks_->AfterPrepareAppend = [&](const detail::BoundOperation&) {
-            entered.set_value();
-            released.wait();
-        };
-        auto holder = std::async(std::launch::async, [&] {
-            return Engine_->AppendDurable({test::collection_id, holderID, {}, {Batch(SecondRows)}});
-        });
-        ASSERT_EQ(entered.get_future().wait_for(10s), std::future_status::ready);
+// A call fingerprints the caller's buffers before admission and copies them
+// after its authoritative outcome lookup. The gate pauses that lookup (the
+// first catalog read after the writer is acquired), so the buffers change
+// deterministically after fingerprinting and before the owned copy. The owned
+// copy then no longer matches the fingerprint (value change) or its
+// reservation (shape change) and the call fails before binding.
+class TInputChangedAfterFingerprintTest
+    : public AppendInputOwnershipTest
+    , public ::testing::WithParamInterface<bool>
+{ };
 
-        const auto batch = Batch(FirstRows);
-        auto queued = std::async(std::launch::async, [&] {
-            return Engine_->AppendDurable({test::collection_id, SecondOperation, {}, {batch}});
-        });
-        ASSERT_EQ(queued.wait_for(300ms), std::future_status::timeout);
-        if (changeShape) {
-            // Keys "duplicate","duplicate","other" become one byte shorter.
-            const auto& keys = *batch->column_data(0);
-            auto* offsets = reinterpret_cast<int32_t*>(Mutable(*batch, 0, 1)) + keys.offset;
-            offsets[3] -= 1;
-        } else {
-            SetValue(*batch, 0, 42);
-        }
-        release.set_value();
-        ASSERT_EQ(holder.get().disposition, CommitDisposition::Committed);
-        Hooks_->AfterPrepareAppend = {};
-        const auto outcome = queued.get();
-        EXPECT_EQ(outcome.disposition, CommitDisposition::DefinitelyNotCommitted);
-        ASSERT_TRUE(outcome.error);
-        EXPECT_EQ(outcome.error->code, "INVALID_ARGUMENT");
-        EXPECT_EQ(outcome.error->message, "Arrow input changed during append");
-        const auto found = Engine_->FindAppendOutcome(test::collection_id, SecondOperation);
-        ASSERT_TRUE(found);
-        EXPECT_FALSE(*found) << "a rejected input must not bind its operation ID";
+TEST_P(TInputChangedAfterFingerprintTest, IsRejectedBeforeBinding)
+{
+    const bool changeShape = GetParam();
+    const auto batch = Batch(FirstRows);
+    std::future<AppendOutcome> append;
+    // Destroyed before `append`, so a failed assertion cannot leave the call
+    // paused and the future's destructor waiting for it.
+    ReleaseOnExit releaseOnExit{Gate_};
+    Gate_.Arm();
+    append = std::async(std::launch::async, [&] {
+        return Engine_->AppendDurable({test::collection_id, SecondOperation, {}, {batch}});
+    });
+    ASSERT_EQ(Gate_.Entered().wait_for(10s), std::future_status::ready);
+    if (changeShape) {
+        // Keys "duplicate","duplicate","other" become one byte shorter.
+        const auto& keys = *batch->column_data(0);
+        auto* offsets = reinterpret_cast<int32_t*>(Mutable(*batch, 0, 1)) + keys.offset;
+        offsets[3] -= 1;
+    } else {
+        SetValue(*batch, 0, 42);
     }
-    EXPECT_EQ(Read(), Expected({&SecondRows, &SecondRows}));
+    Gate_.Release();
+    const auto outcome = append.get();
+    EXPECT_EQ(outcome.disposition, CommitDisposition::DefinitelyNotCommitted);
+    ASSERT_TRUE(outcome.error);
+    EXPECT_EQ(outcome.error->code, "INVALID_ARGUMENT");
+    EXPECT_EQ(outcome.error->message, "Arrow input changed during append");
+    const auto found = Engine_->FindAppendOutcome(test::collection_id, SecondOperation);
+    ASSERT_TRUE(found);
+    EXPECT_FALSE(*found) << "a rejected input must not bind its operation ID";
+    EXPECT_TRUE(Read().empty());
     // The unbound ID remains usable for new content.
     EXPECT_EQ(Engine_->AppendDurable({test::collection_id, SecondOperation, {}, {Batch(FirstRows)}}).disposition,
         CommitDisposition::Committed);
 }
+
+INSTANTIATE_TEST_SUITE_P(ValueOrShape, TInputChangedAfterFingerprintTest, ::testing::Bool());
 
 } // namespace
 } // namespace glamdb
