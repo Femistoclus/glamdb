@@ -1,0 +1,73 @@
+{
+  "apiVersion": "monitoring.coreos.com/v1",
+  "kind": "PrometheusRule",
+  "metadata": {
+    "name": "glamdb-application",
+    "namespace": "monitoring",
+    "labels": {
+      "release": "monitoring"
+    }
+  },
+  "spec": {
+    "groups": [
+      {
+        "name": "glamdb-application",
+        "interval": "30s",
+        "rules": [
+          {
+            "record": "glamdb:http_requests:rate5m",
+            "expr": "sum by (cluster,service) (rate(glamdb_gateway_http_requests_total{job=\"glamdb-gateway\"}[5m]))"
+          },
+          {
+            "record": "glamdb:http_errors:rate5m",
+            "expr": "sum by (cluster,service) (rate(glamdb_gateway_http_requests_total{job=\"glamdb-gateway\",status_class=\"5xx\"}[5m]))"
+          },
+          {
+            "record": "glamdb:http_error:ratio5m",
+            "expr": "glamdb:http_errors:rate5m / on (cluster,service) (glamdb:http_requests:rate5m > 0)"
+          },
+          {
+            "record": "glamdb:http_request_duration_seconds:p50",
+            "expr": "histogram_quantile(0.5, sum by (cluster,service,le) (rate(glamdb_gateway_http_request_duration_seconds_bucket{job=\"glamdb-gateway\"}[5m])))"
+          },
+          {
+            "record": "glamdb:http_request_duration_seconds:p95",
+            "expr": "histogram_quantile(0.95, sum by (cluster,service,le) (rate(glamdb_gateway_http_request_duration_seconds_bucket{job=\"glamdb-gateway\"}[5m])))"
+          },
+          {
+            "record": "glamdb:http_request_duration_seconds:p99",
+            "expr": "histogram_quantile(0.99, sum by (cluster,service,le) (rate(glamdb_gateway_http_request_duration_seconds_bucket{job=\"glamdb-gateway\"}[5m])))"
+          },
+          {
+            "record": "glamdb:native_operations:rate5m",
+            "expr": "sum by (cluster,service,operation,outcome) (rate(glamdb_operations_total{job=\"glamdb-core\"}[5m]) and on (cluster,service,instance) (up{job=\"glamdb-core\"} == 1))"
+          },
+          {
+            "record": "glamdb:podset_owner",
+            "expr": "max by (cluster,namespace,pod,podset) (label_join(kube_pod_owner{owner_is_controller=\"true\"},\"podset\",\"/\",\"owner_kind\",\"owner_name\"))"
+          },
+          {
+            "record": "glamdb:pvc_available:ratio",
+            "expr": "max by (cluster,namespace,persistentvolumeclaim) (kubelet_volume_stats_available_bytes) / max by (cluster,namespace,persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes > 0)"
+          },
+          {
+            "record": "glamdb:pod_pvc_available:ratio",
+            "expr": "min by (cluster,namespace,pod) (glamdb:pvc_available:ratio * on (cluster,namespace,persistentvolumeclaim) group_right () (max by (cluster,namespace,pod,persistentvolumeclaim) (kube_pod_spec_volumes_persistentvolumeclaims_info)))"
+          },
+          {
+            "record": "glamdb:podset_pvc_available:p00",
+            "expr": "quantile by (cluster,namespace,podset) (0, glamdb:pod_pvc_available:ratio * on (cluster,namespace,pod) group_left (podset) glamdb:podset_owner)"
+          },
+          {
+            "record": "glamdb:podset_pvc_available:p50",
+            "expr": "quantile by (cluster,namespace,podset) (0.5, glamdb:pod_pvc_available:ratio * on (cluster,namespace,pod) group_left (podset) glamdb:podset_owner)"
+          },
+          {
+            "record": "glamdb:podset_pvc_available:p100",
+            "expr": "quantile by (cluster,namespace,podset) (1, glamdb:pod_pvc_available:ratio * on (cluster,namespace,pod) group_left (podset) glamdb:podset_owner)"
+          }
+        ]
+      }
+    ]
+  }
+}

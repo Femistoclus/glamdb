@@ -1,0 +1,12 @@
+apiVersion: 1
+providers:
+  - name: GlamDB
+    orgId: 1
+    folder: GlamDB
+    type: file
+    disableDeletion: false
+    editable: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

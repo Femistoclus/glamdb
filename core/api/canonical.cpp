@@ -52,29 +52,29 @@ void ValidateSchema(const SchemaSpec& schema)
     }
 }
 
-void EncodeCell(Encoder& encoder, const FieldSpec& field, Cell& cell)
+void EncodeCell(TCanonicalHasher& encoder, const FieldSpec& field, Cell& cell)
 {
     if (std::holds_alternative<std::monostate>(cell)) {
         Require(field.nullable, "INVALID_ARGUMENT", "NULL in required field");
-        encoder.Number<uint8_t>(0);
+        encoder.AddNumber<uint8_t>(0);
         return;
     }
     Require(cell.index() == static_cast<size_t>(field.type), "INVALID_ARGUMENT", "value has the wrong type");
-    encoder.Number<uint8_t>(1);
+    encoder.AddNumber<uint8_t>(1);
     switch (field.type) {
         case FieldType::String: {
             const auto& value = std::get<std::string>(cell);
             Require(value.size() <= (field.name == "key" ? 1024U : 1024U * 1024) && ValidUtf8(value),
                 "INVALID_ARGUMENT",
                 "invalid UTF-8 or oversized string");
-            encoder.Text(value);
+            encoder.AddText(value);
             break;
         }
         case FieldType::Bool:
-            encoder.Number<uint8_t>(std::get<bool>(cell) ? 1 : 0);
+            encoder.AddNumber<uint8_t>(std::get<bool>(cell) ? 1 : 0);
             break;
         case FieldType::Int64:
-            encoder.Number(std::get<int64_t>(cell));
+            encoder.AddNumber(std::get<int64_t>(cell));
             break;
         case FieldType::Float64: {
             auto& value = std::get<double>(cell);
@@ -82,7 +82,7 @@ void EncodeCell(Encoder& encoder, const FieldSpec& field, Cell& cell)
             if (value == 0) {
                 value = 0.0;
             }
-            encoder.Number(std::bit_cast<uint64_t>(value));
+            encoder.AddNumber(std::bit_cast<uint64_t>(value));
             break;
         }
         case FieldType::TimestampUsUtc: {
@@ -90,7 +90,7 @@ void EncodeCell(Encoder& encoder, const FieldSpec& field, Cell& cell)
             Require(value >= -62135596800000000LL && value <= 253402300799999999LL,
                 "INVALID_ARGUMENT",
                 "timestamp outside years 0001..9999");
-            encoder.Number(value);
+            encoder.AddNumber(value);
             break;
         }
     }
@@ -217,6 +217,39 @@ std::string Sha256State::Digest() const
     return result;
 }
 
+void TCanonicalHasher::Flush()
+{
+    Hash_.Update(std::string_view(Buffer_.data(), Used_));
+    Used_ = 0;
+}
+
+void TCanonicalHasher::AddBytes(std::string_view bytes)
+{
+    Bytes_ += bytes.size();
+    if (bytes.size() > Buffer_.size() - Used_) {
+        Flush();
+        if (bytes.size() >= Buffer_.size()) {
+            Hash_.Update(bytes);
+            return;
+        }
+    }
+    std::copy_n(bytes.data(), bytes.size(), Buffer_.data() + Used_);
+    Used_ += bytes.size();
+}
+
+void TCanonicalHasher::AddText(std::string_view text)
+{
+    Require(text.size() <= 16ULL * 1024 * 1024, "RESOURCE_EXHAUSTED", "encoded string too large");
+    AddNumber(static_cast<uint32_t>(text.size()));
+    AddBytes(text);
+}
+
+std::string TCanonicalHasher::ComputeDigest()
+{
+    Flush();
+    return Hash_.Digest();
+}
+
 std::string Sha256(std::string_view input)
 {
     Sha256State hash;
@@ -322,9 +355,9 @@ Result<NormalizedInput> Normalize(const SchemaSpec& schema, std::string_view col
         if (!header) {
             throw Failure(header.error());
         }
-        Encoder out;
-        out.bytes = *header;
-        const auto header_size = out.bytes.size();
+        TCanonicalHasher out;
+        out.AddBytes(*header);
+        const auto header_size = out.GetSize();
         NormalizedInput result;
         result.rows.reserve(rows.size());
         for (auto& row : rows) {
@@ -341,18 +374,18 @@ Result<NormalizedInput> Normalize(const SchemaSpec& schema, std::string_view col
             } else {
                 normalized = std::move(row);
             }
-            const auto before = out.bytes.size();
+            const auto before = out.GetSize();
             for (size_t i = 0; i < normalized.size(); ++i) {
                 EncodeCell(out, schema.fields[i], normalized[i]);
-                Require(out.bytes.size() - before <= 2ULL * 1024 * 1024 &&
-                        out.bytes.size() - header_size <= 16ULL * 1024 * 1024,
+                Require(out.GetSize() - before <= 2ULL * 1024 * 1024 &&
+                        out.GetSize() - header_size <= 16ULL * 1024 * 1024,
                     "INPUT_TOO_LARGE",
                     "append exceeds decoded input limit");
             }
             result.rows.push_back(std::move(normalized));
         }
-        result.decoded_bytes = out.bytes.size() - header_size;
-        result.payload_hash = Sha256(out.bytes);
+        result.decoded_bytes = out.GetSize() - header_size;
+        result.payload_hash = out.ComputeDigest();
         return result;
     } catch (const Failure& error) {
         auto detail = error.detail;

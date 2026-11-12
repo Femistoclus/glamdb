@@ -3,6 +3,10 @@
 #include "apps/server/routes.h"
 #include "core/telemetry/structured_log.h"
 
+namespace NGlamDB::NTelemetry {
+class TStructuredLogger;
+}
+
 namespace glamdb::NServer {
 // SIGINT/SIGTERM close admission and cancel scans; accepted writes drain before returning.
 void RunServer(TRoutes& routes,

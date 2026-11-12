@@ -1,0 +1,11 @@
+# Production gateway, identity clients and optional stderr/metrics adapters.
+Authlib==1.9.5
+joserfc==1.8.0
+python-keycloak==7.1.1
+cerbos==0.16.1
+starlette-csrf==3.0.0
+starlette==1.10.0
+uvicorn==0.54.0
+httpx==0.28.1
+prometheus-client==0.26.0
+python-json-logger==4.2.0

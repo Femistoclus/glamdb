@@ -12,6 +12,11 @@ This mode publishes the same pink workbench as static HTML/CSS/ES modules on
 GitHub Pages. A visitor needs only a browser. There is no token prompt, shared
 API, account database or local Python prerequisite.
 
+For restricted access, use the separate [OIDC HTTPS deployment](SSO_OPERATIONS.md).
+It checks every resource on the server and needs hosting that can run Caddy.
+The existing GitHub Pages publication stays anonymous until it is explicitly
+retired after a protected replacement has been deployed and verified.
+
 Every page instance owns an isolated bounded BrowserDemoAPI simulation. Visitors
 can create fixed-schema collections, append duplicate rows, build typed filters,
 read initial/historical snapshots, inspect synthetic metadata and export their

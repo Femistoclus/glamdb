@@ -70,9 +70,10 @@ def make_tls_material(directory: Path) -> TLSMaterial:
 class MockHTTPServer:
     """Own a fresh loopback subprocess and always reap it, including on failure."""
 
-    def __init__(self, directory: Path, *, tls: TLSMaterial | None = None):
+    def __init__(self, directory: Path, *, tls: TLSMaterial | None = None, token=TOKEN):
         self.directory = directory
         self.tls = tls
+        self.token = token
         self.process = None
         self._log = None
         self.url = None
@@ -95,7 +96,9 @@ class MockHTTPServer:
                            "--fd", str(listener.fileno()), "--ui-dir", str(ui)]
                 if self.tls is not None:
                     command += ["--certfile", str(self.tls.certificate), "--keyfile", str(self.tls.key)]
-                self.process = subprocess.Popen(command, env=package_environment(), cwd=REPOSITORY,
+                environment = package_environment()
+                environment["GLAMDB_TOKEN"] = self.token
+                self.process = subprocess.Popen(command, env=environment, cwd=REPOSITORY,
                                                 pass_fds=(listener.fileno(),), stdin=subprocess.DEVNULL,
                                                 stdout=self._log, stderr=subprocess.STDOUT)
             self.url = f"{'https' if self.tls else 'http'}://127.0.0.1:{port}"

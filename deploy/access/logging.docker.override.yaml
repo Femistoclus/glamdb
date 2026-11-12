@@ -1,0 +1,14 @@
+# Apply after deploy/logging/compose.yaml in the assembled release.
+# Requires Docker Compose >=2.24.4 for !override; all relative paths resolve
+# against deploy/logging/ (the first Compose file), not this file's directory.
+services:
+  alloy:
+    group_add: !reset []
+    environment:
+      GLAMDB_DOCKER_LOG_GLOB: /var/log/glamdb-gateway/*-json.log
+      GLAMDB_JOURNAL_MATCHES: !reset null
+    volumes: !override
+      - ./config.alloy:/etc/alloy/config.alloy:ro
+      - ./sources/docker-json.alloy:/etc/alloy/source.alloy:ro
+      - ${GLAMDB_GATEWAY_LOG_DIRECTORY:?set the current gateway container log directory}:/var/log/glamdb-gateway:ro
+      - ${GLAMDB_ALLOY_STATE_DIR:?set an owned Alloy state directory}:/var/lib/alloy

@@ -1,0 +1,1111 @@
+{
+  "uid": "glamdb-macos-node",
+  "title": "GlamDB · macOS host",
+  "description": "Official node_exporter 1.12.1 runs on the actual Darwin arm64 Mac, separate from the Linux Podman VM. Internal memory is resident anonymous pages from Mach internal_page_count (the same source as vm_stat Anonymous pages); compressed memory is separate. Active/inactive, anonymous, wired and purgeable categories overlap: never add these series. Free memory includes speculative pages. Unsupported thermal, Linux MemAvailable/iowait/PSI/major-fault and disk queue/busy metrics are unavailable. Disk service time is a driver timing proxy. APFS volumes can share capacity; do not sum them.",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "tags": [
+    "glamdb",
+    "local",
+    "standard-collectors"
+  ],
+  "refresh": "15s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "instance",
+        "label": "Instance",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(node_uname_info{job=\"macos-node\"},instance)",
+        "query": {
+          "query": "label_values(node_uname_info{job=\"macos-node\"},instance)",
+          "refId": "instance"
+        },
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 1,
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Source and scope",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 4
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Official node_exporter 1.12.1 runs on the actual Darwin arm64 Mac, separate from the Linux Podman VM. Internal memory is resident anonymous pages from Mach internal_page_count (the same source as vm_stat Anonymous pages); compressed memory is separate. Active/inactive, anonymous, wired and purgeable categories overlap: never add these series. Free memory includes speculative pages. Unsupported thermal, Linux MemAvailable/iowait/PSI/major-fault and disk queue/busy metrics are unavailable. Disk service time is a driver timing proxy. APFS volumes can share capacity; do not sum them."
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Collector scrape",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=\"macos-node\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Physical RAM",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 4,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "node_memory_total_bytes{job=\"macos-node\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Anonymous resident memory",
+      "description": "Mach internal_page_count × host page size, source/live qualified for this pin. Excludes compressed pages.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "node_memory_internal_bytes{job=\"macos-node\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Data volume available",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 4,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "node_filesystem_avail_bytes{job=\"macos-node\",instance=~\"$instance\",mountpoint=\"/System/Volumes/Data\"}",
+          "legendFormat": "{{instance}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "CPU busy",
+      "description": "Average across actual logical CPUs; busy = 1 - idle. Darwin has no Linux iowait mode.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * (1 - avg by(instance) (rate(node_cpu_seconds_total{job=\"macos-node\",instance=~\"$instance\",mode=\"idle\"}[$__rate_interval])))",
+          "legendFormat": "{{instance}} busy",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "CPU modes",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * avg by(instance,mode) (rate(node_cpu_seconds_total{job=\"macos-node\",instance=~\"$instance\",mode!=\"idle\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} {{mode}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Anonymous, compressed and wired memory",
+      "description": "These are named kernel categories, not additive components of a single used-memory total.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 15,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "node_memory_internal_bytes{job=\"macos-node\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} anonymous resident",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "node_memory_compressed_bytes{job=\"macos-node\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} compressor physical",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "node_memory_wired_bytes{job=\"macos-node\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} wired",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Memory activity and reclaimable hints",
+      "description": "Inactive and purgeable are not equivalent to Linux MemAvailable. Categories overlap.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 15,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "node_memory_active_bytes{job=\"macos-node\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} active",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "node_memory_inactive_bytes{job=\"macos-node\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} inactive",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "node_memory_free_bytes{job=\"macos-node\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} free including speculative",
+          "range": true
+        },
+        {
+          "refId": "D",
+          "expr": "node_memory_purgeable_bytes{job=\"macos-node\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} purgeable",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Swap capacity and use",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "node_memory_swap_used_bytes{job=\"macos-node\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} swap used",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "node_memory_swap_total_bytes{job=\"macos-node\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} swap total",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Load average",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 22,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "node_load1{job=\"macos-node\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} load1",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "node_load5{job=\"macos-node\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} load5",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "node_load15{job=\"macos-node\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} load15",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Filesystem available space",
+      "description": "APFS snapshots and volumes may share their physical free pool. Per-volume values only; no sum.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 29,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "node_filesystem_avail_bytes{job=\"macos-node\",instance=~\"$instance\",mountpoint=~\"/|/System/Volumes/Data|/Volumes/.*\"}",
+          "legendFormat": "{{instance}} {{mountpoint}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Filesystem capacity used",
+      "description": "1 - space available to an unprivileged user / filesystem size. APFS free capacity is shared.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 29,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * (1 - node_filesystem_avail_bytes{job=\"macos-node\",instance=~\"$instance\",mountpoint=~\"/|/System/Volumes/Data|/Volumes/.*\"} / node_filesystem_size_bytes{job=\"macos-node\",instance=~\"$instance\",mountpoint=~\"/|/System/Volumes/Data|/Volumes/.*\"})",
+          "legendFormat": "{{instance}} {{mountpoint}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Physical disk throughput",
+      "description": "IORegistry whole-device counters. Logical and physical devices must not be added together.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 36,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(node_disk_read_bytes_total{job=\"macos-node\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} {{device}} read",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "rate(node_disk_written_bytes_total{job=\"macos-node\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} {{device}} write",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Physical disk operations",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 36,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(node_disk_reads_completed_total{job=\"macos-node\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} {{device}} reads",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "rate(node_disk_writes_completed_total{job=\"macos-node\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} {{device}} writes",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "iops",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Mean disk service time",
+      "description": "Driver Total Time / Operations per direction; this is not end-to-end request latency or queue wait. No operations means no data.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 43,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "1000 * rate(node_disk_read_time_seconds_total{job=\"macos-node\",instance=~\"$instance\"}[$__rate_interval]) / rate(node_disk_reads_completed_total{job=\"macos-node\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} {{device}} read",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "1000 * rate(node_disk_write_time_seconds_total{job=\"macos-node\",instance=~\"$instance\"}[$__rate_interval]) / rate(node_disk_writes_completed_total{job=\"macos-node\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} {{device}} write",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Disk errors and retries",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 43,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(node_disk_read_errors_total{job=\"macos-node\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{device}} read errors",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "rate(node_disk_write_errors_total{job=\"macos-node\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{device}} write errors",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "rate(node_disk_read_retries_total{job=\"macos-node\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{device}} read retries",
+          "range": true
+        },
+        {
+          "refId": "D",
+          "expr": "rate(node_disk_write_retries_total{job=\"macos-node\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{device}} write retries",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Network throughput",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 50,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(node_network_receive_bytes_total{job=\"macos-node\",instance=~\"$instance\",device!=\"lo0\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} {{device}} receive",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "rate(node_network_transmit_bytes_total{job=\"macos-node\",instance=~\"$instance\",device!=\"lo0\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} {{device}} transmit",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Network packets, errors and input drops",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 50,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(node_network_receive_packets_total{job=\"macos-node\",instance=~\"$instance\",device!=\"lo0\"}[$__rate_interval])",
+          "legendFormat": "{{device}} RX packets",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "rate(node_network_transmit_packets_total{job=\"macos-node\",instance=~\"$instance\",device!=\"lo0\"}[$__rate_interval])",
+          "legendFormat": "{{device}} TX packets",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "rate(node_network_receive_errs_total{job=\"macos-node\",instance=~\"$instance\",device!=\"lo0\"}[$__rate_interval])",
+          "legendFormat": "{{device}} RX errors",
+          "range": true
+        },
+        {
+          "refId": "D",
+          "expr": "rate(node_network_transmit_errs_total{job=\"macos-node\",instance=~\"$instance\",device!=\"lo0\"}[$__rate_interval])",
+          "legendFormat": "{{device}} TX errors",
+          "range": true
+        },
+        {
+          "refId": "E",
+          "expr": "rate(node_network_receive_drop_total{job=\"macos-node\",instance=~\"$instance\",device!=\"lo0\"}[$__rate_interval])",
+          "legendFormat": "{{device}} RX drops",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Page-in and page-out bytes",
+      "description": "Upstream names say swapped, but the pinned Darwin implementation uses Mach pageins/pageouts, not swapins/swapouts. Do not interpret this panel as swap-device traffic.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 57,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(node_memory_swapped_in_bytes_total{job=\"macos-node\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} pageins bytes/s",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "rate(node_memory_swapped_out_bytes_total{job=\"macos-node\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} pageouts bytes/s",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Battery charge",
+      "description": "Only present for a battery power source.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 57,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * node_power_supply_current_capacity{job=\"macos-node\",instance=~\"$instance\"} / node_power_supply_max_capacity{job=\"macos-node\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} {{power_supply}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Enabled collector status",
+      "description": "Unsupported thermal API is disabled explicitly. Empty/unsupported individual metric families remain absent; success does not invent them.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 64,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "node_scrape_collector_success{job=\"macos-node\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} {{collector}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ]
+}

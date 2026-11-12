@@ -1,0 +1,36 @@
+groups:
+  - name: glamdb-external-pipeline
+    interval: 15s
+    rules:
+      - alert: GlamDBPipelineSourceUnavailable
+        expr: up{job="glamdb-pipeline",component="prometheus"} == 0 or absent(up{job="glamdb-pipeline",component="prometheus"})
+        for: 1m
+        labels: {cluster: local, service: monitoring, check: prometheus_external, state: NODATA}
+        annotations:
+          summary: Main Prometheus cannot be observed from the independent host
+          description: Check host, process, firewall, observer inventory and network. This notification needs an independent receiver.
+          observed_at: '{{ with query "time()" }}{{ . | first | value }}{{ end }}'
+      - alert: GlamDBPipelineSourceUnavailable
+        expr: up{job="glamdb-pipeline",component="alertmanager"} == 0 or absent(up{job="glamdb-pipeline",component="alertmanager"})
+        for: 1m
+        labels: {cluster: local, service: alerting, check: alertmanager_external, state: NODATA}
+        annotations:
+          summary: Main Alertmanager cannot be observed from the independent host
+          description: The failed Alertmanager must not be this observer's notification destination.
+          observed_at: '{{ with query "time()" }}{{ . | first | value }}{{ end }}'
+      - alert: GlamDBPipelineEvaluationFailures
+        expr: sum(increase(prometheus_rule_evaluation_failures_total{job="glamdb-pipeline",component="prometheus"}[5m])) > 0
+        for: 1m
+        labels: {cluster: local, service: monitoring, check: prometheus_evaluation_external, state: ALARM}
+        annotations:
+          summary: Main Prometheus reports rule evaluation failures
+          description: Inspect /rules and evaluator logs. A failed query is not proof of healthy input.
+          observed_at: '{{ with query "time()" }}{{ . | first | value }}{{ end }}'
+      - alert: GlamDBPipelineEvaluationStalled
+        expr: time() - min(prometheus_rule_group_last_evaluation_timestamp_seconds{job="glamdb-pipeline",component="prometheus"}) > 90 or absent(prometheus_rule_group_last_evaluation_timestamp_seconds{job="glamdb-pipeline",component="prometheus"})
+        for: 1m
+        labels: {cluster: local, service: monitoring, check: prometheus_evaluation_external, state: NODATA}
+        annotations:
+          summary: Main Prometheus rule evaluation is stale or missing
+          description: A reachable metrics endpoint alone does not prove the rules are still evaluating.
+          observed_at: '{{ with query "time()" }}{{ . | first | value }}{{ end }}'

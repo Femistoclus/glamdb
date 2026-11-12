@@ -106,10 +106,15 @@ int JournalFaultVfs::Delete(sqlite3_vfs* vfs, const char* path, int sync_directo
         after_unlink = owner->after_unlink_;
     }
     if (fail && !after_unlink) {
+        owner->failures_.fetch_add(1, std::memory_order_relaxed);
         return SQLITE_IOERR_DELETE;
     }
     const auto result = owner->parent_->xDelete(owner->parent_, path, sync_directory);
-    return fail && result == SQLITE_OK ? SQLITE_IOERR_DIR_FSYNC : result;
+    if (fail && result == SQLITE_OK) {
+        owner->failures_.fetch_add(1, std::memory_order_relaxed);
+        return SQLITE_IOERR_DIR_FSYNC;
+    }
+    return result;
 }
 
 } // namespace glamdb::test

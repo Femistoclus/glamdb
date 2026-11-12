@@ -3,6 +3,10 @@
 
 #include "storage/resources.h"
 
+#include "apps/server/metrics.h"
+
+#include "core/telemetry/structured_log.h"
+
 #include <asio.hpp>
 
 #include <algorithm>
@@ -41,12 +45,21 @@ ELogOperation ClassifyOperation(const TRequest& request) noexcept
         if (path == "/healthz" || suffix == "/readyz" || suffix == "/capabilities") {
             return ELogOperation::Health;
         }
+        if (path == "/databases" && request.Method == "POST") {
+            return ELogOperation::CreateStore;
+        }
         if (suffix.starts_with("/collections/")) {
             if (suffix.find("/operations/") != std::string::npos) {
                 return ELogOperation::Operation;
             }
             if (suffix.ends_with("/append")) {
                 return ELogOperation::Append;
+            }
+            if (suffix.ends_with("/scan/open")) {
+                return ELogOperation::ScanOpen;
+            }
+            if (suffix.ends_with("/scan/cancel")) {
+                return ELogOperation::ScanCancel;
             }
             if (suffix.find("/scan") != std::string::npos || suffix.ends_with("/explain")) {
                 return ELogOperation::Scan;
@@ -57,7 +70,7 @@ ELogOperation ClassifyOperation(const TRequest& request) noexcept
             return ELogOperation::Collections;
         }
         if (suffix == "/collections") {
-            return ELogOperation::Collections;
+            return request.Method == "POST" ? ELogOperation::CreateCollection : ELogOperation::Collections;
         }
         if (path == "/databases" || path.starts_with("/databases/")) {
             return ELogOperation::Database;
@@ -114,6 +127,7 @@ public:
         , Socket_(std::move(socket))
         , Timer_(state.IO)
         , State_(state)
+        , Metrics_(nullptr)
         , RequestID_(state.Logger ? state.Logger->NewRequestID() : 0)
     { }
     template <class F>
@@ -326,6 +340,7 @@ private:
         }
         Request_ = ParseHeaders(std::string_view(Input_).substr(0, size));
         Operation_ = ClassifyOperation(Request_);
+        Metrics_.SetRequest(Request_.Method, Request_.Target);
         if (!State_.Routes.IsAuthorized(Request_)) {
             Write(ErrorResponse(401, "UNAUTHORIZED", "bearer token required"));
             return;
@@ -576,6 +591,7 @@ private:
     }
     void LogCompletion() noexcept
     {
+        Metrics_.Finish(static_cast<int>(StatusCode_), ResponseSent_, ResponseSent_ ? Output_.size() : 0);
         if (Logged_ || !State_.Logger) {
             return;
         }
@@ -587,11 +603,12 @@ private:
         const auto elapsed =
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - Started_).count();
         State_.Logger->TryLog({.Event = ELogEvent::RequestCompleted,
-            .Operation = Operation_,
+            .Operation = StatusCode_ == 401 || StatusCode_ == 403 ? ELogOperation::Auth : Operation_,
             .Outcome = outcome,
             .RequestID = RequestID_,
             .DurationUs = static_cast<std::uint64_t>(elapsed),
-            .StatusCode = StatusCode_});
+            .StatusCode = ResponseSent_ ? StatusCode_ : 0,
+            .ByteCount = ResponseSent_ ? static_cast<std::uint64_t>(Output_.size()) : 0});
     }
     void Drain()
     {
@@ -612,6 +629,7 @@ private:
     TTcp::socket Socket_;
     asio::steady_timer Timer_;
     TState& State_;
+    THttpScope Metrics_;
     TRequest Request_;
     std::array<char, 4096> ReadBuffer_{};
     std::string Input_, Header_, Output_, Peer_, Database_;

@@ -152,11 +152,18 @@ joins a writer attempt or holds a SQLite read transaction.
   before `Next()`, including empty views and zero limits. Without projected or
   filter fields, verified Parquet row-group counts supply batch cardinality.
 - Native scans pin the confirmed generation's [verified membership index](SCAN_INDEX.md).
-  Opening and repeated planning read no root, manifest list or manifest.
+  Opening and repeated planning read no root, manifest list or manifest, and each
+  indexed `TScanDataFile` retains its verified `iceberg::DataFile` descriptor so
+  manifest-level file pruning also performs zero metadata I/O.
   `limit = 0` opens no data file. Recovery and publication derive the index
   through the same strict closure verifier; observed corruption invalidates it.
-  Custom backends without an index retain the uncached planner and lazy manifest
-  reads. Warehouse directories are never listed for membership. Delete manifests,
+  Custom backends without an index retain the non-indexed planner and lazy manifest
+  reads. Uncached planning, metadata inspection (`GetStatistics`, `ListFiles`,
+  `ExplainScan`) and Parquet footer reads share a bounded per-store
+  `TSnapshotMetadataCache` (`32 MiB` under `ResourceClass::Metadata`, disabled when
+  `ReadCacheBytes = 0`) keyed by immutable logical store paths and evicted/cleared
+  on `RetireRoot`, `VerifyRetained`, observed corruption and shutdown.
+  Warehouse directories are never listed for membership. Delete manifests,
   partitioned specs and non-Parquet files are `UNSUPPORTED_TABLE_FEATURE`.
 - `Predicate` supports `True`, comparisons (`Eq`, `Ne`, `Lt`, `Le`, `Gt`, `Ge`)
   of a field with a literal of the exact field type or an explicit `NULL`
@@ -172,11 +179,41 @@ joins a writer attempt or holds a SQLite read transaction.
   Strings compare by unsigned UTF-8 bytes (`key` literals `<= 1024` bytes, other
   strings `<= 1 MiB`); literal `-0.0` normalizes to `0.0`; NaN/Inf and
   out-of-range timestamps are `INVALID_ARGUMENT`.
-- Each file is read whole (at most 32 MiB in this profile) and its footer is
-  checked by the same verifier as recovery: exact field IDs 1..N, names,
-  repetition, physical/logical types, row group counts and the manifest row
-  count. All columns referenced by `projection` and `predicate` are deduplicated
-  and read from Parquet; before `SelectRows` evaluates the predicate or any
+- Before opening a candidate Parquet file, conservative SQL three-valued zone
+  pruning (`TZoneTruth` in `core/scan/pruning.h`) evaluates the predicate over
+  manifest column bounds and null/value counts (`ExtractFileZoneStats`). Only
+  zones proven `AlwaysFalse` or `AlwaysUnknown` at the predicate root are
+  pruned (`CanPruneZone`); Iceberg 16-byte string upper-bound truncation ties are
+  treated conservatively (`UpperExact = false`, so `Ne` never falsely prunes
+  a truncated tie). Statistics for every field in `ReadFields_` (`projection ∪
+  predicate`) are domain-checked first (inconsistent counts, inverted bounds,
+  NaN/Inf floats, `-0.0` normalization, out-of-range timestamps, `key > 1024` or
+  `string > 1 MiB`); malformed, incomplete or contradictory statistics on a
+  column are conservatively discarded (`prune nothing`) so exact column decoding
+  and `ValidateColumn` inspect the data rather than failing or skipping rows at
+  the pruning stage. Non-`key` manifest string upper bounds with `>= 16` UTF-8
+  code points (`truncate(16)`) are also omitted at the manifest level while exact
+  Parquet row-group statistics still prune, and `Float64` bounds require a
+  confirmed zero manifest `nan_value_counts` entry.
+- Surviving files open through positional `TScanRandomAccessFile` (`pread` over
+  `IReadOnlyFileIO`, recording exact `BytesRead` and validating `Close()`,
+  including when `limit` completes a scan inside an open file; only cancellation
+  and already-failed scans close best-effort),
+  eliminating whole-file 32 MiB buffers. On a footer cache miss,
+  `ReadParquetFooterFromStream` reads only the magic/tail/footer ranges and
+  verifies the footer with the same rules as recovery: unencrypted metadata,
+  exact field IDs 1..N, names, repetition, physical/logical types, row-group
+  counts and the manifest row count. The verified `parquet::FileMetaData` is
+  handed directly to `parquet::ParquetFileReader::Open` (single-pass footer
+  verification) and inserted into `TSnapshotMetadataCache`.
+- After footer verification, `ExtractRowGroupZoneStats` applies the same
+  domain-checked conservative SQL-3VL zone evaluator per row group. If all row
+  groups in a file are pruned, no column chunks are read. For surviving row
+  groups, `ReadFields_` (`projection ∪ predicate`) are deduplicated and read
+  positionally via `ReadTable(survivingRowGroups, readColumns)` (when
+  `ReadFields_` is empty on an unfiltered zero-column scan, empty-column batches
+  are synthesized directly from verified row-group row counts without reading
+  column pages). Before `SelectRows` evaluates the predicate or any
   value is returned, every decoded projection and filter-only column is
   validated: Arrow `ValidateFull` (offsets and UTF-8), string limits (1024 bytes
   for `key`, 1 MiB otherwise), finite non-negative-zero floats and timestamps in
@@ -205,7 +242,7 @@ collecting rows finishes a nonempty page with a continuation, freeing retained
 descriptors before decoding resumes. A refusal before the first row preserves
 the fixed snapshot, cursor tokens and previous replay. Pressure never means EOS.
 
-Not implemented: file/row-group pruning, page CRC verification and qualification-scale attempt-volume/capacity measurements.
+Not implemented: Parquet page-index/Bloom pruning, query-result/decoded-array caching, page CRC verification and qualification-scale attempt-volume/capacity measurements.
 The [process resource owner](SHARED_RESOURCES.md) now supplies scan working
 reservations, separately charged output descriptors, tracked Arrow allocation capacity and leases retained through
 slices and nonempty C Data exports. Zero-column slices retain their output schema lease.
@@ -247,8 +284,27 @@ suite passed 716 tests, and the workbench unit suite passed 131. Native HTTP
 checks include empty-output JSON/Arrow pagination and replay, plus `/explain`
 wire-schema validation for initial, historical and latest views with hidden
 predicate fields. The explain regression failed on the nonempty-schema constraint
-before the contract fix and passed afterward. Sanitizer profiles and browser E2E
-were not rerun for this integration.
+before the contract fix and passed afterward. Sanitizer profiles and browser E2E were not rerun for this integration.
+
+Positional Parquet I/O, conservative SQL-3VL manifest/row-group pruning and
+`TSnapshotMetadataCache` were validated after rebasing onto official main
+`47cc955`: `ScanPruningUnitTest` (exhaustive SQL-3VL zone truth tables against
+the row oracle, truncated-string `Ne` and `truncate(16)` upper-bound safety,
+`Float64` `nan_value_counts` gating, and conservative `prune nothing` fallback on
+malformed/contradictory manifest and Parquet statistics),
+`SnapshotMetadataCacheUnitTest` and `SnapshotMetadataCacheGlobalOomTest`
+(per-kind/byte LRU caps, oversize bypass, zero-allocation lookups, strong
+exception safety under `std::bad_alloc`, eviction and thread safety),
+`ScanPruningVerticalTest` (differential parity with `EnablePruning = false` across
+600+ generated 3VL predicates, multi-row-group `> 4096`-byte string manifest-bound
+omission, on-disk corrupt footer statistics `prune nothing`, zero Parquet opens on
+manifest-pruned files, byte-exact positional `PRead` accounting, warm metadata/footer
+cache hits, and `ENOMEM` column-read classification), `ScanReadErrorClassificationTest`
+(including checked close on `limit` completion vs best-effort close on `Cancel()`),
+`glamdb_scan_data_reads_bench`, `glamdb.installed_consumer`, the
+`GLAMDB_BUILD_STORAGE=OFF` contour, and `NativeMetadataHTTP` wire-schema checks
+passed locally with `format-check` (`tidy-check` and sanitizer presets were not
+run in this change).
 
 Value validation reads only decoded columns of the projection and predicate;
 latent corruption in unread columns or unread data pages is not detected by
@@ -259,7 +315,9 @@ latent corruption in unread columns or unread data pages is not detected by
 `Engine::ListFiles`/`GetFileDetails` reuse committed manifest planning and confirmed-root
 leases. Inventory never lists warehouse directories; details validate actual
 immutable Parquet bytes, field IDs, typed footer statistics and row groups.
-These observations do not enable file/page/Bloom pruning. HTTP metadata, SDK
+Manifest and row-group bounds enable conservative file and row-group pruning;
+page-index and Bloom presence remain observational only (page/Bloom pruning is
+not implemented). HTTP metadata, SDK
 and workbench use the same facade. The [installed system recipe](NATIVE_ACCEPTANCE.md)
 checks latest=1,010, historical A=1,000, initial=0, JSON/Arrow/EOS and retained
 batches, then repeats them after restart and source-independent restore.

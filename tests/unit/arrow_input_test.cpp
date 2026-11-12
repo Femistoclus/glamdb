@@ -34,7 +34,11 @@ TEST(ArrowInput, ChunkBoundariesDoNotChangeCanonicalIdentity)
     ASSERT_TRUE(chunked);
     EXPECT_EQ(single->payload_hash, "e9cbe7131f25c3f2932c48f755529fd10370a936c5182e2bca621d5f9e3c0fd7");
     EXPECT_EQ(chunked->payload_hash, single->payload_hash);
-    EXPECT_EQ(chunked->rows, single->rows);
+    ASSERT_NE(single->Columns, nullptr);
+    ASSERT_NE(chunked->Columns, nullptr);
+    EXPECT_TRUE(chunked->Columns->Equals(*single->Columns));
+    EXPECT_TRUE(single->rows.empty());
+    EXPECT_EQ(single->GetRowCount(), 3U);
     const auto fingerprint = FingerprintBatches(schema,
         "00112233-4455-6677-8899-aabbccddeeff",
         {Integers({9007199254740993LL}), Integers({std::nullopt}), Integers({9007199254740993LL})});
@@ -47,7 +51,7 @@ TEST(ArrowInput, MissingNullableFieldsBecomeNullButUnknownAndNullBatchReject)
     const SchemaSpec schema{{{"n", FieldType::Int64, true}, {"extra", FieldType::Bool, true}}};
     const auto result = NormalizeBatches(schema, "00112233-4455-6677-8899-aabbccddeeff", {Integers({1})});
     ASSERT_TRUE(result);
-    EXPECT_TRUE(std::holds_alternative<std::monostate>(result->rows[0][1]));
+    EXPECT_TRUE(result->Columns->column(1)->IsNull(0));
     EXPECT_FALSE(NormalizeBatches(SchemaSpec{{{"other", FieldType::Int64, true}}},
         "00112233-4455-6677-8899-aabbccddeeff",
         {Integers({1})}));

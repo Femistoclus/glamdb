@@ -285,3 +285,31 @@ def test_client_close_attempts_every_stream_even_if_one_close_fails():
         client.close()
     assert all(body.closed for body in bodies)
     assert all(stream.closed for stream in streams)
+
+
+def test_token_provider_preserves_prefix_and_real_arrow_stream_ownership():
+    raw = ipc_bytes()
+    seen, provider_calls = [], []
+    body = TrackedBody(raw)
+    def provider():
+        provider_calls.append(1)
+        return "fresh-token"
+    def handler(request):
+        if request.url.path.endswith("/scan/open"):
+            assert request.url.path == f"/databases/{CID}/collections/{CID}/scan/open"
+            return httpx.Response(404, json={"error": {"code": "ROUTE_NOT_FOUND", "message": "legacy adapter"}})
+        seen.append(request)
+        assert request.headers["authorization"] == "Bearer fresh-token"
+        assert request.headers["accept-encoding"] == "identity"
+        return httpx.Response(200, headers={"content-type": MIME, "content-length": str(len(raw)),
+                                           "X-GlamDB-Snapshot-Id": "7",
+                                           "X-Content-SHA256": hashlib.sha256(raw).hexdigest()}, stream=body)
+    with Client("https://example.test/databases/" + CID, token_provider=provider,
+                transport=httpx.MockTransport(handler)) as client:
+        with client.scan_batches(CID) as stream:
+            batches = list(stream)
+            assert stream.integrity == "verified"
+    assert len(seen) == 1 and len(provider_calls) == 2
+    assert seen[0].url.path == f"/databases/{CID}/collections/{CID}/scan"
+    assert seen[0].method == "POST" and body.closed
+    assert batches[0].column(0)[0].as_py() == 9007199254740993

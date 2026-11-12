@@ -65,6 +65,14 @@
       "tag": "v13.0.0",
       "commit": "eb802a37c7d585840324886a3d8648c9c2159952",
       "license": "MIT"
+    },
+    {
+      "name": "prometheus-cpp",
+      "path": "third_party/prometheus-cpp",
+      "url": "https://github.com/jupp0r/prometheus-cpp.git",
+      "version": "1.3.0",
+      "tag": "v1.3.0",
+      "commit": "e5fada43131d251e9c4786b04263ce98b6767ba5"
     }
   ],
   "archives": {

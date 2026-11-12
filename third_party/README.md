@@ -5,12 +5,13 @@
 | Arrow / Parquet | 25.0.0 | `arrow/` submodule; Parquet is part of Arrow. |
 | Iceberg C++ | 0.4.0 | `iceberg-cpp/` submodule. |
 | GoogleTest | 1.17.0 | `googletest/` submodule; built with project tests. |
-| Quill | 13.0.0 | `quill/` submodule; MIT, private asynchronous JSON logging. |
+| Quill | 13.0.0 | `quill/` submodule; MIT, private asynchronous JSON logging and bounded JSONL rotation. |
 | CLI11 | 2.7.2 | `cli11/` submodule; header-only CLI parser. |
 | Asio | 1.36.0 | `asio/` submodule; standalone application networking. |
 | nlohmann/json | 3.12.0 | `json/` submodule; application JSON codec. |
 | reproc/reproc++ | 14.2.7 | `reproc/` submodule; CLI child-process lifecycle, MIT. |
 | SQLite | 3.54.1 | Official amalgamation archive. |
+| prometheus-cpp | 1.3.0 | `prometheus-cpp/` submodule; core metrics and application-owned pull exporter. |
 
 Exact commits, URLs, and SQLite checksums are recorded in [lock.json](lock.json).
 SQLite's archive was checked against the SHA3-256 published on its
@@ -22,7 +23,7 @@ cmake --preset deps-local
 cmake --build --preset deps-local --parallel 2
 ```
 
-This explicitly builds and installs Arrow/Parquet, Iceberg and SQLite into
+This explicitly builds and installs Arrow/Parquet, Iceberg, SQLite and prometheus-cpp into
 `.deps/install`. GoogleTest is built directly from the pinned submodule when
 `BUILD_TESTING=ON`; the dependency build does not compile or install it again.
 GoogleMock is disabled. Quill is header-only and consumed directly by the private telemetry target in every
@@ -36,6 +37,13 @@ wheel hash in `tools/logging/requirements.txt`; its installed wheel retains
 CLI11 is consumed directly from its pinned submodule by
 the CLI target; it adds no runtime library or public engine dependency. Its tests,
 examples, and installation are disabled when included as a subproject.
+prometheus-cpp installs core/pull with its pinned CivetWeb submodule; push, tests,
+compression and embedded TLS are disabled. Its core library is a private static
+engine dependency; its listener is owned only by a server application. Installed
+consumers find the same exact version through the exported CMake package.
+Normal native builds compile the structured logger against Quill's pinned
+headers. Those headers stay private to `glamdb_logging` and are not required by
+installed engine consumers. Quill is not part of the dependency superbuild.
 The dependency build needs
 network access for SQLite and upstream transitive dependencies, plus the build
 prerequisites of Arrow and Iceberg, including zlib development files. Set
@@ -118,6 +126,11 @@ checks encodings against physical types, and rejects an explicit encoding on a
 column whose dictionary stays enabled (the pinned Arrow writer would ignore
 it). The written footers are checked for dictionary pages and data page
 encodings in the same way.
+
+`prometheus-cpp/0001-synchronize-civetweb-stop-flag.patch` uses real atomic
+stop-flag access for the bundled CivetWeb listener. Its volatile flag raced
+between `mg_stop` and the master/worker threads during Exposer teardown; the
+patch preserves the shutdown protocol and joins without a TSan suppression.
 
 After pulling changes to dependency recipes or patches, rerun the `deps-local`
 configure and build commands above before rebuilding the application. Building

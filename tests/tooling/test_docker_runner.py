@@ -103,7 +103,7 @@ class DockerRunnerTest(unittest.TestCase):
         shutil.copyfile(ROOT / "scripts/build-deps-in-docker.sh", self.runner)
         (self.root / "docker/deps").mkdir()
         shutil.copyfile(ROOT / "docker/deps/Dockerfile", self.root / "docker/deps/Dockerfile")
-        for directory in ("arrow/cpp", "iceberg-cpp"):
+        for directory in ("arrow/cpp", "iceberg-cpp", "prometheus-cpp", "prometheus-cpp/3rdparty/civetweb"):
             path = self.root / "third_party" / directory
             path.mkdir(parents=True)
             (path / "CMakeLists.txt").touch()
@@ -126,13 +126,13 @@ class DockerRunnerTest(unittest.TestCase):
     def test_dependencies_reject_missing_sources_and_arguments(self):
         self.prepare_dependencies()
         self.assertEqual(self.run_script("unknown").returncode, 2)
-        for directory in ("arrow/cpp", "iceberg-cpp", "googletest"):
+        for directory in ("arrow/cpp", "iceberg-cpp", "googletest", "prometheus-cpp", "prometheus-cpp/3rdparty/civetweb"):
             with self.subTest(dependency=directory):
                 source = self.root / "third_party" / directory / "CMakeLists.txt"
                 source.unlink()
                 result = self.run_script()
                 self.assertEqual(result.returncode, 1)
-                self.assertIn("git submodule update --init third_party/" + directory.split("/")[0],
+                self.assertIn("git submodule update --init --recursive third_party/" + directory.split("/")[0],
                               result.stderr)
                 self.assertFalse(self.log.exists())
                 source.touch()

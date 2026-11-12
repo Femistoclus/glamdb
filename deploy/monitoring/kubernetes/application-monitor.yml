@@ -1,0 +1,26 @@
+# Apply only after the application's private metrics Service exists. It must
+# carry app.kubernetes.io/name=glamdb-gateway and expose a port named metrics.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: glamdb-gateway
+  namespace: monitoring
+  labels: {release: monitoring}
+spec:
+  sampleLimit: 10000
+  namespaceSelector:
+    matchNames: [glamdb]
+  selector:
+    matchLabels: {app.kubernetes.io/name: glamdb-gateway}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      relabelings:
+        - targetLabel: job
+          replacement: glamdb-gateway
+        - targetLabel: cluster
+          replacement: local
+        - targetLabel: service
+          replacement: glamdb

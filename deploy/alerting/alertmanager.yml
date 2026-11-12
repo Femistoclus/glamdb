@@ -1,0 +1,56 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: visible-only
+  group_by: []
+  group_wait: 30s
+  # Poll once per minute: the one-minute daily window admits one group send.
+  group_interval: 1m
+  # Below one day to tolerate timer phase/jitter on the next daily opening.
+  # Outside the active interval, even state changes cannot send Telegram.
+  repeat_interval: 12h
+  routes:
+    - matchers: ['state="NODATA"', 'notify_nodata="false"']
+      receiver: visible-only
+    - receiver: telegram
+      active_time_intervals: [daily-summary]
+
+time_intervals:
+  - name: daily-summary
+    time_intervals:
+      - times:
+          - start_time: "10:00"
+            end_time: "10:01"
+        location: Europe/Moscow
+
+receivers:
+  - name: visible-only
+  - name: telegram
+    telegram_configs:
+      - api_url: https://api.telegram.org
+        bot_token_file: /run/secrets/telegram_bot_token
+        chat_id_file: /run/secrets/telegram_chat_id
+        send_resolved: false
+        parse_mode: ""
+        timeout: 15s
+        # One combined daily snapshot across services, including healthy checks.
+        # Compact lines keep the usual inventory within Telegram's limit.
+        message: |-
+          GlamDB daily summary ({{ len .Alerts.Firing }} checks)
+          {{ with index .Alerts 0 }}Observed at (Unix seconds): {{ .Annotations.observed_at }}{{ end }}
+          {{ range .Alerts.Firing }}{{ .Labels.state }} GlamDB {{ .Labels.check }} · {{ .Labels.cluster }}/{{ .Labels.service }}{{ with .Labels.namespace }}/{{ . }}{{ end }}{{ with .Labels.pod }}/{{ . }}{{ end }}{{ with .Labels.node }} · {{ . }}{{ end }}
+          {{ end }}
+          {{ with index .Alerts 0 }}{{ .Annotations.runbook_url }}{{ end }}
+        http_config:
+          follow_redirects: false
+
+# State rules are exclusive. These guards also suppress stale lower states
+# during a rolling rule/configuration change; never inhibit NODATA by ALARM.
+inhibit_rules:
+  - source_matchers: ['state="ALARM"']
+    target_matchers: ['state=~"OK|WARN"']
+    equal: [cluster, service, check, namespace, pod, node]
+  - source_matchers: ['state="NODATA"']
+    target_matchers: ['state=~"OK|WARN|ALARM"']
+    equal: [cluster, service, check, namespace, pod, node]

@@ -2,10 +2,12 @@
 """Start task-owned native Loki/Alloy processes; validate ingestion and redaction."""
 import argparse
 import contextlib
+import http.client
 import json
 import os
 from pathlib import Path
 import socket
+import select
 import subprocess
 import sys
 import tempfile
@@ -39,11 +41,71 @@ def wait_ready(url, process, timeout=45):
     raise TimeoutError("Logging service did not become ready")
 
 
+def capture_native_server(binary, directory, runtime_log):
+    """Test-runtime capture of a real server's stderr; never an application file sink."""
+    token = 'native-e2e-token-canary'
+    private = 'native-e2e-payload-canary'
+    process = subprocess.Popen([str(binary.resolve()), '--data-dir', str(directory / 'native-service'),
+        '--port', '0', '--log-success-sample-every', '1', '--log-max-success-per-second', '1000'],
+        env=dict(os.environ, GLAMDB_TOKEN=token), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        if not select.select([process.stdout], [], [], 20)[0]:
+            raise TimeoutError('Native server did not announce its port')
+        line = process.stdout.readline()
+        if not line:
+            raise RuntimeError('Native server exited before becoming ready')
+        port = json.loads(line)['port']
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=15)
+        try:
+            connection.request('POST', '/databases', json.dumps({'name': private}),
+                {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json', 'X-Request-ID': private})
+            response = connection.getresponse()
+            response.read()
+            assert response.status == 200, response.status
+        finally:
+            connection.close()
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        try:
+            out, error = process.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=5)
+            raise
+    assert process.returncode == 0, out + error
+    assert private not in error and token not in error, 'Native logger exposed a test secret'
+    records = [json.loads(line) for line in error.splitlines()]
+    event = next(record for record in records
+                 if record['event'] == 'operation_completed' and record['operation'] == 'create_store')
+    with runtime_log.open('a') as stream:
+        stream.write(error)
+    return event['request_id']
+
+
+def verify_native_server(loki_url, marker, timeout=45):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        records = smoke.query(loki_url, '{service="glamdb"} |= "' + marker + '"')
+        events = {record['event'] for _, record in records}
+        if {'operation_completed', 'request_completed'} <= events:
+            for labels, record in records:
+                assert 'native-e2e-' not in json.dumps(record), record
+                assert record['error_code'] == 'none', record
+                assert record['phase'] == 'none', record
+                assert type(record['byte_count']) is int, record
+                assert set(labels) <= {'service', 'environment', 'level', 'event', 'detected_level', 'service_name'}, labels
+            return 'PASS'
+        time.sleep(.25)
+    raise TimeoutError('Real native server events did not arrive in Loki')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--loki-binary", required=True, type=Path)
     parser.add_argument("--alloy-binary", required=True, type=Path)
     parser.add_argument("--probe", required=True, type=Path)
+    parser.add_argument("--native-server", type=Path, help="also verify real HTTP/core events through Alloy and Loki")
     parser.add_argument("--exercise-outage", action="store_true",
                         help="restart the owned collector; stop the owned Loki, verify retry exhaustion and recover")
     parser.add_argument("--wal-disk-threshold", type=float, default=0.9,
@@ -91,6 +153,9 @@ loki.source.file "runtime_fixture" {
             wait_ready(base_url + "/ready", processes[0])
             wait_ready(f"http://127.0.0.1:{alloy_port}/-/ready", processes[1])
             result = smoke.run(base_url, logs, args.probe)
+            if args.native_server:
+                marker = capture_native_server(args.native_server, work, logs / 'glamdb.log')
+                result['native_server_status'] = verify_native_server(base_url, marker)
             if args.exercise_outage:
                 processes[1].terminate()
                 try:
