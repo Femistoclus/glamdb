@@ -248,6 +248,8 @@ For the full native test suite in Docker, including on macOS:
 
 See the [build guide](docs/development/BUILDING.md) for toolchain setup, standalone
 client builds, and embedding the installed library.
+The [native capacity campaign](docs/development/CAPACITY_CAMPAIGN.md) measures
+ingestion, backpressure and fresh-process recovery while preserving history caps.
 
 ### Client and UI tests
 

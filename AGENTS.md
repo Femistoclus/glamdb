@@ -355,6 +355,14 @@ deduplication uses a bounded temporary SQLite database, separate from the catalo
 See [qualification preparation](docs/development/QUALIFICATION.md) for commands,
 temporary-workspace prerequisites and the remaining qualification boundaries.
 
+`glamdb_capacity_bench` and `benchmarks/capacity.py` measure native aggregate
+ingestion, retained history/outcomes, physical orphan space, retained slices and
+fresh-process reopen. The default campaign budgets 5,000 attempts of 1,000 rows
+and records every 100 successes without raising caps; short real-engine checks
+run as `glamdb.capacity_campaign`. See [the campaign guide](docs/development/CAPACITY_CAMPAIGN.md)
+for profiles, counters, evidence and cache/qualification limits. Keep full
+measurement runs manual and separate external-file sync counters from SQLite.
+
 After configuring `local`, check project C++ sources and headers with:
 
 ```sh
