@@ -336,7 +336,10 @@ private:
         if (scan < 0) {
             return TrackingError();
         }
-        std::unique_ptr<DIR, decltype(&::closedir)> entries(::fdopendir(scan), ::closedir);
+        const auto closeDirectory = [](DIR* value) noexcept {
+            ::closedir(value);
+        };
+        std::unique_ptr<DIR, decltype(closeDirectory)> entries(::fdopendir(scan), closeDirectory);
         if (!entries) {
             const auto error = LastError();
             ::close(scan);
