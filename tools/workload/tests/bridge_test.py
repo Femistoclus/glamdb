@@ -143,6 +143,56 @@ class BridgeTest(unittest.TestCase):
         ])
         self.assertNotIn(self.env["GLAMDB_TOKEN"], result.stdout + result.stderr)
 
+    def test_tpch_forwards_every_command_with_bounded_workload_controls(self):
+        self.module.write_text("import json,sys\nprint(json.dumps(sys.argv[1:]))\nsys.exit(3)\n")
+        state = str(self.root / "tpch state $(literal).json")
+        connection = ["--state", state, "--timeout", "17.5", "--ca-file", "ca with spaces.pem"]
+        scenarios = [
+            ("generate", ["--scale-factor", "0.0100", "--dbgen", "dbgen with spaces",
+                          "--output", "output with spaces", "--type-profile", "legacy-scaled",
+                          "--generator-parts", "4", "--part-rows", "9000", "--part-bytes", "7000000",
+                          "--distributions", "dists.dss", "--dbgen-sha256", "a" * 64], []),
+            ("init", [*connection, "--url", "https://example.org", "--dataset", "dataset",
+                      "--name", "tpch-run", "--limits", "limits.json", "--table-prefix", "v_"], []),
+            ("load", [*connection, "--batch-rows", "8000", "--batch-bytes", "6000000",
+                      "--workers", "4"], ["--resume"]),
+            ("resolve", connection, ["--retry"]),
+            ("verify", [*connection, "--format", "json", "--level", "rows"], []),
+            ("scan", [*connection, "--queries", "1,6", "--mode", "reduce", "--format", "arrow",
+                      "--consume", "batches", "--users", "7", "--processes", "3", "--warmup", "0",
+                      "--repeat", "2", "--report", "report with spaces"], []),
+            ("status", connection, []),
+        ]
+        for command, values, flags in scenarios:
+            with self.subTest(command=command):
+                result = subprocess.run(
+                    [CLI, "bench", "tpch", command, *values, *flags],
+                    env=self.env, text=True, capture_output=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 3, result.stderr)
+                arguments = json.loads(result.stdout)
+                self.assertEqual(arguments[:3], ["bench", "tpch", command])
+                forwarded = arguments[3:]
+                for flag in flags:
+                    self.assertEqual(forwarded.count(flag), 1)
+                    forwarded.remove(flag)
+                self.assertEqual(dict(zip(forwarded[::2], forwarded[1::2])),
+                                 dict(zip(values[::2], values[1::2])))
+                self.assertEqual(len(forwarded), len(values))
+                self.assertNotIn(self.env["GLAMDB_TOKEN"], result.stdout + result.stderr)
+
+    def test_tpch_generate_requires_explicit_type_profile_before_starting_python(self):
+        self.module.write_text('raise RuntimeError("child must not start")\n')
+        result = subprocess.run(
+            [CLI, "bench", "tpch", "generate", "--scale-factor", "1",
+             "--dbgen", "dbgen", "--output", "dataset"],
+            env=self.env, text=True, capture_output=True, timeout=10,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--type-profile", result.stderr)
+        self.assertNotIn("child must not start", result.stderr)
+        self.assertEqual(result.stdout, "")
+
     def test_standalone_drop_checks_saved_identity_and_success_result(self):
         database = "11111111-2222-4333-8444-555555555555"
         other = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"

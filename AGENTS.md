@@ -51,7 +51,9 @@ are implemented. They can use the native Asio HTTP server over the public Engine
 `--data-dir` starts with no databases; authenticated API/UI operations create,
 list, open, close and reconcile databases. Authenticated native operators can
 explicitly drop an initialized database with its original store identity;
-the SDK/CLI expose exact retries and `bench tpch clean --state`. See
+the SDK/CLI expose exact retries and `bench tpch clean --state`. The standalone
+CLI also routes the complete TPC-H generation/init/load/resolve/verify/scan/status
+lifecycle through the optional workload package. See
 [managed deletion](docs/development/DATABASE_DROP.md) for durable tombstones,
 admission draining, safe filesystem removal and startup recovery. Discard still
 refuses initialized stores. A separate SQLite service registry (version 3,
@@ -331,7 +333,7 @@ Preserve these boundaries when adding or changing engine behavior:
 | `apps/workbench_access/` | OIDC/Cerbos gateway, ownership/audit catalog, lifecycle CLI and offline migration. |
 | `fixtures/`, `tools/verification/` | Literal canonical/metadata inputs, independent row oracle and evidence helpers. |
 | `sdk/python/`, `ui/` | Standalone Python HTTP SDK; HTML/CSS/ES-module pink workbench and browser/unit tests. |
-| `tools/workload/` | Mimesis datasets, SDK/Locust workloads, per-worker SQLite outcome journals and full verification. |
+| `tools/workload/` | Mimesis datasets, reference eight-table TPC-H datasets/lifecycle, SDK/Locust workloads, immutable SQLite outcome journals, fixed-view verification and Q1/Q6 client reducers. |
 | `probes/`, `benchmarks/` | Installed-dependency/compatibility probes and workload measurements. |
 | `scripts/` | Developer tooling, including quality checks. |
 | `deploy/alerting/`, `tools/alerting/` | Four-state Prometheus rules, Alertmanager routing, native Telegram receiver and executable replay/transition tests. |
@@ -660,7 +662,7 @@ parent for native test directories without disabling disk reserves.
 ## Code and dependency conventions
 
 The network CLI's `generate`, `bench write/read/verify/resolve` and
-`bench tpch clean --state RUN_STATE` use the optional
+`bench tpch generate/init/load/resolve/verify/scan/status/clean` use the optional
 Python package through reproc; the CLI still builds without engine dependencies.
 See [the workload guide](tools/workload/README.md). Install its hash-pinned
 `tools/workload/requirements.txt` and local package before testing. Run
@@ -671,6 +673,23 @@ explicit fault tests. Preserve exact saved append UUID/body/hash, never silently
 retry or reconcile, and count only unique committed operations. Locust owns
 scheduling, distributed statistics and percentiles; do not implement another load
 engine or duplicate SDK codecs. Token values stay exclusively in the environment.
+
+TPC-H generation requires explicit `--type-profile native|legacy-scaled` and
+reference TPC-H Tools 3.0.1 provenance. Preserve all eight tables/61 columns and
+exact decimal/date values. Bound both row buffers and metadata; the initial
+profile admits at most 65,536 parts and refuses oversized layouts without
+truncating data. `init` explicitly creates a dedicated managed target;
+`load` assigns disjoint immutable chunks while publication remains serialized.
+Keep state, dataset hashes, original UUID/body/hash and receipts through resume;
+never replace a pending request or silently change the plan/limits. Full
+verification checks the complete plan/receipt inventory and initial/first/final
+snapshots before `load_complete`; scans bind the saved eight-snapshot
+vector. Q1–Q22 scan coverage measures source access patterns; only Q1/Q6 have
+complete client reductions. Read [the TPC-H guide](docs/development/TPC_H.md) for
+capacity/recovery and [small native acceptance and independent review](docs/development/TPC_H_VALIDATION.md).
+POST refusals can be unbound: require authoritative lookup and an explicit retry
+after not-found; retain per-attempt evidence. Full SF=1/SF=10 CLI HTTP acceptance
+remains **NOT RUN**; existing retained-history measurements do not qualify it.
 
 Follow [the C++ style guide](docs/development/CPP_STYLE_GUIDE.md) for naming,
 declarations, layout, and error handling. Keep `.clang-format` aligned with its

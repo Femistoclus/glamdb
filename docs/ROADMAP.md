@@ -38,6 +38,18 @@ incremental physical-capacity admission on supported Linux local filesystems,
 with full fallback, cancellation and lower-limit reopen checks. Its performance
 and regression evidence does not change the G4 qualification status.
 
+The [TPC-H workload](development/TPC_H.md) implements reference eight-table
+generation, explicit managed-target creation, immutable ordinary-append plans,
+outcome resolution, fixed-view row/key verification, Q1–Q22 scan access patterns,
+complete Q1/Q6 client reductions, status and exact cleanup through the standalone
+CLI/Python bridge. The [small native campaign and independent review](development/TPC_H_VALIDATION.md)
+cover both type profiles over HTTP and verified TLS, exact results, restart,
+reply loss, capacity refusal and cleanup. Full SF=1 and SF=10 command-family HTTP acceptance is
+**NOT RUN**. The earlier retained-history capacity campaign uses a separate
+producer/type profile and is not acceptance evidence for this workload. These
+commands do not provide an SQL engine, official TPC-H compliance or QphH results;
+their implementation does not change the G4 qualification status.
+
 Power-loss durability remains **NOT VALIDATED** until G4's physical evidence
 exists. Process kills, injected faults and restarts do not establish it. The
 remaining work is tracked in [issue #28](https://github.com/glamourdb/glamdb/issues/28).
