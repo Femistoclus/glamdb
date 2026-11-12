@@ -52,6 +52,7 @@ class NativeFaultHTTP(unittest.TestCase):
             self.process.terminate()
         out, err = self.process.communicate(timeout=20)
         self.assertEqual(self.process.returncode, 0, out + err)
+        self.log_records = [json.loads(line) for line in err.splitlines() if line.startswith('{')]
 
     def arm(self, target, commit, after):
         self.process.stdin.write(f'{target} {commit} {int(after)}\n')
@@ -624,6 +625,24 @@ class NativeFaultHTTP(unittest.TestCase):
                 self.assertEqual(created['collection_id'], cid)
                 self.assertEqual(self.api(self.base + '/collections', body), created)
         self.assertEqual(len(self.api(self.base + '/collections')['items']), 2)
+
+    def test_logging_correlates_engine_commit_uncertainty_with_http_completion(self):
+        path = self.collection()
+        self.arm('core', 2, True)
+        body = {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'private-log-marker'}]}
+        unknown = self.api(path + '/append', body, status=503)
+        self.assertEqual(unknown['outcome'], 'commit_unknown')
+        self.arm('core', 0, False)
+        self.api(self.base + '/reconcile', {})
+        self.stop()
+        recovery = [e for e in self.log_records if e['event'] == 'recovery_required']
+        self.assertTrue(recovery, self.log_records)
+        self.assertTrue(any(e['outcome'] == 'unknown' and e['operation'] == 'append' for e in recovery))
+        requests = [e for e in self.log_records if e['event'] == 'request_completed']
+        self.assertTrue(any(e['request_id'] == recovery[0]['request_id'] and int(e['status_code']) == 503
+                            and e['outcome'] == 'error' for e in requests))
+        self.assertNotIn('private-log-marker', json.dumps(self.log_records))
+        self.assertNotIn(TOKEN, json.dumps(self.log_records))
 
     def test_uncertain_append_commit_and_recovery_fence_preserve_outcomes(self):
         path = self.collection()

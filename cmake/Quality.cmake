@@ -1,4 +1,4 @@
-find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
+find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 
 foreach(check IN ITEMS format format-check tidy-check quality-negative-check)
     set(quality_args)

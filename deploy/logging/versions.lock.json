@@ -1,0 +1,76 @@
+{
+  "reviewed_at": "2026-11-10",
+  "images": {
+    "grafana/loki": {
+      "version": "3.7.9",
+      "digest": "sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28",
+      "platforms": [
+        {
+          "architecture": "amd64",
+          "os": "linux"
+        },
+        {
+          "architecture": "arm",
+          "os": "linux",
+          "variant": "v7"
+        },
+        {
+          "architecture": "arm64",
+          "os": "linux"
+        }
+      ]
+    },
+    "grafana/alloy": {
+      "version": "v1.21.3",
+      "digest": "sha256:8ab871206bd2d8f89277f53abffee5f452a293980788d52f85fa183a87a505a4",
+      "platforms": [
+        {
+          "architecture": "amd64",
+          "os": "linux"
+        },
+        {
+          "architecture": "arm64",
+          "os": "linux"
+        },
+        {
+          "architecture": "ppc64le",
+          "os": "linux"
+        },
+        {
+          "architecture": "s390x",
+          "os": "linux"
+        },
+        {
+          "architecture": "unknown",
+          "os": "unknown"
+        },
+        {
+          "architecture": "unknown",
+          "os": "unknown"
+        },
+        {
+          "architecture": "unknown",
+          "os": "unknown"
+        },
+        {
+          "architecture": "unknown",
+          "os": "unknown"
+        }
+      ]
+    },
+    "grafana/grafana": {
+      "version": "13.3.0",
+      "digest": "sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205"
+    }
+  },
+  "standalone_test_archives": {
+    "loki-darwin-arm64.zip": {
+      "version": "3.7.9",
+      "sha256": "48acd15626d60ce357ac094c79d30eb9cc8be150b3b97e1360762506c3cd05a8"
+    },
+    "alloy-darwin-arm64.zip": {
+      "version": "1.21.3",
+      "sha256": "867865fd6b4f36dd4c5c8b35e3cccb5432dba466d44ab9d8261ee3cc2587b0eb"
+    }
+  }
+}

@@ -128,6 +128,21 @@ struct ScanProfile
     Metric rows_decoded{};
     Metric rows_returned{};
     Metric elapsed_us{};
+    // Completed row filtering and limit truncation, never pruning estimates.
+    Metric rows_filtered{};
+    Metric rows_limited{};
+    // At most one stop of each kind, including limit=0 and observed cancellation.
+    Metric limit_stops{};
+    Metric cancellation_stops{};
+    Metric data_files_pruned{};
+    Metric row_groups_pruned{};
+    // Live/peak bytes in this scan's Arrow pool (decode and retained output).
+    // Excludes allocator padding, whole-file copies and non-Arrow envelopes.
+    Metric arrow_bytes{};
+    Metric peak_arrow_bytes{};
+    // Live/peak reservations for original output descriptors, including slices.
+    Metric output_metadata_bytes{};
+    Metric peak_output_metadata_bytes{};
 };
 
 class ScanCursor
