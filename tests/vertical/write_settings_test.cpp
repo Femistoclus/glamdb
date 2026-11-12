@@ -10,6 +10,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <future>
+#include <limits>
 #include <map>
 #include <mutex>
 
@@ -323,6 +324,11 @@ TEST_F(TWriteSettingsTest, InvalidSettingsAreRejectedBeforeAnythingIsBound)
     const auto negative = Engine_->UpdateWriteSettings({test::collection_id, -1, {}});
     ASSERT_FALSE(negative);
     EXPECT_EQ(negative.error().code, "INVALID_ARGUMENT");
+    // The next version would not be representable; never computed.
+    const auto maximum = Engine_->UpdateWriteSettings({test::collection_id, std::numeric_limits<int64_t>::max(), {}});
+    ASSERT_FALSE(maximum);
+    EXPECT_EQ(maximum.error().code, "INVALID_ARGUMENT");
+    EXPECT_EQ(maximum.error().retry_hint, RetryHint::FixInput);
     const auto unknown = Engine_->UpdateWriteSettings({SecondCollection, 0, {}});
     ASSERT_FALSE(unknown);
     EXPECT_EQ(unknown.error().code, "COLLECTION_NOT_FOUND");

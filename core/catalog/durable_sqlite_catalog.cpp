@@ -408,7 +408,10 @@ DurableSqliteCatalogStore::UpdateWriteSettings(std::string_view id, int64_t expe
     std::lock_guard lock(mutex_);
     Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
     Require(publication_ == nullptr, "INTERNAL", "write settings cannot change during a publication");
-    Require(expected_version >= 0, "INVALID_ARGUMENT", "expected write settings version must be non-negative");
+    if (expected_version < 0 || expected_version == std::numeric_limits<int64_t>::max()) {
+        throw Failure(
+            {"INVALID_ARGUMENT", "expected write settings version must be in 0..2^63-2", RetryHint::FixInput});
+    }
     auto collection = Collection(id);
     const auto blob = EncodeWriteSettings(collection.schema, settings);
     if (!blob) {

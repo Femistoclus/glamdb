@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <new>
@@ -1278,16 +1279,16 @@ Result<CollectionInfo> Engine::UpdateWriteSettings(const UpdateWriteSettingsRequ
     std::unique_lock writer_lock(impl->writer, std::defer_lock);
     try {
         Require(ValidUuid(request.collection_id), "INVALID_ARGUMENT", "collection ID must be a canonical UUID");
-        Require(request.expected_version >= 0,
-            "INVALID_ARGUMENT",
-            "expected write settings version must be non-negative");
-        SchemaSpec schema;
-        {
-            std::lock_guard state_lock(impl->state_mutex);
-            impl->CheckReady();
-            schema = impl->CachedCollection(request.collection_id).schema;
+        // The next version must be representable: expected + 1 never overflows.
+        if (request.expected_version < 0 || request.expected_version == std::numeric_limits<int64_t>::max()) {
+            throw Failure(
+                {"INVALID_ARGUMENT", "expected write settings version must be in 0..2^63-2", RetryHint::FixInput});
         }
-        const auto settings = Take(CanonicalWriteSettings(schema, request.write_settings));
+        // A cache miss cannot prove absence while another writer may publish.
+        const auto collection = impl->ReadCollection([&](const auto& item) {
+            return item.collection_id == request.collection_id;
+        });
+        const auto settings = Take(CanonicalWriteSettings(collection.schema, request.write_settings));
         if (!writer_lock.try_lock_for(impl->limits.writer_wait)) {
             throw Failure({"RESOURCE_EXHAUSTED",
                 "writer busy; write settings were not changed",

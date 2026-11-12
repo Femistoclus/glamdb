@@ -116,6 +116,8 @@ class NativeMetadataHTTP(NativeHTTP):
         self.assertEqual(updated['write_settings_version'], '2')
         # A lost response is retried with the same request.
         self.assertEqual(self.api(path + '/write-settings', update), updated)
+        boundary = self.api(path + '/write-settings', dict(update, expected_version='9223372036854775807'), status=400)
+        self.assertEqual(boundary['error']['code'], 'INVALID_ARGUMENT')
         conflict = self.api(path + '/write-settings', dict(update, write_settings={'parquet': None}), status=409)
         self.assertEqual(conflict['error']['code'], 'WRITE_SETTINGS_CONFLICT')
         for invalid in ({'parquet': {'compression': {'codec': 'brotli'}}},
