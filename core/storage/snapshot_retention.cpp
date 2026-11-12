@@ -173,16 +173,17 @@ iceberg::Result<TExpirationPlan> PlanExpiration(const iceberg::TableMetadata& me
     const auto old = [&](std::int64_t timestamp) {
         return policy.MinAgeMs == 0 || (timestamp <= nowMs && nowMs - timestamp >= policy.MinAgeMs);
     };
-    for (; plan.Archived < archived.size() && plan.Archived < maximum && old(archived[plan.Archived]);
-         ++plan.Archived)
-    { }
+    for (; plan.Archived < archived.size() && plan.Archived < maximum && old(archived[plan.Archived]); ++plan.Archived)
+    {
+    }
     if (plan.Archived < archivedTotal) {
         return plan;
     }
     for (; plan.Root < metadata.snapshots.size() && plan.Archived + plan.Root < maximum &&
          old(metadata.snapshots[plan.Root]->timestamp_ms.time_since_epoch().count());
          ++plan.Root)
-    { }
+    {
+    }
     return plan;
 }
 
@@ -214,7 +215,8 @@ iceberg::Result<TMetadataRetirement> FindExpiredMetadata(const std::shared_ptr<i
     // Manifests of the remaining archive are protected but are not root state.
     std::set<std::string> archiveRetained;
     const auto addCandidate = [&](const iceberg::ManifestFile& manifest) -> iceberg::Status {
-        if (manifest.manifest_length <= 0 || static_cast<std::uint64_t>(manifest.manifest_length) > limits.ManifestBytes)
+        if (manifest.manifest_length <= 0 ||
+            static_cast<std::uint64_t>(manifest.manifest_length) > limits.ManifestBytes)
         {
             return iceberg::ValidationFailed("Invalid retirement manifest bytes.");
         }

@@ -507,8 +507,7 @@ CollectionInfo DurableSqliteCatalogStore::UpdateHotSnapshots(std::string_view id
     CheckHotSnapshots(hot);
     auto collection = Collection(id);
     if (hot && collection.mode != CollectionMode::Append) {
-        throw Failure(
-            {"COLLECTION_MODE_MISMATCH", "hot_snapshots requires an append collection", RetryHint::FixInput});
+        throw Failure({"COLLECTION_MODE_MISMATCH", "hot_snapshots requires an append collection", RetryHint::FixInput});
     }
     if (collection.hot_snapshots == hot) {
         // Also a repeated request whose response was lost: applied once.
@@ -563,13 +562,15 @@ int64_t DurableSqliteCatalogStore::ArchiveWatermark(std::string_view id)
 {
     int64_t watermark = 0;
     if (database_.Integer("PRAGMA user_version") >= 3) {
-        const auto expired = database_.Query(
-            "SELECT COALESCE(MAX(sequence_number),0) FROM expired_snapshots WHERE collection_id=?", {std::string(id)});
+        const auto expired =
+            database_.Query("SELECT COALESCE(MAX(sequence_number),0) FROM expired_snapshots WHERE collection_id=?",
+                {std::string(id)});
         watermark = ParseInteger(Required(expired.at(0), 0));
     }
     if (HasArchive()) {
-        const auto archived = database_.Query(
-            "SELECT COALESCE(MAX(sequence_number),0) FROM archived_snapshots WHERE collection_id=?", {std::string(id)});
+        const auto archived =
+            database_.Query("SELECT COALESCE(MAX(sequence_number),0) FROM archived_snapshots WHERE collection_id=?",
+                {std::string(id)});
         watermark = std::max(watermark, ParseInteger(Required(archived.at(0), 0)));
     }
     return watermark;
@@ -672,8 +673,9 @@ ArchivedHistory DurableSqliteCatalogStore::ArchivedSnapshotsBelow(std::string_vi
     Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
     ArchivedHistory history;
     if (database_.Integer("PRAGMA user_version") >= 3) {
-        const auto expired = database_.Query(
-            "SELECT COALESCE(MAX(sequence_number),0) FROM expired_snapshots WHERE collection_id=?", {std::string(id)});
+        const auto expired =
+            database_.Query("SELECT COALESCE(MAX(sequence_number),0) FROM expired_snapshots WHERE collection_id=?",
+                {std::string(id)});
         history.expired_through = ParseInteger(Required(expired.at(0), 0));
     }
     if (!HasArchive()) {
@@ -1159,9 +1161,7 @@ CollectionInfo DurableSqliteCatalogStore::PublishCreate(CollectionInfo collectio
         "invalid migration ownership identity");
     CheckHotSnapshots(collection.hot_snapshots);
     if (collection.hot_snapshots && collection.mode != CollectionMode::Append) {
-        throw Failure({"COLLECTION_MODE_MISMATCH",
-            "hot_snapshots requires an append collection",
-            RetryHint::FixInput});
+        throw Failure({"COLLECTION_MODE_MISMATCH", "hot_snapshots requires an append collection", RetryHint::FixInput});
     }
     Publication scope{true, collection.name, std::nullopt, guard, {}, 0};
     publication_ = &scope;
@@ -1483,10 +1483,10 @@ void DurableSqliteCatalogStore::PublishExpiration(const BaseIdentity& base,
                     {base.collection_id, snapshot.snapshot_id, snapshot.sequence_number, snapshot.operation_id});
             }
             if (HasArchive() && expired.size() > static_cast<size_t>(archived_expired)) {
-                Require(database_
-                            .Query("SELECT 1 FROM archived_snapshots WHERE collection_id=? LIMIT 1",
-                                {base.collection_id})
-                            .empty(),
+                Require(
+                    database_
+                        .Query("SELECT 1 FROM archived_snapshots WHERE collection_id=? LIMIT 1", {base.collection_id})
+                        .empty(),
                     "CORRUPTION",
                     "root snapshots cannot expire before the archive");
             }

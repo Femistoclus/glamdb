@@ -1427,7 +1427,7 @@ Status TLocalStorageBackend::CheckAppendAdmissible(const StoreInfo& store,
         // An append that moves snapshots to the archive does not grow the root.
         const auto rootGrowth =
             NStorage::AppendArchiveCut(current->Metadata->snapshots.size() + 1, collection.hot_snapshots) == 0 ? 1U
-                                                                                                                 : 0U;
+                                                                                                               : 0U;
         const auto minUsage = TakeUsage(
             NStorage::ReplaceUsage(ComputeStoreUsage(),
                 {.Previous = {},
@@ -2066,7 +2066,9 @@ Result<std::unique_ptr<StagedExpiration>> TLocalStorageBackend::PrepareArchive(c
         CheckStore(store);
         CheckWriteLatch(*Dirs_);
         const auto base = ResolveBase(identity);
-        Require(!NStorage::IsKVMetadata(*base->Metadata), "CORRUPTION", "the snapshot archive requires append metadata");
+        Require(!NStorage::IsKVMetadata(*base->Metadata),
+            "CORRUPTION",
+            "the snapshot archive requires append metadata");
         auto staged = std::make_unique<TStagedExpiration>();
         staged->Owner = shared_from_this();
         staged->CollectionID = collection.collection_id;
@@ -2556,7 +2558,9 @@ std::shared_ptr<const NStorage::TBaseState> TLocalStorageBackend::VerifyCollecti
     state.Usage = TakeUsage(NStorage::ReplaceUsage(state.Usage, {.Previous = {}, .Next = archive}),
         "CORRUPTION",
         "archived metadata usage");
-    CheckUsage(NStorage::CheckStorageCapacity(state.Usage, Options_.Storage), "CORRUPTION", "archived storage capacity");
+    CheckUsage(NStorage::CheckStorageCapacity(state.Usage, Options_.Storage),
+        "CORRUPTION",
+        "archived storage capacity");
     const auto indexBytes = ScanIndexMemory(state);
     if (memory->GetBytes() < RootMemoryBytes({.RootBytes = state.Usage.RootBytes, .IndexBytes = indexBytes})) {
         // Recovery's protected workspace covers reconstruction. Before the

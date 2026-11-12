@@ -174,8 +174,7 @@ int64_t ArchiveRows(const std::filesystem::path& root, std::string_view collecti
         return 0;
     }
     return detail::ParseInteger(detail::Required(
-        catalog.Query("SELECT COUNT(*) FROM archived_snapshots WHERE collection_id=?", {std::string(collection)})
-            .at(0),
+        catalog.Query("SELECT COUNT(*) FROM archived_snapshots WHERE collection_id=?", {std::string(collection)}).at(0),
         0));
 }
 
@@ -199,8 +198,10 @@ protected:
 
     void Create(std::optional<int64_t> hot, Limits limits = {})
     {
-        auto created = detail::EngineFactory::CreateWith(
-            {test::store_id, Root_.string(), "local-delete-extra-v1", limits}, ArchiveBackend(), Vfs_.Name());
+        auto created =
+            detail::EngineFactory::CreateWith({test::store_id, Root_.string(), "local-delete-extra-v1", limits},
+                ArchiveBackend(),
+                Vfs_.Name());
         ASSERT_TRUE(created) << created.error().message;
         Engine_ = std::move(*created);
         CreateCollectionRequest request{test::collection_id, "events", Schema};
@@ -221,8 +222,9 @@ protected:
             ASSERT_TRUE(Engine_->Shutdown(std::chrono::seconds(5)));
             Engine_.reset();
         }
-        auto opened = detail::EngineFactory::OpenWith(
-            {Root_.string(), test::store_id, "local-delete-extra-v1", limits}, ArchiveBackend(), Vfs_.Name());
+        auto opened = detail::EngineFactory::OpenWith({Root_.string(), test::store_id, "local-delete-extra-v1", limits},
+            ArchiveBackend(),
+            Vfs_.Name());
         ASSERT_TRUE(opened) << opened.error().code << ": " << opened.error().message;
         Engine_ = std::move(*opened);
     }
@@ -625,9 +627,11 @@ TEST_F(TSnapshotArchiveTest, AlteredOrMissingArchivedListIsAnExplicitErrorNeverW
         detail::Database catalog;
         catalog.Open(Root_ / "catalog.sqlite", SQLITE_OPEN_READONLY, {});
         firstList = detail::Required(
-            catalog.Query("SELECT manifest_list FROM archived_snapshots WHERE snapshot_id=?", {first}).at(0), 0);
+            catalog.Query("SELECT manifest_list FROM archived_snapshots WHERE snapshot_id=?", {first}).at(0),
+            0);
         secondList = detail::Required(
-            catalog.Query("SELECT manifest_list FROM archived_snapshots WHERE snapshot_id=?", {second}).at(0), 0);
+            catalog.Query("SELECT manifest_list FROM archived_snapshots WHERE snapshot_id=?", {second}).at(0),
+            0);
     }
     const auto local = [&](const std::string& uri) {
         return Root_ / "warehouse" / uri.substr(uri.find("/warehouse/") + 11);
@@ -684,13 +688,11 @@ TEST_F(TSnapshotArchiveTest, ReopenRejectsLowerLimitsThatArchivedMetadataStillNe
     const auto listBytes = static_cast<int64_t>(ManifestListBytes(Root_));
     Limits lower = limits;
     lower.history.max_manifest_list_bytes = listBytes - 1;
-    const auto refused =
-        OpenExisting({Root_.string(), test::store_id, "local-delete-extra-v1", lower});
+    const auto refused = OpenExisting({Root_.string(), test::store_id, "local-delete-extra-v1", lower});
     ASSERT_FALSE(refused);
     EXPECT_EQ(refused.error().code, "CORRUPTION") << refused.error().message;
     lower.history.max_manifest_list_bytes = listBytes;
-    const auto accepted =
-        OpenExisting({Root_.string(), test::store_id, "local-delete-extra-v1", lower});
+    const auto accepted = OpenExisting({Root_.string(), test::store_id, "local-delete-extra-v1", lower});
     EXPECT_TRUE(accepted) << accepted.error().message;
 }
 
@@ -716,8 +718,11 @@ std::string HistoryDigest(const Engine& engine, const std::string& collection)
     }
     for (const auto& snapshot : history->snapshots) {
         const auto view = Capture(engine, collection, snapshot.snapshot_id);
-        text += std::format("{}:{}:{}:{}|", snapshot.snapshot_id, snapshot.receipt.operation_id,
-            view.StatisticsRows.value_or(-1), view.StatisticsBytes.value_or(-1));
+        text += std::format("{}:{}:{}:{}|",
+            snapshot.snapshot_id,
+            snapshot.receipt.operation_id,
+            view.StatisticsRows.value_or(-1),
+            view.StatisticsBytes.value_or(-1));
         for (const auto& row : view.Rows) {
             text += row + ";";
         }
@@ -791,8 +796,7 @@ TEST(SnapshotArchiveChild, Run)
     const auto index = std::stoll(operation);
     if (selected.starts_with("crash-append-")) {
         vfs.Arm(2, selected == "crash-append-after");
-        const auto outcome =
-            engine->AppendDurable({test::collection_id, Op(index), {}, {Batch(RowsFor(index))}});
+        const auto outcome = engine->AppendDurable({test::collection_id, Op(index), {}, {Batch(RowsFor(index))}});
         ::_exit(outcome.disposition == CommitDisposition::CommitUnknown ? 77 : 78);
     }
     if (selected.starts_with("crash-archive-")) {
@@ -1125,11 +1129,8 @@ struct TWindowCost
 
 // Appends until `history` committed operations, then measures `window`
 // appends: one complete archive cycle when window == hot + slack + 1.
-TWindowCost MeasureWindow(Engine& engine,
-    const std::filesystem::path& root,
-    int64_t& next,
-    int64_t history,
-    int64_t window)
+TWindowCost
+MeasureWindow(Engine& engine, const std::filesystem::path& root, int64_t& next, int64_t history, int64_t window)
 {
     const auto batch = Batch(RowsFor(0, 3));
     const auto append = [&] {

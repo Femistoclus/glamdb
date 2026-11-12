@@ -347,8 +347,8 @@ Result<TScanManifests> PlanVerifiedScan(const NGlamDB::NStorage::TBaseState& sta
                         archived->sequence_number < snapshots.front()->sequence_number,
                     "NOT_FOUND",
                     "snapshot is not retained by this view");
-                Require(archived->data_files > 0 && static_cast<uint64_t>(archived->data_files) <=
-                        plan.Index->Files.size(),
+                Require(archived->data_files > 0 &&
+                        static_cast<uint64_t>(archived->data_files) <= plan.Index->Files.size(),
                     "CORRUPTION",
                     "archived snapshot has an invalid membership boundary");
                 plan.FileCount = static_cast<size_t>(archived->data_files);

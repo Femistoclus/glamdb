@@ -1288,9 +1288,7 @@ CreateOutcome Engine::CreateCollectionImpl(const CreateCollectionRequest& reques
                         }),
                 "INVALID_ARGUMENT",
                 "KV collections require a non-null string key field");
-            Require(!request.hot_snapshots,
-                "COLLECTION_MODE_MISMATCH",
-                "hot_snapshots requires an append collection");
+            Require(!request.hot_snapshots, "COLLECTION_MODE_MISMATCH", "hot_snapshots requires an append collection");
         }
         const auto schema_hash = Take(SchemaFingerprint(request.schema));
         const auto settings = Take(CanonicalWriteSettings(request.schema, request.write_settings));
@@ -1548,8 +1546,7 @@ Result<SnapshotExpirationResult> Engine::ExpireSnapshots(const SnapshotExpiratio
         impl->ReserveAttempt();
         const auto archived =
             impl->catalog->OldestArchivedSnapshots(request.collection_id, MaxExpiredArchivePerCall + 1);
-        auto staged =
-            Take(impl->backend->PrepareExpiration(impl->info, collection, *base, request.policy, archived));
+        auto staged = Take(impl->backend->PrepareExpiration(impl->info, collection, *base, request.policy, archived));
         Require(staged != nullptr, "INTERNAL", "maintenance returned no staged result");
         SnapshotExpirationResult result{staged->Policy(), static_cast<int64_t>(staged->Expired().size()), 0};
         if (staged->Changed()) {
@@ -2503,12 +2500,16 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
         if (staged->IsNoOp()) {
             impl->catalog->PublishNoOp(*binding, receipt, verify);
         } else {
-            impl->catalog->PublishAppend(*binding, receipt, verify, [&] {
-                return staged->Publish(*impl->catalog);
-            },
-            [&] {
-                return staged->Archived();
-            });
+            impl->catalog->PublishAppend(
+                *binding,
+                receipt,
+                verify,
+                [&] {
+                    return staged->Publish(*impl->catalog);
+                },
+                [&] {
+                    return staged->Archived();
+                });
         }
         // Count a confirmed new publication once. Receipt replay paths never
         // reach this boundary; a lost/unknown COMMIT response is not counted.

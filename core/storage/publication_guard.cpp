@@ -50,8 +50,9 @@ iceberg::Status TStoragePublicationGuard::CheckContext(const TPointerChange& cha
         return iceberg::ValidationFailed("Snapshot retention is unsupported for KV collections.");
     }
     // KV membership is copy-on-write over the complete root history.
-    if (kv && (Context_.ArchivePrefix != 0 || Context_.ArchiveMaintenance || !Context_.ExpiredArchive.empty() ||
-                  Context_.RemainingArchive))
+    if (kv &&
+        (Context_.ArchivePrefix != 0 || Context_.ArchiveMaintenance || !Context_.ExpiredArchive.empty() ||
+            Context_.RemainingArchive))
     {
         return iceberg::ValidationFailed("The snapshot archive is unsupported for KV collections.");
     }
@@ -152,8 +153,8 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
     if (Context_.Base) {
         const auto& base = *Context_.Base->Metadata;
         const auto archived = Context_.ArchivePrefix;
-        if ((archived >= base.snapshots.size() && archived != 0 && maintenance) ||
-            archived > base.snapshots.size() || (archived != 0 && Context_.RetentionPolicy) ||
+        if ((archived >= base.snapshots.size() && archived != 0 && maintenance) || archived > base.snapshots.size() ||
+            (archived != 0 && Context_.RetentionPolicy) ||
             (Context_.ArchiveMaintenance && (archived == 0 || Context_.RetentionPolicy)) ||
             ((!Context_.ExpiredArchive.empty() || Context_.RemainingArchive) && !Context_.RetentionPolicy))
         {
@@ -178,7 +179,8 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
                 expiredSequence = expired.Sequence;
             }
             if (Context_.RemainingArchive &&
-                (count != 0 || Context_.RemainingArchive->Sequence != expiredSequence + 1 || expected.snapshots.empty() ||
+                (count != 0 || Context_.RemainingArchive->Sequence != expiredSequence + 1 ||
+                    expected.snapshots.empty() ||
                     Context_.RemainingArchive->Sequence >= expected.snapshots.front()->sequence_number))
             {
                 return iceberg::ValidationFailed("Expiration leaves an archive gap.");

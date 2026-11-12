@@ -933,15 +933,14 @@ Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanReq
                 BoundedDiagnostic("collection schema profile: " + profile.error().message),
                 RetryHint::OperatorAction});
         }
-        auto plan =
-            Take(context.VerifiedState
-                    ? PlanVerifiedScan(*context.VerifiedState, context.Base, request.selector, context.Archived.get())
-                    : PlanManifests(context.FileIO,
-                          context.Base,
-                          request.selector,
-                          context.Cache.get(),
-                          context.RootBytes,
-                          context.Archived.get()));
+        auto plan = Take(context.VerifiedState
+                ? PlanVerifiedScan(*context.VerifiedState, context.Base, request.selector, context.Archived.get())
+                : PlanManifests(context.FileIO,
+                      context.Base,
+                      request.selector,
+                      context.Cache.get(),
+                      context.RootBytes,
+                      context.Archived.get()));
         if (context.ChronologicalFiles) {
             RequireInput(context.Collection.mode == CollectionMode::Append,
                 "chronological sources require an append collection");

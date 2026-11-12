@@ -51,7 +51,8 @@ iceberg::Result<TVerifiedManifestList> ReadManifestListIdentity(const std::share
     std::string_view expectedSha256)
 {
     return CatchIcebergExceptions([&]() -> iceberg::Result<TVerifiedManifestList> {
-        if (!fileIO || limits.ManifestListBytes > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
+        if (!fileIO ||
+            limits.ManifestListBytes > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
             limits.Store.Manifests > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
         {
             return iceberg::InvalidArgument("Invalid manifest-list verification limits.");
@@ -120,7 +121,8 @@ iceberg::Result<TArchiveCut> DescribeArchiveCut(const std::shared_ptr<iceberg::F
             return {};
         };
         using TManifests = std::map<std::string, std::uint64_t, std::less<>>;
-        const auto readManifests = [&](const std::string& path, TVerifiedManifestList& list) -> iceberg::Result<TManifests> {
+        const auto readManifests = [&](const std::string& path,
+                                       TVerifiedManifestList& list) -> iceberg::Result<TManifests> {
             ICEBERG_RETURN_UNEXPECTED(checkList(path));
             ICEBERG_ASSIGN_OR_RAISE(list, ReadManifestListIdentity(fileIO, path, limits));
             TManifests manifests;
