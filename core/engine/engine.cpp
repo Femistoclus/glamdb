@@ -35,6 +35,7 @@
 #include <new>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -570,16 +571,20 @@ struct Engine::Impl
                 CheckReady();
                 admissionGeneration = metadata_pages.GetGeneration();
             }
-            auto page = metadata_pages.Read(
+            const auto workingBytes = request.PageToken.empty() && !std::is_same_v<T, TCollectionPage>
+                ? MetadataWorkForRoot(limits.history.max_root_file_bytes)
+                : MetadataWorkBytes;
+            auto page = metadata_pages.ReadWithMemory(
                 request,
                 parameters,
-                [&]() -> Result<TMetadataPages::TListing> {
-                    auto listing = load();
+                [&](const auto& workingMemory) -> Result<TMetadataPages::TListing> {
+                    auto listing = load(workingMemory);
                     if (!listing) {
                         return std::unexpected(listing.error());
                     }
                     return TMetadataPages::TListing(std::move(*listing));
                 },
+                workingBytes,
                 TMetadataPages::TClock::now(),
                 admissionGeneration,
                 resources);
@@ -686,7 +691,10 @@ struct Engine::Impl
 
 #if GLAMDB_HAS_STORAGE
     template <class T, class TRead>
-    Result<T> ReadView(std::string_view id, TRead&& read, bool useCache = true)
+    Result<T> ReadView(std::string_view id,
+        TRead&& read,
+        bool useCache = true,
+        std::shared_ptr<ResourceReservation> planningMemory = {})
     {
         std::string root;
         bool leased = false;
@@ -714,8 +722,12 @@ struct Engine::Impl
                 leased = true;
             }
             Require(backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
-            auto memory = Take(
-                resources->Reserve(ResourceClass::Metadata, MetadataWorkForRoot(limits.history.max_root_file_bytes)));
+            const auto workingBytes = MetadataWorkForRoot(limits.history.max_root_file_bytes);
+            Require(!planningMemory || planningMemory->GetBytes() >= workingBytes,
+                "RESOURCE_EXHAUSTED",
+                "metadata planning reservation does not cover the admitted root");
+            auto memory = planningMemory ? std::move(planningMemory)
+                                         : Take(resources->Reserve(ResourceClass::Metadata, workingBytes));
             const auto capabilities = backend->GetCapabilities();
             context.Resources = resources;
             context.PlanningMemory = memory;
@@ -741,6 +753,48 @@ struct Engine::Impl
             release();
             return std::unexpected(ExceptionError(error));
         }
+    }
+
+    Result<SnapshotHistory> ReadSnapshots(std::string_view id, std::shared_ptr<ResourceReservation> planningMemory = {})
+    {
+        return ReadView<SnapshotHistory>(
+            id,
+            [&](const TScanContext& context) {
+                std::vector<AppendResult> receipts;
+                catalog->ForEachOperation(
+                    [&](const auto& record) {
+                        if (record.state == OperationState::Committed && record.outcome && record.outcome->result) {
+                            const auto& receipt = *record.outcome->result;
+                            if ((receipt.receipt_version != 3 || receipt.snapshot_created) &&
+                                (!context.VerifiedState || !context.VerifiedState->ScanIndex ||
+                                    std::ranges::binary_search(context.VerifiedState->ScanIndex->Snapshots,
+                                        receipt.snapshot_id,
+                                        {},
+                                        &NGlamDB::NStorage::TSnapshotBoundary::SnapshotID)))
+                            {
+                                receipts.push_back(receipt);
+                            }
+                        }
+                    },
+                    id);
+                return ReadHistory(context, receipts);
+            },
+            false,
+            std::move(planningMemory));
+    }
+
+    Result<TFileListing> ReadFileListing(std::string_view collectionID,
+        SnapshotSelector selector,
+        std::shared_ptr<ResourceReservation> planningMemory = {})
+    {
+        return ReadView<TFileListing>(
+            collectionID,
+            [&](const TScanContext& context) {
+                CheckExpiredSnapshot(context, selector);
+                return ReadFiles(context, selector);
+            },
+            true,
+            std::move(planningMemory));
     }
 #endif
 
@@ -1142,14 +1196,16 @@ Result<std::vector<CollectionInfo>> Engine::ListCollections() const
 
 Result<TCollectionPage> Engine::ListCollectionsPage(const TMetadataPageRequest& request) const
 {
-    return impl_->ReadMetadataPage<TCollectionPage>(request, "collections-v1", [&]() -> Result<TCollectionPage> {
-        auto collections = ListCollections();
-        if (!collections) {
-            return std::unexpected(collections.error());
-        }
-        const auto highWater = collections->empty() ? 0 : collections->back().creation_sequence;
-        return TCollectionPage{.CreationHighWaterMark = highWater, .Collections = std::move(*collections)};
-    });
+    return impl_->ReadMetadataPage<TCollectionPage>(request,
+        "collections-v1",
+        [&](const auto&) -> Result<TCollectionPage> {
+            auto collections = ListCollections();
+            if (!collections) {
+                return std::unexpected(collections.error());
+            }
+            const auto highWater = collections->empty() ? 0 : collections->back().creation_sequence;
+            return TCollectionPage{.CreationHighWaterMark = highWater, .Collections = std::move(*collections)};
+        });
 }
 
 Result<SnapshotHistory> Engine::ListSnapshotsPage(std::string_view collectionID,
@@ -1159,8 +1215,13 @@ Result<SnapshotHistory> Engine::ListSnapshotsPage(std::string_view collectionID,
         Require(ValidUuid(collectionID), "INVALID_ARGUMENT", "Collection ID must be a canonical UUID.");
         return impl_->ReadMetadataPage<SnapshotHistory>(request,
             std::string("snapshots-v1:") + std::string(collectionID),
-            [&] {
+            [&](const auto& workingMemory) {
+#if GLAMDB_HAS_STORAGE
+                return impl_->ReadSnapshots(collectionID, workingMemory);
+#else
+                (void)workingMemory;
                 return ListSnapshots(collectionID);
+#endif
             });
     } catch (const Failure& error) {
         return std::unexpected(error.detail);
@@ -1180,8 +1241,13 @@ Result<TFileListing> Engine::ListFilesPage(std::string_view collectionID,
         parameters.Text(collectionID);
         parameters.Number(static_cast<uint8_t>(selector.kind));
         parameters.Number(selector.snapshot_id);
-        return impl_->ReadMetadataPage<TFileListing>(request, parameters.bytes, [&] {
+        return impl_->ReadMetadataPage<TFileListing>(request, parameters.bytes, [&](const auto& workingMemory) {
+#if GLAMDB_HAS_STORAGE
+            return impl_->ReadFileListing(collectionID, selector, workingMemory);
+#else
+            (void)workingMemory;
             return ListFiles(collectionID, selector);
+#endif
         });
     } catch (const Failure& error) {
         return std::unexpected(error.detail);
@@ -2408,29 +2474,7 @@ Result<SnapshotHistory> Engine::ListSnapshots(std::string_view id) const
 {
     const auto impl = impl_;
 #if GLAMDB_HAS_STORAGE
-    return impl->ReadView<SnapshotHistory>(
-        id,
-        [&](const TScanContext& context) {
-            std::vector<AppendResult> receipts;
-            impl->catalog->ForEachOperation(
-                [&](const auto& record) {
-                    if (record.state == OperationState::Committed && record.outcome && record.outcome->result) {
-                        const auto& receipt = *record.outcome->result;
-                        if ((receipt.receipt_version != 3 || receipt.snapshot_created) &&
-                            (!context.VerifiedState || !context.VerifiedState->ScanIndex ||
-                                std::ranges::binary_search(context.VerifiedState->ScanIndex->Snapshots,
-                                    receipt.snapshot_id,
-                                    {},
-                                    &NGlamDB::NStorage::TSnapshotBoundary::SnapshotID)))
-                        {
-                            receipts.push_back(receipt);
-                        }
-                    }
-                },
-                id);
-            return ReadHistory(context, receipts);
-        },
-        false);
+    return impl->ReadSnapshots(id);
 #else
     (void)id;
     return std::unexpected(
@@ -2457,10 +2501,7 @@ Result<CollectionStatistics> Engine::GetStatistics(std::string_view id, Snapshot
 Result<TFileListing> Engine::ListFiles(std::string_view collectionID, SnapshotSelector selector) const
 {
 #if GLAMDB_HAS_STORAGE
-    return impl_->ReadView<TFileListing>(collectionID, [&](const TScanContext& context) {
-        CheckExpiredSnapshot(context, selector);
-        return ReadFiles(context, selector);
-    });
+    return impl_->ReadFileListing(collectionID, selector);
 #else
     (void)collectionID;
     (void)selector;

@@ -54,7 +54,8 @@ Scan reservations have separate lifetimes:
 
 | Reservation | Release |
 | --- | --- |
-| Metadata planning: 768 MiB default; larger root profiles scale to 48 times the root byte limit | End of indexed planning; uncached plans retain it until cursor destruction. Verified membership retains its existing generation charge. |
+| Verified-index planning: 16 MiB temporary schema/projection workspace | End of planning. Root/index ownership remains charged to the verified generation; cursor/output/predicate leases are separate. |
+| Uncached metadata planning: 768 MiB default; larger root profiles scale to 48 times the root byte limit | Uncached plans retain it until cursor destruction. A supplied caller planning lease is reused. |
 | 16 MiB cursor metadata, 1 MiB selection data, 16 KiB ordinary control | Cursor destruction; returned schemas/buffers, including `ScanInfo::output_schema`, also retain the shared cursor metadata envelope. |
 | 256 MiB pending manifest metadata | After all descriptors from that manifest have been consumed (including when the last pending file is pruned), or on scan failure/EOS. |
 | 256 MiB footer/decoder metadata | After the active positional file reader (`TScanRandomAccessFile` + Parquet reader) is destroyed. Arrow column/filter allocations are charged directly to the cursor's `ResourcePool` under `ResourceClass::Data` (no whole-file byte copy is buffered). |
@@ -136,6 +137,14 @@ the next filesystem observation. Reservations are process-local and do not
 replace checked ENOSPC/EIO handling or coordinate independent external writers.
 No persistent format changes or migration are required.
 
+Core paginated history and file listings pass their admitted planning lease
+through the nested metadata read instead of reserving another full working set.
+The lease covers the configured root limit, including larger history profiles,
+and remains alive through page construction. Returned listing, page and session
+leases retain their existing independent lifetime. Root/manifest reads and
+corruption classification are unchanged. Cached continuations still use the
+conservative full working envelope; this change does not lower their copy bound.
+
 ## Validation
 
 `ResourceOwner`, `ResourcePool`, `SharedResources` and native route tests cover
@@ -151,6 +160,12 @@ sampled physical bytes/inodes/workspace use. Run:
 cmake --build --preset local --parallel 2
 ctest --preset local --output-on-failure -R 'ResourceOwner|ResourcePool|SharedResources|SharedPressure|glamdb.resource_profile'
 ```
+
+`VerifiedScanAdmissionTest` additionally checks indexed planning under metadata
+pressure, supplied and uncached planning leases, invalid verified membership and
+retained output after shutdown. `MetadataWorkingAdmissionTest` checks one shared
+planning envelope for history/files, pressure, continuation/replay and final
+lease release. Run them with the storage-enabled vertical suite.
 
 Executed evidence and sanitizer results are recorded in
 [the validation report](SHARED_RESOURCES_VALIDATION.md). This campaign does not

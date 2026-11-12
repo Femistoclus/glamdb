@@ -189,10 +189,10 @@ TEST(SharedResources, CompoundScanLiteralsRequireRetainedMetadataAdmission)
     EXPECT_GE(owner->GetUsage().memory_bytes[1] - baseline, 32ULL << 20);
     cursor->reset();
     EXPECT_EQ(owner->GetUsage().memory_bytes[1], baseline);
-    // Leave room for planning and the old fixed cursor allowance, but not for
-    // copying and retaining this predicate's string set.
-    auto pressure = owner->Reserve(ResourceClass::Metadata,
-        owner->GetLimits().memory_bytes[1] - baseline - detail::MetadataWorkBytes - (17ULL << 20));
+    // This predicate's owned string set needs more than 64 MiB during binding,
+    // independently of the indexed planner's smaller temporary workspace.
+    auto pressure =
+        owner->Reserve(ResourceClass::Metadata, owner->GetLimits().memory_bytes[1] - baseline - (64ULL << 20));
     ASSERT_TRUE(pressure);
     auto refused = (*created)->Scan(request);
     EXPECT_FALSE(refused);

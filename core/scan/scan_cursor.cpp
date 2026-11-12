@@ -43,6 +43,9 @@ namespace glamdb::detail {
 namespace {
 
 constexpr int64_t MaxBatchRows = 65536;
+// Verified membership already owns roots and file descriptors. Planning copies
+// only bounded 128-field schemas/projections; predicates reserve separately.
+constexpr uint64_t VerifiedPlanningMemoryBytes = 16ULL << 20;
 
 void RequireInput(bool condition, std::string_view message)
 {
@@ -908,7 +911,8 @@ Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanReq
         auto controlMemory = Take(context.Resources->Reserve(ResourceClass::Control, ControlMemoryBytes));
         auto planningMemory = context.PlanningMemory
             ? std::move(context.PlanningMemory)
-            : Take(context.Resources->Reserve(ResourceClass::Metadata, MetadataWorkForRoot(context.RootBytes)));
+            : Take(context.Resources->Reserve(ResourceClass::Metadata,
+                  context.VerifiedState ? VerifiedPlanningMemoryBytes : MetadataWorkForRoot(context.RootBytes)));
         RequireInput(request.batch_rows >= 1 && request.batch_rows <= MaxBatchRows,
             "batch_rows must be within 1..65536");
         RequireInput(!request.limit || *request.limit >= 0, "limit must not be negative");

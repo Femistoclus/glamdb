@@ -232,6 +232,26 @@ Result<TMetadataPages::TListing> TMetadataPages::Read(const TMetadataPageRequest
     std::optional<uint64_t> admissionGeneration,
     const std::shared_ptr<ResourceOwner>& resources)
 {
+    return ReadWithMemory(
+        request,
+        parameters,
+        [&](const auto&) {
+            return load();
+        },
+        MetadataWorkBytes,
+        now,
+        admissionGeneration,
+        resources);
+}
+
+Result<TMetadataPages::TListing> TMetadataPages::ReadWithMemory(const TMetadataPageRequest& request,
+    std::string_view parameters,
+    const TLoadWithMemory& load,
+    uint64_t workingBytes,
+    TClock::time_point now,
+    std::optional<uint64_t> admissionGeneration,
+    const std::shared_ptr<ResourceOwner>& resources)
+{
     bool pending = false;
     uint64_t generation = 0;
     try {
@@ -251,7 +271,7 @@ Result<TMetadataPages::TListing> TMetadataPages::Read(const TMetadataPageRequest
             }
         }
         const auto owner = resources ? resources : ResourceOwner::ProcessDefault();
-        auto workingMemory = owner->Reserve(ResourceClass::Metadata, MetadataWorkBytes);
+        auto workingMemory = owner->Reserve(ResourceClass::Metadata, workingBytes);
         if (!workingMemory) {
             throw Failure(workingMemory.error());
         }
@@ -295,7 +315,7 @@ Result<TMetadataPages::TListing> TMetadataPages::Read(const TMetadataPageRequest
             pending = true;
             generation = Generation_;
         }
-        auto listing = load();
+        auto listing = load(*workingMemory);
         if (!listing) {
             throw Failure(listing.error());
         }

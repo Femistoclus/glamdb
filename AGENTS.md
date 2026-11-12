@@ -39,6 +39,10 @@ Scan plans, queued manifest descriptors, individual output descriptors and the
 per-store 32 MiB immutable metadata/footer cache retain shared reservations;
 cursor control admission and live/peak memory profiles are
 described in [shared resources](docs/development/SHARED_RESOURCES.md).
+Verified-index scan opening uses a bounded 16 MiB schema/projection workspace;
+uncached root planning keeps its full history-derived envelope. Core paginated
+history/files pass one admitted planning lease into their nested metadata read,
+while returned results retain independent ownership charges.
 Full engine durability remains unqualified. `Engine::GetHealth()` exposes
 nonblocking read/write admission and recovery/shutdown state; HTTP
 `GET /databases/{id}/readyz` (or legacy `/readyz`) maps write readiness to
