@@ -872,6 +872,7 @@ EngineFactory::Open(const OpenStoreRequest& request, std::shared_ptr<StorageBack
 Result<std::shared_ptr<Engine>>
 EngineFactory::CreateWith(const CreateStoreRequest& request, const BackendFactory& backend, std::string sqlite_vfs)
 {
+    NGlamDB::NTelemetry::TReadOperationScope metrics(NGlamDB::NTelemetry::EReadOperation::CreateStore);
     try {
         auto impl = std::make_shared<Engine::Impl>();
         impl->info = {request.store_id, request.profile_id, 1};
@@ -887,17 +888,21 @@ EngineFactory::CreateWith(const CreateStoreRequest& request, const BackendFactor
             std::move(sqlite_vfs));
         impl->Recover(false);
         impl->lease->MarkReady(impl->info);
-        return std::shared_ptr<Engine>(new Engine(std::move(impl)));
+        return metrics.Finish(Result<std::shared_ptr<Engine>>(std::shared_ptr<Engine>(new Engine(std::move(impl)))));
     } catch (const Failure& error) {
+        metrics.Error(error.detail.code);
         return std::unexpected(error.detail);
     } catch (const std::exception& error) {
-        return std::unexpected(ExceptionError(error));
+        const auto detail = ExceptionError(error);
+        metrics.Error(detail.code);
+        return std::unexpected(detail);
     }
 }
 
 Result<std::shared_ptr<Engine>>
 EngineFactory::OpenWith(const OpenStoreRequest& request, const BackendFactory& backend, std::string sqlite_vfs)
 {
+    NGlamDB::NTelemetry::TReadOperationScope metrics(NGlamDB::NTelemetry::EReadOperation::OpenStore);
     try {
         auto impl = std::make_shared<Engine::Impl>();
         impl->info = {request.expected_store_id, request.profile_id, 1};
@@ -914,11 +919,14 @@ EngineFactory::OpenWith(const OpenStoreRequest& request, const BackendFactory& b
             impl->limits,
             std::move(sqlite_vfs));
         impl->Recover(false);
-        return std::shared_ptr<Engine>(new Engine(std::move(impl)));
+        return metrics.Finish(Result<std::shared_ptr<Engine>>(std::shared_ptr<Engine>(new Engine(std::move(impl)))));
     } catch (const Failure& error) {
+        metrics.Error(error.detail.code);
         return std::unexpected(error.detail);
     } catch (const std::exception& error) {
-        return std::unexpected(ExceptionError(error));
+        const auto detail = ExceptionError(error);
+        metrics.Error(detail.code);
+        return std::unexpected(detail);
     }
 }
 
@@ -1609,6 +1617,10 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
             [&] {
                 return staged->Publish(*impl->catalog);
             });
+        // Count a confirmed new publication once. Receipt replay paths never
+        // reach this boundary; a lost/unknown COMMIT response is not counted.
+        NGlamDB::NTelemetry::RecordPublished(static_cast<std::uint64_t>(receipt.rows_appended),
+            static_cast<std::uint64_t>(receipt.compressed_data_bytes_added));
         phase = CommitPhase::Complete;
         if (gate.owns_lock()) {
             if (context.candidate_metadata_location) {
@@ -1810,6 +1822,7 @@ Result<ScanExplanation> Engine::ExplainScan(const ScanRequest& request) const
 
 Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) const
 {
+    NGlamDB::NTelemetry::TReadOperationScope metrics(NGlamDB::NTelemetry::EReadOperation::ScanOpen);
     const auto impl = impl_;
     // The root this scan resolved; held until planning has read it, so a
     // concurrent append does not remove it underneath the scan.
@@ -1853,46 +1866,57 @@ Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) con
         if (!cursor) {
             impl->CloseOnCorruption(cursor.error());
         }
-        return cursor;
+        return metrics.Finish(std::move(cursor));
 #else
         throw Failure({"DEPENDENCY_UNAVAILABLE", "storage scanner is not built", RetryHint::OperatorAction});
 #endif
     } catch (const Failure& error) {
         release_root();
         impl->CloseOnCorruption(error.detail);
+        metrics.Error(error.detail.code);
         return std::unexpected(error.detail);
     } catch (const std::exception& error) {
         release_root();
-        return std::unexpected(ExceptionError(error));
+        const auto detail = ExceptionError(error);
+        metrics.Error(detail.code);
+        return std::unexpected(detail);
     }
 }
 
 Status Engine::Reconcile()
 {
+    NGlamDB::NTelemetry::TReadOperationScope metrics(NGlamDB::NTelemetry::EReadOperation::Reconcile);
     const auto impl = impl_;
     std::unique_lock lock(impl->writer, std::try_to_lock);
     if (!lock.owns_lock()) {
+        metrics.Error("OPERATION_IN_PROGRESS");
         return std::unexpected(
             ErrorDetail{"OPERATION_IN_PROGRESS", "writer is still executing", RetryHint::SameIdAfterReconcile});
     }
     try {
         Require(!impl->closed, "CANCELLED", "engine is closed");
         impl->Recover(true);
+        metrics.Finish();
         return {};
     } catch (const Failure& error) {
+        metrics.Error(error.detail.code);
         return std::unexpected(error.detail);
     } catch (const std::exception& error) {
-        return std::unexpected(ExceptionError(error));
+        const auto detail = ExceptionError(error);
+        metrics.Error(detail.code);
+        return std::unexpected(detail);
     }
 }
 
 Status Engine::Shutdown(std::chrono::milliseconds timeout)
 {
+    NGlamDB::NTelemetry::TReadOperationScope metrics(NGlamDB::NTelemetry::EReadOperation::CloseStore);
     const auto impl = impl_;
     impl->closing = true;
     impl->metadata_pages.Clear();
     std::unique_lock lock(impl->writer, std::defer_lock);
     if (!lock.try_lock_for(std::max(timeout, std::chrono::milliseconds(0)))) {
+        metrics.Error("DEADLINE_EXCEEDED");
         return std::unexpected(ErrorDetail{"DEADLINE_EXCEEDED",
             "writer has not finished; resources remain owned",
             RetryHint::OperatorAction});
@@ -1902,6 +1926,7 @@ Status Engine::Shutdown(std::chrono::milliseconds timeout)
         {
             std::lock_guard state_lock(impl->state_mutex);
             if (impl->closed) {
+                metrics.Finish();
                 return {};
             }
             ready = impl->ready;
@@ -1915,11 +1940,15 @@ Status Engine::Shutdown(std::chrono::milliseconds timeout)
         std::lock_guard state_lock(impl->state_mutex);
         impl->ready = false;
         impl->closed = true;
+        metrics.Finish();
         return {};
     } catch (const Failure& error) {
+        metrics.Error(error.detail.code);
         return std::unexpected(error.detail);
     } catch (const std::exception& error) {
-        return std::unexpected(ExceptionError(error));
+        const auto detail = ExceptionError(error);
+        metrics.Error(detail.code);
+        return std::unexpected(detail);
     }
 }
 

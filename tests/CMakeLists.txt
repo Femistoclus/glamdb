@@ -142,6 +142,13 @@ if(NOT GLAMDB_IO_ONLY)
 endif()
 
 if(TARGET glamdb_server)
+    add_executable(glamdb_observability_probe logging/operation_probe.cpp)
+    target_include_directories(glamdb_observability_probe PRIVATE "${PROJECT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/public")
+    target_link_libraries(glamdb_observability_probe PRIVATE glamdb_metrics glamdb_logging glamdb_build_options)
+    add_test(NAME glamdb.server_observability COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/server/observability_test.py" "$<TARGET_FILE:glamdb_server>"
+        --probe "$<TARGET_FILE:glamdb_observability_probe>")
+    set_tests_properties(glamdb.server_observability PROPERTIES LABELS "integration;http;telemetry" TIMEOUT 120)
     add_test(NAME glamdb.native_metrics COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/server/metrics_test.py" "$<TARGET_FILE:glamdb_server>")
     set_tests_properties(glamdb.native_metrics PROPERTIES LABELS "integration;http;metrics" TIMEOUT 120)
@@ -220,9 +227,8 @@ if(TARGET glamdb_transport)
 endif()
 
 if(TARGET glamdb_routes)
-    add_executable(glamdb_native_fault_driver server/native_fault_driver.cpp
-        "${PROJECT_SOURCE_DIR}/apps/server/server.cpp" support/journal_fault_vfs.cpp)
-    target_link_libraries(glamdb_native_fault_driver PRIVATE glamdb_routes glamdb_build_options
+    add_executable(glamdb_native_fault_driver server/native_fault_driver.cpp support/journal_fault_vfs.cpp)
+    target_link_libraries(glamdb_native_fault_driver PRIVATE glamdb_server_runtime glamdb_build_options
         SQLite::SQLite3 iceberg::iceberg_sql_catalog_static)
     add_test(NAME glamdb.native_http_fault COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/server/native_fault_test.py" "$<TARGET_FILE:glamdb_native_fault_driver>")
@@ -234,9 +240,8 @@ if(TARGET glamdb_routes)
         PROPERTIES LABELS "unit;http;fault" TIMEOUT 120)
 endif()
 if(TARGET glamdb_routes)
-    add_executable(glamdb_http_lifecycle_driver server/lifecycle_driver.cpp
-        "${PROJECT_SOURCE_DIR}/apps/server/server.cpp" support/fake_storage.cpp)
-    target_link_libraries(glamdb_http_lifecycle_driver PRIVATE glamdb_routes glamdb_build_options
+    add_executable(glamdb_http_lifecycle_driver server/lifecycle_driver.cpp support/fake_storage.cpp)
+    target_link_libraries(glamdb_http_lifecycle_driver PRIVATE glamdb_server_runtime glamdb_build_options
         SQLite::SQLite3 iceberg::iceberg_sql_catalog_static)
     add_test(NAME glamdb.http_lifecycle COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/server/lifecycle_test.py" "$<TARGET_FILE:glamdb_http_lifecycle_driver>")
@@ -244,13 +249,13 @@ if(TARGET glamdb_routes)
 endif()
 
 if(TARGET glamdb_routes)
-    add_executable(glamdb_resource_profile_driver server/resource_profile_driver.cpp
-        "${PROJECT_SOURCE_DIR}/apps/server/server.cpp")
-    target_link_libraries(glamdb_resource_profile_driver PRIVATE glamdb_routes glamdb_build_options)
+    add_executable(glamdb_resource_profile_driver server/resource_profile_driver.cpp)
+    target_link_libraries(glamdb_resource_profile_driver PRIVATE glamdb_server_runtime glamdb_build_options)
     add_test(NAME glamdb.resource_profile COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/server/resource_profile_test.py" "$<TARGET_FILE:glamdb_resource_profile_driver>")
     set_tests_properties(glamdb.resource_profile PROPERTIES LABELS "integration;http;resources" TIMEOUT 240)
 endif()
+if(TARGET glamdb_logging)
 add_executable(glamdb_logging_probe logging/logging_probe.cpp)
 target_include_directories(glamdb_logging_probe PRIVATE "${PROJECT_SOURCE_DIR}")
 target_link_libraries(glamdb_logging_probe PRIVATE glamdb_logging glamdb_build_options)
@@ -258,6 +263,7 @@ add_test(NAME glamdb.logging
     COMMAND "${CMAKE_COMMAND}" -E env "GLAMDB_LOG_PROBE=$<TARGET_FILE:glamdb_logging_probe>"
             "${Python3_EXECUTABLE}" -m unittest discover -s "${PROJECT_SOURCE_DIR}/tests/logging" -v)
 set_tests_properties(glamdb.logging PROPERTIES LABELS "unit;logging" TIMEOUT 60)
+endif()
 
 if(TARGET glamdb_server)
     set(glamdb_logging_admin "-")

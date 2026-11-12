@@ -1,10 +1,14 @@
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
-add_library(glamdb_routes STATIC routes.cpp databases.cpp scans.cpp metadata.cpp metrics.cpp)
-target_link_libraries(glamdb_routes PUBLIC glamdb_transport glamdb_logging PRIVATE glamdb_build_options SQLite::SQLite3 OpenSSL::Crypto prometheus-cpp::pull)
+add_library(glamdb_routes STATIC routes.cpp databases.cpp scans.cpp metadata.cpp)
+target_link_libraries(glamdb_routes PUBLIC glamdb_transport glamdb_logging
+    PRIVATE glamdb_build_options SQLite::SQLite3 OpenSSL::Crypto)
 target_compile_definitions(glamdb_routes PRIVATE GLAMDB_HTTP_STORAGE=$<BOOL:${GLAMDB_BUILD_STORAGE}>)
-add_executable(glamdb_server main.cpp server.cpp)
+add_library(glamdb_server_runtime STATIC server.cpp metrics.cpp)
+target_link_libraries(glamdb_server_runtime PUBLIC glamdb_routes
+    PRIVATE glamdb_build_options prometheus-cpp::pull)
+add_executable(glamdb_server main.cpp)
 set_target_properties(glamdb_server PROPERTIES OUTPUT_NAME glamdb)
-target_link_libraries(glamdb_server PRIVATE glamdb_build_options glamdb_routes prometheus-cpp::pull CLI11::CLI11)
+target_link_libraries(glamdb_server PRIVATE glamdb_build_options glamdb_server_runtime glamdb_logging CLI11::CLI11)
 install(TARGETS glamdb_server RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(FILES "${PROJECT_SOURCE_DIR}/ui/index.html" DESTINATION "${CMAKE_INSTALL_DATADIR}/glamdb/ui")
 install(DIRECTORY "${PROJECT_SOURCE_DIR}/ui/assets" DESTINATION "${CMAKE_INSTALL_DATADIR}/glamdb/ui")

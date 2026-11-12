@@ -58,6 +58,11 @@ int main()
     Check(Find(before, "glamdb_phase_duration_seconds", {{"operation", "append"}, {"phase", "data"}})
                 .histogram.sample_count == 0,
         "pre-registered phase has observations");
+    Check(Find(before, "glamdb_rows_published_total", {}).counter.value == 0 &&
+            Find(before, "glamdb_data_bytes_published_total", {}).counter.value == 0 &&
+            Find(before, "glamdb_read_rows_total", {}).counter.value == 0 &&
+            Find(before, "glamdb_scan_cursors_retained", {}).gauge.value == 0,
+        "new process read or publication metrics did not reset");
     {
         TOperationScope<AppendOutcome> scope(EOperation::Append);
         scope.EnterPhase(CommitPhase::Data);
@@ -71,17 +76,66 @@ int main()
     {
         TOperationScope<CreateOutcome> scope(EOperation::CreateCollection);
     }
+    {
+        TReadOperationScope scope(EReadOperation::ScanOpen);
+        Check(Find(collectable->Collect(), "glamdb_read_operations_in_flight", {{"operation", "scan_open"}})
+                    .gauge.value == 1,
+            "read scope missing from in-flight gauge");
+        const auto result = scope.Finish(Result<int>(7));
+        Check(result && *result == 7, "read scope changed the successful result");
+        scope.Error("CANCELLED");
+        scope.Finish();
+    }
+    {
+        TReadOperationScope scope(EReadOperation::CloseStore);
+        const auto result = scope.Finish(Status(std::unexpected(ErrorDetail{"RESOURCE_EXHAUSTED", "private-message"})));
+        Check(!result && result.error().code == "RESOURCE_EXHAUSTED", "read scope changed the failed result");
+    }
+    {
+        TReadOperationScope scope(EReadOperation::Reconcile);
+    }
+    {
+        TReadOperationScope scope(EReadOperation::ScanCancel);
+        scope.Finish();
+    }
+    {
+        TReadOperationScope scope(EReadOperation::ScanNext);
+        scope.Error("CANCELLED");
+    }
+    {
+        TReadOperationScope scope(EReadOperation::ScanNext);
+        Check(scope.Finish(Result<int>(5), 5, 64).has_value(), "scan scope changed the result");
+    }
+    RecordReadFinished(EReadOperation::ScanNext, {}, .001);
+    RecordReadFinished(EReadOperation::Reconcile, "unbounded-secret-error", .001);
+    RecordReadFinished(static_cast<EReadOperation>(255), "unbounded-secret-error", .001, 999);
     std::vector<std::thread> writers;
     for (int thread = 0; thread < 8; ++thread) {
         writers.emplace_back([] {
             for (int call = 0; call < 10000; ++call) {
-                RecordFinished(EOperation::Append, CommitDisposition::Committed, CommitPhase::Complete, {}, 0.01);
+                RecordFinished(EOperation::Append,
+                    CommitDisposition::Committed,
+                    CommitPhase::Complete,
+                    {},
+                    0.01,
+                    2,
+                    16);
+                RecordReadFinished(EReadOperation::ScanNext, {}, .005, 3, 24);
             }
         });
     }
     for (auto& writer : writers) {
         writer.join();
     }
+    const auto completed = collectable->Collect();
+    Check(Find(completed, "glamdb_rows_published_total", {}).counter.value == 0 &&
+            Find(completed, "glamdb_data_bytes_published_total", {}).counter.value == 0,
+        "receipt-facing outcomes were counted as new publications");
+    RecordPublished(5, 128);
+    AdjustRetainedCursors(2);
+    Check(Find(collectable->Collect(), "glamdb_scan_cursors_retained", {}).gauge.value == 2,
+        "retained cursor objects missing");
+    AdjustRetainedCursors(-2);
     AdjustAdmission(1, 8192);
     Check(Find(collectable->Collect(), "glamdb_admission_owned_input_bytes", {}).gauge.value == 8192,
         "admission ownership missing");
@@ -105,6 +159,37 @@ int main()
         "error label unbounded");
     Check(Find(after, "glamdb_operations_in_flight", {{"operation", "append"}}).gauge.value == 0,
         "scope did not release in-flight gauge");
+    Check(Find(after, "glamdb_read_operations_total", {{"operation", "scan_open"}, {"outcome", "ok"}}).counter.value ==
+                1 &&
+            Find(after, "glamdb_read_operations_total", {{"operation", "scan_open"}, {"outcome", "cancelled"}})
+                    .counter.value == 0,
+        "read scope completion counted more than once");
+    Check(Find(after, "glamdb_read_operations_total", {{"operation", "close_store"}, {"outcome", "error"}})
+                    .counter.value == 1 &&
+            Find(after, "glamdb_read_operations_total", {{"operation", "reconcile"}, {"outcome", "incomplete"}})
+                    .counter.value == 1 &&
+            Find(after, "glamdb_read_operations_total", {{"operation", "reconcile"}, {"outcome", "error"}})
+                    .counter.value == 1 &&
+            Find(after, "glamdb_read_operations_total", {{"operation", "scan_next"}, {"outcome", "cancelled"}})
+                    .counter.value == 1,
+        "read error, cancellation or incomplete outcome hidden");
+    Check(
+        Find(after, "glamdb_read_operations_total", {{"operation", "scan_cancel"}, {"outcome", "ok"}}).counter.value ==
+                1 &&
+            Find(after, "glamdb_read_operations_total", {{"operation", "scan_next"}, {"outcome", "ok"}})
+                    .counter.value == 80002 &&
+            Find(after, "glamdb_read_duration_seconds", {{"operation", "scan_next"}}).histogram.sample_count == 80003 &&
+            Find(after, "glamdb_read_rows_total", {}).counter.value == 240005,
+        "concurrent scan calls or returned rows were lost");
+    Check(Find(after, "glamdb_rows_published_total", {}).counter.value == 5 &&
+            Find(after, "glamdb_data_bytes_published_total", {}).counter.value == 128,
+        "confirmed publication row or byte accounting incorrect");
+    Check(Find(after, "glamdb_scan_cursors_retained", {}).gauge.value == 0 &&
+            Find(after, "glamdb_read_operations_in_flight", {{"operation", "scan_open"}}).gauge.value == 0 &&
+            Find(after, "glamdb_read_operations_in_flight", {{"operation", "close_store"}}).gauge.value == 0 &&
+            Find(after, "glamdb_read_operations_in_flight", {{"operation", "scan_next"}}).gauge.value == 0 &&
+            Find(after, "glamdb_read_operations_in_flight", {{"operation", "reconcile"}}).gauge.value == 0,
+        "read scopes or cursor retention did not release their gauges");
     prometheus::TextSerializer serializer;
     const auto snapshot = serializer.Serialize(after);
     Check(snapshot.find("sensitive") == std::string::npos && snapshot.find("secret") == std::string::npos &&
@@ -122,7 +207,7 @@ int main()
         }
         return result;
     };
-    Check(count(snapshot) == count(serializer.Serialize(before)) && count(snapshot) == 714,
+    Check(count(snapshot) == count(serializer.Serialize(before)) && count(snapshot) == 879,
         "pre-registered series budget changed");
     std::cout << snapshot;
 }

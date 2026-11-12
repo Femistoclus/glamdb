@@ -51,6 +51,38 @@ constexpr std::array<std::string_view, 13> ErrorNames{"INVALID_ARGUMENT",
 constexpr std::array<double, 15>
     Bounds{0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 15, 60};
 
+constexpr std::array<std::string_view, 7> ReadOperationNames{"create_store",
+    "open_store",
+    "close_store",
+    "reconcile",
+    "scan_open",
+    "scan_next",
+    "scan_cancel"};
+constexpr std::array<std::string_view, 4> ReadOutcomeNames{"ok", "error", "cancelled", "incomplete"};
+
+#ifdef GLAMDB_METRICS_WITH_LOGGING
+void LogCoreFinished(ELogOperation operation,
+    ELogOutcome outcome,
+    std::string_view error,
+    double seconds,
+    ELogPhase phase = ELogPhase::None,
+    std::uint64_t rows = 0,
+    std::uint64_t bytes = 0) noexcept
+{
+    const auto event = outcome == ELogOutcome::Unknown ? ELogEvent::RecoveryRequired
+        : error == "IO_ERROR" || error == "CORRUPTION" ? ELogEvent::StorageFailed
+                                                       : ELogEvent::OperationCompleted;
+    LogCurrent({.Event = event,
+        .Operation = operation,
+        .Outcome = outcome,
+        .DurationUs = seconds >= 0 && seconds <= 1e9 ? static_cast<std::uint64_t>(seconds * 1e6) : 0,
+        .RowCount = rows,
+        .ByteCount = bytes,
+        .Phase = phase,
+        .ErrorCode = LogErrorCode(error)});
+}
+#endif
+
 // Domain schema and stable handles only. prometheus-cpp owns the registry,
 // concurrent counters/gauges/histograms, collection and serialization.
 struct TDomainMetrics final : prometheus::Collectable
@@ -65,6 +97,13 @@ struct TDomainMetrics final : prometheus::Collectable
     std::array<prometheus::Gauge*, OperationNames.size()> InFlight{};
     prometheus::Gauge* Pending{};
     prometheus::Gauge* OwnedBytes{};
+    std::array<std::array<prometheus::Counter*, ReadOutcomeNames.size()>, ReadOperationNames.size()> ReadOutcomes{};
+    std::array<prometheus::Histogram*, ReadOperationNames.size()> ReadDurations{};
+    std::array<prometheus::Gauge*, ReadOperationNames.size()> ReadInFlight{};
+    prometheus::Counter* ReadRows{};
+    prometheus::Counter* PublishedRows{};
+    prometheus::Counter* PublishedBytes{};
+    prometheus::Gauge* RetainedCursors{};
 #ifdef GLAMDB_METRICS_WITH_LOGGING
     std::array<prometheus::Counter*, 11> LogCounters{};
     std::array<prometheus::Gauge*, 3> LogGauges{};
@@ -129,6 +168,58 @@ struct TDomainMetrics final : prometheus::Collectable
                           .Labels(processLabels)
                           .Register(Registry)
                           .Add({});
+        auto& readOutcomes =
+            prometheus::BuildCounter()
+                .Name("glamdb_read_operations_total")
+                .Help("Read and lifecycle calls, including retries; cancellation is a separate operation.")
+                .Labels(processLabels)
+                .Register(Registry);
+        auto& readDurations = prometheus::BuildHistogram()
+                                  .Name("glamdb_read_duration_seconds")
+                                  .Help("Read and lifecycle API duration including lock acquisition.")
+                                  .Labels(processLabels)
+                                  .Register(Registry);
+        auto& readInFlight = prometheus::BuildGauge()
+                                 .Name("glamdb_read_operations_in_flight")
+                                 .Help("Read and lifecycle calls retaining an execution scope.")
+                                 .Labels(processLabels)
+                                 .Register(Registry);
+        for (size_t operation = 0; operation < ReadOperationNames.size(); ++operation) {
+            const prometheus::Labels labels{{"operation", std::string(ReadOperationNames[operation])}};
+            ReadDurations[operation] = &readDurations.Add(labels, bounds);
+            ReadInFlight[operation] = &readInFlight.Add(labels);
+            for (size_t outcome = 0; outcome < ReadOutcomeNames.size(); ++outcome) {
+                ReadOutcomes[operation][outcome] =
+                    &readOutcomes.Add({{"operation", std::string(ReadOperationNames[operation])},
+                        {"outcome", std::string(ReadOutcomeNames[outcome])}});
+            }
+        }
+        ReadRows = &prometheus::BuildCounter()
+                        .Name("glamdb_read_rows_total")
+                        .Help("Rows returned by native ScanCursor::Next calls, before HTTP page replay.")
+                        .Labels(processLabels)
+                        .Register(Registry)
+                        .Add({});
+        PublishedRows =
+            &prometheus::BuildCounter()
+                 .Name("glamdb_rows_published_total")
+                 .Help("Rows in newly observed confirmed catalog commits; excludes idempotent receipt replays.")
+                 .Labels(processLabels)
+                 .Register(Registry)
+                 .Add({});
+        PublishedBytes =
+            &prometheus::BuildCounter()
+                 .Name("glamdb_data_bytes_published_total")
+                 .Help("Compressed data-file bytes in newly observed confirmed catalog commits; excludes metadata.")
+                 .Labels(processLabels)
+                 .Register(Registry)
+                 .Add({});
+        RetainedCursors = &prometheus::BuildGauge()
+                               .Name("glamdb_scan_cursors_retained")
+                               .Help("Native cursor objects still retained, including cancelled or exhausted objects.")
+                               .Labels(processLabels)
+                               .Register(Registry)
+                               .Add({});
 #ifdef GLAMDB_METRICS_WITH_LOGGING
         const std::array<std::string, 11> counters{"submitted",
             "accepted",
@@ -224,11 +315,29 @@ void RecordFinished(EOperation operation,
     glamdb::CommitDisposition outcome,
     glamdb::CommitPhase phase,
     std::string_view error,
-    double seconds) noexcept
+    double seconds,
+    std::uint64_t rows,
+    std::uint64_t bytes) noexcept
 try {
     const auto operationIndex = static_cast<size_t>(operation);
     const auto outcomeIndex = static_cast<size_t>(outcome);
     const auto phaseIndex = static_cast<size_t>(phase);
+#ifdef GLAMDB_METRICS_WITH_LOGGING
+    if (operationIndex < OperationNames.size() && outcomeIndex < 3) {
+        LogCoreFinished(operation == EOperation::Append ? ELogOperation::Append : ELogOperation::CreateCollection,
+            outcome == glamdb::CommitDisposition::Committed           ? ELogOutcome::Ok
+                : outcome == glamdb::CommitDisposition::CommitUnknown ? ELogOutcome::Unknown
+                                                                      : ELogOutcome::Error,
+            error,
+            seconds,
+            phaseIndex < PhaseNames.size() ? static_cast<ELogPhase>(phaseIndex + 1) : ELogPhase::None,
+            rows,
+            bytes);
+    }
+#else
+    (void)rows;
+    (void)bytes;
+#endif
     const auto& metrics = GetDomainMetrics();
     if (!metrics || operationIndex >= OperationNames.size() || outcomeIndex >= 3 || phaseIndex >= PhaseNames.size()) {
         return;
@@ -243,6 +352,77 @@ try {
     }
 } catch (...) {
     // Telemetry must not change an engine operation's outcome.
+    return;
+}
+
+void RecordPublished(std::uint64_t rows, std::uint64_t bytes) noexcept
+try {
+    if (const auto& metrics = GetDomainMetrics()) {
+        metrics->PublishedRows->Increment(static_cast<double>(rows));
+        metrics->PublishedBytes->Increment(static_cast<double>(bytes));
+    }
+} catch (...) {
+    return;
+}
+
+void RecordReadFinished(EReadOperation operation,
+    std::string_view error,
+    double seconds,
+    std::uint64_t rows,
+    std::uint64_t bytes) noexcept
+try {
+    const auto index = static_cast<size_t>(operation);
+    if (index >= ReadOperationNames.size()) {
+        return;
+    }
+#ifdef GLAMDB_METRICS_WITH_LOGGING
+    constexpr std::array<ELogOperation, 7> logOperations{ELogOperation::CreateStore,
+        ELogOperation::OpenStore,
+        ELogOperation::CloseStore,
+        ELogOperation::Reconcile,
+        ELogOperation::ScanOpen,
+        ELogOperation::ScanNext,
+        ELogOperation::ScanCancel};
+    LogCoreFinished(logOperations[index],
+        error.empty()              ? ELogOutcome::Ok
+            : error == "CANCELLED" ? ELogOutcome::Cancelled
+                                   : ELogOutcome::Error,
+        error,
+        seconds,
+        ELogPhase::None,
+        rows,
+        bytes);
+#else
+    (void)bytes;
+#endif
+    if (const auto& metrics = GetDomainMetrics()) {
+        const size_t outcome = error.empty() ? 0 : error == "CANCELLED" ? 2 : error == "INCOMPLETE" ? 3 : 1;
+        metrics->ReadOutcomes[index][outcome]->Increment();
+        metrics->ReadDurations[index]->Observe(seconds);
+        if (operation == EReadOperation::ScanNext && error.empty()) {
+            metrics->ReadRows->Increment(static_cast<double>(rows));
+        }
+    }
+} catch (...) {
+    return;
+}
+
+void AdjustReadInFlight(EReadOperation operation, int64_t delta) noexcept
+try {
+    const auto index = static_cast<size_t>(operation);
+    if (const auto& metrics = GetDomainMetrics(); metrics && index < ReadOperationNames.size()) {
+        metrics->ReadInFlight[index]->Increment(static_cast<double>(delta));
+    }
+} catch (...) {
+    return;
+}
+
+void AdjustRetainedCursors(int64_t delta) noexcept
+try {
+    if (const auto& metrics = GetDomainMetrics()) {
+        metrics->RetainedCursors->Increment(static_cast<double>(delta));
+    }
+} catch (...) {
     return;
 }
 

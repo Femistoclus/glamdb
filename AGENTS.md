@@ -318,10 +318,15 @@ for real storage/counter/readiness/restart coverage; `GLAMDB_TEST_TMPDIR` select
 its disposable test parent when `/tmp` cannot meet the storage disk reserve.
 The listener includes bounded native HTTP request/status counters, duration and
 in-flight metrics through asynchronous response completion/cancellation.
-`--log-directory DIR` opts into the existing Quill 13 structured logger with
-8 MiB JSONL rotation and three backups; requests never log tokens, URLs or data.
-Native and IO-only builds consume the pinned header-only `third_party/quill`
-for the structured logger.
+The server logs bounded JSON to stderr by default; `--log-directory DIR` selects
+Quill 13 file rotation at 8 MiB and three backups. Success sampling is configured
+with `--log-success-sample-every` and `--log-max-success-per-second`. Generated
+HTTP correlation uses the existing scoped worker/engine context; no tokens, URLs or data are logged.
+`glamdb.server_observability` checks real operations, publication replay counters,
+read scopes and sampling; metrics remain unsampled. Retained cursor counts and
+published rows/bytes are process observations, not database inventory.
+Normal native builds consume the pinned header-only `third_party/quill`; IO-only
+metrics builds retain no Quill dependency unless `GLAMDB_BUILD_LOGGING=ON`.
 
 Client/mock development uses Python 3.13 and Node 22+:
 
@@ -505,10 +510,11 @@ tool path overrides, and build details.
 Operational logs are independent of store publication. The native adapter uses
 pinned Quill BoundedDropping queues and its JSON sink on stderr; the Python
 adapter uses logging, python-json-logger and standard bounded QueueHandler /
-QueueListener. Runtime journald/Docker/Kubernetes owns retention and rotation.
+QueueListener. Runtime journald/Docker/Kubernetes owns stderr retention; optional native files
+use Quill rotation. Do not add a custom writer or log transport.
 Register native producer threads during worker initialization: only sixteen
 lifetime producer allocations are admitted to bound thread churn even with a
-blocked sink. No application file mode or `GLAMDB_LOG_DIRECTORY` exists.
+blocked sink. Server file mode uses Quill directly; `GLAMDB_LOG_DIRECTORY` is not used.
 Never add payload/header/query text or uncontrolled identifiers to the event
 schema. Quill queue admission and backend callbacks are measurable; exact
 native delivery/backlog are unavailable. Read [LOGGING.md](docs/development/LOGGING.md)

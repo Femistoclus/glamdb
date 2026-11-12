@@ -1,4 +1,6 @@
-add_subdirectory(telemetry)
+if(NOT GLAMDB_IO_ONLY OR GLAMDB_BUILD_LOGGING)
+    add_subdirectory(telemetry)
+endif()
 
 add_library(glamdb_io STATIC
     io/local_fs.cpp

@@ -102,7 +102,7 @@ class CmakeConfigurationTest(unittest.TestCase):
 
     def test_missing_logging_dependency_explains_initialization(self):
         (self.source / "third_party/quill").unlink()
-        result = self.configure("-DBUILD_TESTING=OFF")
+        result = self.configure("-DBUILD_TESTING=OFF", "-DGLAMDB_BUILD_LOGGING=ON")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("git submodule update --init third_party/quill", " ".join(result.stdout.split()))
 
@@ -114,7 +114,7 @@ set_target_properties(glamdb_logging PROPERTIES EXPORT_NAME logging)
 install(TARGETS glamdb_logging EXPORT LoggingTargets ARCHIVE DESTINATION lib)
 install(EXPORT LoggingTargets NAMESPACE logging:: DESTINATION lib/cmake/logging)
 ''')
-        result = self.configure("-DBUILD_TESTING=OFF", f"-DCMAKE_INSTALL_PREFIX={install}")
+        result = self.configure("-DBUILD_TESTING=OFF", "-DGLAMDB_BUILD_LOGGING=ON", f"-DCMAKE_INSTALL_PREFIX={install}")
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assert_success(self.cmake, "--build", str(self.build), "--target", "glamdb_logging")
         self.assert_success(self.cmake, "--install", str(self.build))

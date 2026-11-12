@@ -15,7 +15,7 @@ try {
     TLogOptions logOptions;
     CLI::App app{"GlamDB native HTTP server"};
     app.add_subcommand("serve", "Serve an existing store or a managed database directory")->fallthrough();
-    std::string root, storeID, uiRoot, dataDir, metricsAddress;
+    std::string root, storeID, uiRoot, dataDir, metricsAddress, logDirectory;
     std::string address = "127.0.0.1";
     uint16_t port = 8080;
     int timeoutMs = 10000;
@@ -28,7 +28,7 @@ try {
     app.add_option("--listen", address, "HTTP listen address; use TLS proxy outside loopback");
     app.add_option("--port", port, "HTTP port; zero selects an available port");
     app.add_option("--metrics-listen-address", metricsAddress, "Private Prometheus IP:port; disabled by default");
-    app.add_option("--log-directory", logOptions.Directory, "Private bounded JSONL log directory; disabled by default");
+    app.add_option("--log-directory", logDirectory, "Private bounded JSONL log directory; disabled by default");
     app.add_option("--ui-root", uiRoot, "Workbench directory (defaults to installed share/glamdb/ui)");
     app.add_option("--request-timeout-ms", timeoutMs, "Total header/body read timeout")->check(CLI::Range(100, 60000));
     app.add_option("--scan-live-limit", scanLimits.Live, "Global live scan cursor limit")->check(CLI::Range(1, 4096));
@@ -68,6 +68,10 @@ try {
     scanLimits.CompletedTtl = std::chrono::seconds(completedTtl);
     glamdb::NServer::ValidateScanLimits(scanLimits, &resourceLimits);
     auto resources = std::make_shared<glamdb::ResourceOwner>(resourceLimits);
+    logOptions.Directory = logDirectory;
+    if (!logDirectory.empty() && app.get_option("--log-success-sample-every")->count() == 0) {
+        logOptions.SuccessSampleEvery = 1;
+    }
     TLogRuntime logging(logOptions);
     TLogScope scope(logging.Get(), ELogOperation::Other, logging.Get() ? logging.Get()->NewRequestID() : 0);
     glamdb::NTransport::Require((!dataDir.empty() && root.empty() && storeID.empty()) ||

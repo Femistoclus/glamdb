@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -9,6 +10,7 @@
 
 namespace NGlamDB::NTelemetry {
 class TStructuredLogger;
+enum class ELogOperation : std::uint8_t;
 }
 
 namespace prometheus {
@@ -27,11 +29,15 @@ public:
     THttpScope(const THttpScope&) = delete;
     THttpScope& operator=(const THttpScope&) = delete;
     void SetRequest(std::string_view method, std::string_view target) noexcept;
-    void Finish(int status, bool completed) noexcept;
+    std::uint64_t GetRequestID() const noexcept;
+    // Bytes count only an encoded body whose entire local socket write completed.
+    void Finish(int status, bool completed, std::uint64_t bodyBytes = 0) noexcept;
 
 private:
     const std::chrono::steady_clock::time_point Start_ = std::chrono::steady_clock::now();
     NGlamDB::NTelemetry::TStructuredLogger* Logger_;
+    std::uint64_t RequestID_;
+    NGlamDB::NTelemetry::ELogOperation Operation_;
     size_t Route_ = 0, Method_ = 0;
     bool Finished_ = false;
 };

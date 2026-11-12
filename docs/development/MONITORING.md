@@ -56,6 +56,9 @@ The native server also registers finite HTTP metrics with `service_instance="cor
 - `glamdb_http_request_duration_seconds{route}` measures the actual accepted
   connection lifetime, including header/body reading and the full response write.
 - `glamdb_http_requests_in_flight{route}` retains ownership through that lifetime.
+- `glamdb_http_response_bytes_total{route}` counts completed response-body bytes
+  written to the local socket, excluding headers; it does not measure peer
+  consumption or partially written cancelled responses.
 
 Seventeen route names and eight method names are registered once. Unparsed
 connections and unknown paths use `other`; methods outside the fixed domain use
@@ -63,25 +66,33 @@ connections and unknown paths use `other`; methods outside the fixed domain use
 Idle histogram count/sum/buckets remain zero, so an idle quantile has no observed
 latency. The library registry owns all samples and concurrent updates.
 
-`--log-directory /path/to/private/logs` selects bounded JSONL files for native
-operation and lifecycle records through the existing Quill 13 structured logger. Its
-`RotatingJsonFileSink` appends schema-1 JSONL to `glamdb.jsonl`, rotating at 8 MiB
-with at most three indexed backups (`glamdb.1.jsonl`, etc.). Rotation and writing
-run on the Quill backend; the request thread uses its 64 KiB bounded dropping
-queue. Successful request records are capped at 20 per second; errors and
-lifecycle records bypass that success limit and can still be dropped when the
-queue is full. Native `glamdb_log_*` counters report those decisions.
-The server registers its I/O and operation workers and drains the logger on
-shutdown. Without the flag, records use the existing stderr sink. Newly created
-log directories have owner-only access; use a trusted private directory.
-Records contain fixed operation/outcome names, generated request IDs, measured
-duration and completed response status; they contain no database identities,
-tokens, URLs or row values. Their outcome describes the HTTP request, not the
-durable commit disposition: a cancelled transport can still have committed.
-Actual engine call outcomes, including `commit_unknown`, are recorded separately
-in `glamdb_operations_total`; resolve an individual write through its original
-operation identity. The shared schema's `row_count` default is not a native HTTP
-row measurement. Log shipping tails the active `glamdb.jsonl` file; numbered backups are not rediscovered as new sources.
+The server emits bounded schema-1 JSON to stderr by default. Successes sample
+one in 100 and admit at most twenty per second. `--log-directory DIR` instead
+uses Quill's `RotatingJsonFileSink`: `glamdb.jsonl`, 8 MiB per file and three
+backups, owner-only newly created directories. File mode defaults to every
+success, capped at twenty per second. Configure either mode using
+`--log-success-sample-every` and `--log-max-success-per-second`. Errors bypass
+success sampling but can still be lost when bounded queues or sinks fail.
+Register stable I/O/data/lifecycle workers; drain logging after they finish.
+Native `glamdb_log_*` counters expose actual admission and sink callbacks.
+See [logging](LOGGING.md) for generated correlation, finite events and quotas.
+
+The core additionally exports:
+
+- `glamdb_read_operations_total{operation,outcome}`, `glamdb_read_duration_seconds{operation}`
+  and `glamdb_read_operations_in_flight{operation}` for store create/open/close,
+  reconcile and scan open/next/cancel. `outcome` is `ok`, `error`,
+  `cancelled` or `incomplete`; scope exit without a recorded result is incomplete.
+- `glamdb_read_rows_total`: rows returned by successful native `ScanNext` calls.
+- `glamdb_rows_published_total` and `glamdb_data_bytes_published_total`: rows and
+  compressed data-file bytes in confirmed new publications in this process.
+  Idempotent receipt replays do not increment them; these are not warehouse
+  inventory and reset on restart.
+- `glamdb_scan_cursors_retained`: retained native cursor objects, decremented
+  on destruction, rather than the number of currently readable sessions.
+
+All these metrics count actual calls independently of log sampling. Operation,
+outcome, phase and error domains are fixed; no user-controlled label is added.
 
 `glamdb_server_ready{service_instance="core"}` observes actual `Engine::GetHealth`
 at scrape time. It is one only when at least one managed database is open and
@@ -99,7 +110,7 @@ Parquet/Iceberg subspan. `commit_unknown` is a returned outcome counter, not
 current recovery state. No current-unknown gauge is fabricated.
 
 All native operation/outcome/phase/error combinations are registered once:
-714 domain time series, independent of request volume. The 15 finite duration
+a bounded set of domain time series, independent of request volume. The 15 finite duration
 buckets are unchanged: 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1,
 0.25, 0.5, 1, 2.5, 5, 15 and 60 seconds, plus infinity/count/sum. Unobserved
 registered phase/error samples now appear as zero. Histogram sums now retain

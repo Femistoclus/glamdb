@@ -76,10 +76,8 @@ size_t FindLabel(const std::array<std::string_view, Size>& values, std::string_v
     return found == values.end() ? 0 : static_cast<size_t>(found - values.begin());
 }
 
-size_t ClassifyRoute(std::string_view target)
+size_t ClassifyRoute(std::string_view path)
 {
-    const auto [path, query] = NTransport::ParseTarget(target);
-    (void)query;
     std::string_view suffix = path;
     if (suffix == "/healthz" || suffix == "/readyz") {
         return FindLabel(Routes, "health");
@@ -151,6 +149,12 @@ public:
                               .Help("Fully written native HTTP responses by finite status code; excludes cancellation.")
                               .Labels(process)
                               .Register(Registry_);
+        auto& bytes = prometheus::BuildCounter()
+                          .Name("glamdb_http_response_bytes_total")
+                          .Help("Encoded body bytes in completed local socket writes, including replays; excludes "
+                                "headers and incomplete writes, and does not establish peer delivery.")
+                          .Labels(process)
+                          .Register(Registry_);
         for (size_t code = 0; code <= StatusCodes.size(); ++code) {
             Responses[code] = &responses.Add(
                 {{"status_code", code < StatusCodes.size() ? std::to_string(StatusCodes[code]) : "other"}});
@@ -172,6 +176,7 @@ public:
             const prometheus::Labels label{{"route", std::string(Routes[route])}};
             Durations[route] = &durations.Add(label, bounds);
             InFlight[route] = &inFlight.Add(label);
+            Bytes[route] = &bytes.Add(label);
             for (size_t method = 0; method < Methods.size(); ++method) {
                 for (size_t status = 0; status < StatusClasses.size(); ++status) {
                     auto labels = label;
@@ -191,6 +196,7 @@ public:
         Requests{};
     std::array<prometheus::Histogram*, Routes.size()> Durations{};
     std::array<prometheus::Gauge*, Routes.size()> InFlight{};
+    std::array<prometheus::Counter*, Routes.size()> Bytes{};
     std::array<prometheus::Counter*, StatusCodes.size() + 1> Responses{};
 
 private:
@@ -209,28 +215,47 @@ const std::shared_ptr<THttpMetrics>& GetHttpMetrics() noexcept
     return Metrics;
 }
 
-NGlamDB::NTelemetry::ELogOperation GetLogOperation(size_t route, size_t method) noexcept
+NGlamDB::NTelemetry::ELogOperation ClassifyOperation(size_t route, size_t method, std::string_view path) noexcept
 {
     using NGlamDB::NTelemetry::ELogOperation;
     if (Routes[route] == "databases") {
-        return Methods[method] == "POST" ? ELogOperation::CreateStore : ELogOperation::InspectStore;
+        return Methods[method] == "POST" ? ELogOperation::CreateStore : ELogOperation::Databases;
+    }
+    if (Routes[route] == "health") {
+        return path.ends_with("/readyz") ? ELogOperation::Readiness : ELogOperation::Health;
+    }
+    if (Routes[route] == "database_lifecycle") {
+        return path.ends_with("/open")     ? ELogOperation::OpenStore
+            : path.ends_with("/close")     ? ELogOperation::CloseStore
+            : path.ends_with("/reconcile") ? ELogOperation::Reconcile
+                                           : ELogOperation::Other;
+    }
+    if (Routes[route] == "collections") {
+        return Methods[method] == "POST" && path.ends_with("/collections") ? ELogOperation::CreateCollection
+                                                                           : ELogOperation::Collections;
+    }
+    if (Routes[route] == "collection") {
+        return path.ends_with("/schema") ? ELogOperation::Schema : ELogOperation::Collections;
+    }
+    if (Routes[route] == "scan") {
+        return path.ends_with("/scan/open") ? ELogOperation::ScanOpen : ELogOperation::ScanNext;
     }
     constexpr std::array<ELogOperation, Routes.size()> Operations{ELogOperation::Other,
         ELogOperation::Health,
-        ELogOperation::Health,
+        ELogOperation::Capabilities,
         ELogOperation::CreateStore,
         ELogOperation::InspectStore,
         ELogOperation::Other,
         ELogOperation::Collections,
         ELogOperation::Collections,
         ELogOperation::Append,
-        ELogOperation::Scan,
-        ELogOperation::Scan,
+        ELogOperation::ScanNext,
+        ELogOperation::ScanCancel,
         ELogOperation::Operation,
         ELogOperation::Snapshots,
         ELogOperation::Snapshots,
-        ELogOperation::Other,
-        ELogOperation::Other,
+        ELogOperation::Files,
+        ELogOperation::Files,
         ELogOperation::Other};
     return Operations[route];
 }
@@ -271,6 +296,8 @@ private:
 
 THttpScope::THttpScope(NGlamDB::NTelemetry::TStructuredLogger* logger) noexcept
     : Logger_(logger)
+    , RequestID_(logger == nullptr ? 0 : logger->NewRequestID())
+    , Operation_(NGlamDB::NTelemetry::ELogOperation::Other)
 {
     if (const auto& metrics = GetHttpMetrics()) {
         metrics->InFlight[Route_]->Increment();
@@ -285,17 +312,25 @@ THttpScope::~THttpScope()
 void THttpScope::SetRequest(std::string_view method, std::string_view target) noexcept
 try {
     Method_ = FindLabel(Methods, method);
-    const auto route = ClassifyRoute(target);
+    const auto [path, query] = NTransport::ParseTarget(target);
+    (void)query;
+    const auto route = ClassifyRoute(path);
     if (const auto& metrics = GetHttpMetrics(); metrics && route != Route_) {
         metrics->InFlight[Route_]->Decrement();
         metrics->InFlight[route]->Increment();
     }
     Route_ = route;
+    Operation_ = ClassifyOperation(Route_, Method_, path);
 } catch (...) {
     return;
 }
 
-void THttpScope::Finish(int status, bool completed) noexcept
+std::uint64_t THttpScope::GetRequestID() const noexcept
+{
+    return RequestID_;
+}
+
+void THttpScope::Finish(int status, bool completed, std::uint64_t bodyBytes) noexcept
 {
     if (std::exchange(Finished_, true)) {
         return;
@@ -309,18 +344,21 @@ void THttpScope::Finish(int status, bool completed) noexcept
         if (completed) {
             const auto code = std::ranges::find(StatusCodes, status);
             metrics->Responses[static_cast<size_t>(code - StatusCodes.begin())]->Increment();
+            metrics->Bytes[Route_]->Increment(static_cast<double>(bodyBytes));
         }
     }
     if (Logger_) {
         using namespace NGlamDB::NTelemetry;
         const bool denied = status == 401 || status == 403;
-        Logger_->TryLog({.Operation = denied ? ELogOperation::Auth : GetLogOperation(Route_, Method_),
+        Logger_->TryLog({.Operation = denied ? ELogOperation::Auth : Operation_,
             .Outcome = !completed ? ELogOutcome::Cancelled
                 : denied          ? ELogOutcome::Denied
                 : status >= 400   ? ELogOutcome::Error
                                   : ELogOutcome::Ok,
+            .RequestID = RequestID_,
             .DurationUs = static_cast<uint64_t>(seconds * 1000000),
-            .StatusCode = completed ? static_cast<uint32_t>(status) : 0});
+            .StatusCode = completed ? static_cast<uint32_t>(status) : 0,
+            .ByteCount = completed ? bodyBytes : 0});
     }
 }
 

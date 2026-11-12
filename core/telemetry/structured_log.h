@@ -5,6 +5,7 @@
 #include <expected>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <system_error>
 
 namespace NGlamDB::NTelemetry {
@@ -15,7 +16,8 @@ enum class ELogEvent : std::uint8_t {
     RequestCompleted,
     StorageFailed,
     RecoveryRequired,
-    LoggerHealth
+    LoggerHealth,
+    OperationCompleted
 };
 enum class ELogOperation : std::uint8_t {
     Other,
@@ -29,9 +31,55 @@ enum class ELogOperation : std::uint8_t {
     Append,
     Scan,
     Operation,
-    Auth
+    Auth,
+    Databases,
+    Capabilities,
+    Readiness,
+    OpenStore,
+    CloseStore,
+    Reconcile,
+    CreateCollection,
+    Schema,
+    ScanOpen,
+    ScanNext,
+    ScanCancel,
+    Stats,
+    Files,
+    Count
 };
 enum class ELogOutcome : std::uint8_t { Ok, Error, Unknown, Denied, Cancelled };
+enum class ELogPhase : std::uint8_t {
+    None,
+    Validation,
+    Binding,
+    Data,
+    Metadata,
+    CatalogTransaction,
+    CatalogCommit,
+    RecordingFailure,
+    Reconciling,
+    Complete
+};
+enum class ELogError : std::uint8_t {
+    None,
+    InvalidArgument,
+    ResourceExhausted,
+    DeadlineExceeded,
+    Cancelled,
+    IoError,
+    Corruption,
+    RecoveryRequired,
+    OperationConflict,
+    PreconditionFailed,
+    DependencyUnavailable,
+    SchemaMismatch,
+    Internal,
+    Other
+};
+
+// Fixed domains shared by logging and the native HTTP metric adapter.
+const char* LogOperationName(ELogOperation operation) noexcept;
+ELogError LogErrorCode(std::string_view code) noexcept;
 
 // No free text, URL, path, identity or payload may cross this boundary.
 struct TLogEvent
@@ -43,6 +91,9 @@ struct TLogEvent
     std::uint64_t DurationUs = 0;
     std::uint64_t RowCount = 0;
     std::uint32_t StatusCode = 0;
+    std::uint64_t ByteCount = 0;
+    ELogPhase Phase = ELogPhase::None;
+    ELogError ErrorCode = ELogError::None;
 };
 
 struct TLogOptions
@@ -108,6 +159,29 @@ private:
     std::unique_ptr<TImpl> Impl_;
 };
 
+// A non-owning, thread-local request context. The application joins workers
+// before destroying the logger. Registration happens before their first core call.
+class TScopedLogContext
+{
+public:
+    explicit TScopedLogContext(TStructuredLogger* logger, std::uint64_t requestID = 0) noexcept;
+    ~TScopedLogContext();
+    TScopedLogContext(const TScopedLogContext&) = delete;
+    TScopedLogContext& operator=(const TScopedLogContext&) = delete;
+
+    std::uint64_t GetID() const noexcept
+    {
+        return RequestID_;
+    }
+
+private:
+    TStructuredLogger* PreviousLogger_;
+    std::uint64_t PreviousRequestID_;
+    std::uint64_t RequestID_;
+};
+
+void LogCurrent(TLogEvent event) noexcept;
+
 // Explicit synchronous call context. No process-global logger pointer and no
 // dependency on HTTP types. The owner must outlive this scope and its workers.
 class TLogScope
@@ -124,6 +198,7 @@ private:
     ELogOperation Operation_;
     std::uint64_t RequestID_;
     TLogScope* Previous_;
+    TScopedLogContext Context_;
     static thread_local TLogScope* Current_;
 };
 

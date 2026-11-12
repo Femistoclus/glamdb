@@ -45,12 +45,21 @@ ELogOperation ClassifyOperation(const TRequest& request) noexcept
         if (path == "/healthz" || suffix == "/readyz" || suffix == "/capabilities") {
             return ELogOperation::Health;
         }
+        if (path == "/databases" && request.Method == "POST") {
+            return ELogOperation::CreateStore;
+        }
         if (suffix.starts_with("/collections/")) {
             if (suffix.find("/operations/") != std::string::npos) {
                 return ELogOperation::Operation;
             }
             if (suffix.ends_with("/append")) {
                 return ELogOperation::Append;
+            }
+            if (suffix.ends_with("/scan/open")) {
+                return ELogOperation::ScanOpen;
+            }
+            if (suffix.ends_with("/scan/cancel")) {
+                return ELogOperation::ScanCancel;
             }
             if (suffix.find("/scan") != std::string::npos || suffix.ends_with("/explain")) {
                 return ELogOperation::Scan;
@@ -61,7 +70,7 @@ ELogOperation ClassifyOperation(const TRequest& request) noexcept
             return ELogOperation::Collections;
         }
         if (suffix == "/collections") {
-            return ELogOperation::Collections;
+            return request.Method == "POST" ? ELogOperation::CreateCollection : ELogOperation::Collections;
         }
         if (path == "/databases" || path.starts_with("/databases/")) {
             return ELogOperation::Database;
@@ -582,7 +591,7 @@ private:
     }
     void LogCompletion() noexcept
     {
-        Metrics_.Finish(static_cast<int>(StatusCode_), ResponseSent_);
+        Metrics_.Finish(static_cast<int>(StatusCode_), ResponseSent_, ResponseSent_ ? Output_.size() : 0);
         if (Logged_ || !State_.Logger) {
             return;
         }
@@ -598,7 +607,8 @@ private:
             .Outcome = outcome,
             .RequestID = RequestID_,
             .DurationUs = static_cast<std::uint64_t>(elapsed),
-            .StatusCode = StatusCode_});
+            .StatusCode = ResponseSent_ ? StatusCode_ : 0,
+            .ByteCount = ResponseSent_ ? static_cast<std::uint64_t>(Output_.size()) : 0});
     }
     void Drain()
     {
