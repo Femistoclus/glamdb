@@ -38,6 +38,10 @@ concurrent snapshot readers. Power-loss durability qualification is still pendin
   configurable through the SDK and [workbench](docs/development/WORKBENCH.md).
 - **Data inspection.** Browse schemas, snapshot history, statistics, files,
   Parquet row groups, scan plans, and execution profiles.
+- **Native compute contract.** Negotiate version 1.0, operation support by append/KV
+  mode and effective limits through the installed C++ API. See the
+  [storage contract](docs/development/STORAGE_CONTRACT.md); independent read views,
+  split execution, staging sessions, stable C ABI and Flight remain unsupported.
 - **Connected tools.** Manage multiple databases through one authenticated
   server. Read and write through the UI, CLI, or Python SDK; retrieve scan results
   as JSON or Arrow IPC with fixed-snapshot pagination.

@@ -2444,6 +2444,11 @@ EngineCapabilities Engine::GetCapabilities() const
     return impl_->backend ? impl_->backend->GetCapabilities() : EngineCapabilities{};
 }
 
+Result<TStorageContract> Engine::NegotiateStorageContract(const TStorageContractRequest& request) const
+{
+    return glamdb::NegotiateStorageContract(request, GetCapabilities(), GetLimits());
+}
+
 Result<StorageFootprint> Engine::GetStorageFootprint() const
 {
     const auto impl = impl_;

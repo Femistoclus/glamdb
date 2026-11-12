@@ -23,7 +23,12 @@ must remain usable from a standalone checkout.
 GlamDB is an open-source C++23 columnar key-value storage engine in early
 development. The checkout implements the SQLite catalog, synchronous write and
 recovery coordinator, canonical Arrow input, public C++ facade, outcome JSON,
-and network CLI. Independent durable I/O and Arrow/Parquet/Iceberg
+and network CLI. The installed [native storage contract](docs/development/STORAGE_CONTRACT.md)
+adds pure version/feature negotiation and an Engine convenience method, with
+operation support by append/KV mode and effective limits. Discovery is separate
+from readiness; independent read views, splits, staged sessions, stable C ABI and
+Flight are explicitly unsupported. Keep publication on the existing Engine path.
+Independent durable I/O and Arrow/Parquet/Iceberg
 storage primitives provide file production, staging, publication validation,
 recovery verification, and capacity checks. `core/backend/` connects them to the
 coordinator StorageBackend and `core/scan/` implements `Engine::Scan`
@@ -342,7 +347,7 @@ Preserve these boundaries when adding or changing engine behavior:
 
 | Path | Use |
 | --- | --- |
-| `public/storage/` | Installed C++ types, scan API and synchronous engine facade. |
+| `public/storage/` | Installed C++ types, versioned native storage contract, scan API and synchronous engine facade. |
 | `core/api/`, `core/catalog/`, `core/engine/` | Canonical input, catalog, coordinator, and internal storage-backend seam. |
 | `core/backend/` | Production StorageBackend over `glamdb_storage`, built with `GLAMDB_BUILD_STORAGE`. |
 | `core/scan/` | Predicate evaluation, conservative zone pruning, snapshot planning, bounded metadata/footer cache and positional Parquet scan cursor. |
