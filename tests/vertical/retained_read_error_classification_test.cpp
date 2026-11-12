@@ -54,7 +54,10 @@ TEST_P(BackendRetainedClassificationTest, TransientReadFailureDuringOpenIsNotCor
         faults->AddRule({NT::EIOOp::OpenRead, "*-m0.avro", 1, 1, std::make_error_code(GetParam()), std::nullopt});
         detail::TLocalStorageOptions options;
         options.Fs = faults;
-        auto opened = detail::EngineFactory::OpenWith({Root_.string(), test::store_id}, FaultFactory(options));
+        // Full verification reads the faulted manifest during VerifyReachable.
+        OpenStoreRequest full{Root_.string(), test::store_id};
+        full.verify_full = true;
+        auto opened = detail::EngineFactory::OpenWith(full, FaultFactory(options));
         ASSERT_FALSE(opened);
         EXPECT_EQ(opened.error().code, "IO_ERROR") << opened.error().message;
     }

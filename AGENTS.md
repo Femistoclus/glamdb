@@ -212,11 +212,18 @@ transport maintenance endpoints are not provided.
 KV collections refuse snapshot expiration and preserve all retained file intervals
 and no-op bound roots. Their first creation introduces catalog version 4 while
 existing version-3 append retention stores remain compatible.
-Append collections can set `hot_snapshots` (creation, `Engine::UpdateSnapshotArchive`):
+Append collections use `hot_snapshots` (default `DefaultHotSnapshots` = 100 for new
+append collections, opt-out `KeepAllSnapshotsInRoot`; creation, `Engine::UpdateSnapshotArchive`):
 appends then keep only the newest snapshots in the Iceberg root and move older
 ones, still readable, to catalog archive rows in the same outer transaction;
 `Engine::ArchiveSnapshots` is the bounded maintenance call. The first stored
-setting introduces catalog version 5; stores without it are unchanged. See
+setting (normally the first append collection) introduces catalog versions 5 and
+6, which older binaries cannot open; stores whose collections all opt out are unchanged.
+Version 6 writes a verified per-collection checkpoint with every publication;
+a fresh open of such a store rebuilds state from checkpoints, the current root
+and current manifests instead of re-verifying history, and falls back to full
+verification on any mismatch (`Reconcile`, `Engine::VerifyStoreFull` and
+`OpenStoreRequest::verify_full` always verify fully). See
 [the snapshot archive tier](docs/development/SNAPSHOT_ARCHIVE.md). Native HTTP
 (`features.snapshot_archive`, `.../snapshot-archive` routes), the SDK and both
 CLIs expose the setting, status and maintenance; the mock refuses them.

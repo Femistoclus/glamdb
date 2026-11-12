@@ -216,6 +216,10 @@ struct Engine::Impl
     Limits limits;
     std::shared_ptr<StoreLease> lease;
     std::shared_ptr<DurableSqliteCatalogStore> catalog;
+    // OpenStoreRequest::verify_full: never open from checkpoints.
+    bool verify_full = false;
+    // Detected corruption whose checkpoints are not yet deleted.
+    std::atomic<bool> forget_checkpoints{false};
     std::shared_ptr<StorageBackend> backend;
     mutable std::mutex state_mutex;
     // Orders corruption reports against a publication decision. The writer
@@ -776,6 +780,15 @@ struct Engine::Impl
             return;
         }
         if (archived->sequence_number < first) {
+            // An open from checkpoints does not re-verify archive rows, so
+            // every use binds the row to its permanent committed receipt.
+            const auto operation = catalog->FindOperation(context.Collection.collection_id, archived->operation_id);
+            Require(operation && operation->state == OperationState::Committed && operation->outcome &&
+                    operation->outcome->result && operation->outcome->result->snapshot_id == archived->snapshot_id &&
+                    operation->outcome->result->parent_snapshot_id == archived->parent_snapshot_id &&
+                    operation->outcome->result->snapshot_created_at_us == archived->timestamp_ms * 1000,
+                "CORRUPTION",
+                "archived snapshot differs from its committed receipt");
             context.Archived = std::make_shared<const ArchivedSnapshotRecord>(std::move(*archived));
         }
     }
@@ -805,21 +818,30 @@ struct Engine::Impl
             TLogScope::Emit(ELogEvent::StorageFailed);
         }
         if (error.code == "CORRUPTION" || error.code == "UNSUPPORTED_STORE_VERSION") {
-            std::lock_guard gate(commit_gate);
-            if (backend) {
-                backend->InvalidateCache();
+            {
+                std::lock_guard gate(commit_gate);
+                if (backend) {
+                    backend->InvalidateCache();
+                }
+                std::lock_guard lock(state_mutex);
+                ready = false;
+                ++health_generation;
+                TLogScope::Emit(ELogEvent::RecoveryRequired);
             }
-            std::lock_guard lock(state_mutex);
-            ready = false;
-            ++health_generation;
-            TLogScope::Emit(ELogEvent::RecoveryRequired);
+            // Outside the commit gate: a publication may hold the catalog
+            // while it waits for the gate.
+            if (error.code == "CORRUPTION") {
+                ForgetCheckpoints();
+            }
         }
     }
 
     void VerifyStorage()
     {
         try {
-            catalog->ValidateInventory();
+            // Skipped when no catalog transaction ran since the last complete
+            // validation, such as the catalog (re)open that precedes recovery.
+            catalog->ValidateInventoryIfChanged();
             std::vector<CollectionView> views;
             for (const auto& collection : catalog->Collections()) {
                 views.push_back({collection,
@@ -847,6 +869,59 @@ struct Engine::Impl
         }
     }
 
+    // Rebuilds every collection from its catalog checkpoint (no history,
+    // archive rows, receipts or footers are read). False when any collection
+    // has none, is KV, or does not match; nothing stays installed then.
+    bool OpenFromCheckpoints()
+    {
+        if (!backend || !catalog->HasCheckpoints()) {
+            return false;
+        }
+        try {
+            std::vector<CollectionView> views;
+            std::vector<CollectionCheckpointView> checkpoints;
+            std::vector<CollectionCheckpoint> rows;
+            for (const auto& collection : catalog->Collections()) {
+                if (collection.mode != CollectionMode::Append) {
+                    return false;
+                }
+                auto checkpoint = catalog->Checkpoint(collection.collection_id);
+                if (!checkpoint) {
+                    return false;
+                }
+                views.push_back({collection,
+                    catalog->Base(collection.collection_id),
+                    {},
+                    catalog->ExpiredSnapshots(collection.collection_id)});
+                checkpoints.push_back({*checkpoint, catalog->NewestArchivedSnapshot(collection.collection_id)});
+                rows.push_back(std::move(*checkpoint));
+            }
+            catalog->CheckCheckpoints(rows);
+            if (backend->OpenFromCheckpoints(info, views, checkpoints)) {
+                return true;
+            }
+        } catch (const Failure&) {
+        }
+        backend->InvalidateCache();
+        return false;
+    }
+
+    // Detected corruption must be found again by the next open, which the
+    // checkpoint path (no footers, no history) might not do.
+    // Never waits for the catalog: a busy catalog leaves the request pending
+    // for the next recovery (Reconcile, or Shutdown of an unready engine).
+    void ForgetCheckpoints() noexcept
+    {
+        try {
+            forget_checkpoints = true;
+            if (catalog && catalog->DropCheckpoints()) {
+                forget_checkpoints = false;
+            }
+        } catch (...) {
+            // Best effort; a catalog that cannot write keeps the request pending.
+        }
+    }
+
     void Recover(bool reopen)
     {
         {
@@ -854,8 +929,14 @@ struct Engine::Impl
             recovering = true;
         }
         try {
+            if (forget_checkpoints) {
+                ForgetCheckpoints();
+            }
             RecoverStore(reopen);
         } catch (const Failure& error) {
+            if (error.detail.code == "CORRUPTION") {
+                ForgetCheckpoints();
+            }
             using namespace NGlamDB::NTelemetry;
             if (error.detail.code == "IO_ERROR" || error.detail.code == "CORRUPTION" ||
                 error.detail.code == "UNSUPPORTED_STORE_VERSION")
@@ -896,12 +977,21 @@ struct Engine::Impl
             }
             catalog->Reopen();
         }
-        VerifyStorage();
-        catalog->DurabilityFence();
-        catalog->ForEachOperation([&](const auto& operation) {
-            if (operation.state != OperationState::Bound) {
-                return;
-            }
+        // A fresh open trusts the verified checkpoints of a version 6 catalog
+        // when all of them match; Reconcile, Shutdown recovery, an explicit
+        // request and any mismatch re-verify the whole retained history.
+        const bool checkpointed = !reopen && !verify_full && OpenFromCheckpoints();
+        if (!checkpointed) {
+            VerifyStorage();
+        }
+        // Full verification re-establishes the checkpoints it just proved.
+        const bool reestablish = !checkpointed && backend && catalog->HasCheckpoints();
+        std::vector<CollectionCheckpoint> reseed;
+        if (reestablish) {
+            reseed = backend->VerifiedCheckpoints();
+        }
+        catalog->DurabilityFence(reseed, reestablish);
+        catalog->ForEachBoundOperation([&](const auto& operation) {
             AppendOutcome failure = Rejected(operation.binding.operation_id,
                 CommitPhase::Reconciling,
                 {"INTERRUPTED", "registered append was interrupted before publication", RetryHint::NewOperationId});
@@ -920,7 +1010,11 @@ struct Engine::Impl
             }
             catalog->RecordFailure(operation.binding, failure);
         });
-        catalog->ValidateInventory();
+        if (checkpointed) {
+            catalog->ValidateInventoryLight();
+        } else {
+            catalog->ValidateInventory();
+        }
         RefreshCache();
         DrainExpiredMetadata();
         std::lock_guard lock(state_mutex);
@@ -1064,10 +1158,12 @@ EngineFactory::OpenWith(const OpenStoreRequest& request, const BackendFactory& b
         // bytes/inodes can prevent admission of the next recovery workspace.
         impl->ReserveStoreDevice(impl->lease->Root().string());
         impl->backend = MakeBackend(backend, impl->lease->Root(), impl->info);
+        impl->verify_full = request.verify_full;
         impl->catalog = DurableSqliteCatalogStore::Open(impl->lease->Root() / "catalog.sqlite",
             impl->info,
             impl->limits,
-            std::move(sqlite_vfs));
+            std::move(sqlite_vfs),
+            !request.verify_full);
         impl->Recover(false);
         return metrics.Finish(Result<std::shared_ptr<Engine>>(std::shared_ptr<Engine>(new Engine(std::move(impl)))));
     } catch (const Failure& error) {
@@ -1280,9 +1376,10 @@ CreateOutcome Engine::CreateCollectionImpl(const CreateCollectionRequest& reques
                 ValidUtf8(request.exact_name) && request.exact_name.find('\0') == std::string::npos,
             "INVALID_ARGUMENT",
             "invalid collection ID or exact name");
-        Require(!request.hot_snapshots || (*request.hot_snapshots >= 1 && *request.hot_snapshots <= (1LL << 40)),
+        Require(!request.hot_snapshots ||
+                (*request.hot_snapshots >= KeepAllSnapshotsInRoot && *request.hot_snapshots <= (1LL << 40)),
             "INVALID_ARGUMENT",
-            "hot_snapshots must be 1..1099511627776");
+            "hot_snapshots must be 0 (keep all in the root) or 1..1099511627776");
         Require(request.mode == CollectionMode::Append || request.mode == CollectionMode::KeyValue,
             "INVALID_ARGUMENT",
             "invalid collection mode");
@@ -1293,7 +1390,23 @@ CreateOutcome Engine::CreateCollectionImpl(const CreateCollectionRequest& reques
                         }),
                 "INVALID_ARGUMENT",
                 "KV collections require a non-null string key field");
-            Require(!request.hot_snapshots, "COLLECTION_MODE_MISMATCH", "hot_snapshots requires an append collection");
+            Require(!request.hot_snapshots || *request.hot_snapshots == KeepAllSnapshotsInRoot,
+                "COLLECTION_MODE_MISMATCH",
+                "hot_snapshots requires an append collection");
+        }
+        // The effective setting: an append collection that does not choose
+        // gets DefaultHotSnapshots when the backend supports the archive.
+        std::optional<int64_t> hot;
+        bool hotDefaulted = false;
+        if (request.mode == CollectionMode::Append) {
+            if (!request.hot_snapshots) {
+                if (impl->backend && impl->backend->GetCapabilities().snapshot_archive) {
+                    hot = DefaultHotSnapshots;
+                    hotDefaulted = true;
+                }
+            } else if (*request.hot_snapshots != KeepAllSnapshotsInRoot) {
+                hot = request.hot_snapshots;
+            }
         }
         const auto schema_hash = Take(SchemaFingerprint(request.schema));
         const auto settings = Take(CanonicalWriteSettings(request.schema, request.write_settings));
@@ -1353,7 +1466,7 @@ CreateOutcome Engine::CreateCollectionImpl(const CreateCollectionRequest& reques
                 Require(impl->catalog->CreatedWriteSettings(collection.collection_id) == settings,
                     "WRITE_SETTINGS_MISMATCH",
                     "write settings differ from original creation");
-                Require(impl->catalog->CreatedHotSnapshots(collection.collection_id) == request.hot_snapshots,
+                Require(impl->catalog->CreatedHotSnapshots(collection.collection_id) == hot,
                     "SNAPSHOT_ARCHIVE_MISMATCH",
                     "hot_snapshots differs from original creation");
                 context = CreateRecoveryContext{impl->info.store_id,
@@ -1380,7 +1493,7 @@ CreateOutcome Engine::CreateCollectionImpl(const CreateCollectionRequest& reques
             throw Failure(health.error());
         }
         impl->CheckSettingsSupported(settings);
-        Require(!request.hot_snapshots || impl->backend->GetCapabilities().snapshot_archive,
+        Require(!hot || impl->backend->GetCapabilities().snapshot_archive,
             "DEPENDENCY_UNAVAILABLE",
             "the storage backend does not support the snapshot archive");
         const auto attempt = NewUuid();
@@ -1404,7 +1517,8 @@ CreateOutcome Engine::CreateCollectionImpl(const CreateCollectionRequest& reques
                 info.mode == request.mode,
             "IO_ERROR",
             "producer changed collection identity, schema or write settings");
-        info.hot_snapshots = request.hot_snapshots;
+        info.hot_snapshots = hot;
+        info.hot_snapshots_defaulted = hotDefaulted;
         context->candidate_table_uuid = info.table_uuid;
         {
             std::lock_guard state_lock(impl->state_mutex);
@@ -1433,7 +1547,10 @@ CreateOutcome Engine::CreateCollectionImpl(const CreateCollectionRequest& reques
                 return staged->Publish(*impl->catalog);
             },
             migrationIdentity,
-            migrationOperation);
+            migrationOperation,
+            [&] {
+                return staged->Checkpoint();
+            });
         committed = true;
         if (gate.owns_lock()) {
             if (context->candidate_metadata_location) {
@@ -1543,10 +1660,15 @@ Result<SnapshotExpirationResult> Engine::ExpireSnapshots(const SnapshotExpiratio
         Require(collection.mode == CollectionMode::Append,
             "COLLECTION_MODE_MISMATCH",
             "snapshot expiration requires append mode");
-        Require(!request.policy || !request.policy->keep_last || !collection.hot_snapshots ||
-                *collection.hot_snapshots <= *request.policy->keep_last,
-            "INVALID_ARGUMENT",
-            "hot_snapshots must not exceed keep_last");
+        // A defaulted hot_snapshots above a new keep_last is lowered to it with
+        // the expiration; an explicitly set one is refused.
+        std::optional<int64_t> lowerDefaultHot;
+        if (request.policy && request.policy->keep_last && collection.hot_snapshots &&
+            *collection.hot_snapshots > *request.policy->keep_last)
+        {
+            Require(collection.hot_snapshots_defaulted, "INVALID_ARGUMENT", "hot_snapshots must not exceed keep_last");
+            lowerDefaultHot = *request.policy->keep_last;
+        }
         base = impl->catalog->Base(request.collection_id);
         impl->ReserveAttempt();
         const auto archived =
@@ -1576,12 +1698,19 @@ Result<SnapshotExpirationResult> Engine::ExpireSnapshots(const SnapshotExpiratio
                 [&] {
                     return staged->Publish(*impl->catalog);
                 },
-                staged->ArchivedExpired());
+                staged->ArchivedExpired(),
+                [&] {
+                    return staged->Checkpoint();
+                },
+                lowerDefaultHot);
             committed = true;
             impl->backend->PublicationFinished(request.collection_id, candidate, CommitDisposition::Committed);
             impl->RefreshCache();
             gate.unlock();
             impl->RetireRoot(*base);
+        } else if (lowerDefaultHot) {
+            impl->catalog->LowerDefaultHotSnapshots(request.collection_id, *lowerDefaultHot);
+            impl->RefreshCache();
         }
         impl->DrainExpiredMetadata();
         result.cleanup_pending = impl->catalog->PendingMetadataCount(request.collection_id);
@@ -1653,9 +1782,12 @@ Result<CollectionInfo> Engine::UpdateSnapshotArchive(const UpdateSnapshotArchive
     std::unique_lock writer_lock(impl->writer, std::defer_lock);
     try {
         Require(ValidUuid(request.collection_id), "INVALID_ARGUMENT", "collection ID must be a canonical UUID");
-        Require(!request.hot_snapshots || (*request.hot_snapshots >= 1 && *request.hot_snapshots <= (1LL << 40)),
+        Require(!request.hot_snapshots ||
+                (*request.hot_snapshots >= KeepAllSnapshotsInRoot && *request.hot_snapshots <= (1LL << 40)),
             "INVALID_ARGUMENT",
-            "hot_snapshots must be 1..1099511627776");
+            "hot_snapshots must be 0 (keep all in the root) or 1..1099511627776");
+        const std::optional<int64_t> hot =
+            request.hot_snapshots == KeepAllSnapshotsInRoot ? std::nullopt : request.hot_snapshots;
         const auto collection = impl->ReadCollection([&](const auto& item) {
             return item.collection_id == request.collection_id;
         });
@@ -1670,7 +1802,7 @@ Result<CollectionInfo> Engine::UpdateSnapshotArchive(const UpdateSnapshotArchive
             impl->CheckReady();
             expected_generation = impl->health_generation;
         }
-        if (request.hot_snapshots) {
+        if (hot) {
             Require(collection.mode == CollectionMode::Append,
                 "COLLECTION_MODE_MISMATCH",
                 "hot_snapshots requires an append collection");
@@ -1678,7 +1810,7 @@ Result<CollectionInfo> Engine::UpdateSnapshotArchive(const UpdateSnapshotArchive
                 "DEPENDENCY_UNAVAILABLE",
                 "the storage backend does not support the snapshot archive");
             const auto policy = Take(GetSnapshotRetention(request.collection_id));
-            Require(!policy.keep_last || *request.hot_snapshots <= *policy.keep_last,
+            Require(!policy.keep_last || *hot <= *policy.keep_last,
                 "INVALID_ARGUMENT",
                 "hot_snapshots must not exceed keep_last");
         }
@@ -1688,7 +1820,7 @@ Result<CollectionInfo> Engine::UpdateSnapshotArchive(const UpdateSnapshotArchive
         }
         CollectionInfo updated;
         try {
-            updated = impl->catalog->UpdateHotSnapshots(request.collection_id, request.hot_snapshots);
+            updated = impl->catalog->UpdateHotSnapshots(request.collection_id, hot);
         } catch (const Failure& error) {
             if (!error.uncertain) {
                 throw;
@@ -1762,6 +1894,9 @@ Result<SnapshotArchiveStatus> Engine::ArchiveSnapshots(std::string_view collecti
                 },
                 [&] {
                     return staged->Archived();
+                },
+                [&] {
+                    return staged->Checkpoint();
                 });
             committed = true;
             moved = static_cast<int64_t>(staged->Archived().size());
@@ -2514,6 +2649,9 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
                 },
                 [&] {
                     return staged->Archived();
+                },
+                [&] {
+                    return staged->Checkpoint();
                 });
         }
         // Count a confirmed new publication once. Receipt replay paths never
@@ -2648,7 +2786,16 @@ Result<StorageFootprint> Engine::GetStorageFootprint() const
             impl->CheckReady();
         }
         Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "physical inventory requires storage");
-        auto result = impl->backend->GetStorageFootprint();
+        // Archived lists, and the manifests only they reference, stay on disk
+        // as retained metadata; the inventory reads them, never open.
+        std::vector<ArchivedListReference> archived;
+        for (const auto& collection : impl->catalog->Collections()) {
+            impl->catalog->ForEachArchivedSnapshot(collection.collection_id, [&](const ArchivedSnapshotRecord& row) {
+                archived.push_back(
+                    {collection.collection_id, row.manifest_list, row.manifest_list_bytes, row.manifest_list_sha256});
+            });
+        }
+        auto result = impl->backend->GetStorageFootprint(archived);
         if (!result) {
             impl->CloseOnCorruption(result.error());
             return result;
@@ -2892,6 +3039,13 @@ Status Engine::Reconcile()
         metrics.Error(detail.code);
         return std::unexpected(detail);
     }
+}
+
+Status Engine::VerifyStoreFull()
+{
+    // The full recovery path: every receipt, archive row, retained transition
+    // and data-file footer, then fresh checkpoints in the durability fence.
+    return Reconcile();
 }
 
 Status Engine::Shutdown(std::chrono::milliseconds timeout)

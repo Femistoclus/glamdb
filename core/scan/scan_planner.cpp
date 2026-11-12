@@ -352,6 +352,15 @@ Result<TScanManifests> PlanVerifiedScan(const NGlamDB::NStorage::TBaseState& sta
                     "CORRUPTION",
                     "archived snapshot has an invalid membership boundary");
                 plan.FileCount = static_cast<size_t>(archived->data_files);
+                // The verified index records each file's origin sequence: the
+                // prefix is exactly the files of this snapshot and older.
+                const auto& files = plan.Index->Files;
+                Require(files[plan.FileCount - 1].IntroducedSequence >= 1 &&
+                        files[plan.FileCount - 1].IntroducedSequence <= archived->sequence_number &&
+                        (plan.FileCount == files.size() ||
+                            files[plan.FileCount].IntroducedSequence > archived->sequence_number),
+                    "CORRUPTION",
+                    "archived snapshot membership differs from the verified index");
                 return plan;
             }
             Require(hot,

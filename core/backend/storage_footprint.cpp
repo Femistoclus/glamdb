@@ -4,8 +4,11 @@
 #include "core/api/canonical.h"
 #include "core/io/store_dirs.h"
 #include "core/storage/base_state.h"
+#include "core/storage/durable_local_file_io.h"
+#include "core/storage/snapshot_archive.h"
 #include "storage/resources.h"
 
+#include <iceberg/manifest/manifest_list.h>
 #include <iceberg/snapshot.h>
 #include <iceberg/table_metadata.h>
 
@@ -185,7 +188,7 @@ struct TInventory
 };
 } // namespace
 
-Result<StorageFootprint> TLocalStorageBackend::GetStorageFootprint()
+Result<StorageFootprint> TLocalStorageBackend::GetStorageFootprint(std::span<const ArchivedListReference> archived)
 {
     try {
         auto memory = Options_.Resources->Reserve(ResourceClass::Metadata, InventoryMemory);
@@ -228,10 +231,10 @@ Result<StorageFootprint> TLocalStorageBackend::GetStorageFootprint()
                 // KV overwrites retain historical manifests even when none of
                 // their files remain live. The verified union covers append
                 // manifest merging and every retained KV snapshot alike.
-                for (const auto& path : base->RetainedManifestPaths) {
+                base->RetainedManifestPaths.ForEach([&](const std::string& path) {
                     chargePath(path);
                     inventory.Metadata.insert(path);
-                }
+                });
             }
             // A durable no-op permanently references its exact prepared root,
             // including an initial-empty root superseded by later mutations.
@@ -239,6 +242,40 @@ Result<StorageFootprint> TLocalStorageBackend::GetStorageFootprint()
                 (void)reservation;
                 chargePath(path);
                 inventory.Metadata.insert(path);
+            }
+            for (const auto& list : archived) {
+                Require(Collections_.contains(list.collection_id),
+                    "CORRUPTION",
+                    "archived snapshot belongs to an unknown collection");
+            }
+        }
+        // Archived snapshots keep their list and every manifest it lists (the
+        // root no longer references those that only archived snapshots use).
+        // Each list is read here with its recorded size and digest: an
+        // explicit inventory reads O(archived) small files, open never does.
+        if (!archived.empty()) {
+            auto readOnly = FileIO_->ReadOnlyView();
+            Require(readOnly.has_value(), "IO_ERROR", "cannot open a read-only FileIO");
+            const std::shared_ptr<iceberg::FileIO> view(std::move(*readOnly));
+            for (const auto& list : archived) {
+                Require(list.bytes > 0, "CORRUPTION", "invalid archived manifest list size");
+                auto verified = NGlamDB::NStorage::ReadManifestListIdentity(view,
+                    list.manifest_list,
+                    Options_.Storage,
+                    static_cast<uint64_t>(list.bytes),
+                    list.sha256);
+                Require(verified.has_value(),
+                    "CORRUPTION",
+                    "archived manifest list differs from its archive row: " +
+                        (verified ? std::string() : verified.error().message));
+                chargePath(list.manifest_list);
+                inventory.Metadata.insert(list.manifest_list);
+                for (const auto& manifest : verified->Manifests) {
+                    if (!inventory.Metadata.contains(manifest.manifest_path)) {
+                        chargePath(manifest.manifest_path);
+                        inventory.Metadata.insert(manifest.manifest_path);
+                    }
+                }
             }
         }
         const auto expected = Dirs_->Fs()->Stat(Dirs_->Root());

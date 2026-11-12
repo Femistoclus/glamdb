@@ -6,6 +6,7 @@
 #include "storage/resources.h"
 #include "tests/support/checked.h"
 #include "tests/support/journal_fault_vfs.h"
+#include "tests/support/sql_trace.h"
 #include "tests/vertical/vertical_support.h"
 
 #include <array>
@@ -259,7 +260,8 @@ protected:
 TEST_F(TSnapshotArchiveTest, ArchivedSnapshotsAnswerExactlyAsWhileHot)
 {
     Create(2);
-    EXPECT_EQ(CatalogVersion(Root_), 5);
+    // The archive tier comes with verified checkpoints (catalog version 6).
+    EXPECT_EQ(CatalogVersion(Root_), 6);
     std::map<int64_t, TView> hot;
     std::vector<int64_t> order;
     for (int64_t index = 0; index < 14; ++index) {
@@ -325,7 +327,7 @@ TEST_F(TSnapshotArchiveTest, ArchivedSnapshotsAnswerExactlyAsWhileHot)
 
 TEST_F(TSnapshotArchiveTest, StoresWithoutTheSettingStayUnchanged)
 {
-    Create(std::nullopt);
+    Create(KeepAllSnapshotsInRoot);
     for (int64_t index = 0; index < 6; ++index) {
         ASSERT_EQ(Append(index).disposition, CommitDisposition::Committed);
     }
@@ -355,7 +357,7 @@ TEST_F(TSnapshotArchiveTest, SettingIsValidatedPersistedAndPartOfCreation)
     const auto mismatch = Engine_->CreateCollection(retry);
     EXPECT_EQ(mismatch.disposition, CommitDisposition::DefinitelyNotCommitted);
     EXPECT_EQ(test::Present(mismatch.error).code, "SNAPSHOT_ARCHIVE_MISMATCH");
-    for (const auto value : {int64_t{0}, int64_t{-1}, (int64_t{1} << 40) + 1}) {
+    for (const auto value : {int64_t{-1}, (int64_t{1} << 40) + 1}) {
         const auto invalid = Engine_->UpdateSnapshotArchive({test::collection_id, value});
         ASSERT_FALSE(invalid);
         EXPECT_EQ(invalid.error().code, "INVALID_ARGUMENT");
@@ -391,9 +393,83 @@ TEST_F(TSnapshotArchiveTest, SettingIsValidatedPersistedAndPartOfCreation)
     EXPECT_EQ(Engine_->GetSnapshotArchive(SecondCollection)->archived_snapshots, 0);
 }
 
-TEST_F(TSnapshotArchiveTest, MaintenanceArchivesAnExistingHistoryInBoundedCalls)
+// New append collections get DefaultHotSnapshots unless they opt out with
+// KeepAllSnapshotsInRoot; a repeated creation compares effective values.
+TEST_F(TSnapshotArchiveTest, NewAppendCollectionsDefaultToTheArchiveTier)
 {
     Create(std::nullopt);
+    auto info = Engine_->GetCollection(test::collection_id);
+    ASSERT_TRUE(info);
+    EXPECT_EQ(info->hot_snapshots, DefaultHotSnapshots);
+    EXPECT_TRUE(info->hot_snapshots_defaulted);
+    EXPECT_EQ(CatalogVersion(Root_), 6);
+    CreateCollectionRequest retry{test::collection_id, "events", Schema};
+    EXPECT_EQ(Engine_->CreateCollection(retry).disposition, CommitDisposition::Committed);
+    retry.hot_snapshots = DefaultHotSnapshots;
+    EXPECT_EQ(Engine_->CreateCollection(retry).disposition, CommitDisposition::Committed);
+    retry.hot_snapshots = KeepAllSnapshotsInRoot;
+    EXPECT_EQ(test::Present(Engine_->CreateCollection(retry).error).code, "SNAPSHOT_ARCHIVE_MISMATCH");
+    // Opting out at creation: no setting is stored.
+    CreateCollectionRequest optOut{SecondCollection, "all-in-root", Schema};
+    optOut.hot_snapshots = KeepAllSnapshotsInRoot;
+    ASSERT_EQ(Engine_->CreateCollection(optOut).disposition, CommitDisposition::Committed);
+    info = Engine_->GetCollection(SecondCollection);
+    EXPECT_FALSE(info->hot_snapshots);
+    EXPECT_FALSE(info->hot_snapshots_defaulted);
+    EXPECT_EQ(Engine_->CreateCollection(optOut).disposition, CommitDisposition::Committed);
+    optOut.hot_snapshots.reset();
+    EXPECT_EQ(test::Present(Engine_->CreateCollection(optOut).error).code, "SNAPSHOT_ARCHIVE_MISMATCH");
+    // Opting out later, and an explicit value, end the default.
+    ASSERT_TRUE(Engine_->UpdateSnapshotArchive({test::collection_id, DefaultHotSnapshots}));
+    EXPECT_FALSE(Engine_->GetCollection(test::collection_id)->hot_snapshots_defaulted);
+    EXPECT_EQ(Engine_->GetCollection(test::collection_id)->hot_snapshots, DefaultHotSnapshots);
+    ASSERT_TRUE(Engine_->UpdateSnapshotArchive({test::collection_id, KeepAllSnapshotsInRoot}));
+    EXPECT_FALSE(Engine_->GetCollection(test::collection_id)->hot_snapshots);
+    // KV collections never get the default; an explicit opt-out is accepted.
+    const std::string kvID = "00000000-0000-4000-8000-0000000000c3";
+    CreateCollectionRequest kv{kvID, "kv", Schema};
+    kv.mode = CollectionMode::KeyValue;
+    ASSERT_EQ(Engine_->CreateCollection(kv).disposition, CommitDisposition::Committed);
+    EXPECT_FALSE(Engine_->GetCollection(kvID)->hot_snapshots);
+    kv.hot_snapshots = KeepAllSnapshotsInRoot;
+    EXPECT_EQ(Engine_->CreateCollection(kv).disposition, CommitDisposition::Committed);
+    Reopen();
+    EXPECT_FALSE(Engine_->GetCollection(test::collection_id)->hot_snapshots);
+    EXPECT_FALSE(Engine_->GetCollection(kvID)->hot_snapshots);
+}
+
+// A retention keep_last below a defaulted hot_snapshots lowers it in the
+// expiration's transaction; an explicitly set value is refused instead.
+TEST_F(TSnapshotArchiveTest, RetentionLowersOnlyADefaultedSetting)
+{
+    Create(std::nullopt);
+    for (int64_t index = 0; index < 6; ++index) {
+        ASSERT_EQ(Append(index).disposition, CommitDisposition::Committed);
+    }
+    const auto expired = Engine_->ExpireSnapshots({test::collection_id, SnapshotRetentionPolicy{4}});
+    ASSERT_TRUE(expired) << expired.error().message;
+    EXPECT_EQ(expired->snapshots_expired, 2);
+    auto info = Engine_->GetCollection(test::collection_id);
+    EXPECT_EQ(info->hot_snapshots, 4);
+    EXPECT_TRUE(info->hot_snapshots_defaulted);
+    // The same policy again changes nothing; a lower one lowers it again.
+    ASSERT_TRUE(Engine_->ExpireSnapshots({test::collection_id, SnapshotRetentionPolicy{4}}));
+    ASSERT_TRUE(Engine_->ExpireSnapshots({test::collection_id, SnapshotRetentionPolicy{3}}));
+    EXPECT_EQ(Engine_->GetCollection(test::collection_id)->hot_snapshots, 3);
+    Reopen();
+    info = Engine_->GetCollection(test::collection_id);
+    EXPECT_EQ(info->hot_snapshots, 3);
+    EXPECT_TRUE(info->hot_snapshots_defaulted);
+    ASSERT_TRUE(Engine_->UpdateSnapshotArchive({test::collection_id, 3}));
+    const auto refused = Engine_->ExpireSnapshots({test::collection_id, SnapshotRetentionPolicy{2}});
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "INVALID_ARGUMENT");
+    EXPECT_EQ(Engine_->GetCollection(test::collection_id)->hot_snapshots, 3);
+}
+
+TEST_F(TSnapshotArchiveTest, MaintenanceArchivesAnExistingHistoryInBoundedCalls)
+{
+    Create(KeepAllSnapshotsInRoot);
     for (int64_t index = 0; index < 30; ++index) {
         ASSERT_EQ(Append(index).disposition, CommitDisposition::Committed);
     }
@@ -431,7 +507,7 @@ TEST_F(TSnapshotArchiveTest, MaintenanceArchivesAnExistingHistoryInBoundedCalls)
 
 TEST_F(TSnapshotArchiveTest, AppendsShrinkALongBacklogByABoundedCut)
 {
-    Create(std::nullopt);
+    Create(KeepAllSnapshotsInRoot);
     for (int64_t index = 0; index < 80; ++index) {
         ASSERT_EQ(Append(index).disposition, CommitDisposition::Committed);
     }
@@ -579,6 +655,10 @@ class TArchiveRowTamperingTest
     , public ::testing::WithParamInterface<const char*>
 { };
 
+// Full verification refuses a tampered archive row at open. An open from the
+// verified checkpoints does not read archive rows: it either refuses (row
+// counts) or every later read of a snapshot returns its original answer or
+// an explicit error, never different data.
 TEST_P(TArchiveRowTamperingTest, OpenFailsClosed)
 {
     Create(2);
@@ -586,6 +666,10 @@ TEST_P(TArchiveRowTamperingTest, OpenFailsClosed)
         ASSERT_EQ(Append(index).disposition, CommitDisposition::Committed);
     }
     ASSERT_GE(Status().archived_snapshots, 4);
+    std::map<int64_t, TView> original;
+    for (const auto& [index, receipt] : Receipts_) {
+        original[receipt.snapshot_id] = Capture(*Engine_, test::collection_id, receipt.snapshot_id);
+    }
     ASSERT_TRUE(Engine_->Shutdown(std::chrono::seconds(5)));
     Engine_.reset();
     {
@@ -594,9 +678,63 @@ TEST_P(TArchiveRowTamperingTest, OpenFailsClosed)
         catalog.Execute(GetParam());
         ASSERT_EQ(catalog.Changes(), 1);
     }
+    OpenStoreRequest full{Root_.string(), test::store_id};
+    full.verify_full = true;
+    const auto refused = OpenExisting(full);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "CORRUPTION") << refused.error().message;
     const auto opened = OpenExisting({Root_.string(), test::store_id});
-    ASSERT_FALSE(opened);
-    EXPECT_EQ(opened.error().code, "CORRUPTION") << opened.error().message;
+    if (!opened) {
+        EXPECT_EQ(opened.error().code, "CORRUPTION") << opened.error().message;
+        return;
+    }
+    const auto& engine = **opened;
+    // A detected corruption also closes readiness for later reads.
+    const auto allowed = [](const ErrorDetail& error) {
+        return error.code == "CORRUPTION" || error.code == "NOT_FOUND" || error.code == "RECOVERY_REQUIRED";
+    };
+    for (const auto& [snapshot, expected] : original) {
+        ScanRequest request{test::collection_id};
+        request.selector = SnapshotSelector::Id(snapshot);
+        if (auto cursor = engine.Scan(request)) {
+            std::vector<std::string> rows;
+            bool failed = false;
+            while (true) {
+                auto next = (*cursor)->Next();
+                if (!next) {
+                    EXPECT_TRUE(allowed(next.error())) << next.error().code;
+                    failed = true;
+                    break;
+                }
+                if (!*next) {
+                    break;
+                }
+                auto piece = Render(**next);
+                rows.insert(rows.end(), piece.begin(), piece.end());
+            }
+            if (!failed) {
+                EXPECT_EQ(Sorted(rows), expected.Rows) << snapshot;
+            }
+        } else {
+            EXPECT_TRUE(allowed(cursor.error())) << cursor.error().code << ": " << cursor.error().message;
+        }
+        if (const auto statistics = engine.GetStatistics(test::collection_id, request.selector)) {
+            EXPECT_EQ(statistics->rows.value, expected.StatisticsRows) << snapshot;
+            EXPECT_EQ(statistics->compressed_data_bytes.value, expected.StatisticsBytes) << snapshot;
+        } else {
+            EXPECT_TRUE(allowed(statistics.error())) << statistics.error().code;
+        }
+        if (const auto files = engine.ListFiles(test::collection_id, request.selector)) {
+            std::vector<std::pair<int64_t, int64_t>> listed;
+            for (const auto& file : files->Files) {
+                listed.emplace_back(file.RecordCount, file.CompressedBytes);
+            }
+            std::ranges::sort(listed);
+            EXPECT_EQ(listed, expected.Files) << snapshot;
+        } else {
+            EXPECT_TRUE(allowed(files.error())) << files.error().code;
+        }
+    }
 }
 
 INSTANTIATE_TEST_SUITE_P(SnapshotArchive,
@@ -787,7 +925,9 @@ TEST(SnapshotArchiveChild, Run)
     }
     const auto start = std::chrono::steady_clock::now();
     test::JournalFaultVfs vfs;
-    auto opened = detail::EngineFactory::OpenWith({root, test::store_id}, ArchiveBackend(), vfs.Name());
+    OpenStoreRequest request{root, test::store_id};
+    request.verify_full = std::string_view(mode) == "verify-full";
+    auto opened = detail::EngineFactory::OpenWith(request, ArchiveBackend(), vfs.Name());
     ASSERT_TRUE(opened) << opened.error().code << ": " << opened.error().message;
     auto engine = std::move(*opened);
     const auto openMs =
@@ -817,7 +957,7 @@ TEST_P(TArchiveCrashTest, ProcessExitAroundTheArchivingCommitReopensConsistently
 {
     const std::string mode = GetParam();
     const bool append = mode.starts_with("crash-append-");
-    Create(append ? std::optional<int64_t>(2) : std::nullopt);
+    Create(append ? 2 : KeepAllSnapshotsInRoot);
     for (int64_t index = 0; index < (append ? 4 : 6); ++index) {
         ASSERT_EQ(Append(index).disposition, CommitDisposition::Committed);
     }
@@ -828,6 +968,11 @@ TEST_P(TArchiveCrashTest, ProcessExitAroundTheArchivingCommitReopensConsistently
     Engine_.reset();
     RunArchiveChild(Root_, mode, 50, EChildExit::Interrupted);
     RunArchiveChild(Root_, "verify", 0);
+    // The first open after the crash used the checkpoints; full verification
+    // of the same store in another fresh process answers identically.
+    const auto checkpointed = ReadBytes(Directory_.path / "digest-child");
+    RunArchiveChild(Root_, "verify-full", 0);
+    EXPECT_EQ(ReadBytes(Directory_.path / "digest-child"), checkpointed);
     Reopen();
     const auto status = Status();
     EXPECT_EQ(ArchiveRows(Root_, test::collection_id), status.archived_snapshots);
@@ -928,9 +1073,9 @@ protected:
             store->Engine = std::move(*created);
             for (const auto& collection : Collections_) {
                 CreateCollectionRequest request{collection, collection, Schema};
-                if (store == &Archived_ && collection == Collections_[0]) {
-                    request.hot_snapshots = 3;
-                }
+                // The reference keeps every snapshot in its roots.
+                request.hot_snapshots =
+                    store == &Archived_ && collection == Collections_[0] ? 3 : KeepAllSnapshotsInRoot;
                 ASSERT_EQ(store->Engine->CreateCollection(request).disposition, CommitDisposition::Committed);
             }
         }
@@ -1124,13 +1269,22 @@ struct TWindowCost
     uint64_t FullscanSteps = 0;
     uint64_t VmSteps = 0;
     uint64_t RootParses = 0;
+    // From the statement trace (E1): store-wide operation counts, statements
+    // that walk all operations of the store, and pager page reads.
+    int64_t OperationCounts = 0;
+    int64_t StoreOperationPages = 0;
+    int64_t PageReads = 0;
     double MeanMs = 0;
 };
 
 // Appends until `history` committed operations, then measures `window`
 // appends: one complete archive cycle when window == hot + slack + 1.
-TWindowCost
-MeasureWindow(Engine& engine, const std::filesystem::path& root, int64_t& next, int64_t history, int64_t window)
+TWindowCost MeasureWindow(Engine& engine,
+    const std::filesystem::path& root,
+    int64_t& next,
+    int64_t history,
+    int64_t window,
+    test::SqlTrace* trace = nullptr)
 {
     const auto batch = Batch(RowsFor(0, 3));
     const auto append = [&] {
@@ -1139,6 +1293,9 @@ MeasureWindow(Engine& engine, const std::filesystem::path& root, int64_t& next, 
     };
     while (next < history) {
         append();
+    }
+    if (trace) {
+        (void)trace->Take();
     }
     const auto work = detail::ReadCatalogWork();
     const auto parses = NGlamDB::NStorage::TableMetadataParses();
@@ -1159,9 +1316,16 @@ MeasureWindow(Engine& engine, const std::filesystem::path& root, int64_t& next, 
         .VmSteps = after.vm_steps - work.vm_steps,
         .RootParses = NGlamDB::NStorage::TableMetadataParses() - parses,
         .MeanMs = elapsed / static_cast<double>(window)};
+    if (trace) {
+        const auto statements = trace->Take();
+        cost.OperationCounts = test::CountContaining(statements, "COUNT(*) FROM operations");
+        cost.StoreOperationPages = test::CountContaining(statements, "(collection_id,operation_id)>(?,?)");
+        cost.PageReads = test::Sum(statements).page_reads;
+    }
     std::cout << std::format("archive_cost history={} window={} root_bytes={} root_snapshots={} archived={} "
                              "rows_changed={} rows_returned={} statements={} fullscan_steps={} vm_steps={} "
-                             "root_parses={} mean_append_ms={:.2f}\n",
+                             "root_parses={} operation_counts={} store_operation_pages={} page_reads={} "
+                             "mean_append_ms={:.2f}\n",
         history,
         window,
         cost.RootBytes,
@@ -1173,6 +1337,9 @@ MeasureWindow(Engine& engine, const std::filesystem::path& root, int64_t& next, 
         cost.FullscanSteps,
         cost.VmSteps,
         cost.RootParses,
+        cost.OperationCounts,
+        cost.StoreOperationPages,
+        cost.PageReads,
         cost.MeanMs);
     return cost;
 }
@@ -1208,6 +1375,8 @@ TEST(SnapshotArchiveCost, RootAndCatalogWorkPerAppendDoNotDependOnArchivedHistor
     const int64_t window = static_cast<int64_t>(NGlamDB::NStorage::ArchiveSlack(hot)) + 1;
     test::TempDir directory;
     const auto root = directory.path / "store";
+    // Traces every statement of the store's catalog connection.
+    test::SqlTrace trace;
     auto created = CreateStore({test::store_id, root.string(), "local-delete-extra-v1", CostLimits()});
     ASSERT_TRUE(created) << created.error().message;
     auto engine = std::move(*created);
@@ -1218,9 +1387,15 @@ TEST(SnapshotArchiveCost, RootAndCatalogWorkPerAppendDoNotDependOnArchivedHistor
     std::vector<TWindowCost> costs;
     for (const auto history : CostHistories()) {
         ASSERT_EQ(history % window, 0) << "histories must align with the archive cycle";
-        costs.push_back(MeasureWindow(*engine, root, next, history, window));
+        costs.push_back(MeasureWindow(*engine, root, next, history, window, &trace));
     }
     for (const auto& cost : costs) {
+        // E1 on the archiving path: no store-wide operation count or walk,
+        // no full-table scan step, and page reads differ only by B-tree depth.
+        EXPECT_EQ(cost.OperationCounts, 0);
+        EXPECT_EQ(cost.StoreOperationPages, 0);
+        EXPECT_EQ(cost.FullscanSteps, 0U);
+        EXPECT_LE(cost.PageReads, costs.front().PageReads + 4 * window);
         EXPECT_EQ(cost.RootSnapshots, costs.front().RootSnapshots);
         EXPECT_LE(cost.RootSnapshots, hot + static_cast<int64_t>(NGlamDB::NStorage::ArchiveSlack(hot)));
         // Random snapshot IDs and sequence digits change the root by a few bytes.
@@ -1252,7 +1427,10 @@ TEST(SnapshotArchiveCost, DISABLED_BaselineWithoutArchiveGrowsWithHistory)
     auto created = CreateStore({test::store_id, root.string(), "local-delete-extra-v1", limits});
     ASSERT_TRUE(created) << created.error().message;
     auto engine = std::move(*created);
-    ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", Schema}).disposition,
+    ASSERT_EQ(engine
+                  ->CreateCollection(
+                      {test::collection_id, "events", Schema, {}, CollectionMode::Append, KeepAllSnapshotsInRoot})
+                  .disposition,
         CommitDisposition::Committed);
     int64_t next = 0;
     for (const auto history : CostHistories()) {

@@ -435,7 +435,11 @@ TEST_F(EngineVerticalTest, MissingCommittedDataFailsClosed)
     const auto files = DataFiles();
     ASSERT_EQ(files.size(), 2U);
     std::filesystem::remove(files.front());
-    EXPECT_FALSE(OpenExisting({Root_.string(), test::store_id}));
+    // Full verification reads every committed file; an open from checkpoints
+    // (the default for new stores) does not.
+    OpenStoreRequest full{Root_.string(), test::store_id};
+    full.verify_full = true;
+    EXPECT_FALSE(OpenExisting(full));
 }
 
 TEST_F(EngineVerticalTest, CursorDetectedCorruptionClosesReadiness)

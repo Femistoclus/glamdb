@@ -4,8 +4,11 @@ An append collection can keep only its newest snapshots in the Iceberg root and
 move older ones to an archive in the SQLite catalog, as DuckLake stores
 snapshots as catalog rows. Archived snapshots stay readable; only the explicit
 retention policy of [snapshot retention](SNAPSHOT_RETENTION.md) makes a
-snapshot unreadable. Without the setting nothing changes: every retained
-snapshot stays in the root and no catalog table is created.
+snapshot unreadable. New append collections use the tier by default
+(`DefaultHotSnapshots` = 100); a collection created with
+`KeepAllSnapshotsInRoot` keeps every retained snapshot in the root, and a store
+whose collections all opt out creates no archive table. Existing collections
+keep their setting on open and upgrade.
 
 | State | Where the snapshot entry lives | Readable | Manifest list and manifests |
 | --- | --- | --- | --- |
@@ -15,23 +18,38 @@ snapshot stays in the root and no catalog table is created.
 
 ```cpp
 CreateCollectionRequest request{collection_id, "events", schema};
-request.hot_snapshots = 100;                  // part of the definition
+// absent: DefaultHotSnapshots (100) for append collections
+// request.hot_snapshots = 50;                      // explicit
+// request.hot_snapshots = KeepAllSnapshotsInRoot;  // explicit opt-out (0)
 engine->CreateCollection(request);
 engine->UpdateSnapshotArchive({collection_id, 50});   // later appends apply it
 auto status = engine->GetSnapshotArchive(collection_id);
 auto moved = engine->ArchiveSnapshots(collection_id); // bounded maintenance
 ```
 
-`hot_snapshots` accepts 1–2^40 and is stored per collection in the catalog.
-`CollectionInfo::hot_snapshots` reports it. A repeated creation must request
-the same value as the original creation (`SNAPSHOT_ARCHIVE_MISMATCH`).
-`UpdateSnapshotArchive` replaces it under the writer, is applied once when
-repeated and moves nothing by itself; an absent value stops archiving later
-snapshots. Raising it does not move archived snapshots back. Retention must
-keep at least the hot snapshots: `hot_snapshots` greater than `keep_last` is
-`INVALID_ARGUMENT`, whichever of the two is changed. KV collections need their
-complete root history; the setting and archive maintenance return
-`COLLECTION_MODE_MISMATCH` for them, like retention.
+The creation request is tri-state: absent means the default (100 for append
+collections when the backend supports the archive, none for KV and for
+backends without it), `KeepAllSnapshotsInRoot` (0) means no archive, and
+1–2^40 is an explicit value. The effective value is stored per collection in
+the catalog like an explicit one; `CollectionInfo::hot_snapshots` reports it
+(absent: no archive) and `CollectionInfo::hot_snapshots_defaulted` whether it
+came from the default and was never set explicitly (catalog table
+`collection_hot_defaults`, version 6). A repeated creation compares effective
+values (`SNAPSHOT_ARCHIVE_MISMATCH` otherwise): omitting the field matches a
+collection that received the default or was created with an explicit 100; an
+explicit opt-out matches neither. A creation retry that omits the field no
+longer matches a collection created before the default existed.
+`UpdateSnapshotArchive` replaces the value with an explicit one under the
+writer, is applied once when repeated and moves nothing by itself; an absent
+value or `KeepAllSnapshotsInRoot` stops archiving later snapshots. Raising it
+does not move archived snapshots back. Retention must keep at least the hot
+snapshots: an explicitly set `hot_snapshots` greater than `keep_last` is
+`INVALID_ARGUMENT`, whichever of the two is changed; a defaulted value above a
+new `keep_last` is lowered to `keep_last` in the expiration's transaction (or
+its own when the root does not change) and stays marked as defaulted. KV
+collections need their complete root history; the default never applies to
+them, an explicit value and archive maintenance return
+`COLLECTION_MODE_MISMATCH`, like retention.
 
 ## HTTP, SDK and CLI
 
@@ -74,15 +92,20 @@ oldest snapshot that stays, hashes the moved lists, requires each list's file
 counts to equal the snapshot's verified membership boundary, and computes the
 manifests each moved snapshot references last. Manifests are referenced by a
 contiguous snapshot range in the verified append profile, so these lists are
-enough. The root keeps valid Iceberg v2: it lists the hot snapshots, and the
+enough. The verified candidate then drops the moved boundaries from its
+membership and erases the retired manifests from its retained path set without
+copying the shared file index (see [the scan index](SCAN_INDEX.md)). The root keeps valid Iceberg v2: it lists the hot snapshots, and the
 oldest one's parent is archived.
 
 ## Catalog format
 
-Catalog version 5 adds two tables after the version 4 KV tables. It is created
-by the first transaction that stores a setting (creation or update), together
-with any missing version 2–4 tables. Older binaries reject version 5. Stores
-that never store a setting keep their version and stay byte-compatible.
+Catalog version 5 adds two tables after the version 4 KV tables, and version 6
+adds the verified checkpoints (see [verified checkpoints](#verified-checkpoints)).
+Both are created by the first transaction that stores a setting (creation or
+update), together with any missing version 2–4 tables; a version 5 catalog
+written before checkpoints existed becomes version 6 at its first publication.
+Older binaries reject versions 5 and 6. Stores that never store a setting keep
+their version and stay byte-compatible.
 
 ```sql
 CREATE TABLE collection_snapshot_archive(collection_id TEXT PRIMARY KEY REFERENCES collections(collection_id),
@@ -174,6 +197,69 @@ per-history work.
 Archived list integrity is checked when a read or expiration needs the list.
 `manifest_list_bytes` and the retired manifest totals are trusted catalog state
 written by a verified publication, like receipt totals.
+
+This full path remains the one used by `Reconcile`, by recovery during
+`Shutdown`, by `Engine::VerifyStoreFull`, by `OpenStoreRequest::verify_full`
+and whenever a version 6 store's checkpoints are missing or do not match.
+
+## Verified checkpoints
+
+Catalog version 6 stores one checkpoint per append collection and a partial
+index of interrupted operations:
+
+```sql
+CREATE TABLE collection_checkpoints(collection_id TEXT PRIMARY KEY REFERENCES collections(collection_id),
+  snapshot_id INTEGER, sequence_number INTEGER NOT NULL CHECK(sequence_number>=0),
+  metadata_location TEXT NOT NULL CHECK(length(metadata_location)<=2048),
+  root_bytes INTEGER NOT NULL CHECK(root_bytes>=1), root_sha256 TEXT NOT NULL CHECK(length(root_sha256)=64),
+  usage_root_bytes, usage_snapshots, usage_snapshot_log, usage_data_files, usage_manifests,
+  usage_manifest_bytes, usage_manifest_list_bytes, usage_footer_bytes INTEGER NOT NULL CHECK(...>=0),
+  operations, archived, expired INTEGER NOT NULL CHECK(...>=0),
+  receipt_chain TEXT NOT NULL CHECK(length(receipt_chain)=64))
+CREATE INDEX operations_bound ON operations(collection_id,operation_id) WHERE state=0
+```
+
+Every publication of an append collection (creation, ordinary and bulk append,
+archive maintenance, expiration) writes its checkpoint in the same outer
+transaction as the pointer and receipt: the verified candidate's root location,
+size and SHA-256, current snapshot and sequence, and cumulative storage usage.
+The catalog maintains the operation count (every binding increments it), the
+archive and expiration row counts, and a SHA-256 chain over the publications
+since the row was established (kind, root, digest and the encoded receipt). KV
+collections have no checkpoint.
+
+A fresh `OpenExisting` of a version 6 store opens from checkpoints when every
+collection has one and all of them match: the catalog validates its header and
+registry (O(collections), no `integrity_check` and no walk over operation
+records), requires each checkpoint to equal the catalog pointer and current
+snapshot, the archive and ledger row counts, and the operation counts to sum to
+the exact operation count. Each collection is then rebuilt from its root (size
+and digest must match), the manifest lists of its root snapshots and its
+current manifests: the scan index groups the live files by origin sequence in
+list order, which every append and merge preserves, and is identical to the one
+full verification builds; usage comes from the checkpoint and must agree with
+the root and the live files and fit the configured budgets. Open reads no
+data-file footer, no archived or expired list, no superseded manifest and no
+archive row except the newest; interrupted operations are found through the
+partial index. Any mismatch or error discards the attempt and runs the full
+path, which then re-establishes every checkpoint in its durability fence.
+
+What the checkpoint path trusts instead of re-proving: the history before the
+current root (each transition was verified by the publication guard before
+its COMMIT), the cumulative byte totals, archive rows until they are used, and
+the SQLite file itself. Archive rows are therefore checked on use: an archived
+read binds the row to its committed receipt (snapshot, parent, time) and
+requires its `data_files` prefix to end exactly at the files whose origin
+sequence is the row's; a tampered row is `CORRUPTION`, never other data.
+Scrubbing remains explicit: `VerifyStoreFull`, `Reconcile` or `verify_full`.
+Detected `CORRUPTION` (during recovery or by any read) deletes every
+checkpoint, so the next open verifies fully and finds it again instead of
+reopening ready; a successful full verification re-establishes them.
+
+The physical inventory (`GetStorageFootprint`) reads each archived list with
+its recorded size and SHA-256 and counts it and its manifests as referenced
+metadata, so archiving does not turn retained metadata into "unreferenced"
+warehouse bytes.
 
 ## Validation
 

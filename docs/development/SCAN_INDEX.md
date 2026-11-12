@@ -26,8 +26,9 @@ Branches, snapshot expiration and schema evolution remain unsupported.
 `CheckManifest` records a descriptor only after the existing strict manifest
 entry/counter/path checks and Parquet length, row-count, schema and field-ID
 verification succeed. Recovery builds one index while verifying every retained
-transition. Publication copies the verified base index and checks only the new
-closure; that candidate remains tentative until the outer SQLite commit. When
+transition. Publication derives the candidate from the verified base index
+without copying it and checks only the new closure; that candidate remains
+tentative until the outer SQLite commit. When
 manifests are merged, the verifier compares EXISTING entries with the removed
 parent manifests, including metrics and original snapshot/sequence numbers,
 without adding those files or charging their footers again.
@@ -59,11 +60,27 @@ while `GetStatistics`, `ListFiles` and `ExplainScan` may reuse immutable entries
 
 ## Cost and reproduction
 
-The current development caps bound snapshots and files. A live generation takes
-O(files + snapshots) index space; publication copies that space, and cursors may
-retain previous generations. The backend's shared metadata reservation stays
-with the parsed root and its index, including generations pinned by cursors.
-Recovery adds descriptors to one mutable builder before publishing it. The
+The current development caps bound snapshots and files. A live generation
+references O(files + snapshots) index space. Generations are structurally
+shared: files live in a 32-way persistent vector of immutable descriptors, so a
+new generation shares every existing descriptor with its base and allocates
+only its new descriptors, one partial leaf of at most 32 handles and, once per
+32 files, one root-to-leaf path. Only the sorted boundary table, O(retained
+snapshots), is copied per publication. Retained manifest paths (a persistent
+B+-tree) and expired snapshot IDs (one immutable vector) are shared the same
+way. A snapshot archive cut drops the archived boundaries from a copy of the
+boundary table (bounded by the hot window) and erases each retired manifest
+path in O(log paths), copying one root-to-leaf path and at most one merged
+sibling per level; no descriptor or path string is copied. Nothing reachable from a published generation is modified, so cursors
+pinning previous generations keep exactly their own files while later ones
+share nodes with them. The backend's shared metadata reservation stays with the
+parsed root and its index, including generations pinned by cursors; each
+generation charges its whole logical content from incrementally kept totals, in
+O(1). KV mutations derive their candidate the same way and close a file's
+lifetime by replacing only that descriptor and its trie path; their closure
+still builds O(files) known/live path maps, so a KV mutation remains
+proportional to retained files. Recovery adds descriptors to one index before
+publishing it. The
 [shared resource envelopes](SHARED_RESOURCES.md) remain conservative admission
 estimates, not a bound on total process memory.
 
@@ -79,10 +96,12 @@ build/release/tests/glamdb_scan_index_bench 256 1000
 Each run creates a disposable native store with duplicate/NULL rows, compares
 indexed and uncached planning, counts metadata opens, then closes and reopens
 the engine. Reopen is cold with respect to engine state; the OS page cache is
-not flushed. `index_capacity_bytes` counts `TScanMembership`'s own object, vector
-and path-string capacities, excluding allocator rounding, shared-pointer control
-blocks, shared `iceberg::DataFile` descriptors (emitted separately as
-`datafile_descriptor_bytes`), parsed roots/manifests, FileIO instrumentation and process RSS.
+not flushed. `index_capacity_bytes` counts `TScanMembership`'s own object, one
+leaf slot and one descriptor per file, the boundary vector and path-string
+capacities, excluding allocator rounding, shared-pointer control blocks, interior
+trie nodes, shared `iceberg::DataFile` descriptors (emitted separately as
+`datafile_descriptor_bytes`), parsed roots/manifests, FileIO instrumentation and
+process RSS. The table below predates the shared layout and counted vector capacities.
 
 These measurements use the initial implementation on official base `1f48601`.
 
@@ -109,6 +128,34 @@ checks tentative/confirmed, rollback, uncertainty and failed-rebuild transitions
 `BackendPublicationIntegration` exercises publication handoff and lost COMMIT
 results with real SQLite/Parquet/Iceberg. The existing uncached `ScanMockTest`
 suite uses in-memory FileIO and remains separate evidence.
+
+## Publication cost versus data files
+
+`glamdb_append_history_bench ROOT keep-last|retain-all CHECKPOINT...` appends
+one-row batches to one collection and reports, for the 200 appends before each
+checkpoint, the publication guard time (`StagedAppend::VerifyClosure`: closure
+verification and candidate accounting) and the whole append latency.
+`keep-last` expires all but the newest 100 snapshots every 100 appends, so the
+root stays small and costs that grow with data files dominate:
+
+```sh
+cmake --build --preset release --target glamdb_append_history_bench --parallel 2
+build/release/benchmarks/glamdb_append_history_bench /tmp/ah keep-last 1000 5000 10000 15000
+```
+
+Measured on 2026-11-12 with Linux aarch64 (4-CPU VM), Clang 18, Release, store
+on tmpfs; p50 in microseconds, before (copying index, 8532c49) / after:
+
+| Data files | Guard p50 | Append p50 | Peak RSS, MiB |
+| ---: | ---: | ---: | ---: |
+| 1,000 | 636 / 574 | 2,483 / 2,341 | 38 / 28 |
+| 5,000 | 1,041 / 639 | 3,264 / 2,630 | 64 / 56 |
+| 10,000 | 1,886 / 640 | 4,746 / 2,662 | 89 / 85 |
+| 15,000 | 2,650 / 614 | 5,830 / 2,511 | 116 / 109 |
+
+With all snapshots retained (`retain-all`), guard time still grows with the
+root (1,199 / 2,823 / 4,577 us at 1,000 / 3,000 / 5,000 snapshots, previously
+1,237 / 3,587 / 6,199 us) because root verification remains O(snapshots).
 
 ## Executed checks
 
