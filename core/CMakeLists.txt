@@ -34,7 +34,7 @@ if(NOT GLAMDB_IO_ONLY)
     find_package(iceberg CONFIG REQUIRED GLOBAL)
     find_package(Arrow 25 CONFIG REQUIRED GLOBAL)
     add_library(glamdb_core STATIC resources/resources.cpp resources/arrow_pool.cpp resources/metadata_result.cpp api/canonical.cpp api/codec.cpp api/arrow_input.cpp api/bulk_input.cpp
-        api/write_settings.cpp api/scalars.cpp
+        api/write_settings.cpp api/scalars.cpp api/kv.cpp scan/read_budget.cpp
         catalog/sqlite.cpp catalog/durable_sqlite_catalog.cpp
         engine/storage_mapping.cpp engine/store_lease.cpp engine/engine.cpp engine/metadata_pages.cpp
         scan/predicate.cpp)
@@ -50,8 +50,8 @@ if(NOT GLAMDB_IO_ONLY)
     if(GLAMDB_BUILD_STORAGE)
         # The production storage backend and scanner. Without them the public
         # factories install no backend and report DEPENDENCY_UNAVAILABLE.
-        target_sources(glamdb_core PRIVATE backend/inert_catalog.cpp backend/local_storage_backend.cpp backend/storage_footprint.cpp
-            backend/storage_errors.cpp
+        target_sources(glamdb_core PRIVATE backend/inert_catalog.cpp backend/local_storage_backend.cpp
+            backend/storage_footprint.cpp backend/storage_errors.cpp backend/kv_spool.cpp backend/kv_producer.cpp
             scan/parquet_input.cpp scan/pruning.cpp scan/metadata_cache.cpp scan/scan_planner.cpp scan/scan_cursor.cpp
             scan/metadata.cpp scan/file_metadata.cpp)
         target_compile_definitions(glamdb_core PRIVATE GLAMDB_HAS_STORAGE=1)

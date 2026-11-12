@@ -130,10 +130,68 @@ void AddWorkloadCommands(CLI::App& app, std::optional<int>& exitCode)
     Value(*generate, *generation, "--locale", "Mimesis locale (default en)");
     Value(*generate, *generation, "--part-rows", "Rows per part, up to 10000 (default 1000)");
     Value(*generate, *generation, "--part-bytes", "Maximum bytes per part (default 4194304)");
-    auto* bench = app.add_subcommand("bench", "Run Locust SDK workloads and resolve/verify their journals");
+    auto* bench = app.add_subcommand("bench", "Run SDK workloads and manage reproducible TPC-H scans");
     bench->require_subcommand(1);
     auto* tpch = bench->add_subcommand("tpch", "Manage a dedicated TPC-H benchmark database");
     tpch->require_subcommand(1);
+    auto* tpchGenerate = tpch->add_subcommand("generate", "Generate all eight tables with reference TPC-H DBGEN");
+    auto tpchGeneration = Command(*tpchGenerate, {"bench", "tpch", "generate"}, exitCode);
+    Value(*tpchGenerate, *tpchGeneration, "--scale-factor", "Exact reference scale, e.g. 1 or 0.01", true);
+    Value(*tpchGenerate, *tpchGeneration, "--output", "New eight-table dataset directory", true);
+    Value(*tpchGenerate, *tpchGeneration, "--dbgen", "DBGEN executable beside the pinned 3.0.1 source package", true);
+    Value(*tpchGenerate, *tpchGeneration, "--type-profile", "Explicit native or legacy-scaled encoding", true);
+    Value(*tpchGenerate, *tpchGeneration, "--generator-parts", "Partitions of one global scale factor (default 1)");
+    Value(*tpchGenerate, *tpchGeneration, "--part-rows", "Maximum rows per dataset part (default 10000)");
+    Value(*tpchGenerate, *tpchGeneration, "--part-bytes", "Maximum bytes per dataset part (default 8388608)");
+    Value(*tpchGenerate, *tpchGeneration, "--distributions", "Reference DBGEN distribution file");
+    Value(*tpchGenerate, *tpchGeneration, "--dbgen-sha256", "Expected SHA-256 of the DBGEN executable");
+    const std::map<std::string_view, const char*> descriptions{
+        {"init", "Explicitly create a dedicated database and eight collections"},
+        {"load", "Load disjoint immutable chunks and verify complete table contents"},
+        {"resolve", "Look up original operation outcomes; resend only with --retry"},
+        {"verify", "Compare full fixed-view rows, receipts and logical relationships"},
+        {"scan", "Run Q1-Q22 source scans or complete Q1/Q6 client reductions"},
+        {"status", "Report target identity, progress, unresolved operations and limits"},
+    };
+    for (const auto* name : {"init", "load", "resolve", "verify", "scan", "status"}) {
+        auto* command = tpch->add_subcommand(name, descriptions.at(name));
+        auto args = Command(*command, {"bench", "tpch", name}, exitCode);
+        Value(*command, *args, "--state", "Saved benchmark state JSON file", true);
+        Value(*command, *args, "--ca-file", "Additional PEM certificate authority");
+        const std::string_view mode(name);
+        Value(*command,
+            *args,
+            "--timeout",
+            mode == "verify" || mode == "scan" ? "SDK deadline in seconds (default 300)"
+                                               : "SDK deadline in seconds (default 30)");
+        if (mode == "init") {
+            Value(*command, *args, "--url", "Server URL; HTTPS required outside loopback", true);
+            Value(*command, *args, "--dataset", "Completed eight-table dataset directory", true);
+            Value(*command, *args, "--name", "Dedicated managed database name", true);
+            Value(*command, *args, "--limits", "Explicit database limits as a JSON file");
+            Value(*command, *args, "--table-prefix", "Collection name prefix (default empty)");
+        } else if (mode == "load") {
+            Value(*command, *args, "--batch-rows", "Maximum rows per immutable append (default 10000)");
+            Value(*command, *args, "--batch-bytes", "Maximum bytes per immutable append (default 8388608)");
+            Value(*command, *args, "--workers", "Workers assigned disjoint append parts (default 1)");
+            Flag(*command, *args, "--resume", "Resume the original saved load plan and requests");
+        } else if (mode == "resolve") {
+            Flag(*command, *args, "--retry", "Explicitly resend verified original OPERATION_NOT_FOUND requests");
+        } else if (mode == "verify") {
+            Value(*command, *args, "--format", "json or arrow (default arrow)");
+            Value(*command, *args, "--level", "full (rows, receipts, keys and relations) or rows (default full)");
+        } else if (mode == "scan") {
+            Value(*command, *args, "--queries", "all or comma-separated Q1-Q22 numbers (default all)");
+            Value(*command, *args, "--mode", "scan access patterns or reduce complete Q1/Q6 results (default scan)");
+            Value(*command, *args, "--format", "json or arrow (default arrow)");
+            Value(*command, *args, "--consume", "rows or Arrow batches (default batches)");
+            Value(*command, *args, "--users", "Concurrent Locust users (default 1)");
+            Value(*command, *args, "--processes", "Client worker processes (default 1)");
+            Value(*command, *args, "--warmup", "Warm-up repetitions, including zero (default 1)");
+            Value(*command, *args, "--repeat", "Measured repetitions (default 5)");
+            Value(*command, *args, "--report", "New report directory", true);
+        }
+    }
     auto* clean = tpch->add_subcommand("clean", "Drop the exact database identity saved in a run state file");
     auto cleanup = Command(*clean, {"bench", "tpch", "clean"}, exitCode);
     Value(*clean, *cleanup, "--state", "Saved version-1 run state JSON file; never a database name", true);

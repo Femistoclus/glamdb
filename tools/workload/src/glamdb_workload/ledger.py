@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 from pathlib import Path
+from urllib.parse import quote
 
 from glamdb_sdk import AppendRequest
 
@@ -17,15 +18,19 @@ STATES = (
     "conflict",
     "in_progress",
     "not_found",
+    "failure_lookup_required",
 )
 TERMINAL = {"committed", "definitely_not_committed"}
 
 
 class Ledger:
-    def __init__(self, path):
+    def __init__(self, path, *, readonly=False):
         self.path = Path(path)
-        self.db = sqlite3.connect(self.path)
+        self.db = (sqlite3.connect('file:' + quote(str(self.path.resolve())) + '?mode=ro', uri=True)
+                   if readonly else sqlite3.connect(self.path))
         self.db.row_factory = sqlite3.Row
+        if readonly:
+            return
         self.db.execute("PRAGMA journal_mode=DELETE")
         self.db.execute("PRAGMA synchronous=EXTRA")
         self.db.executescript("""

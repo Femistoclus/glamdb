@@ -3,8 +3,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -21,6 +23,8 @@ struct TScanDataFile
     std::int64_t SizeBytes = 0;
     std::int64_t RecordCount = 0;
     std::shared_ptr<const iceberg::DataFile> DataFile{};
+    std::int64_t IntroducedSequence = 0;
+    std::optional<std::int64_t> RemovedSequence{};
 
     bool operator==(const TScanDataFile& other) const
     {
@@ -32,6 +36,7 @@ struct TSnapshotBoundary
 {
     std::int64_t SnapshotID;
     std::size_t FileCount;
+    std::int64_t SequenceNumber = 0;
 };
 
 // Conservative bytes retained by one manifest DataFile descriptor: map-node and
@@ -96,10 +101,24 @@ public:
     }
     // O(log32 n). Requires index < size().
     const TScanDataFile& operator[](std::size_t index) const;
+    // Require !empty().
+    const TScanDataFile& front() const
+    {
+        return (*this)[0];
+    }
+    const TScanDataFile& back() const
+    {
+        return (*this)[Size_ - 1];
+    }
     const_iterator begin() const;
     const_iterator end() const;
     // Strong exception guarantee.
     void push_back(TScanDataFile file);
+    // Replaces descriptor `index` with a changed copy, copying only that
+    // descriptor and its root-to-leaf path; references to the previous
+    // descriptor stay valid while another generation shares it. Strong
+    // exception guarantee.
+    void Update(std::size_t index, const std::function<void(TScanDataFile&)>& change);
     // Path capacities plus DataFileMemory of every descriptor, kept incrementally.
     std::uint64_t DescriptorBytes() const noexcept
     {
@@ -119,15 +138,17 @@ private:
     unsigned Shift_ = 0;
 };
 
-// Built only by strict append-closure verification. Files are chronological;
-// each retained snapshot selects a prefix. Boundaries are sorted by snapshot
-// ID (IDs themselves are opaque). This representation requires the fixed-schema,
-// unpartitioned, append-only profile: no deletes, branches or compaction.
-// Copying shares every file descriptor; boundaries are copied.
+// Built only by strict closure verification. Append snapshots select a
+// chronological file prefix. KeyValue snapshots select file lifetimes by their
+// sequence number. Boundaries are sorted by opaque snapshot ID for lookup only.
+// Both profiles require one fixed-schema, unpartitioned, linear history; files
+// have fresh paths and cannot be resurrected. Copying shares every file
+// descriptor; boundaries are copied.
 struct TScanMembership
 {
     TScanFiles Files;
     std::vector<TSnapshotBoundary> Snapshots;
+    bool KeyValue = false;
 };
 
 // Sorted snapshot IDs. Generations share one immutable vector; expiration and
@@ -143,6 +164,9 @@ public:
     // Sorts `ids`. The shared vector keeps no spare capacity, so publication
     // and recovery charge the same bytes for the same IDs.
     explicit TSortedSnapshotIDs(std::vector<std::int64_t> ids);
+    TSortedSnapshotIDs(std::initializer_list<std::int64_t> ids)
+        : TSortedSnapshotIDs(std::vector<std::int64_t>(ids))
+    { }
 
     const_iterator begin() const noexcept
     {

@@ -183,3 +183,111 @@ class AppendRequest:
     def to_dict(self) -> dict[str, Any]:
         """Return a detached view; editing it cannot change a retry body."""
         return json.loads(self.body)
+
+
+def bounded_keys(keys: Iterable[str], maximum: int) -> list[str]:
+    if isinstance(keys, (str, bytes)):
+        raise ValidationError("keys must be a sequence of UTF-8 strings")
+    try:
+        iterator = iter(keys)
+    except TypeError as exc:
+        raise ValidationError("keys must be a sequence of UTF-8 strings") from exc
+    result = []
+    for key in iterator:
+        if len(result) == maximum:
+            raise ValidationError(f"at most {maximum} keys are supported")
+        try:
+            valid = isinstance(key, str) and len(key.encode("utf-8")) <= 1024
+        except UnicodeError:
+            valid = False
+        if not valid:
+            raise ValidationError("keys must be UTF-8 strings of at most 1024 bytes")
+        result.append(key)
+    return result
+
+
+def _kv_schema(schema: Schema) -> None:
+    if not any(field.name == "key" and field.type == "string" and not field.nullable for field in schema.fields):
+        raise ValidationError("KV collections require a nonnullable string key field")
+
+
+def _precondition(body: dict[str, Any], expected_snapshot: Any) -> None:
+    from .codec import int64
+    if expected_snapshot is not ANY:
+        body["expected_snapshot"] = None if expected_snapshot is None else str(int64(expected_snapshot))
+
+
+@dataclass(frozen=True)
+class MutationRequest:
+    """Owned KV mutation bytes and canonical identity; retries send the same body."""
+    collection_id: str
+    operation_id: str
+    payload_hash: str
+    body: bytes
+    kind: str
+
+    def __post_init__(self):
+        if self.kind not in ("upsert", "delete", "compact") or type(self.body) is not bytes:
+            raise ValidationError("prepared mutations require a known kind and immutable bytes")
+        if uuid_string(self.collection_id, "collection_id") != self.collection_id or uuid_string(self.operation_id, "operation_id") != self.operation_id:
+            raise ValidationError("prepared mutations require canonical UUIDs")
+        if not isinstance(self.payload_hash, str) or len(self.payload_hash) != 64 or any(c not in "0123456789abcdef" for c in self.payload_hash):
+            raise ValidationError("prepared mutations require a canonical SHA256 payload hash")
+        _check_request_size(len(self.body))
+        try:
+            value = json.loads(self.body)
+        except (ValueError, UnicodeError) as exc:
+            raise ValidationError("prepared mutation body must be UTF-8 JSON") from exc
+        if not isinstance(value, dict) or value.get("operation_id") != self.operation_id:
+            raise ValidationError("prepared mutation body differs from its operation identity")
+
+    @classmethod
+    def prepare(cls, kind: str, collection_id: str | UUID, operation_id: str | UUID, schema: Schema,
+                *, rows: Iterable[Mapping[str, Any]] | None = None, keys: Iterable[str] | None = None,
+                expected_snapshot: Any = ANY, max_files: int = 64,
+                target_file_bytes: int = 8 * 1024**2) -> "MutationRequest":
+        from itertools import chain
+        from .codec import Field
+        _kv_schema(schema)
+        cid = uuid_string(collection_id, "collection_id")
+        op = uuid_string(operation_id, "operation_id")
+        body: dict[str, Any] = {"operation_id": op}
+        source = hashlib.sha256(b"empty").hexdigest()
+        files, target = 256, 8 * 1024**2
+        if kind == "upsert":
+            if rows is None:
+                raise ValidationError("upsert rows are required")
+            iterator = iter(rows)
+            sentinel = object()
+            first = next(iterator, sentinel)
+            if first is sentinel:
+                body["rows"] = []
+            else:
+                request = AppendRequest.prepare(cid, op, schema, chain([first], iterator), expected_snapshot)
+                source = request.payload_hash
+                body = request.to_dict()
+        elif kind == "delete":
+            if keys is None:
+                raise ValidationError("delete keys are required")
+            body["keys"] = bounded_keys(keys, 10000)
+            if body["keys"]:
+                source = canonical_payload_hash(cid, Schema([Field("key", "string", False)]),
+                                                [{"key": key} for key in body["keys"]])
+        elif kind == "compact":
+            if type(max_files) is not int or not 1 <= max_files <= 256:
+                raise ValidationError("max_files must be an integer in 1..256")
+            if type(target_file_bytes) is not int or not 1024 <= target_file_bytes <= 16 * 1024**2:
+                raise ValidationError("target_file_bytes must be an integer in 1024..16777216")
+            files, target = max_files, target_file_bytes
+            body.update(max_files=str(files), target_file_bytes=str(target))
+        else:
+            raise ValidationError("unknown KV mutation kind")
+        _precondition(body, expected_snapshot)
+        number = {"upsert": 1, "delete": 2, "compact": 3}[kind]
+        digest = hashlib.sha256(f"glamdb.kv1/{number}/3/{schema_fingerprint(schema).hex()}/{source}/{files}/{target}/".encode()).hexdigest()
+        frozen = json_bytes(body)
+        _check_request_size(len(frozen))
+        return cls(cid, op, digest, frozen, kind)
+
+    def to_dict(self) -> dict[str, Any]:
+        return json.loads(self.body)

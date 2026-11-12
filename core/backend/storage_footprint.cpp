@@ -48,7 +48,7 @@ void Add(uint64_t& target, uint64_t value)
     target += value;
 }
 
-enum class ECategory { Data, Metadata, Catalog, Other, Shared };
+enum class ECategory : uint8_t { Data, Metadata, Catalog, Other, Shared };
 
 ECategory Category(std::string_view path)
 {
@@ -197,6 +197,10 @@ Result<StorageFootprint> TLocalStorageBackend::GetStorageFootprint()
         inventory.Result.StoreID = Store_.store_id;
         inventory.Prefix = "store://" + Store_.store_id + "/";
         uint64_t pathBytes = 0;
+        const auto chargePath = [&](std::string_view path) {
+            Add(pathBytes, path.size() + 128);
+            Require(pathBytes <= (32ULL << 20), "RESOURCE_EXHAUSTED", "physical inventory path budget exhausted");
+        };
         {
             std::lock_guard lock(Mutex_);
             Require(VerifiedGeneration_, "RECOVERY_REQUIRED", "physical inventory requires a verified generation");
@@ -210,22 +214,31 @@ Result<StorageFootprint> TLocalStorageBackend::GetStorageFootprint()
                 if (base->ScanIndex != nullptr) {
                     for (const auto& file : base->ScanIndex->Files) {
                         Require(file.SizeBytes >= 0, "CORRUPTION", "negative committed file length");
+                        chargePath(file.Path);
                         inventory.Data.emplace(file.Path, static_cast<uint64_t>(file.SizeBytes));
-                        Add(pathBytes, file.Path.size() + 128);
                     }
                 }
+                chargePath(base->MetadataLocation);
                 inventory.Metadata.insert(base->MetadataLocation);
                 for (const auto& snapshot : base->Metadata->snapshots) {
                     Require(snapshot != nullptr, "CORRUPTION", "snapshot metadata is missing");
+                    chargePath(snapshot->manifest_list);
                     inventory.Metadata.insert(snapshot->manifest_list);
-                    Add(pathBytes, snapshot->manifest_list.size() + 128);
                 }
-                for (const auto& manifest : base->CurrentManifests) {
-                    inventory.Metadata.insert(manifest.manifest_path);
-                    Add(pathBytes, manifest.manifest_path.size() + 128);
-                }
-                Add(pathBytes, base->MetadataLocation.size() + 128);
-                Require(pathBytes <= (32ULL << 20), "RESOURCE_EXHAUSTED", "physical inventory path budget exhausted");
+                // KV overwrites retain historical manifests even when none of
+                // their files remain live. The verified union covers append
+                // manifest merging and every retained KV snapshot alike.
+                base->RetainedManifestPaths.ForEach([&](const std::string& path) {
+                    chargePath(path);
+                    inventory.Metadata.insert(path);
+                });
+            }
+            // A durable no-op permanently references its exact prepared root,
+            // including an initial-empty root superseded by later mutations.
+            for (const auto& [path, reservation] : NoOpRoots_) {
+                (void)reservation;
+                chargePath(path);
+                inventory.Metadata.insert(path);
             }
         }
         const auto expected = Dirs_->Fs()->Stat(Dirs_->Root());

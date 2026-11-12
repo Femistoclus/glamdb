@@ -1,5 +1,10 @@
 # Explicit snapshot retention
 
+This maintenance API supports append collections. KV collections preserve their
+complete snapshot intervals and no-op bound roots; policy reads, updates and
+expiration refuse with `COLLECTION_MODE_MISMATCH`. A KV expiration ledger or
+metadata cleanup queue is corruption. See [KV mode](KV_MODE.md).
+
 The embedded C++ API supports explicit, opt-in expiration. Existing collections
 retain all history until an application installs a policy and runs maintenance.
 There is no background task, implicit append expiration, or HTTP/SDK/UI

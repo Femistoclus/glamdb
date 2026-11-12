@@ -330,7 +330,7 @@ TJson SnapshotsJson(const Engine& engine, const std::string& collection, Snapsho
         outcome.operation_id = snapshot.receipt.operation_id;
         outcome.result = snapshot.receipt;
         const auto receipt = TJson::parse(Unwrap(json_adapter::ToJson(outcome)).body).at("result");
-        items.push_back({{"snapshot_id", std::to_string(snapshot.snapshot_id)},
+        TJson item{{"snapshot_id", std::to_string(snapshot.snapshot_id)},
             {"parent_id", OptionalInteger(snapshot.parent_snapshot_id)},
             {"parent_snapshot_id", OptionalInteger(snapshot.parent_snapshot_id)},
             {"created_at_us", std::to_string(snapshot.created_at_us)},
@@ -338,7 +338,14 @@ TJson SnapshotsJson(const Engine& engine, const std::string& collection, Snapsho
             {"operation_id", snapshot.receipt.operation_id},
             {"receipt", receipt},
             {"backend", "local"},
-            {"mock", false}});
+            {"mock", false}};
+        if (snapshot.receipt.receipt_version == 3) {
+            item["mutation_kind"] = receipt.at("mutation_kind");
+            item["rows_written"] = std::to_string(snapshot.receipt.rows_written);
+            item["rows_removed"] = std::to_string(snapshot.receipt.rows_removed);
+            item["rows_affected"] = std::to_string(snapshot.receipt.rows_affected);
+        }
+        items.push_back(std::move(item));
     }
     result["items"] = std::move(items);
     return result;

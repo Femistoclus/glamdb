@@ -70,7 +70,9 @@ export function validateRecovery(payload, status, path, body) {
         if (recovery.candidate_table_uuid !== null) uuid(recovery.candidate_table_uuid);
         return;
     }
-    const match = path.match(/\/collections\/([^/]+)\/(?:append|operations\/([^/?]+))$/);
+    const match = path.match(
+        /\/collections\/([^/]+)\/(?:append|upsert|delete|compact|operations\/([^/?]+))$/,
+    );
     require(match && recovery.collection_id === decodeURIComponent(match[1]));
     const operation = body?.operation_id ?? decodeURIComponent(match[2] ?? '');
     require(recovery.operation_id === operation);

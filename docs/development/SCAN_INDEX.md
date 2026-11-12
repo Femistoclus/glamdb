@@ -15,9 +15,11 @@ for lookup. Scanning reverses the selected prefix to visit newer appends first.
 Manifest merging preserves the original descriptors and snapshot boundaries;
 only ADDED entries extend the index. Initial-empty views select zero files.
 
-This works only for the current append-only, unpartitioned, fixed-schema
-profile. Deletes, branches, compaction, snapshot expiration and schema evolution
-need a different representation and validation contract.
+The prefix representation applies only to append mode. Explicit KV mode uses
+a separately verified half-open lifetime interval for every retained file,
+indexed by snapshot sequence; see [KV mode](KV_MODE.md). Deletes and compaction
+preserve historical membership without copying one file set per snapshot.
+Branches, snapshot expiration and schema evolution remain unsupported.
 
 ## Verification and lifetime
 
@@ -71,7 +73,11 @@ pinning previous generations keep exactly their own files while later ones
 share nodes with them. The backend's shared metadata reservation stays with the
 parsed root and its index, including generations pinned by cursors; each
 generation charges its whole logical content from incrementally kept totals, in
-O(1). Recovery adds descriptors to one index before publishing it. The
+O(1). KV mutations derive their candidate the same way and close a file's
+lifetime by replacing only that descriptor and its trie path; their closure
+still builds O(files) known/live path maps, so a KV mutation remains
+proportional to retained files. Recovery adds descriptors to one index before
+publishing it. The
 [shared resource envelopes](SHARED_RESOURCES.md) remain conservative admission
 estimates, not a bound on total process memory.
 

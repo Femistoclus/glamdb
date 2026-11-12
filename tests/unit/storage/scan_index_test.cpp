@@ -240,6 +240,7 @@ struct TLegacyMembership
 {
     std::vector<TScanDataFile> Files;
     std::vector<TSnapshotBoundary> Snapshots;
+    bool KeyValue = false;
 };
 
 struct TLegacyGeneration
@@ -309,6 +310,8 @@ void ExpectSame(const TGeneration& actual, const TLegacyGeneration& expected, st
     for (const auto& file : files) {
         ASSERT_EQ(file, reference[position]) << position;
         ASSERT_EQ(file.DataFile, reference[position].DataFile) << position;
+        ASSERT_EQ(file.IntroducedSequence, reference[position].IntroducedSequence) << position;
+        ASSERT_EQ(file.RemovedSequence, reference[position].RemovedSequence) << position;
         ++position;
     }
     ASSERT_EQ(position, reference.size());
@@ -448,10 +451,22 @@ TEST(ScanIndexSharingTest, MatchesTheCopyingReferenceForRandomizedGenerations)
             }
             ASSERT_EQ(chain.Current.Index->Files.size(), files);
             ASSERT_EQ(Bytes(chain.Current), before);
-        } else if (action < 80) {
+        } else if (action < 75) {
             if (pinned.size() < 16) {
                 pinned.emplace_back(chain.Current, chain.Reference);
             }
+        } else if (action < 80 && !chain.Reference.Index->Files.empty()) {
+            // KV copy-on-write closes file lifetimes in a new generation.
+            const auto offset = fixture.Random() % chain.Reference.Index->Files.size();
+            const auto sequence = static_cast<std::int64_t>(fixture.Serial++);
+            auto copied = std::make_shared<TLegacyMembership>(*chain.Reference.Index);
+            copied->Files[offset].RemovedSequence = sequence;
+            chain.Reference.Index = std::move(copied);
+            auto shared = std::make_shared<TScanMembership>(*chain.Current.Index);
+            shared->Files.Update(offset, [&](TScanDataFile& file) {
+                file.RemovedSequence = sequence;
+            });
+            chain.Current.Index = std::move(shared);
         } else if (chain.Chronological.size() > 1) {
             // Expiration drops the oldest boundaries and replaces the retained paths.
             const auto count = 1 + fixture.Random() % (chain.Chronological.size() - 1);
@@ -738,6 +753,30 @@ TEST(ScanIndexSharingTest, EmptyAndSmallStructuresBehaveLikeVectors)
         ASSERT_EQ(listed[path], many[path]);
         ASSERT_TRUE(bulk.Contains(many[path]));
         ASSERT_TRUE(inserted.Contains(many[path]));
+    }
+}
+
+TEST(ScanIndexSharingTest, UpdatedLifetimeCopiesOnlyThatDescriptorAndKeepsTheBase)
+{
+    TLegacyGeneration reference;
+    const auto base = BuildHistory(1000, &reference);
+    for (const std::size_t offset : std::array<std::size_t, 4>{0, 517, 991, 999}) {
+        auto changed = std::make_shared<TScanMembership>(*base.Index);
+        changed->Files.Update(offset, [](TScanDataFile& file) {
+            file.RemovedSequence = 42;
+        });
+        ASSERT_EQ(changed->Files.size(), base.Index->Files.size());
+        EXPECT_EQ(changed->Files[offset].RemovedSequence, 42);
+        EXPECT_FALSE(base.Index->Files[offset].RemovedSequence);
+        EXPECT_NE(&changed->Files[offset], &base.Index->Files[offset]);
+        std::size_t shared = 0;
+        for (std::size_t file = 0; file < base.Index->Files.size(); ++file) {
+            shared += &changed->Files[file] == &base.Index->Files[file] ? 1 : 0;
+        }
+        EXPECT_EQ(shared, base.Index->Files.size() - 1);
+        EXPECT_EQ(changed->Files.DescriptorBytes(), base.Index->Files.DescriptorBytes());
+        std::mt19937_64 random(offset);
+        ExpectSame(base, reference, random);
     }
 }
 

@@ -309,6 +309,11 @@ private:
             , Inner_(std::move(inner))
         { }
 
+        bool IsNoOp() const override
+        {
+            return Inner_->IsNoOp();
+        }
+
         AppendResult Receipt() const override
         {
             return Inner_->Receipt();

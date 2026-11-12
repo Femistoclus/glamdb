@@ -294,7 +294,8 @@ The canonical encoding version and existing hashes are unchanged; older binaries
 limited to 64 fields cannot open collections created with wider schemas.
 A field named `key`, if supplied, must be a
 non-nullable string; its values are not unique.
-Schema evolution, SQL, upsert and delete are unsupported.
+Schema evolution and SQL are unsupported. Explicit KV collections support the
+mutation routes described below; append collections preserve their old behavior.
 
 Create also accepts optional `write_settings`, part of the collection definition
 (a repeated creation with different settings returns 409 `WRITE_SETTINGS_MISMATCH`):
@@ -732,3 +733,57 @@ capacity. Reclaimed continuation tokens return `404` like expired tokens.
 Lifecycle close/reconcile clears tokens. No raw file paths can be requested;
 file IDs outside the selected snapshot fail even when the file exists elsewhere.
 See `glamdb.native_metadata` and [system acceptance](NATIVE_ACCEPTANCE.md).
+
+## Explicit KV routes and receipts
+
+Collection create accepts `mode: "append" | "kv"`; omission keeps the existing
+append definition. The server reports mode on collection metadata and compares
+it on every repeated create. A different mode returns
+`409/COLLECTION_MODE_MISMATCH`; mode cannot be updated. KV requires a
+nonnullable UTF-8 `key` field at any schema position. Ordinary `/append` rejects
+KV, and KV mutation routes reject append collections.
+
+The following routes are relative to `/databases/{id}` (or unscoped in legacy
+single-store mode). They adapt the public synchronous facade and its existing
+serialized coordinator, without a second writer or background queue.
+
+| POST route | Request | Result |
+| --- | --- | --- |
+| `/collections/{id}/upsert` | `{operation_id, rows, expected_snapshot?}` | Full-row, last-input-wins `UpsertDurable` outcome |
+| `/collections/{id}/delete` | `{operation_id, keys, expected_snapshot?}` | `DeleteDurable`; duplicate and missing keys are ignored for effects |
+| `/collections/{id}/compact` | `{operation_id, expected_snapshot?, max_files?, target_file_bytes?}` | Bounded `CompactDurable` outcome, including a durable no-op |
+| `/collections/{id}/lookup` | `{keys, snapshot_id?}` | `{collection_id, schema, snapshot_id, rows, backend, mock}` |
+
+Upsert replaces the whole row; omitted nullable columns become NULL. Ordinary
+upsert accepts up to 10,000 rows and delete up to 10,000 keys. Every key is UTF-8
+within 1,024 encoded bytes. Lookup accepts at most 4,096 keys, preserves request
+order and duplicate hits, and returns JSON `null` for each miss. Its snapshot is
+resolved once. Omit `snapshot_id` for latest, use `null` for initial-empty, or a
+canonical decimal int64 string for retained history. Result and HTTP body limits
+remain 16 MiB. Compaction defaults to `max_files="64"` and
+`target_file_bytes="8388608"`; supported bounds are 1–256 files and 1,024–16 MiB
+target bytes. Numeric options and all native receipt counters use decimal
+strings. No-op operations are still permanently recorded by operation ID.
+
+Native capabilities advertise `features.key_value/upsert/delete/lookup/compact`
+and include `kv` in `collection_modes`. `features.bulk_upsert` and
+`features.migration` are false over HTTP. `native_only.bulk_upsert/migration`
+identify the available C++ facade operations. No bulk-upsert or migration HTTP
+route is exposed. Append collections use the separate streaming `/bulk-append`
+route, advertised by `features.bulk_append`. The mock and browser demo explicitly
+decline KV features.
+
+Version-3 mutation receipts preserve the existing outcome envelope and recovery
+context. `rows_appended` is always `"0"`; additional fields are `mutation_kind`
+(`upsert`, `delete`, or `compact`), `snapshot_created` (boolean), `input_rows`,
+`rows_affected`, `rows_written`, `rows_removed`, `data_files_removed`, and
+`compressed_data_bytes_removed`. Existing added-file/byte counters remain.
+A no-op has no new snapshot, zero changed counters and `snapshot_created_at_us`,
+and an effective snapshot ID equal to its base or `"0"` for initial-empty.
+Snapshot history contains publications only, with mutation kind and written /
+removed counts. `GET /collections/{id}/operations/{operation_id}` also returns
+no-op outcomes. Uncertain writes remain `commit_unknown`; resolve or repeat the
+original prepared request after reconciliation. Version-1/2 append receipt bytes
+and strict append bounds remain unchanged. Shared literal vectors are in
+`fixtures/http/kv-v3.json`; executable route/schema inventory remains in
+`fixtures/http/v0.json` and `v0.schema.json`.

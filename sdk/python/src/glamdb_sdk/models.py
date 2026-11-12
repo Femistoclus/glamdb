@@ -69,3 +69,11 @@ class ScanResult:
     @property
     def next_cursor(self) -> str | None:
         return self.raw.get("next_cursor")
+
+
+@dataclass(frozen=True)
+class LookupResult:
+    schema: Schema
+    snapshot_id: str | None
+    rows: list[dict[str, Any] | None]
+    raw: Mapping[str, Any]

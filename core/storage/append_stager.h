@@ -40,4 +40,11 @@ iceberg::Result<TStagedAppend> StageBulkAppend(std::shared_ptr<iceberg::Table> t
     const std::unordered_map<std::string, std::string>& summary,
     const std::shared_ptr<NIO::TIOAttempt>& attempt);
 
+iceberg::Result<TStagedAppend> StageKVOverwrite(std::shared_ptr<iceberg::Table> table,
+    const std::vector<std::shared_ptr<iceberg::DataFile>>& addedFiles,
+    const std::vector<std::shared_ptr<iceberg::DataFile>>& removedFiles,
+    const std::unordered_map<std::string, std::string>& summary,
+    const std::shared_ptr<NIO::TIOAttempt>& attempt,
+    bool compact = false);
+
 }

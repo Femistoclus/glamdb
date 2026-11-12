@@ -5,6 +5,7 @@
 #include "core/api/canonical.h"
 #include "core/api/scalar_validation.h"
 #include "core/engine/storage_mapping.h"
+#include "core/io/store_uri.h"
 #include "core/scan/metadata_cache.h"
 #include "core/scan/parquet_input.h"
 #include "core/scan/predicate.h"
@@ -19,6 +20,7 @@
 
 #include <arrow/api.h>
 #include <iceberg/file_io.h>
+#include <iceberg/manifest/manifest_entry.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/exception.h>
 #include <parquet/file_reader.h>
@@ -30,6 +32,7 @@
 #include <cmath>
 #include <cstring>
 #include <deque>
+#include <format>
 #include <iterator>
 #include <mutex>
 #include <new>
@@ -542,8 +545,19 @@ private:
             CheckActive();
             std::shared_ptr<ResourceReservation> outputMemory;
             if (!BatchReader_) {
-                if (PendingFiles_.empty() && Plan_.Index && NextIndexedFile_ < Plan_.FileCount) {
-                    PendingFiles_.push_back(Plan_.Index->Files[Plan_.FileCount - ++NextIndexedFile_]);
+                if (PendingFiles_.empty() && Plan_.Index) {
+                    while (NextIndexedFile_ < Plan_.FileCount) {
+                        const auto offset =
+                            Context_.ChronologicalFiles ? NextIndexedFile_++ : Plan_.FileCount - ++NextIndexedFile_;
+                        const auto& file = Plan_.Index->Files[offset];
+                        if (!Plan_.Index->KeyValue ||
+                            (Plan_.SequenceNumber && file.IntroducedSequence <= *Plan_.SequenceNumber &&
+                                (!file.RemovedSequence || *Plan_.SequenceNumber < *file.RemovedSequence)))
+                        {
+                            PendingFiles_.push_back(file);
+                            break;
+                        }
+                    }
                 }
                 while (PendingFiles_.empty() && NextManifest_ < Plan_.Manifests.size()) {
                     CheckActive();
@@ -802,6 +816,92 @@ private:
     }
 };
 
+// Merge append can place files from several operations in one manifest and
+// reorder its entries. Restore the producer's order using inherited data
+// sequences and the owned, fixed-width file ordinal, never opaque snapshot IDs.
+void OrderChronologicalFiles(TScanManifests& plan, const TScanContext& context)
+{
+    if (plan.Index || !plan.SnapshotID) {
+        return;
+    }
+    Require(plan.SequenceNumber && *plan.SequenceNumber > 0,
+        "CORRUPTION",
+        "chronological source has no snapshot sequence");
+    auto index = std::make_shared<NGlamDB::NStorage::TScanMembership>();
+    std::vector<NGlamDB::NStorage::TScanDataFile> files;
+    uint64_t retainedBytes = 0;
+    const auto maxRetainedBytes = MetadataWorkForRoot(context.RootBytes) / 2;
+    for (size_t manifest = 0; manifest < plan.Manifests.size(); ++manifest) {
+        Require(plan.Manifests[manifest].deleted_files_count == 0,
+            "CORRUPTION",
+            "chronological append source contains deleted files");
+        const auto decoded = Take(ReadManifestDataFiles(context.FileIO, plan, manifest, context.Cache.get()));
+        for (const auto& file : *decoded) {
+            const auto sequence = file->data_sequence_number;
+            const auto path = NGlamDB::NIO::TStoreUri::Parse(file->file_path, context.Base.store_id);
+            Require(sequence && *sequence > 0 && *sequence <= *plan.SequenceNumber && path &&
+                    path.Value().CollectionId() == context.Base.collection_id &&
+                    path.Value().Kind() == NGlamDB::NIO::EFileKind::Data,
+                "CORRUPTION",
+                "chronological source has invalid file provenance");
+            const auto leaf = path.Value().Leaf();
+            Require(leaf.size() == 87 && NGlamDB::NIO::IsCanonicalUuid(leaf.substr(0, 36)) && leaf[36] == '-' &&
+                    NGlamDB::NIO::IsCanonicalUuid(leaf.substr(37, 36)) && leaf[73] == '-' &&
+                    std::ranges::all_of(leaf.substr(74, 5),
+                        [](char value) {
+                            return value >= '0' && value <= '9';
+                        }),
+                "CORRUPTION",
+                "chronological source has no owned producer file ordinal");
+            // The caller's retained planning envelope covers descriptors outside
+            // Arrow too. Include map nodes, payload bytes and vector growth
+            // before retaining another independently decoded manifest's files.
+            uint64_t bytes = 2 *
+                (sizeof(NGlamDB::NStorage::TScanDataFile) + sizeof(iceberg::DataFile) + file->file_path.size() + 128);
+            bytes += 128 *
+                (file->column_sizes.size() + file->value_counts.size() + file->null_value_counts.size() +
+                    file->nan_value_counts.size());
+            for (const auto* bounds : {&file->lower_bounds, &file->upper_bounds}) {
+                for (const auto& [id, value] : *bounds) {
+                    static_cast<void>(id);
+                    bytes += 128 + 2 * value.size();
+                }
+            }
+            Require(bytes <= maxRetainedBytes && retainedBytes <= maxRetainedBytes - bytes,
+                "RESOURCE_EXHAUSTED",
+                "chronological source descriptors exceed the planning reservation");
+            retainedBytes += bytes;
+            files.push_back({file->file_path, file->file_size_in_bytes, file->record_count, file, *sequence, {}});
+        }
+    }
+    std::ranges::sort(files, [](const auto& left, const auto& right) {
+        return left.IntroducedSequence == right.IntroducedSequence ? left.Path < right.Path
+                                                                   : left.IntroducedSequence < right.IntroducedSequence;
+    });
+    std::string_view operationPrefix;
+    int64_t operationSequence = 0;
+    size_t ordinal = 0;
+    for (const auto& file : files) {
+        if (file.IntroducedSequence != operationSequence) {
+            operationSequence = file.IntroducedSequence;
+            operationPrefix = std::string_view(file.Path).substr(0, file.Path.size() - 13);
+            ordinal = 0;
+        }
+        const auto leaf = std::string_view(file.Path).substr(file.Path.size() - 13);
+        Require(ordinal < 256 && std::string_view(file.Path).substr(0, file.Path.size() - 13) == operationPrefix &&
+                leaf.substr(0, 5) == std::format("{:05}", ordinal),
+            "CORRUPTION",
+            "chronological source has duplicate or missing producer file ordinals");
+        ++ordinal;
+    }
+    for (auto& file : files) {
+        index->Files.push_back(std::move(file));
+    }
+    plan.FileCount = index->Files.size();
+    plan.Index = std::move(index);
+    plan.Manifests.clear();
+}
+
 } // namespace
 
 Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanRequest& request)
@@ -843,6 +943,11 @@ Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanReq
                                              request.selector,
                                              context.Cache.get(),
                                              context.RootBytes));
+        if (context.ChronologicalFiles) {
+            RequireInput(context.Collection.mode == CollectionMode::Append,
+                "chronological sources require an append collection");
+            OrderChronologicalFiles(plan, context);
+        }
         // Uncached lists/schemas remain materialized in the plan. Verified
         // membership already retains the backend's shared generation lease.
         auto retainedPlan = context.VerifiedState ? nullptr : planningMemory;

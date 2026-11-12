@@ -141,3 +141,10 @@ for this change.
 Bulk HTTP cases in `v0.json` use `request_records`, LF-terminated NDJSON encoded
 with the route's `content_type`, and corresponding `record_schemas` in
 `v0.schema.json`. They share the ordinary `appendOutcome` response contract.
+
+`kv-v3.json` is a separate immutable-mode fixture for new mutation receipts. It
+retains literal canonical hash preimages and committed upsert/delete/compaction
+results, including initial and existing-base no-ops. Native outcome serialization,
+the Python SDK and workbench consume the same counters and invalid scalar/field
+cases. Version-1/2 vectors in `outcomes-v0.json` stay unchanged. These fixtures
+prove protocol agreement, not storage durability.

@@ -15,6 +15,27 @@ from glamdb_sdk.request import json_bytes
 MAX_PART_BYTES = 8 * 1024**2
 
 
+def manifest_json(raw):
+    def object_value(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError('dataset manifest contains duplicate JSON keys')
+            value[key] = item
+        return value
+
+    def invalid_number(value):
+        raise ValueError('dataset manifest requires finite JSON numbers')
+
+    try:
+        value = json.loads(raw, object_pairs_hook=object_value, parse_constant=invalid_number)
+    except (UnicodeError, json.JSONDecodeError, RecursionError):
+        raise ValueError('dataset manifest must be valid UTF-8 JSON') from None
+    if not isinstance(value, dict):
+        raise ValueError('dataset manifest must be a JSON object')
+    return value
+
+
 def write_json(path, value):
     """Replace a metadata file only after its complete JSON has been written."""
     path = Path(path)
@@ -222,11 +243,19 @@ def generate(
 
 
 class Dataset:
-    def __init__(self, path):
+    def __init__(self, path, *, max_manifest_bytes=None):
         self.path = Path(path).resolve()
-        self.manifest = json.loads((self.path / "manifest.json").read_bytes())
+        if max_manifest_bytes is not None and (type(max_manifest_bytes) is not int or max_manifest_bytes < 1):
+            raise ValueError("dataset metadata byte limit must be positive")
+        with (self.path / "manifest.json").open("rb") as source:
+            raw = source.read() if max_manifest_bytes is None else source.read(max_manifest_bytes + 1)
+        if max_manifest_bytes is not None and len(raw) > max_manifest_bytes:
+            raise ValueError(f"dataset metadata exceeds byte limit {max_manifest_bytes}")
+        self._manifest_bytes = len(raw)
+        self._manifest_sha256 = hashlib.sha256(raw).hexdigest()
+        self.manifest = manifest_json(raw)
         m = self.manifest
-        if m.get("version") != 1 or m.get("format") != "glamdb-jsonl":
+        if type(m.get('version')) is not int or m.get("version") != 1 or m.get("format") != "glamdb-jsonl":
             raise ValueError("unsupported dataset manifest")
         self.schema = Schema.from_dict(m["schema"])
         if (

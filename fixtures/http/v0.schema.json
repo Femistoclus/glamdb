@@ -128,7 +128,10 @@
           "$ref": "#/$defs/schema"
         },
         "mode": {
-          "const": "append"
+          "enum": [
+            "append",
+            "kv"
+          ]
         },
         "write_settings": {
           "$ref": "#/$defs/writeSettings"
@@ -479,7 +482,10 @@
           "$ref": "#/$defs/schema"
         },
         "mode": {
-          "const": "append"
+          "enum": [
+            "append",
+            "kv"
+          ]
         },
         "creation_sequence": {
           "$ref": "#/$defs/int64"
@@ -540,72 +546,14 @@
       "additionalProperties": false
     },
     "receipt": {
-      "type": "object",
-      "properties": {
-        "collection_id": {
-          "$ref": "#/$defs/uuid"
+      "oneOf": [
+        {
+          "$ref": "#/$defs/appendReceipt"
         },
-        "operation_id": {
-          "$ref": "#/$defs/uuid"
-        },
-        "payload_hash": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
-        },
-        "hash_version": {
-          "const": 1
-        },
-        "snapshot_id": {
-          "$ref": "#/$defs/int64"
-        },
-        "parent_snapshot_id": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/int64"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "rows_appended": {
-          "$ref": "#/$defs/int64"
-        },
-        "data_files_added": {
-          "$ref": "#/$defs/int64"
-        },
-        "compressed_data_bytes_added": {
-          "$ref": "#/$defs/int64"
-        },
-        "snapshot_created_at_us": {
-          "$ref": "#/$defs/int64"
-        },
-        "durability_profile": {
-          "type": "string"
-        },
-        "receipt_version": {
-          "enum": [
-            1,
-            2
-          ],
-          "description": "Version 1: 1..10000 rows and one file. Version 2: 1..256 files, 1..25600000 rows, at most 100000 rows and 32 MiB per file in aggregate. Numeric profile bounds are checked by core and receipt readers."
+        {
+          "$ref": "#/$defs/mutationReceipt"
         }
-      },
-      "required": [
-        "collection_id",
-        "operation_id",
-        "payload_hash",
-        "hash_version",
-        "snapshot_id",
-        "parent_snapshot_id",
-        "rows_appended",
-        "data_files_added",
-        "compressed_data_bytes_added",
-        "snapshot_created_at_us",
-        "durability_profile",
-        "receipt_version"
-      ],
-      "additionalProperties": false
+      ]
     },
     "recovery": {
       "type": "object",
@@ -993,7 +941,10 @@
         "collection_modes": {
           "type": "array",
           "items": {
-            "const": "append"
+            "enum": [
+              "append",
+              "kv"
+            ]
           }
         },
         "features": {
@@ -1282,6 +1233,22 @@
             "min",
             "max",
             "format"
+          ],
+          "additionalProperties": false
+        },
+        "native_only": {
+          "type": "object",
+          "properties": {
+            "bulk_upsert": {
+              "type": "boolean"
+            },
+            "migration": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "bulk_upsert",
+            "migration"
           ],
           "additionalProperties": false
         }
@@ -3569,6 +3536,460 @@
         }
       ]
     },
+    "appendReceipt": {
+      "type": "object",
+      "properties": {
+        "collection_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "hash_version": {
+          "const": 1
+        },
+        "snapshot_id": {
+          "$ref": "#/$defs/int64"
+        },
+        "parent_snapshot_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rows_appended": {
+          "$ref": "#/$defs/int64"
+        },
+        "data_files_added": {
+          "$ref": "#/$defs/int64"
+        },
+        "compressed_data_bytes_added": {
+          "$ref": "#/$defs/int64"
+        },
+        "snapshot_created_at_us": {
+          "$ref": "#/$defs/int64"
+        },
+        "durability_profile": {
+          "type": "string"
+        },
+        "receipt_version": {
+          "enum": [
+            1,
+            2
+          ],
+          "description": "Version 1: 1..10000 rows and one file. Version 2: 1..256 files, 1..25600000 rows, at most 100000 rows and 32 MiB per file in aggregate. Numeric profile bounds are checked by core and receipt readers."
+        }
+      },
+      "required": [
+        "collection_id",
+        "operation_id",
+        "payload_hash",
+        "hash_version",
+        "snapshot_id",
+        "parent_snapshot_id",
+        "rows_appended",
+        "data_files_added",
+        "compressed_data_bytes_added",
+        "snapshot_created_at_us",
+        "durability_profile",
+        "receipt_version"
+      ],
+      "additionalProperties": false
+    },
+    "mutationReceipt": {
+      "type": "object",
+      "properties": {
+        "collection_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "hash_version": {
+          "const": 1
+        },
+        "snapshot_id": {
+          "$ref": "#/$defs/int64"
+        },
+        "parent_snapshot_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rows_appended": {
+          "const": "0"
+        },
+        "data_files_added": {
+          "$ref": "#/$defs/int64"
+        },
+        "compressed_data_bytes_added": {
+          "$ref": "#/$defs/int64"
+        },
+        "snapshot_created_at_us": {
+          "$ref": "#/$defs/int64"
+        },
+        "durability_profile": {
+          "type": "string"
+        },
+        "receipt_version": {
+          "const": 3
+        },
+        "mutation_kind": {
+          "enum": [
+            "upsert",
+            "delete",
+            "compact"
+          ]
+        },
+        "snapshot_created": {
+          "type": "boolean"
+        },
+        "input_rows": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "pattern": "^(0|[1-9][0-9]*)$"
+            }
+          ]
+        },
+        "rows_affected": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "pattern": "^(0|[1-9][0-9]*)$"
+            }
+          ]
+        },
+        "rows_written": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "pattern": "^(0|[1-9][0-9]*)$"
+            }
+          ]
+        },
+        "rows_removed": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "pattern": "^(0|[1-9][0-9]*)$"
+            }
+          ]
+        },
+        "data_files_removed": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "pattern": "^(0|[1-9][0-9]*)$"
+            }
+          ]
+        },
+        "compressed_data_bytes_removed": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "pattern": "^(0|[1-9][0-9]*)$"
+            }
+          ]
+        }
+      },
+      "required": [
+        "collection_id",
+        "operation_id",
+        "payload_hash",
+        "hash_version",
+        "snapshot_id",
+        "parent_snapshot_id",
+        "rows_appended",
+        "data_files_added",
+        "compressed_data_bytes_added",
+        "snapshot_created_at_us",
+        "durability_profile",
+        "receipt_version",
+        "mutation_kind",
+        "snapshot_created",
+        "input_rows",
+        "rows_affected",
+        "rows_written",
+        "rows_removed",
+        "data_files_removed",
+        "compressed_data_bytes_removed"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "snapshot_created": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "rows_affected": {
+                "const": "0"
+              },
+              "rows_written": {
+                "const": "0"
+              },
+              "rows_removed": {
+                "const": "0"
+              },
+              "data_files_added": {
+                "const": "0"
+              },
+              "data_files_removed": {
+                "const": "0"
+              },
+              "compressed_data_bytes_added": {
+                "const": "0"
+              },
+              "compressed_data_bytes_removed": {
+                "const": "0"
+              },
+              "snapshot_created_at_us": {
+                "const": "0"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mutation_kind": {
+                "const": "compact"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "input_rows": {
+                "const": "0"
+              },
+              "rows_affected": {
+                "const": "0"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "upsert": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/row"
+          },
+          "minItems": 0,
+          "maxItems": 10000
+        },
+        "expected_snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operation_id",
+        "rows"
+      ],
+      "additionalProperties": false
+    },
+    "delete": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "keys": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": {
+            "type": "string",
+            "maxLength": 1024
+          },
+          "description": "UTF-8 keys, at most 1024 encoded bytes each; order and duplicates retained."
+        },
+        "expected_snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operation_id",
+        "keys"
+      ],
+      "additionalProperties": false
+    },
+    "compact": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "expected_snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_files": {
+          "$ref": "#/$defs/int64"
+        },
+        "target_file_bytes": {
+          "$ref": "#/$defs/int64"
+        }
+      },
+      "required": [
+        "operation_id"
+      ],
+      "additionalProperties": false
+    },
+    "lookup": {
+      "type": "object",
+      "properties": {
+        "keys": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "maxLength": 1024
+          },
+          "description": "UTF-8 keys, at most 1024 encoded bytes each; order and duplicates retained."
+        },
+        "snapshot_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "keys"
+      ],
+      "additionalProperties": false
+    },
+    "lookupResult": {
+      "type": "object",
+      "properties": {
+        "collection_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "snapshot_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema": {
+          "$ref": "#/$defs/schema"
+        },
+        "rows": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/$defs/row"
+              }
+            ]
+          }
+        },
+        "backend": {
+          "const": "local"
+        },
+        "mock": {
+          "const": false
+        }
+      },
+      "required": [
+        "collection_id",
+        "snapshot_id",
+        "schema",
+        "rows",
+        "backend",
+        "mock"
+      ],
+      "additionalProperties": false
+    },
+    "bulkBatch": {
+      "type": "object",
+      "properties": {
+        "rows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/row"
+          },
+          "minItems": 1,
+          "maxItems": 10000
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "additionalProperties": false
+    },
     "bulkHeader": {
       "type": "object",
       "properties": {
@@ -3593,23 +4014,6 @@
       },
       "required": [
         "operation_id",
-        "rows"
-      ],
-      "additionalProperties": false
-    },
-    "bulkBatch": {
-      "type": "object",
-      "properties": {
-        "rows": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/row"
-          },
-          "minItems": 1,
-          "maxItems": 10000
-        }
-      },
-      "required": [
         "rows"
       ],
       "additionalProperties": false

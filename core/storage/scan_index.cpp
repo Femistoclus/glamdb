@@ -120,6 +120,23 @@ TFileNode PushLeaf(const TScanFiles::TNode& branch, unsigned shift, std::size_t 
     return MakeBranch(std::move(children));
 }
 
+// Returns a copy of `node` (at `shift`) whose element `index` is `item`.
+TFileNode ReplaceItem(const TScanFiles::TNode& node,
+    unsigned shift,
+    std::size_t index,
+    const std::shared_ptr<const TScanDataFile>& item)
+{
+    if (shift == 0) {
+        auto files = CopyWithRoom(node.Files, 0);
+        files[index & Mask] = item;
+        return std::make_shared<const TScanFiles::TNode>(TScanFiles::TNode{{}, std::move(files)});
+    }
+    auto children = CopyWithRoom(node.Children, 0);
+    auto& child = children[(index >> shift) & Mask];
+    child = ReplaceItem(*child, shift - Bits, index, item);
+    return MakeBranch(std::move(children));
+}
+
 } // namespace
 
 TScanFiles::const_iterator::const_iterator(const TScanFiles* files, std::size_t index)
@@ -213,6 +230,26 @@ void TScanFiles::push_back(TScanDataFile file)
     Shift_ = shift;
     Tail_ = std::move(leaf);
     ++Size_;
+    DescriptorBytes_ = bytes;
+}
+
+void TScanFiles::Update(std::size_t index, const std::function<void(TScanDataFile&)>& change)
+{
+    const auto& previous = (*this)[index];
+    auto changed = std::make_shared<TScanDataFile>(previous);
+    change(*changed);
+    std::shared_ptr<const TScanDataFile> item = std::move(changed);
+    const auto previousBytes = ScanDataFileBytes(previous);
+    const auto bytes = DescriptorBytes_ == std::numeric_limits<std::uint64_t>::max()
+        ? DescriptorBytes_
+        : Add(DescriptorBytes_ - previousBytes, ScanDataFileBytes(*item));
+    if (index >= TailOffset()) {
+        auto tail = ReplaceItem(*Tail_, 0, index, item);
+        Tail_ = std::move(tail);
+    } else {
+        auto root = ReplaceItem(*Root_, Shift_, index, item);
+        Root_ = std::move(root);
+    }
     DescriptorBytes_ = bytes;
 }
 
