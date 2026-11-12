@@ -81,7 +81,7 @@ std::shared_ptr<arrow::RecordBatch> Batch(int64_t value)
 std::string OperationID(int64_t index)
 {
     char operation[37];
-    std::snprintf(operation, sizeof(operation), "65000000-0000-4000-8001-%012llx", static_cast<long long>(index + 1));
+    std::snprintf(operation, sizeof(operation), "65000000-0000-4000-8001-%012llx", static_cast<long long>(index) + 1);
     return operation;
 }
 

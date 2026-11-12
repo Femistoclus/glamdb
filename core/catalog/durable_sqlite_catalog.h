@@ -297,6 +297,8 @@ private:
         std::optional<CollectionCheckpoint> record,
         std::string_view kind,
         std::string_view receipt,
+        // Signed row-count changes of the archive and the expiration ledger.
+        // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
         int64_t archived_delta,
         int64_t expired_delta,
         bool reseed);

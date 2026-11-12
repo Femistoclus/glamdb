@@ -614,17 +614,24 @@ TEST_F(TAppendStagerTest, ManifestSyncFailureCannotProduceAStageOrPublish)
 TEST(ManifestMergeTargetTest, BoundsEveryMergedBinByTheDecodedCap)
 {
     TStorageLimits limits;
-    const auto manifest = [](std::int64_t length, std::int32_t added, std::int32_t existing) {
+    struct TShape
+    {
+        std::int64_t Length;
+        std::int32_t Added;
+        std::int32_t Existing;
+    };
+    const auto manifest = [](TShape shape) {
         iceberg::ManifestFile file;
-        file.manifest_length = length;
-        file.added_files_count = added;
-        file.existing_files_count = existing;
+        file.manifest_length = shape.Length;
+        file.added_files_count = shape.Added;
+        file.existing_files_count = shape.Existing;
         return file;
     };
     TBaseState state;
     EXPECT_EQ(ManifestMergeTarget(state, 1, limits), std::nullopt);
     // Header-dominated single-entry manifests: Iceberg's default is safe.
-    state.CurrentManifests = {manifest(5000, 1, 0), manifest(5000, 1, 0)};
+    state.CurrentManifests = {manifest({.Length = 5000, .Added = 1, .Existing = 0}),
+        manifest({.Length = 5000, .Added = 1, .Existing = 0})};
     state.CurrentManifestDecodedBytes = {300, 300};
     EXPECT_EQ(ManifestMergeTarget(state, 1, limits), std::nullopt);
     // Unmeasured manifests keep the default too.
@@ -632,17 +639,17 @@ TEST(ManifestMergeTargetTest, BoundsEveryMergedBinByTheDecodedCap)
     EXPECT_EQ(ManifestMergeTarget(state, 1, limits), std::nullopt);
     // The measured boundary case: ~29,500 entries of ~284 decoded bytes
     // compress to ~60 bytes each, so an 8 MiB encoded bin would hold ~140k.
-    state.CurrentManifests = {manifest(1'800'000, 0, 29'000), manifest(5000, 1, 0)};
+    state.CurrentManifests = {manifest({.Length = 1'800'000, .Added = 0, .Existing = 29'000}),
+        manifest({.Length = 5000, .Added = 1, .Existing = 0})};
     state.CurrentManifestDecodedBytes = {29'000ULL * 284, 300};
     for (const std::uint64_t files : {1U, 256U}) {
-        const auto target = ManifestMergeTarget(state, files, limits);
-        ASSERT_TRUE(target);
+        const auto target = ManifestMergeTarget(state, files, limits).value_or(0);
         const auto ratio = (29'000.0 * 284 + 40.0 * 29'000) / 1'800'000;
-        const auto entry = 284 + 40;
-        EXPECT_LE(static_cast<double>(*target) * ratio + 2.0 * static_cast<double>(files * entry),
-            static_cast<double>(limits.ManifestBytes - limits.ManifestBytes / 8));
-        EXPECT_GT(*target, 1'000'000);
-        EXPECT_LT(*target, 8LL << 20);
+        const auto entry = 284.0 + 40.0;
+        const auto budget = static_cast<double>(limits.ManifestBytes) * 7.0 / 8.0;
+        EXPECT_LE(static_cast<double>(target) * ratio + 2.0 * static_cast<double>(files) * entry, budget);
+        EXPECT_GT(target, 1'000'000);
+        EXPECT_LT(target, 8LL << 20);
     }
     // A cap too small for this append's own entries disables merging.
     limits.ManifestBytes = 4096;

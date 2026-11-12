@@ -974,6 +974,9 @@ struct Engine::Impl
                 return true;
             }
         } catch (const Failure&) {
+            // Any mismatch: the caller verifies fully.
+            backend->InvalidateCache();
+            return false;
         }
         backend->InvalidateCache();
         return false;
@@ -994,7 +997,8 @@ struct Engine::Impl
                 forget_checkpoints = false;
             }
         } catch (...) {
-            // Best effort; a catalog that cannot write keeps the request pending.
+            // A catalog that cannot write keeps the request pending.
+            forget_checkpoints = true;
         }
     }
 
@@ -1760,7 +1764,7 @@ Result<SnapshotExpirationResult> Engine::ExpireSnapshots(const SnapshotExpiratio
             *collection.hot_snapshots > *request.policy->keep_last)
         {
             Require(collection.hot_snapshots_defaulted, "INVALID_ARGUMENT", "hot_snapshots must not exceed keep_last");
-            lowerDefaultHot = *request.policy->keep_last;
+            lowerDefaultHot = request.policy->keep_last;
         }
         base = impl->catalog->Base(request.collection_id);
         impl->ReserveAttempt();

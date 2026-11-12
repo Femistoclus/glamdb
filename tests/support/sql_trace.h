@@ -147,6 +147,7 @@ private:
 
     // SQLite calls this with the connection mutex held; it is recursive, so the
     // status calls below do not block.
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): sqlite3_trace_v2 callback signature.
     static int OnTrace(unsigned type, void* context, void* subject, void* /*detail*/)
     {
         auto& state = *static_cast<State*>(context);

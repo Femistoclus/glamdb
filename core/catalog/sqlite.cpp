@@ -91,6 +91,9 @@ std::atomic<uint64_t> FullscanSteps{0};
 std::atomic<uint64_t> VmSteps{0};
 std::atomic<uint64_t> Statements{0};
 
+// The handles have distinct SQLite types; `rows` and `changesBefore` are counts
+// of different statements.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 void CountStatement(sqlite3* connection, sqlite3_stmt* statement, size_t rows, int64_t changesBefore)
 {
     RowsReturned.fetch_add(rows, std::memory_order_relaxed);

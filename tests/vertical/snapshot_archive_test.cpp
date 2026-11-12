@@ -32,6 +32,7 @@ std::string Op(int64_t index)
     return std::format("00000000-0000-4000-8000-{:012x}", index + 1);
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters): an operation index and its row count.
 std::vector<TInputRow> RowsFor(int64_t index, int64_t count = 2)
 {
     std::vector<TInputRow> rows;
@@ -939,6 +940,7 @@ void RunArchiveChild(const std::filesystem::path& root,
     environment.push_back("GLAMDB_ARCHIVE_MODE=" + std::string(mode));
     environment.push_back("GLAMDB_ARCHIVE_OPERATION=" + std::to_string(operation));
     std::vector<char*> variables;
+    variables.reserve(environment.size() + 1);
     for (auto& value : environment) {
         variables.push_back(value.data());
     }
@@ -1301,9 +1303,11 @@ TEST_F(TArchiveDifferentialTest, RandomizedHistoryAnswersIdenticallyWithAndWitho
         const auto a = Archived_.Engine->FindAppendOutcome(operation.first, Op(index));
         const auto b = Reference_.Engine->FindAppendOutcome(operation.first, Op(index));
         ASSERT_TRUE(a && b);
-        ASSERT_EQ(a->has_value(), b->has_value());
-        if (a->has_value()) {
-            EXPECT_EQ(Normalize(Archived_, **a), Normalize(Reference_, **b)) << index;
+        const auto& archived = *a;
+        const auto& reference = *b;
+        ASSERT_EQ(archived.has_value(), reference.has_value());
+        if (archived && reference) {
+            EXPECT_EQ(Normalize(Archived_, *archived), Normalize(Reference_, *reference)) << index;
         }
     }
 }

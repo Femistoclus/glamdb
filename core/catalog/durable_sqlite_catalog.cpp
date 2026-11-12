@@ -612,6 +612,7 @@ void DurableSqliteCatalogStore::WriteCheckpoint(std::string_view id,
     std::optional<CollectionCheckpoint> record,
     std::string_view kind,
     std::string_view receipt,
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     int64_t archived_delta,
     int64_t expired_delta,
     bool reseed)
@@ -752,7 +753,9 @@ void DurableSqliteCatalogStore::DropCheckpointsAfterTransaction() noexcept
     try {
         DeleteCheckpoints();
     } catch (...) {
-        // The engine keeps its own request pending for the next recovery.
+        // Retried after the next transaction; the engine also keeps its own
+        // request pending for the next recovery.
+        drop_checkpoints_after_transaction_ = true;
     }
 }
 
