@@ -1,0 +1,12 @@
+# Use after deploy/monitoring/compose.yml; paths are relative to that first file.
+services:
+  prometheus:
+    command:
+      - --config.file=/etc/prometheus/prometheus-alerting.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --storage.tsdb.retention.size=5GB
+      - --web.listen-address=0.0.0.0:9090
+      - --alertmanager.notification-queue-capacity=1000
+    volumes:
+      - ../alerting/generated:/etc/prometheus/alerting:ro

@@ -1,0 +1,201 @@
+{
+  "rule_files": [
+    "../external-observer/rules.yml"
+  ],
+  "evaluation_interval": "15s",
+  "tests": [
+    {
+      "name": "independent healthy evaluator and manager",
+      "interval": "15s",
+      "input_series": [
+        {
+          "series": "up{job=\"glamdb-pipeline\",component=\"prometheus\"}",
+          "values": "1+0x30"
+        },
+        {
+          "series": "up{job=\"glamdb-pipeline\",component=\"alertmanager\"}",
+          "values": "1+0x30"
+        },
+        {
+          "series": "prometheus_rule_group_last_evaluation_timestamp_seconds{job=\"glamdb-pipeline\",component=\"prometheus\",rule_group=\"states\"}",
+          "values": "0+15x30"
+        },
+        {
+          "series": "prometheus_rule_evaluation_failures_total{job=\"glamdb-pipeline\",component=\"prometheus\"}",
+          "values": "0+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "count(ALERTS{alertname=\"GlamDBPipelineSourceUnavailable\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "3m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "expr": "count(ALERTS{alertname=\"GlamDBPipelineEvaluationStalled\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "3m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "expr": "count(ALERTS{alertname=\"GlamDBPipelineEvaluationFailures\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "3m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "both required pipeline targets missing from inventory",
+      "interval": "15s",
+      "input_series": [],
+      "promql_expr_test": [
+        {
+          "expr": "count(ALERTS{alertname=\"GlamDBPipelineSourceUnavailable\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "3m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 2
+            }
+          ]
+        },
+        {
+          "expr": "count(ALERTS{alertname=\"GlamDBPipelineEvaluationStalled\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "3m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "reachable endpoint with stalled rules is not healthy",
+      "interval": "15s",
+      "input_series": [
+        {
+          "series": "up{job=\"glamdb-pipeline\",component=\"prometheus\"}",
+          "values": "1+0x30"
+        },
+        {
+          "series": "up{job=\"glamdb-pipeline\",component=\"alertmanager\"}",
+          "values": "1+0x30"
+        },
+        {
+          "series": "prometheus_rule_group_last_evaluation_timestamp_seconds{job=\"glamdb-pipeline\",component=\"prometheus\",rule_group=\"states\"}",
+          "values": "0+0x30"
+        },
+        {
+          "series": "prometheus_rule_evaluation_failures_total{job=\"glamdb-pipeline\",component=\"prometheus\"}",
+          "values": "0+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "count(ALERTS{alertname=\"GlamDBPipelineSourceUnavailable\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "3m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "expr": "count(ALERTS{alertname=\"GlamDBPipelineEvaluationStalled\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "3m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "scrape failure detected without main evaluator",
+      "interval": "15s",
+      "input_series": [
+        {
+          "series": "up{job=\"glamdb-pipeline\",component=\"prometheus\"}",
+          "values": "0+0x30"
+        },
+        {
+          "series": "up{job=\"glamdb-pipeline\",component=\"alertmanager\"}",
+          "values": "0+0x30"
+        },
+        {
+          "series": "prometheus_rule_group_last_evaluation_timestamp_seconds{job=\"glamdb-pipeline\",component=\"prometheus\",rule_group=\"states\"}",
+          "values": "0+15x30"
+        },
+        {
+          "series": "prometheus_rule_evaluation_failures_total{job=\"glamdb-pipeline\",component=\"prometheus\"}",
+          "values": "0+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "count(ALERTS{alertname=\"GlamDBPipelineSourceUnavailable\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "3m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 2
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "failed query is an evaluator fault",
+      "interval": "15s",
+      "input_series": [
+        {
+          "series": "up{job=\"glamdb-pipeline\",component=\"prometheus\"}",
+          "values": "1+0x30"
+        },
+        {
+          "series": "up{job=\"glamdb-pipeline\",component=\"alertmanager\"}",
+          "values": "1+0x30"
+        },
+        {
+          "series": "prometheus_rule_group_last_evaluation_timestamp_seconds{job=\"glamdb-pipeline\",component=\"prometheus\",rule_group=\"states\"}",
+          "values": "0+15x30"
+        },
+        {
+          "series": "prometheus_rule_evaluation_failures_total{job=\"glamdb-pipeline\",component=\"prometheus\"}",
+          "values": "0+1x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "count(ALERTS{alertname=\"GlamDBPipelineEvaluationFailures\",alertstate=\"firing\"}) or vector(0)",
+          "eval_time": "3m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

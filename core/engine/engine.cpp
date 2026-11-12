@@ -1189,9 +1189,9 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
             std::nullopt,
             false};
         impl->ReserveAttempt();
-        metrics.EnterPhase(CommitPhase::Data);
         auto canonical = request;
         canonical.write_settings = settings;
+        metrics.EnterPhase(CommitPhase::Data);
         auto staged = Take(impl->backend->PrepareCreate(impl->info, canonical, attempt));
         Require(staged != nullptr, "IO_ERROR", "producer returned no staged collection");
         auto info = staged->Info();

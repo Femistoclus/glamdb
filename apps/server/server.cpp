@@ -294,7 +294,6 @@ private:
             return;
         }
         Closed_ = true;
-        Metrics_.Finish(static_cast<int>(StatusCode_), ResponseSent_);
         LogCompletion();
         ++Generation_;
         std::error_code ignored;
@@ -583,6 +582,7 @@ private:
     }
     void LogCompletion() noexcept
     {
+        Metrics_.Finish(static_cast<int>(StatusCode_), ResponseSent_);
         if (Logged_ || !State_.Logger) {
             return;
         }

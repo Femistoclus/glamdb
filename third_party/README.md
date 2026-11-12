@@ -5,14 +5,13 @@
 | Arrow / Parquet | 25.0.0 | `arrow/` submodule; Parquet is part of Arrow. |
 | Iceberg C++ | 0.4.0 | `iceberg-cpp/` submodule. |
 | GoogleTest | 1.17.0 | `googletest/` submodule; built with project tests. |
-| Quill | 13.0.0 | `quill/` submodule; MIT, private asynchronous JSON logging. |
+| Quill | 13.0.0 | `quill/` submodule; MIT, private asynchronous JSON logging and bounded JSONL rotation. |
 | CLI11 | 2.7.2 | `cli11/` submodule; header-only CLI parser. |
 | Asio | 1.36.0 | `asio/` submodule; standalone application networking. |
 | nlohmann/json | 3.12.0 | `json/` submodule; application JSON codec. |
 | reproc/reproc++ | 14.2.7 | `reproc/` submodule; CLI child-process lifecycle, MIT. |
 | SQLite | 3.54.1 | Official amalgamation archive. |
 | prometheus-cpp | 1.3.0 | `prometheus-cpp/` submodule; core metrics and application-owned pull exporter. |
-| Quill | 13.0.0 | `quill/` submodule; MIT, header-only bounded structured logging and JSONL rotation. |
 
 Exact commits, URLs, and SQLite checksums are recorded in [lock.json](lock.json).
 SQLite's archive was checked against the SHA3-256 published on its
@@ -44,8 +43,7 @@ engine dependency; its listener is owned only by a server application. Installed
 consumers find the same exact version through the exported CMake package.
 Normal native builds compile the structured logger against Quill's pinned
 headers. Those headers stay private to `glamdb_logging` and are not required by
-installed engine consumers. Quill is not part of the dependency superbuild;
-IO-only builds do not require it.
+installed engine consumers. Quill is not part of the dependency superbuild.
 The dependency build needs
 network access for SQLite and upstream transitive dependencies, plus the build
 prerequisites of Arrow and Iceberg, including zlib development files. Set

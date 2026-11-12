@@ -259,6 +259,7 @@ Preserve these boundaries when adding or changing engine behavior:
 | `tools/workload/` | Mimesis datasets, SDK/Locust workloads, per-worker SQLite outcome journals and full verification. |
 | `probes/`, `benchmarks/` | Installed-dependency/compatibility probes and workload measurements. |
 | `scripts/` | Developer tooling, including quality checks. |
+| `deploy/alerting/`, `tools/alerting/` | Four-state Prometheus rules, Alertmanager routing, native Telegram receiver and executable replay/transition tests. |
 | `core/telemetry/metrics.*`, `deploy/monitoring/`, `tools/monitoring/` | Library-backed native/Python telemetry, standard collectors/chart, application panels and checks. |
 | `third_party/` | Pinned upstream submodules and `lock.json`. |
 
@@ -275,8 +276,31 @@ For branding/static hosting read [PUBLIC_DEMO.md](docs/development/PUBLIC_DEMO.m
 Preserve the supplied PNGs unchanged. Brand paths must be local assets; sizes
 belong in theme.json. Asset URLs must support both / and /glamdb/.
 
+The complete single-host Linux monitoring/logging/alerting deployment is
+`scripts/observability.py`, implemented in `tools/observability/`. Read the
+[Russian quickstart](deploy/observability/QUICKSTART.ru.md) before deployment.
+It requires local rootful Podman, systemd/cgroup-v2, actual application metrics
+and logs, and a dedicated bounded Loki mount. `init/up/status/check/down` use
+owned resources and preserve persistent data. Run its standard-library unit
+suite with `python3 -m unittest discover -s tools/observability/tests -v`;
+the real lifecycle test requires an explicitly disposable `glamdb-lab-*` config.
+Linux arm64 runtime was exercised; amd64 plans/pins and boot-unit generation do
+not establish an executed amd64 or actual-reboot test. Missing sources never
+become mock producers or synthetic healthy metrics.
+
 ## Build and development commands
 
+For alerting setup and validation, read [ALERTING.md](ALERTING.md) and run
+`python3 tools/alerting/check.py` with the required Prometheus/Alertmanager tools
+on PATH or passed explicitly. Its process tests run real Prometheus/Alertmanager
+with a loopback Telegram protocol peer only.
+The native receiver owns delivery; there is no webhook/outbox service.
+Telegram uses one combined daily current-state summary in the 10:00–10:01
+Europe/Moscow window. State changes outside that window do not notify.
+`deploy/alerting/external-observer/` runs on a separate host/notification path.
+Gateway application metrics cover requests after the edge/OIDC proxy. Separate
+Caddy outer-edge counts include authentication rejections before the application.
+Native operation counters measure actual core operations.
 For real host/container/Kubernetes monitoring, private application endpoints,
 source gaps and deployment steps, read [MONITORING](docs/development/MONITORING.md).
 Install `tools/monitoring/requirements.txt` with hash verification and build the pinned
@@ -296,8 +320,8 @@ The listener includes bounded native HTTP request/status counters, duration and
 in-flight metrics through asynchronous response completion/cancellation.
 `--log-directory DIR` opts into the existing Quill 13 structured logger with
 8 MiB JSONL rotation and three backups; requests never log tokens, URLs or data.
-Native builds, including IO-only metrics builds, consume the pinned header-only
-`third_party/quill` for the shared structured logger.
+Native and IO-only builds consume the pinned header-only `third_party/quill`
+for the structured logger.
 
 Client/mock development uses Python 3.13 and Node 22+:
 

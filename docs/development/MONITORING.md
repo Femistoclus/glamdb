@@ -63,18 +63,16 @@ connections and unknown paths use `other`; methods outside the fixed domain use
 Idle histogram count/sum/buckets remain zero, so an idle quantile has no observed
 latency. The library registry owns all samples and concurrent updates.
 
-`--log-directory /path/to/private/logs` sends native operation and runtime
-lifecycle records through the existing Quill 13 structured logger to files. Its
+`--log-directory /path/to/private/logs` selects bounded JSONL files for native
+operation and lifecycle records through the existing Quill 13 structured logger. Its
 `RotatingJsonFileSink` appends schema-1 JSONL to `glamdb.jsonl`, rotating at 8 MiB
 with at most three indexed backups (`glamdb.1.jsonl`, etc.). Rotation and writing
 run on the Quill backend; the request thread uses its 64 KiB bounded dropping
-queue. Successful requests retain the default one-in-100 sampling and are capped
-at 20 per second; `--log-success-sample-every` and
-`--log-max-success-per-second` configure those limits. Errors and lifecycle
-records bypass the success limit and can still be dropped when the queue is full.
-Native `glamdb_log_*` counters report those decisions.
-The server registers its I/O and stable worker producers and drains the logger on
-shutdown. Omitting the directory retains the existing stderr sink. Newly created
+queue. Successful request records are capped at 20 per second; errors and
+lifecycle records bypass that success limit and can still be dropped when the
+queue is full. Native `glamdb_log_*` counters report those decisions.
+The server registers its I/O and operation workers and drains the logger on
+shutdown. Without the flag, records use the existing stderr sink. Newly created
 log directories have owner-only access; use a trusted private directory.
 Records contain fixed operation/outcome names, generated request IDs, measured
 duration and completed response status; they contain no database identities,

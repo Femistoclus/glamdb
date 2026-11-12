@@ -1,0 +1,19 @@
+# Install on a different host/fault domain. Replace all .invalid addresses.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files: [rules.yml]
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: [independent-alertmanager.example.invalid:9093]
+
+scrape_configs:
+  - job_name: glamdb-pipeline
+    static_configs:
+      - targets: [glamdb-host.example.invalid:9090]
+        labels: {cluster: local, component: prometheus}
+      - targets: [glamdb-host.example.invalid:9093]
+        labels: {cluster: local, component: alertmanager}
