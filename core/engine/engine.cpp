@@ -585,7 +585,7 @@ struct Engine::Impl
 
 #if GLAMDB_HAS_STORAGE
     template <class T, class TRead>
-    Result<T> ReadView(std::string_view id, TRead&& read)
+    Result<T> ReadView(std::string_view id, TRead&& read, bool useCache = true)
     {
         std::string root;
         bool leased = false;
@@ -612,8 +612,12 @@ struct Engine::Impl
             }
             Require(backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
             auto memory = Take(resources->Reserve(ResourceClass::Metadata, MetadataWorkBytes));
+            const auto capabilities = backend->GetCapabilities();
             context.Resources = resources;
             context.FileIO = Take(backend->ReadOnlyFileIO());
+            context.Cache = useCache ? backend->ReadMetadataCache() : nullptr;
+            context.EnableFilePruning = capabilities.file_pruning;
+            context.EnableRowGroupPruning = capabilities.row_group_pruning;
             auto result = read(context);
             if (const auto retained = RetainMetadata(resources, result); !retained) {
                 throw Failure(retained.error());
@@ -1745,15 +1749,18 @@ Result<SnapshotHistory> Engine::ListSnapshots(std::string_view id) const
 {
     const auto impl = impl_;
 #if GLAMDB_HAS_STORAGE
-    return impl->ReadView<SnapshotHistory>(id, [&](const TScanContext& context) {
-        std::vector<AppendResult> receipts;
-        for (const auto& record : impl->catalog->Operations()) {
-            if (record.state == OperationState::Committed && record.outcome && record.outcome->result) {
-                receipts.push_back(*record.outcome->result);
+    return impl->ReadView<SnapshotHistory>(
+        id,
+        [&](const TScanContext& context) {
+            std::vector<AppendResult> receipts;
+            for (const auto& record : impl->catalog->Operations()) {
+                if (record.state == OperationState::Committed && record.outcome && record.outcome->result) {
+                    receipts.push_back(*record.outcome->result);
+                }
             }
-        }
-        return ReadHistory(context, receipts);
-    });
+            return ReadHistory(context, receipts);
+        },
+        false);
 #else
     (void)id;
     return std::unexpected(
@@ -1796,9 +1803,12 @@ Result<TFileDetails>
 Engine::GetFileDetails(std::string_view collectionID, std::string_view fileID, SnapshotSelector selector) const
 {
 #if GLAMDB_HAS_STORAGE
-    return impl_->ReadView<TFileDetails>(collectionID, [&](const TScanContext& context) {
-        return ReadFileDetails(context, fileID, selector);
-    });
+    return impl_->ReadView<TFileDetails>(
+        collectionID,
+        [&](const TScanContext& context) {
+            return ReadFileDetails(context, fileID, selector);
+        },
+        false);
 #else
     (void)collectionID;
     (void)fileID;
@@ -1855,8 +1865,12 @@ Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) con
             leased_root = context.Base.metadata_location;
         }
         Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
+        const auto capabilities = impl->backend->GetCapabilities();
         context.Resources = impl->resources;
         context.FileIO = Take(impl->backend->ReadOnlyFileIO());
+        context.Cache = impl->backend->ReadMetadataCache();
+        context.EnableFilePruning = capabilities.file_pruning;
+        context.EnableRowGroupPruning = capabilities.row_group_pruning;
         context.Closing = std::shared_ptr<const std::atomic<bool>>(impl, &impl->closing);
         context.Lease = impl;
         context.OnError = [impl](const ErrorDetail& error) {
@@ -1939,6 +1953,9 @@ Status Engine::Shutdown(std::chrono::milliseconds timeout)
         }
         // Roots whose scans finished after the last append.
         impl->RemoveReleasedRoots();
+        if (impl->backend) {
+            impl->backend->InvalidateCache();
+        }
         impl->catalog->Close();
         std::lock_guard state_lock(impl->state_mutex);
         impl->ready = false;

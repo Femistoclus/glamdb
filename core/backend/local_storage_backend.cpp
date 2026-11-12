@@ -18,6 +18,7 @@
 #include "core/storage/table_profile.h"
 
 #include "core/resources/arrow_pool.h"
+#include "core/scan/metadata_cache.h"
 #include "storage/resources.h"
 
 #include <arrow/array/array_binary.h>
@@ -556,12 +557,14 @@ private:
 TLocalStorageBackend::TLocalStorageBackend(StoreInfo store,
     TLocalStorageOptions options,
     std::shared_ptr<NIO::TStoreDirs> dirs,
-    std::shared_ptr<NStorage::TDurableLocalFileIO> fileIO)
+    std::shared_ptr<NStorage::TDurableLocalFileIO> fileIO,
+    std::shared_ptr<TSnapshotMetadataCache> readCache)
     : Store_(std::move(store))
     , Options_(std::move(options))
     , Dirs_(std::move(dirs))
     , FileIO_(std::move(fileIO))
     , Catalog_(std::make_shared<TInertCatalog>())
+    , ReadCache_(std::move(readCache))
 { }
 
 EngineCapabilities TLocalStorageBackend::GetCapabilities() const
@@ -570,6 +573,8 @@ EngineCapabilities TLocalStorageBackend::GetCapabilities() const
         .append = true,
         .scan = true,
         .metadata = true,
+        .file_pruning = Options_.EnablePruning,
+        .row_group_pruning = Options_.EnablePruning,
         .write_settings = true,
         .parquet_codecs = ParquetCodecCapabilities()};
 }
@@ -587,6 +592,15 @@ TLocalStorageBackend::Open(const std::filesystem::path& root, const StoreInfo& s
         [&]() -> Result<std::shared_ptr<TLocalStorageBackend>> {
             options.Resources = options.Resources ? options.Resources : ResourceOwner::ProcessDefault();
             options.InputPool = MakeResourcePool(options.Resources, options.InputPool);
+            std::shared_ptr<TSnapshotMetadataCache> readCache;
+            if (options.ReadCacheBytes > 0) {
+                auto cacheMemory = options.Resources->Reserve(ResourceClass::Metadata, options.ReadCacheBytes);
+                if (!cacheMemory) {
+                    throw Failure(cacheMemory.error());
+                }
+                readCache = std::make_shared<TSnapshotMetadataCache>(std::move(*cacheMemory),
+                    TSnapshotMetadataCacheOptions{.MaxBytes = options.ReadCacheBytes});
+            }
             auto fs = options.Fs ? options.Fs : std::make_shared<NIO::TPosixLocalFS>();
             auto dirs = TakeIO(NIO::TStoreDirs::Open(std::move(fs), root, std::make_shared<NIO::TWriteLatch>()),
                 EStoragePath::Preflight,
@@ -595,7 +609,7 @@ TLocalStorageBackend::Open(const std::filesystem::path& root, const StoreInfo& s
                 "IO_ERROR",
                 "open durable FileIO");
             return std::shared_ptr<TLocalStorageBackend>(
-                new TLocalStorageBackend(store, options, std::move(dirs), std::move(fileIO)));
+                new TLocalStorageBackend(store, options, std::move(dirs), std::move(fileIO), std::move(readCache)));
         });
 }
 
@@ -874,6 +888,9 @@ void TLocalStorageBackend::PublicationFinished(std::string_view collectionID,
     VerifiedGeneration_ = false;
     Collections_.clear();
     AdmittedWarehouseBytes_.reset();
+    if (ReadCache_) {
+        ReadCache_->Clear();
+    }
 }
 
 void TLocalStorageBackend::DiscardCandidate(std::string_view collectionID)
@@ -896,6 +913,9 @@ void TLocalStorageBackend::InvalidateCache()
     VerifiedGeneration_ = false;
     Collections_.clear();
     AdmittedWarehouseBytes_.reset();
+    if (ReadCache_) {
+        ReadCache_->Clear();
+    }
 }
 
 NIO::TResult<std::uint64_t> TLocalStorageBackend::CheckWriteCapacity(bool remember, bool reuse)
@@ -1004,6 +1024,9 @@ void TLocalStorageBackend::RetireRoot(const BaseIdentity& superseded)
         {
             return;
         }
+    }
+    if (ReadCache_) {
+        ReadCache_->EvictRoot(location);
     }
     // Best effort: a root that cannot be removed stays as an orphan file.
     [[maybe_unused]] const auto error = Dirs_->RemoveMetadataFile(uri.Value());
