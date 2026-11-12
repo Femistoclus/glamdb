@@ -51,14 +51,7 @@ test('public prefix loads both supplied logos and needs no token or API', async 
     expect(await page.locator('#brand-favicon').getAttribute('href')).toContain(
         '/assets/brand/mark.png',
     );
-    for (const name of [
-        'Schema',
-        'Snapshots',
-        'Storage',
-        'Explain',
-        'Operations',
-        'Style studio',
-    ]) {
+    for (const name of ['Schema', 'Snapshots', 'Storage', 'Explain', 'Operations']) {
         await nav(page, name);
         await expect(page.locator('#view h1')).toBeVisible();
     }
@@ -133,22 +126,13 @@ test('public visitors are isolated and reset restores sample collections', async
     await expect(page.locator('.collection-list button')).toHaveCount(2);
 });
 
-test('public mobile branding and live style preview fit the viewport', async ({ page }) => {
+test('public mobile navigation and theme toggle fit the viewport', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await open(page);
     await page.getByRole('button', { name: 'Toggle navigation' }).click();
-    await nav(page, 'Style studio');
-    await page.getByLabel('Color accent', { exact: true }).fill('#ad146d');
-    await page.getByLabel('Color accent', { exact: true }).dispatchEvent('change');
-    await expect
-        .poll(() =>
-            page.evaluate(() =>
-                getComputedStyle(document.documentElement)
-                    .getPropertyValue('--color-accent')
-                    .trim(),
-            ),
-        )
-        .toBe('#ad146d');
+    await page.getByRole('button', { name: 'Switch to dark theme' }).click();
+    await expect(page.locator('html')).toHaveAttribute('data-appearance', 'dark');
+    await nav(page, 'Data studio');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
         true,
     );

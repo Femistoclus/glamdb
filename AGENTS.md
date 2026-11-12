@@ -92,7 +92,12 @@ Collection routes are scoped by `/databases/{id}`; optional legacy
 separate, explicitly disposable in-memory mock remains a development profile. The architecture and
 invariants below describe the intended engine, not qualified guarantees.
 
-Data studio separates compact read and schema-driven write panels. Native
+Data studio keeps schema, compact reading and nested row editing together;
+results stay inside Read rows. Light/dark appearance and sidebar preferences are
+local display settings. Runtime design remains configurable through theme JSON.
+Existing Keycloak realms use the client-only migration in
+[compact workbench operations](docs/development/COMPACT_WORKBENCH.md); custom or
+shared authentication flows require explicit review before migration. Native
 Overview, Snapshots, Storage and Explain use public-facade HTTP metadata;
 reload/restart restore these views from the server. Storage IDs derive from
 selected committed manifest membership; details verify actual Parquet footers,

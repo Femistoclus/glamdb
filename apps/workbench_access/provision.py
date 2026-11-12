@@ -178,6 +178,10 @@ def provision(admin, *, workbench_origin, output, test_mode=False):
             },
         ]
         identity = admin.create_client(client)
+        if name == "glamdb-workbench":
+            from .login_form import configure_login_form
+
+            configure_login_form(admin)
         clients[name] = identity
         if name != "glamdb-sdk":
             write_secret(

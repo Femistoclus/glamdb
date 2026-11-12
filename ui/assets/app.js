@@ -3,6 +3,8 @@ import { WorkbenchAPI, readMetadataPages, validateViewMetadata } from './api.js'
 import { fileDetails } from './file-details.js';
 import { loadAccessSession, selectDatabase, signOutAccess } from './access.js';
 import { applyTheme, validateTheme, brandAsset } from './theme.js';
+import { applyAppearance, readPreference, savePreference } from './appearance.js';
+import { sortSnapshots, snapshotCreatedAt } from './snapshot-time.js';
 import {
     escapeHTML as e,
     displayValue,
@@ -43,6 +45,11 @@ import {
 const $ = (selector) => document.querySelector(selector);
 const accessGateway = document.documentElement.dataset.accessGateway === 'true';
 const publicDemo = !accessGateway && document.documentElement.dataset.publicDemo === 'true';
+let colorMode = readPreference(
+    'appearance',
+    globalThis.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
+);
+let sidebarCollapsed = readPreference('sidebar-collapsed', 'false') === 'true';
 const icon = (name, classes = '') =>
     `<svg class="icon ${classes}" aria-hidden="true"><use href="${new URL('icons.svg', import.meta.url).href}#${name}"></use></svg>`;
 const nav = [
@@ -53,13 +60,11 @@ const nav = [
     ['storage', 'database'],
     ['explain', 'sparkle'],
     ['operations', 'activity'],
-    ['style', 'palette'],
 ];
 let state = resetConnection({
     base: location.origin,
     epoch: -1,
     theme: null,
-    themePreview: false,
 });
 let connectionController = null,
     viewController = null,
@@ -332,10 +337,11 @@ async function loadTheme(force = false) {
         if (accessGateway && !force && state.access) await pollAccess();
         const config = validateTheme(await response.json());
         const stamp = JSON.stringify(config);
-        if (force || (!state.themePreview && stamp !== themeStamp)) {
+        if (force || stamp !== themeStamp) {
             state.theme = config;
             themeStamp = stamp;
             applyTheme(config);
+            applyAppearance(config, colorMode);
             syncQueryLimit();
             updateThemeText();
         }
@@ -629,14 +635,14 @@ async function reloadAccess() {
 
 function chrome() {
     $('#app').innerHTML =
-        `<div class="shell"><aside class="sidebar" id="sidebar" aria-label="Workspace navigation">${brand()}
+        `<div class="shell" data-collapsed="${sidebarCollapsed}"><aside class="sidebar" id="sidebar" aria-label="Workspace navigation"><div class="sidebar-head">${brand()}${state.theme.brand.mark ? `<img class="collapsed-brand" src="${e(brandAsset(state.theme, 'mark'))}" alt="${e(state.theme.brand.name)}">` : ''}<button class="icon-button sidebar-collapse" data-action="collapse-sidebar" aria-controls="sidebar" aria-expanded="${!sidebarCollapsed}" aria-label="${sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}" title="${sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}">${icon('chevron')}</button></div>
     <p class="brand-tagline" data-brand="tagline">${e(state.theme.brand.tagline)}</p><div class="workspace-tag"><span class="status-dot"></span>
     <div><strong>${accessGateway ? e(state.access?.organization?.name ?? 'Account') : e(state.database?.name ?? 'My workspace')}</strong><small>${accessGateway ? e(state.access?.organization?.login ?? 'Signed in') : e(new URL(state.base).host)} · ${state.databaseError ? 'UNAVAILABLE' : state.databaseLoading ? 'CONNECTING' : state.capabilities?.mock ? 'MOCK' : 'CONNECTED'}</small></div></div>
     ${accessGateway ? `<label class="field" style="margin:0 7px 20px">Database<select id="database-selector" aria-label="Database">${databaseOptions()}</select></label>` : ''}
-    <nav class="nav">${nav.map(([key, symbol]) => `<button data-action="nav" data-tab="${key}" class="${state.tab === key ? 'active' : ''}" ${state.tab === key ? 'aria-current="page"' : ''}>${icon(symbol)}<span data-label="nav_${key}">${e(labels(`nav_${key}`))}</span></button>`).join('')}</nav>
+    <nav class="nav">${nav.map(([key, symbol]) => `<button aria-label="${e(labels(`nav_${key}`))}" title="${e(labels(`nav_${key}`))}" data-action="nav" data-tab="${key}" class="${state.tab === key ? 'active' : ''}" ${state.tab === key ? 'aria-current="page"' : ''}>${icon(symbol)}<span data-label="nav_${key}">${e(labels(`nav_${key}`))}</span></button>`).join('')}</nav>
     <div class="collection-heading"><span data-label="collections">${e(labels('collections'))}</span><button class="icon-button" data-action="create" aria-label="New collection" ${accessGateway && (state.databaseLoading || state.databaseError) ? 'disabled' : ''}>${icon('plus')}</button></div>
-    <div class="collection-list">${state.collections.map((item) => `<button data-action="select-collection" data-id="${e(item.collection_id)}" class="${state.collectionId === item.collection_id ? 'selected' : ''}">${icon('table')}<span>${e(item.name)}</span></button>`).join('')}</div>
-    <div class="sidebar-footer">${icon('kiss', 'decor-kiss')}<p data-label="footer">${e(labels('footer'))}</p></div></aside>
+    <div class="collection-list">${state.collections.map((item) => `<button aria-label="${e(item.name)}" title="${e(item.name)}" data-action="select-collection" data-id="${e(item.collection_id)}" class="${state.collectionId === item.collection_id ? 'selected' : ''}">${icon('table')}<span>${e(item.name)}</span></button>`).join('')}</div>
+    <div class="sidebar-footer"><button class="text-button theme-toggle" data-action="toggle-appearance" aria-label="Switch to ${colorMode === 'dark' ? 'light' : 'dark'} theme" title="Switch to ${colorMode === 'dark' ? 'light' : 'dark'} theme">${icon('palette')}<span>${colorMode === 'dark' ? 'Dark theme' : 'Light theme'}</span></button></div></aside>
     <div class="workspace"><header class="topbar"><div class="breadcrumb"><button class="icon-button menu-toggle" data-action="menu" aria-label="Toggle navigation">${icon('menu')}</button><span>Workspace</span>${icon('chevron')}<strong>${e(currentCollection()?.name ?? 'Your collections')}</strong></div>
     <div class="top-actions">${state.managed ? '<button class="text-button" data-action="databases">Databases</button>' : ''}${publicDemo ? '' : '<button class="text-button" data-action="pending-requests">Pending requests</button>'}<button class="text-button docs-button" data-action="about">Quick guide</button><button class="icon-button" data-action="refresh" aria-label="Refresh workspace">${icon('refresh')}</button>${accessGateway ? `<a class="text-button" href="${e(state.access.account_url)}">Account</a>` : ''}<button class="text-button" data-action="${accessGateway ? 'sign-out' : 'disconnect'}">${accessGateway ? 'Sign out' : publicDemo ? 'Reset demo' : 'Disconnect'}</button><span class="avatar" aria-label="Workspace avatar">${state.theme.brand.mark ? `<img data-brand-logo="mark" class="brand-mark" src="${e(brandAsset(state.theme, 'mark'))}" alt="">` : 'G'}</span></div></header>
     <main id="main-content" class="main">${state.capabilities?.mock ? `<div class="mock-banner">${icon('sparkle')}<span data-label="${publicDemo ? 'public_demo_notice' : 'mock_notice'}">${e(labels(publicDemo ? 'public_demo_notice' : 'mock_notice'))}</span></div>` : ''}<div id="view"></div>
@@ -644,9 +650,11 @@ function chrome() {
     renderView();
 }
 function availableSnapshots() {
-    return supportsFeature(state.capabilities, 'snapshots')
-        ? state.snapshots
-        : sessionSnapshots(state.operations, state.collectionId);
+    return sortSnapshots(
+        supportsFeature(state.capabilities, 'snapshots')
+            ? state.snapshots
+            : sessionSnapshots(state.operations, state.collectionId),
+    );
 }
 function snapshotControl() {
     return `<label class="snapshot-control">${icon('clock')}<span class="sr-only">Snapshot</span><select id="snapshot-selector" aria-label="Snapshot"><option value="latest" ${state.snapshotId === null ? 'selected' : ''}>${e(labels('latest'))}</option><option value="initial" ${state.snapshotId === 'initial' ? 'selected' : ''}>Initial empty view</option>${availableSnapshots()
@@ -662,52 +670,57 @@ function heading(title, copy = '', snapshot = true) {
 function emptyView() {
     return `<section class="panel empty">${icon('table')}<h2 data-label="empty_title">${e(labels('empty_title'))}</h2><p data-label="empty_copy">${e(labels('empty_copy'))}</p><button class="button primary" data-action="create">${icon('plus')}New collection</button></section>`;
 }
+function schemaSummary(label = 'Overview schema') {
+    return `<div class="table-wrap schema-preview"><table aria-label="${e(label)}"><thead><tr><th>Column</th><th>Type</th><th>Nullable</th></tr></thead><tbody>${fields()
+        .map(
+            (field) =>
+                `<tr><td>${e(field.name)}</td><td><span class="type">${e(field.type)}</span></td><td>${field.nullable ? 'Yes' : 'Required'}</td></tr>`,
+        )
+        .join('')}</tbody></table></div>`;
+}
 function overview() {
-    const s = state.stats ?? {};
-    const measured =
-        state.rowMeasurement?.snapshot_id === state.resolvedSnapshot
-            ? state.rowMeasurement.rows
-            : null;
+    const stats = state.stats ?? {};
     const rows =
-        s.rows ??
-        measured ??
+        stats.rows ??
+        (state.rowMeasurement?.snapshot_id === state.resolvedSnapshot
+            ? state.rowMeasurement.rows
+            : null) ??
         (state.resolvedSnapshot === 'initial'
             ? '0'
             : sessionRowCount(state.operations, state.collectionId, state.resolvedSnapshot));
-    return `${heading(labels('overview_title'), labels('overview_copy'))}<section class="hero"><div class="hero-copy"><p class="eyebrow" data-label="hero_eyebrow">${e(labels('hero_eyebrow'))}</p><h2 data-label="hero_title">${e(labels('hero_title'))}</h2><p data-label="hero_copy">${e(labels('hero_copy'))}</p><button class="button primary" data-action="nav" data-tab="data"><span data-label="hero_button">${e(labels('hero_button'))}</span>${icon('arrow')}</button></div><div class="hero-art" aria-hidden="true"><div class="mini-card back"></div><div class="mini-card"><div class="mini-card-head">${icon('table')}${e(currentCollection()?.name ?? 'your_collection')}</div><div class="mini-card-grid">${Array.from({ length: 12 }, () => '<span></span>').join('')}</div></div>${icon('bow', 'hero-bow decor-bow')}${icon('sparkle', 'hero-star one decor-sparkle')}${icon('sparkle', 'hero-star two decor-sparkle')}${icon('kiss', 'hero-kiss decor-kiss')}<p class="hero-note" data-label="hero_note">${e(labels('hero_note'))}</p></div></section>
-    <section class="metrics" aria-label="Collection statistics">${[
-        ['Rows', rows, 'table'],
-        ['Columns', fields().length, 'columns'],
-        [
-            'Snapshots',
-            s.retained_snapshots ??
-                (supportsFeature(state.capabilities, 'snapshots') ? state.snapshots.length : null),
-            'clock',
-        ],
-        [
-            'Data files',
-            s.data_files ??
-                (supportsFeature(state.capabilities, 'files') ? state.files.length : null),
-            'database',
-        ],
-    ]
-        .map(
-            ([label, value, symbol]) =>
-                `<div class="metric"><div class="metric-icon">${icon(symbol)}</div><div><strong>${number(value)}</strong><span>${label.toUpperCase()}</span></div></div>`,
-        )
-        .join('')}</section>
-    ${state.collectionId && !supportsFeature(state.capabilities, 'stats') ? `<div class="notice row-count-notice"><span>Rows refer to snapshot <code>${e(state.resolvedSnapshot)}</code>. Counting reads one column across the whole snapshot; it may take time.</span><button class="button small" data-action="${countController ? 'cancel-count' : 'count-rows'}">${countController ? 'Cancel count' : 'Count rows'}</button></div>` : ''}
-    ${
+    const databaseName =
+        state.database?.name ??
+        state.access?.databases?.find((db) => db.id === state.databaseId)?.name ??
+        'Connected store';
+    return `${heading(labels('overview_title'), labels('overview_copy'))}${
         state.collectionId
-            ? `<div class="panels"><section class="panel"><div class="panel-header"><div><h2>Inside your collection</h2><p>${e(currentCollection()?.name)} · fixed schema</p></div><button class="button small" data-action="nav" data-tab="schema">View schema${icon('arrow')}</button></div><div class="panel-body">${fields()
-                  .slice(0, 6)
+            ? `<div class="overview-summary"><section class="panel"><div class="panel-header"><div><h2>Collection schema</h2><p>${e(currentCollection()?.name)} · ${fields().length} columns</p></div><button class="button small" data-action="nav" data-tab="schema">Full schema</button></div>${schemaSummary()}</section><div class="overview-facts"><div class="database-context"><strong>${e(databaseName)}</strong><span>${e(currentCollection()?.name)} · snapshot <code>${e(state.resolvedSnapshot ?? 'initial')}</code></span></div><section class="metrics overview-metrics" aria-label="Collection statistics">${[
+                  ['Rows', rows, 'table'],
+                  ['Columns', fields().length, 'columns'],
+                  [
+                      'Snapshots',
+                      stats.retained_snapshots ??
+                          (supportsFeature(state.capabilities, 'snapshots')
+                              ? state.snapshots.length
+                              : null),
+                      'clock',
+                  ],
+                  [
+                      'Data files',
+                      stats.data_files ??
+                          (supportsFeature(state.capabilities, 'files')
+                              ? state.files.length
+                              : null),
+                      'database',
+                  ],
+              ]
                   .map(
-                      (field) =>
-                          `<div class="column-preview"><span class="column-name">${icon(field.name === 'key' ? 'key' : 'columns')}<strong>${e(field.name)}</strong></span><span class="type">${e(field.type)}${field.nullable ? ' · nullable' : ''}</span></div>`,
+                      ([label, value, symbol]) =>
+                          `<div class="metric"><div class="metric-icon">${icon(symbol)}</div><div><strong>${number(value)}</strong><span>${label.toUpperCase()}</span></div></div>`,
                   )
                   .join(
                       '',
-                  )}</div></section><section class="panel"><div class="panel-header"><h2>A little history</h2>${badge('Immutable', 'pink')}</div><div class="panel-body">${snapshotList(3)}<button class="text-button" data-action="nav" data-tab="snapshots">See all snapshots →</button></div></section></div>`
+                  )}</section>${!supportsFeature(state.capabilities, 'stats') ? `<div class="notice row-count-notice"><span>Count rows in the selected snapshot.</span><button class="button small" data-action="${countController ? 'cancel-count' : 'count-rows'}">${countController ? 'Cancel count' : 'Count rows'}</button></div>` : ''}</div></div><section class="panel overview-history"><div class="panel-header"><h2>Recent snapshots</h2><button class="text-button" data-action="nav" data-tab="snapshots">See all snapshots →</button></div><div class="panel-body">${snapshotList(3)}</div></section>`
             : emptyView()
     }`;
 }
@@ -718,7 +731,6 @@ function snapshotList(max = 100) {
         snapshots.length
             ? snapshots
                   .slice()
-                  .reverse()
                   .slice(0, max)
                   .map(
                       (s) =>
@@ -729,6 +741,7 @@ function snapshotList(max = 100) {
     }`;
 }
 function readQuery() {
+    draftWrite();
     const form = $('#query-form');
     if (form) {
         state.projection = [...form.querySelectorAll('input[name="column"]:checked')].map(
@@ -762,7 +775,7 @@ function dataView() {
     const columns = state.projection.length
         ? state.projection
         : fields().map((field) => field.name);
-    return `${heading(labels('data_title'), labels('data_copy'))}<div class="data-editors"><section class="panel read-panel" aria-labelledby="read-title"><div class="panel-header"><div><h2 id="read-title" data-label="read_title">${e(labels('read_title', 'Read rows'))}</h2><p>Choose columns and optional filters.</p></div></div><div class="panel-body"><form id="query-form" class="query-controls"><div><label>Columns to read</label><div class="column-choices" style="margin-top:9px">${fields()
+    return `${heading(labels('data_title'), labels('data_copy'))}<details class="panel schema-strip"><summary>Schema · ${fields().length} columns · ${e(currentCollection()?.name)}</summary>${schemaSummary('Data studio schema')}</details><div class="data-editors"><section class="panel read-panel" aria-labelledby="read-title"><div class="panel-header"><div><h2 id="read-title" data-label="read_title">${e(labels('read_title', 'Read rows'))}</h2><p id="read-snapshot-note">Choose columns and optional filters. Snapshot ${e(state.snapshotId ?? 'latest')}.</p></div></div><div class="panel-body"><form id="query-form" class="query-controls"><div><label>Columns to read</label><div class="column-choices" style="margin-top:9px">${fields()
         .map(
             (field) =>
                 `<label class="column-check"><input type="checkbox" name="column" value="${e(field.name)}" ${columns.includes(field.name) ? 'checked' : ''}>${e(field.name)}</label>`,
@@ -798,8 +811,7 @@ function dataView() {
                     )}</select><input name="value" aria-label="Filter value ${i + 1}" value="${e(c.value)}" placeholder="A value, in its original type"><button type="button" class="icon-button" data-action="remove-condition" data-index="${i}" aria-label="Remove condition ${i + 1}">${icon('close')}</button></div>`,
         )
         .join('')}
-    <button type="button" class="text-button" data-action="add-condition" ${!composite && state.clauses.length ? 'disabled title="This server supports one comparison per query"' : ''}>+ Add a condition</button></div><div class="query-footer"><label>Result limit<input name="limit" type="number" min="0" max="${queryMaxRows(state.capabilities, state.theme)}" value="${state.limit}"></label><div class="button-row"><button type="button" class="button" data-action="explain-query" ${supportsFeature(state.capabilities, 'explain') ? '' : 'disabled title="Unavailable on this server"'}>${icon('sparkle')}Explain</button><button type="submit" class="button primary" id="run-query">${icon('arrow')}<span data-label="run_query">${e(labels('run_query'))}</span></button></div></div><details class="editor-json"><summary>Query JSON</summary><pre id="query-json" class="json-block">${e(queryPreview())}</pre><button type="button" class="text-button" data-action="download-query-json">Download JSON</button></details></form></div></section>${writePanel()}</div>
-    ${state.result ? resultTable() : `<div class="notice" style="margin-top:20px">Ready when you are. Your result will appear here, with its exact snapshot identity.</div>`}`;
+    <button type="button" class="text-button" data-action="add-condition" ${!composite && state.clauses.length ? 'disabled title="This server supports one comparison per query"' : ''}>+ Add a condition</button></div><div class="query-footer"><label>Result limit<input name="limit" type="number" min="0" max="${queryMaxRows(state.capabilities, state.theme)}" value="${state.limit}"></label><div class="button-row"><button type="button" class="button" data-action="explain-query" ${supportsFeature(state.capabilities, 'explain') ? '' : 'disabled title="Unavailable on this server"'}>${icon('sparkle')}Explain</button><button type="submit" class="button primary" id="run-query">${icon('arrow')}<span data-label="run_query">${e(labels('run_query'))}</span></button></div></div><details class="editor-json"><summary>Query JSON</summary><pre id="query-json" class="json-block">${e(queryPreview())}</pre><button type="button" class="text-button" data-action="download-query-json">Download JSON</button></details></form></div><div id="read-results" aria-live="polite">${state.result ? resultTable() : '<div class="notice read-ready">Read rows to see the selected snapshot.</div>'}</div></section>${writePanel()}</div>`;
 }
 function queryPreview() {
     try {
@@ -825,10 +837,10 @@ function writePanel() {
         ? `<div class="button-row" style="margin:12px 0">${kvEnabled('lookup') ? '<button class="button small" data-action="lookup-keys">Lookup keys</button>' : ''}${kvEnabled('delete') ? '<button class="button small" data-action="delete-keys">Delete keys</button>' : ''}${kvEnabled('compact') ? '<button class="button small" data-action="compact-files">Compact files</button>' : ''}</div>`
         : '';
     if (operation && ['delete', 'compact'].includes(operation.action))
-        return `<section class="panel write-panel"><div class="panel-body"><h2>${e(actionTitle(operation.action))}</h2><p>A mutation is pending. Keep its original ID and payload.</p><code>${e(operation.operationId)}</code><div class="button-row"><button class="button" data-action="append">Review or retry same operation</button><button class="button" data-action="resolve-operation" data-id="${e(operation.operationId)}">Check outcome</button></div>${controls}</div></section>`;
+        return `<section class="panel write-panel" data-write-panel><div class="panel-body"><h2>${e(actionTitle(operation.action))}</h2><p>A mutation is pending. Keep its original ID and payload.</p><code>${e(operation.operationId)}</code><div class="button-row"><button class="button" data-action="append">Review or retry same operation</button><button class="button" data-action="resolve-operation" data-id="${e(operation.operationId)}">Check outcome</button></div>${controls}</div></section>`;
     if (isKV() && !kvEnabled('upsert'))
-        return '<section class="panel"><p class="notice">This connection does not advertise KV upsert.</p></section>';
-    return `<div>${controls}${writeEditor(state.schema, state.writeDraft, operation, state.collectionId, state.theme.labels, isKV() ? 'kv' : 'append')}</div>`;
+        return '<section class="panel" data-write-panel><p class="notice">This connection does not advertise KV upsert.</p></section>';
+    return `<div data-write-panel>${controls}${writeEditor(state.schema, state.writeDraft, operation, state.collectionId, state.theme.labels, isKV() ? 'kv' : 'append')}</div>`;
 }
 function draftWrite() {
     const form = $('#write-form');
@@ -840,23 +852,54 @@ function resultTable() {
     return `<section class="panel results-panel"><div class="panel-header"><div><h2>Your results</h2><p>${number(state.rows.length)} rows${state.result.next_cursor ? ' · partial preview; reduce the limit or use the SDK for all rows' : ''} · snapshot <code>${e(state.result.snapshot_id ?? 'initial empty')}</code></p></div><button class="button small" data-action="${publicDemo ? 'export-json' : 'export-arrow'}">${icon('download')}${publicDemo ? 'JSON' : 'Arrow'}</button></div><div class="table-wrap"><table aria-label="Query results"><thead><tr>${schema.map((f) => `<th>${e(f.name)}</th>`).join('')}</tr></thead><tbody>${page.map((row) => `<tr>${schema.map((f) => `<td title="${e(displayValue(row[f.name]))}">${row[f.name] === null ? '<span class="null">NULL</span>' : e(displayValue(row[f.name]))}</td>`).join('')}</tr>`).join('')}</tbody></table>${!page.length ? '<p class="result-empty">No rows match this query. The result schema is still available.</p>' : ''}</div><div class="table-footer"><span>${page.length ? state.page * 100 + 1 : 0}–${state.page * 100 + page.length} of ${number(state.rows.length)} · bounded preview</span><div class="button-row"><button class="button small" data-action="previous-page" ${state.page === 0 ? 'disabled' : ''}>Previous</button><button class="button small" data-action="next-page" ${(state.page + 1) * 100 >= state.rows.length ? 'disabled' : ''}>Next</button></div></div></section>`;
 }
 
+function renderReadResults() {
+    const target = $('#read-results');
+    if (!target) return;
+    target.innerHTML = state.result
+        ? resultTable()
+        : '<div class="notice read-ready">Read rows to see the selected snapshot.</div>';
+    if (state.result) $('#view').dataset.resultSnapshot = state.result.snapshot_id ?? 'initial';
+    else delete $('#view').dataset.resultSnapshot;
+}
+function renderWritePanel({ removedIndex = null, reset = false } = {}) {
+    const expanded = reset
+        ? []
+        : [...document.querySelectorAll('[data-write-row]')].flatMap((row, index) =>
+              row.open && index !== removedIndex
+                  ? [removedIndex !== null && index > removedIndex ? index - 1 : index]
+                  : [],
+          );
+    const target = $('[data-write-panel]');
+    if (target) {
+        target.outerHTML = writePanel();
+        for (const index of expanded) {
+            const row = document.querySelectorAll('[data-write-row]')[index];
+            if (row) row.open = true;
+        }
+    }
+}
+function updateDataSelection() {
+    const select = $('#snapshot-selector');
+    if (select) select.value = state.snapshotId ?? 'latest';
+    const note = $('#read-snapshot-note');
+    if (note)
+        note.textContent = `Choose columns and optional filters. Snapshot ${state.resolvedSnapshot ?? state.snapshotId ?? 'latest'}.`;
+    if ($('#query-json')) $('#query-json').textContent = queryPreview();
+    renderReadResults();
+}
 function renderView() {
     if (!$('#view')) return;
-    if (accessGateway && state.tab !== 'style' && (state.databaseLoading || state.databaseError)) {
+    if (accessGateway && (state.databaseLoading || state.databaseError)) {
         $('#view').innerHTML = state.databaseError
             ? `${heading('Database unavailable', 'Choose another database or refresh to try again.', false)}<div class="notice" role="alert">${e(state.databaseError)}</div>`
             : `${heading('Opening database…', '', false)}<p class="notice" role="status">Loading the selected database.</p>`;
         return;
     }
-    if (
-        state.collectionId &&
-        !state.schema &&
-        !['overview', 'style', 'operations'].includes(state.tab)
-    ) {
+    if (state.collectionId && !state.schema && !['overview', 'operations'].includes(state.tab)) {
         $('#view').innerHTML = '<p class="notice" role="status">Opening this snapshot…</p>';
         return;
     }
-    if (!state.collectionId && !['overview', 'style'].includes(state.tab)) {
+    if (!state.collectionId && !['overview'].includes(state.tab)) {
         $('#view').innerHTML = heading(labels(`nav_${state.tab}`), '', false) + emptyView();
         return;
     }
@@ -868,7 +911,6 @@ function renderView() {
         storage: storageView,
         explain: explainView,
         operations: operationsView,
-        style: styleView,
     };
     $('#view').innerHTML = (renders[state.tab] ?? overview)();
     if (state.tab === 'data' && state.result)
@@ -915,12 +957,11 @@ function writeSettingsPanel() {
 function snapshotsView() {
     const observed = !supportsFeature(state.capabilities, 'snapshots');
     const snapshots = availableSnapshots();
-    return `${heading('Every version has a story.', observed ? 'Observed in this session. Complete history requires server metadata support.' : 'Read an immutable view. Keep your latest data untouched.')}<section class="panel"><div class="panel-header"><h2>${observed ? 'Observed in this session' : 'Snapshot history'}</h2>${badge(`${snapshots.length} ${observed ? 'observed' : 'retained'}`)}</div><div class="table-wrap"><table aria-label="Snapshot history"><thead><tr><th>Snapshot ID</th><th>Parent</th><th>Rows written / removed</th><th></th></tr></thead><tbody>${snapshots
+    return `${heading('Every version has a story.', observed ? 'Observed in this session. Complete history requires server metadata support.' : 'Read an immutable view. Keep your latest data untouched.')}<section class="panel"><div class="panel-header"><h2>${observed ? 'Observed in this session' : 'Snapshot history'}</h2>${badge(`${snapshots.length} ${observed ? 'observed' : 'retained'}`)}</div><div class="table-wrap"><table aria-label="Snapshot history"><thead><tr><th>Snapshot ID</th><th>Created (UTC)</th><th>Parent</th><th>Rows written / removed</th><th></th></tr></thead><tbody>${snapshots
         .slice()
-        .reverse()
         .map(
             (s) =>
-                `<tr><td class="mono">${e(s.snapshot_id)}</td><td class="mono">${e(s.parent_id ?? s.parent_snapshot_id ?? 'Initial')}</td><td>${number(countSnapshotRows(s))}</td><td><button class="button small" data-action="open-snapshot" data-id="${e(s.snapshot_id)}">Explore${icon('arrow')}</button></td></tr>`,
+                `<tr><td class="mono">${e(s.snapshot_id)}</td><td>${e(snapshotCreatedAt(s) ?? 'Unavailable')}</td><td class="mono">${e(s.parent_id ?? s.parent_snapshot_id ?? 'Initial')}</td><td>${number(countSnapshotRows(s))}</td><td><button class="button small" data-action="open-snapshot" data-id="${e(s.snapshot_id)}">Explore${icon('arrow')}</button></td></tr>`,
         )
         .join(
             '',
@@ -975,7 +1016,6 @@ function operationsView() {
         ops.length
             ? ops
                   .slice()
-                  .reverse()
                   .map(
                       (op) =>
                           `<div class="operations-card">${icon('activity')}<div><strong>${e(op.outcome ?? 'Unresolved')}</strong>${isKV() ? `<p>${e(receiptTitle(op.action ?? op.result?.mutation_kind))}</p>` : ''}<p class="mono">${e(op.operationId)}</p><p>${op.result?.snapshot_created === false ? 'No new snapshot · effective view' : 'Snapshot'} ${e(op.result?.snapshot_id === '0' && op.result?.snapshot_created === false ? 'initial empty' : (op.result?.snapshot_id ?? 'not yet confirmed'))}</p></div><button class="button small" data-action="resolve-operation" data-id="${e(op.operationId)}">Check outcome</button></div>`,
@@ -986,7 +1026,6 @@ function operationsView() {
         published
             ? `<section class="panel"><div class="panel-header"><h2>Published snapshot operations</h2>${badge('Server history')}</div><p class="panel-body small muted">Original operation IDs from retained server snapshots. Look up the authoritative outcome without submitting a write.</p><div class="table-wrap"><table aria-label="Published snapshot operations"><thead><tr><th>Operation ID</th><th>Snapshot</th><th></th></tr></thead><tbody>${published
                   .slice()
-                  .reverse()
                   .map(
                       (snapshot) =>
                           `<tr><td class="mono">${e(snapshot.operation_id)}</td><td class="mono">${e(snapshot.snapshot_id)}</td><td><button class="button small" data-action="lookup-operation" data-id="${e(snapshot.operation_id)}">Look up outcome</button></td></tr>`,
@@ -997,34 +1036,10 @@ function operationsView() {
             : ''
     }<section class="panel"><div class="panel-body"><form id="operation-lookup-form" class="button-row"><label class="field">Operation ID<input name="operation" required autocomplete="off" placeholder="Original operation UUID"></label><button class="button" type="submit" ${state.collectionId ? '' : 'disabled'}>Look up operation</button></form><p class="small muted">Look up an original ID in this collection. This does not submit or retry a write.</p></div></section>`;
 }
-function styleView() {
-    const c = state.theme;
-    return `${heading('Make it your kind of pink.', 'A runtime theme, because a new mood should not need a new binary.', false)}<section class="panel"><div class="panel-header"><h2>Your palette</h2>${badge('Live preview', 'pink')}</div><div class="panel-body"><div class="style-grid">${Object.entries(
-        c.colors,
-    )
-        .filter(([, v]) => /^#[0-9a-f]{6}$/i.test(v))
-        .map(
-            ([name, value]) =>
-                `<label class="color-field"><input type="color" data-theme-color="${e(name)}" value="${e(value)}" aria-label="Color ${e(name)}"><span>${e(name.replaceAll('_', ' '))}<code>${e(value)}</code></span></label>`,
-        )
-        .join(
-            '',
-        )}</div><div class="section-heading"><h2>The little extras</h2></div><div class="toggle-row">${Object.entries(
-        c.decoration,
-    )
-        .map(
-            ([name, value]) =>
-                `<label><input type="checkbox" data-theme-decoration="${e(name)}" ${value ? 'checked' : ''}>${e(name)}</label>`,
-        )
-        .join(
-            '',
-        )}</div><div class="button-row" style="margin-top:24px"><button class="button" data-action="reset-theme">Reset preview</button><button class="button primary" data-action="download-theme">${icon('download')}Download theme.json</button></div></div></section><div class="notice" style="margin-top:20px">Permanent changes: edit <code>ui/config/theme.json</code> (or your server's --theme-file). This page reloads valid changes automatically. Preview changes above are local to this tab until reset. No core rebuild, frontend build or server restart is required.</div>`;
-}
-
 async function allPages(path, signal, api = state.api, view) {
     return readMetadataPages(api, path, { signal, view });
 }
-async function refreshSelection() {
+async function refreshSelection({ preserveEditors = false } = {}) {
     if (!state.collectionId) {
         state.schema = null;
         state.stats = null;
@@ -1043,67 +1058,80 @@ async function refreshSelection() {
         id = state.collectionId;
     const current = () =>
         !signal.aborted && api === state.api && epoch === state.epoch && id === state.collectionId;
-    const info = await api.json(`/collections/${encodeURIComponent(id)}`, { signal });
-    if (!current()) return;
-    const selected =
-        state.snapshotId === null ? (info.current_snapshot_id ?? 'initial') : state.snapshotId;
-    const suffix = `?snapshot_id=${encodeURIComponent(selected)}`;
-    // Native admission allows two data calls per database. Read metadata one
-    // request at a time, leaving capacity for a query or outcome resolution.
-    const schema = await api.json(`/collections/${encodeURIComponent(id)}/schema`, { signal });
-    if (!current()) return;
-    const stats = supportsFeature(state.capabilities, 'stats')
-        ? await api.json(`/collections/${encodeURIComponent(id)}/stats${suffix}`, { signal })
-        : null;
-    if (!current()) return;
-    const snapshots = supportsFeature(state.capabilities, 'snapshots')
-        ? await allPages(
-              `/collections/${encodeURIComponent(id)}/snapshots`,
-              signal,
-              api,
-              publicDemo
-                  ? undefined
-                  : { collectionId: id, mock: state.capabilities?.mock === true },
-          )
-        : [];
-    if (!current()) return;
-    const filesResult = supportsFeature(state.capabilities, 'files')
-        ? await allPages(
-              `/collections/${encodeURIComponent(id)}/files${suffix}`,
-              signal,
-              api,
-              publicDemo
-                  ? undefined
-                  : {
-                        collectionId: id,
-                        snapshotId: selected,
-                        mock: state.capabilities?.mock === true,
-                    },
-          )
-        : [];
-    if (!current()) return;
-    if (stats)
-        validateViewMetadata(stats, {
-            collectionId: id,
-            snapshotId: selected,
-            mock: state.capabilities?.mock === true,
-        });
-    state.collection = info;
-    state.resolvedSnapshot = selected;
-    state.schema = schema.schema ?? schema;
-    state.stats = stats;
-    state.snapshots = snapshots;
-    state.files = filesResult;
-    if (
-        !state.projection.length ||
-        state.projection.some((name) => !fields().some((f) => f.name === name))
-    )
-        state.projection = fields().map((f) => f.name);
-    state.collections = state.collections.map((item) => (item.collection_id === id ? info : item));
-    chrome();
+    try {
+        const info = await api.json(`/collections/${encodeURIComponent(id)}`, { signal });
+        if (!current()) return;
+        const selected =
+            state.snapshotId === null ? (info.current_snapshot_id ?? 'initial') : state.snapshotId;
+        const suffix = `?snapshot_id=${encodeURIComponent(selected)}`;
+        // Native admission allows two data calls per database. Read metadata one
+        // request at a time, leaving capacity for a query or outcome resolution.
+        const schema = await api.json(`/collections/${encodeURIComponent(id)}/schema`, { signal });
+        if (!current()) return;
+        const stats = supportsFeature(state.capabilities, 'stats')
+            ? await api.json(`/collections/${encodeURIComponent(id)}/stats${suffix}`, { signal })
+            : null;
+        if (!current()) return;
+        const snapshots = supportsFeature(state.capabilities, 'snapshots')
+            ? await allPages(
+                  `/collections/${encodeURIComponent(id)}/snapshots`,
+                  signal,
+                  api,
+                  publicDemo
+                      ? undefined
+                      : { collectionId: id, mock: state.capabilities?.mock === true },
+              )
+            : [];
+        if (!current()) return;
+        const filesResult = supportsFeature(state.capabilities, 'files')
+            ? await allPages(
+                  `/collections/${encodeURIComponent(id)}/files${suffix}`,
+                  signal,
+                  api,
+                  publicDemo
+                      ? undefined
+                      : {
+                            collectionId: id,
+                            snapshotId: selected,
+                            mock: state.capabilities?.mock === true,
+                        },
+              )
+            : [];
+        if (!current()) return;
+        if (stats)
+            validateViewMetadata(stats, {
+                collectionId: id,
+                snapshotId: selected,
+                mock: state.capabilities?.mock === true,
+            });
+        state.collection = info;
+        state.resolvedSnapshot = selected;
+        state.schema = schema.schema ?? schema;
+        state.stats = stats;
+        state.snapshots = snapshots;
+        state.files = filesResult;
+        if (
+            !state.projection.length ||
+            state.projection.some((name) => !fields().some((f) => f.name === name))
+        )
+            state.projection = fields().map((f) => f.name);
+        state.collections = state.collections.map((item) =>
+            item.collection_id === id ? info : item,
+        );
+        if (preserveEditors && state.tab === 'data' && $('#query-form')) updateDataSelection();
+        else chrome();
+    } catch (error) {
+        // A newer selection cancels these metadata requests. Its cancellation
+        // must not reset the connection or overwrite the new workspace.
+        if (current()) throw error;
+    }
 }
 async function selectCollection(id, snapshot = null) {
     const changedCollection = id !== state.collectionId;
+    const preserveEditors = !changedCollection && state.tab === 'data' && Boolean($('#query-form'));
+    draftWrite();
+    const writeDraft = state.writeDraft,
+        writeOperationId = state.writeOperationId;
     if (!changedCollection && $('#query-form')) {
         try {
             readQuery();
@@ -1121,13 +1149,20 @@ async function selectCollection(id, snapshot = null) {
         state.projection = [];
         state.clauses = [];
     }
-    state.schema = null;
-    state.stats = null;
-    state.snapshots = [];
-    state.files = [];
-    chrome();
-    $('#view').innerHTML = '<p class="notice">Opening this snapshot…</p>';
-    await refreshSelection();
+    if (preserveEditors) {
+        state.writeDraft = writeDraft;
+        state.writeOperationId = writeOperationId;
+        renderReadResults();
+        $('#read-snapshot-note').textContent = 'Opening selected snapshot…';
+    } else {
+        state.schema = null;
+        state.stats = null;
+        state.snapshots = [];
+        state.files = [];
+        chrome();
+        $('#view').innerHTML = '<p class="notice">Opening this snapshot…</p>';
+    }
+    await refreshSelection({ preserveEditors });
 }
 async function refreshWorkspace() {
     const api = state.api,
@@ -1202,7 +1237,7 @@ async function runQuery() {
         state.rows = result.rows ?? [];
         state.page = 0;
         state.lastQuery = { ...body, snapshot_id: result.snapshot_id ?? 'initial' };
-        renderView();
+        renderReadResults();
         toast(
             `${state.rows.length} rows${result.next_cursor ? ' (partial preview)' : ''}. Fixed snapshot ${result.snapshot_id ?? 'initial empty'}.`,
         );
@@ -2038,6 +2073,7 @@ async function inspectFile(id) {
     }
 }
 function navigate(tab) {
+    if (!nav.some(([key]) => key === tab)) tab = 'overview';
     if (state.tab === 'data') {
         try {
             readQuery();
@@ -2131,7 +2167,28 @@ document.addEventListener('click', async (event) => {
                 toast('Database reconciled. Check the original operation outcome.');
         } else if (action === 'nav') navigate(target.dataset.tab);
         else if (action === 'menu') $('#sidebar').classList.toggle('open');
-        else if (action === 'disconnect') {
+        else if (action === 'collapse-sidebar') {
+            sidebarCollapsed = !sidebarCollapsed;
+            savePreference('sidebar-collapsed', sidebarCollapsed);
+            $('.shell').dataset.collapsed = String(sidebarCollapsed);
+            target.setAttribute(
+                'aria-label',
+                sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar',
+            );
+            target.setAttribute('title', sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar');
+            target.setAttribute('aria-expanded', String(!sidebarCollapsed));
+        } else if (action === 'toggle-appearance') {
+            colorMode = colorMode === 'dark' ? 'light' : 'dark';
+            savePreference('appearance', colorMode);
+            applyAppearance(state.theme, colorMode);
+            target.setAttribute(
+                'aria-label',
+                `Switch to ${colorMode === 'dark' ? 'light' : 'dark'} theme`,
+            );
+            target.setAttribute('title', target.getAttribute('aria-label'));
+            target.querySelector('span').textContent =
+                colorMode === 'dark' ? 'Dark theme' : 'Light theme';
+        } else if (action === 'disconnect') {
             if (publicDemo) {
                 location.reload();
                 return;
@@ -2170,20 +2227,22 @@ document.addEventListener('click', async (event) => {
         else if (action === 'cancel-count') countController?.abort();
         else if (action === 'add-write-row' || action === 'remove-write-row') {
             draftWrite();
-            if (action === 'add-write-row' && state.writeDraft.length < 100)
-                state.writeDraft.push({});
-            else if (action === 'remove-write-row' && state.writeDraft.length > 1)
-                state.writeDraft.splice(Number(target.dataset.index), 1);
             try {
                 readQuery();
             } catch {
                 /* Preserve drafts while editing. */
             }
-            renderView();
+            const removedIndex =
+                action === 'remove-write-row' ? Number(target.dataset.index) : null;
+            if (action === 'add-write-row' && state.writeDraft.length < 100)
+                state.writeDraft.push({});
+            else if (removedIndex !== null && state.writeDraft.length > 1)
+                state.writeDraft.splice(removedIndex, 1);
+            renderWritePanel({ removedIndex });
         } else if (action === 'new-write') {
             state.writeOperationId = null;
             state.writeDraft = null;
-            renderView();
+            renderWritePanel({ reset: true });
         } else if (action === 'download-query-json') {
             download('query.json', JSON.stringify(readQuery(), null, 2), 'application/json');
         } else if (action === 'add-field') {
@@ -2210,10 +2269,10 @@ document.addEventListener('click', async (event) => {
         else if (action === 'explain-current') await explainQuery(false);
         else if (action === 'previous-page') {
             state.page = Math.max(0, state.page - 1);
-            renderView();
+            renderReadResults();
         } else if (action === 'next-page') {
             state.page++;
-            renderView();
+            renderReadResults();
         } else if (action === 'open-snapshot') {
             state.tab = 'data';
             await selectCollection(state.collectionId, target.dataset.id);
@@ -2237,14 +2296,7 @@ document.addEventListener('click', async (event) => {
         else if (action === 'resolve-operation') await resolveOperation(target.dataset.id);
         else if (action === 'resolve-pending')
             await resolveOperation($('#append-form').dataset.operationId);
-        else if (action === 'download-theme')
-            download('theme.json', JSON.stringify(state.theme, null, 2), 'application/json');
-        else if (action === 'reset-theme') {
-            state.themePreview = false;
-            await loadTheme(true);
-            renderView();
-            toast('Theme reloaded from your config file.');
-        } else if (action === 'about')
+        else if (action === 'about')
             showModal(
                 'A pretty powerful workbench.',
                 `<div class="metadata-list"><p>Browse collections, append typed rows, filter your data and explore immutable snapshots.</p><div class="notice">${publicDemo ? 'This public demo runs in your browser. Your rows stay in this tab; Reset demo or reload restores the samples. JSON export is available here. Connect to a server separately for the network SDK and Arrow IPC.' : 'Connected servers report their backend and supported capabilities. Native writes use the C++ engine; mock results are disposable. Physical power-loss durability remains unqualified.'}</div><p class="small muted">Theme: edit <code>ui/config/theme.json</code>. Changes reload automatically. No token is saved in browser storage.</p></div>`,
@@ -2287,17 +2339,6 @@ document.addEventListener('change', async (event) => {
             refreshColumnOptions(target.closest('.schema-editor-row'));
             creationFields = readCreationFields();
             renderCreationFields();
-        } else if (target.dataset.themeColor) {
-            state.theme = structuredClone(state.theme);
-            state.theme.colors[target.dataset.themeColor] = target.value;
-            state.themePreview = true;
-            applyTheme(state.theme);
-            target.closest('label').querySelector('code').textContent = target.value;
-        } else if (target.dataset.themeDecoration) {
-            state.theme = structuredClone(state.theme);
-            state.theme.decoration[target.dataset.themeDecoration] = target.checked;
-            state.themePreview = true;
-            applyTheme(state.theme);
         }
     } catch (error) {
         if (state.api === api) report(error);

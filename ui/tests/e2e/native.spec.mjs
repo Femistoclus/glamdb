@@ -67,6 +67,7 @@ test('native typed write and every metadata view survive browser reload', async 
     await expect(page.getByLabel('Result limit')).toHaveAttribute('max', '10000');
     await page.getByLabel('Result limit').fill('1010');
     const write = page.locator('#write-form');
+    await write.locator('[data-write-row] summary').first().click();
     await write.getByLabel('key row 1', { exact: true }).fill('persisted-browser-row');
     await write.getByLabel('label row 1', { exact: true }).fill('native');
     await write.getByLabel('amount row 1 NULL', { exact: true }).uncheck();
@@ -377,6 +378,7 @@ test('unknown append survives database switching and reconciliation with its ori
         page.locator('.operations-card').getByText(operationId, { exact: true }),
     ).toBeVisible();
     await page.getByRole('button', { name: 'Reconcile database', exact: true }).click();
+    await expect(page.locator('#toast')).toContainText('Database reconciled.');
     await page.getByRole('button', { name: 'Check outcome', exact: true }).click();
     await expect(page.locator('.operations-card strong')).toHaveText('committed');
     await expect(
@@ -417,6 +419,7 @@ test('native lost receipt exports and imports after reload without changing the 
         await route.abort('failed');
     });
     const write = page.locator('#write-form');
+    await write.locator('[data-write-row] summary').first().click();
     await write.getByLabel('key row 1', { exact: true }).fill('native-recovery-row');
     await write.getByLabel('label row 1', { exact: true }).fill('original payload');
     await write.getByRole('button', { name: 'Append rows', exact: true }).click();
@@ -534,6 +537,7 @@ test('native decimal and date creation, exact write and typed filters survive re
     await expect(dialog).not.toBeVisible();
     await navigate(page, 'Data studio');
     const write = page.locator('#write-form');
+    await write.locator('[data-write-row] summary').first().click();
     const amount = '9999999999999999999999999999999999.9999';
     await write.getByLabel('key row 1', { exact: true }).fill('exact-money');
     await write.getByLabel('day row 1', { exact: true }).fill('0001-01-01');
@@ -713,4 +717,63 @@ test('native KV no-op receipt exports, imports and retries after reload without 
     await expect(
         page.getByRole('table', { name: 'Published snapshot operations' }).locator('tbody tr'),
     ).toHaveCount(0);
+});
+
+test('native snapshot selection keeps the same read and write forms and their drafts', async ({
+    page,
+}, info) => {
+    await connect(page);
+    await page.getByLabel('Database name').fill('compact_native');
+    await page.getByRole('button', { name: 'Create database', exact: true }).click();
+    await page.getByRole('button', { name: 'New collection', exact: true }).first().click();
+    await page.getByLabel('Collection name').fill('compact_rows');
+    await page.getByRole('button', { name: 'Create collection' }).click();
+    await expect(page.getByRole('dialog')).not.toBeVisible();
+    await navigate(page, 'Data studio');
+    const write = page.locator('#write-form');
+    await write.locator('[data-write-row] summary').first().click();
+    await write.getByLabel('key row 1', { exact: true }).fill('saved-row');
+    await write.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await expect(write.getByText('Append committed', { exact: true })).toBeVisible();
+    const snapshot = await page.locator('#snapshot-selector option').last().getAttribute('value');
+    await write.getByRole('button', { name: 'New rows', exact: true }).click();
+    await write.locator('[data-write-row] summary').first().click();
+    await write.getByLabel('key row 1', { exact: true }).fill('unsent-draft');
+    await page.getByRole('button', { name: '+ Add a condition', exact: true }).click();
+    await page.getByLabel('Filter value 1').fill('saved-row');
+    await page.getByLabel('Result limit').fill('7');
+    await page.locator('#query-form').evaluate((node) => (globalThis.originalReadForm = node));
+    await write.evaluate((node) => (globalThis.originalWriteForm = node));
+    for (const [selected, count] of [
+        ['initial', 0],
+        [snapshot, 1],
+        ['latest', 1],
+    ]) {
+        await page.getByLabel('Snapshot', { exact: true }).selectOption(selected);
+        await expect
+            .poll(() =>
+                page
+                    .locator('#query-form')
+                    .evaluate((node) => node === globalThis.originalReadForm),
+            )
+            .toBe(true);
+        await expect
+            .poll(() => write.evaluate((node) => node === globalThis.originalWriteForm))
+            .toBe(true);
+        await expect(page.getByLabel('Result limit')).toHaveValue('7');
+        await expect(page.getByLabel('Filter value 1')).toHaveValue('saved-row');
+        await expect(write.getByLabel('key row 1', { exact: true })).toHaveValue('unsent-draft');
+        await page.locator('#run-query').click();
+        await expect(page.locator('.read-panel .results-panel')).toBeVisible();
+        await expect(page.locator('.read-panel tbody tr')).toHaveCount(count);
+        await expect(page.locator('.mock-banner')).toHaveCount(0);
+    }
+    await expect(write.getByLabel('key row 1', { exact: true })).toHaveValue('unsent-draft');
+    await page.getByRole('button', { name: 'Switch to dark theme' }).click();
+    await page.getByRole('button', { name: 'Collapse sidebar' }).click();
+    await expect(page.locator('.sidebar')).toHaveCSS('width', '64px');
+    await page.screenshot({
+        path: info.outputPath('native-compact-data-dark.png'),
+        fullPage: true,
+    });
 });

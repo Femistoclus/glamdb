@@ -9,7 +9,7 @@ export function writeEditor(schema, draft, operation, collectionId, labels = {},
     <div class="write-rows">${rows
         .map(
             (row, index) =>
-                `<fieldset class="write-row" data-write-row><legend>Row ${index + 1}${rows.length > 1 && !frozen ? `<button type="button" class="text-button" data-action="remove-write-row" data-index="${index}" aria-label="Remove row ${index + 1}">Remove</button>` : ''}</legend>${fields
+                `<details class="write-row" data-write-row ${frozen ? 'open' : ''}><summary><span>Row ${index + 1}</span><small>${fields.length} columns</small>${rows.length > 1 && !frozen ? `<button type="button" class="text-button" data-action="remove-write-row" data-index="${index}" aria-label="Remove row ${index + 1}">Remove</button>` : ''}</summary><div class="write-row-fields">${fields
                     .map((field, fi) => {
                         const value = row[field.name];
                         const isNull = field.nullable && (value === null || value === undefined);
@@ -21,7 +21,7 @@ export function writeEditor(schema, draft, operation, collectionId, labels = {},
                                 : `<input id="${id}" data-write-value type="text" ${['int64', 'float64', 'decimal'].includes(field.type) ? 'inputmode="decimal"' : ''} value="${e(value ?? '')}" ${disabled} aria-label="${e(field.name)} row ${index + 1}" placeholder="${field.type === 'timestamp_us_utc' ? '2026-11-11T12:00:00.000000Z' : field.type === 'date' ? 'YYYY-MM-DD' : e(field.name)}">`;
                         return `<div class="write-field" data-field="${e(field.name)}"><label for="${id}">${e(field.name)} <span class="field-type">${e(field.type)}</span></label><div class="write-value">${control}${field.nullable ? `<label class="null-toggle"><input type="checkbox" data-write-null ${isNull ? 'checked' : ''} ${frozen ? 'disabled' : ''} aria-label="${e(field.name)} row ${index + 1} NULL">NULL</label>` : ''}</div></div>`;
                     })
-                    .join('')}</fieldset>`,
+                    .join('')}</div></details>`,
         )
         .join('')}</div>
     <div class="write-actions"><button type="button" class="text-button" data-action="add-write-row" ${frozen || rows.length >= 100 ? 'disabled' : ''}>+ Add row</button><button class="button primary" type="submit" ${operation?.terminal ? 'disabled' : ''}>${operation?.terminal ? (operation.outcome === 'committed' ? 'Committed' : 'Not committed') : operation ? 'Retry same operation' : `${action} rows`}</button></div>
