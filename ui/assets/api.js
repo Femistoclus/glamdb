@@ -1,5 +1,6 @@
 import { validateRecovery } from './recovery.js';
 import { validateArrowFraming, validateArrowHeaders } from './arrow.js';
+import { validateCommittedReceipt } from './receipt.js';
 
 export function csrfToken(cookie = globalThis.document?.cookie ?? '') {
     const values = cookie
@@ -162,6 +163,8 @@ export class WorkbenchAPI {
         }
         if (payload?.outcome === 'commit_unknown')
             validateRecovery(payload, response.status, path, options.body);
+        if (payload?.outcome === 'committed')
+            validateCommittedReceipt(payload, response.status, path, options.body);
         if (
             !response.ok &&
             !(

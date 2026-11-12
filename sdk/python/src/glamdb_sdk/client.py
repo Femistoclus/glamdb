@@ -642,7 +642,7 @@ class Client:
         return self._append_outcome(status, value, budget, expected_payload_hash=request.payload_hash)
 
     @staticmethod
-    def _validate_receipt(result: Mapping[str, Any], expected_payload_hash: str | None) -> None:
+    def _validate_receipt(result: Mapping[str, Any], expected_payload_hash: str | None, *, mock: bool = False) -> None:
         digest = result.get("payload_hash")
         if not isinstance(digest, str) or re.fullmatch(r"[0-9a-fA-F]{64}", digest, re.ASCII) is None:
             raise ProtocolError("append receipt requires a SHA256 hexadecimal payload_hash")
@@ -650,20 +650,37 @@ class Client:
             raise ProtocolError("append receipt requires supported hash_version 1")
         if expected_payload_hash is not None and not hmac.compare_digest(digest.lower(), expected_payload_hash.lower()):
             raise ProtocolError("append receipt payload_hash differs from the original request")
-        if type(result.get("receipt_version")) is not int or result["receipt_version"] != 1:
-            raise ProtocolError("append receipt requires supported receipt_version 1")
+        version = result.get("receipt_version")
+        if type(version) is not int or version not in (1, 2):
+            raise ProtocolError("append receipt requires supported receipt_version 1 or 2")
         rows = int64(result.get("rows_appended"))
-        if not 1 <= rows <= 10000:
+        if not 1 <= rows <= (10000 if version == 1 else 25600000):
             raise ProtocolError("append receipt rows_appended is outside the v0 append profile")
         created_at = result.get("snapshot_created_at_us")
         if not isinstance(created_at, str):
             raise ProtocolError("append receipt requires decimal-string snapshot_created_at_us")
-        timestamp_us(int64(created_at))
-        # The development adapter has no physical files and omits unavailable
-        # measurements. Check optional metrics without inventing missing ones.
-        for name, minimum in (("data_files_added", 1), ("compressed_data_bytes_added", 0), ("rows_total", rows)):
-            if name in result and int64(result[name]) < minimum:
-                raise ProtocolError(f"append receipt has invalid {name}")
+        created_at_us = int64(created_at)
+        timestamp_us(created_at_us)
+        if version == 2 and created_at_us % 1000:
+            raise ProtocolError("bulk append receipt timestamp requires millisecond precision")
+        # Native receipts retain every core field. The development adapter has
+        # no physical files and may omit unavailable measurements.
+        if not mock or version == 2:
+            for name in ("data_files_added", "compressed_data_bytes_added", "parent_snapshot_id", "durability_profile"):
+                if name not in result:
+                    raise ProtocolError(f"append receipt requires {name}")
+        files = int64(result["data_files_added"]) if "data_files_added" in result else None
+        if files is not None:
+            if version == 1 and files != 1:
+                raise ProtocolError("ordinary append receipt requires one data file")
+            if version == 2 and (not 1 <= files <= 256 or rows > files * 100000):
+                raise ProtocolError("bulk append receipt exceeds its file or row bounds")
+        if "compressed_data_bytes_added" in result:
+            size = int64(result["compressed_data_bytes_added"])
+            if not 1 <= size <= (files or 1) * 32 * 1024 * 1024:
+                raise ProtocolError("append receipt exceeds its compressed byte bound")
+        if "rows_total" in result and int64(result["rows_total"]) < rows:
+            raise ProtocolError("append receipt has invalid rows_total")
         if "parent_snapshot_id" in result and result["parent_snapshot_id"] is not None:
             parent = result["parent_snapshot_id"]
             if not isinstance(parent, str):
@@ -688,7 +705,8 @@ class Client:
                 if not isinstance(result.get("snapshot_id"), str):
                     raise ProtocolError("append receipt requires decimal-string snapshot_id", raw=value)
                 int64(result["snapshot_id"])
-                self._validate_receipt(result, expected_payload_hash)
+                self._validate_receipt(result, expected_payload_hash,
+                                       mock=value.get("mock") is True or result.get("mock") is True)
             elif kind == "definitely_not_committed":
                 if (not isinstance(error_value, dict) or result is not None or not 400 <= status <= 599
                         or value.get("recovery_required", False) is not False or "recovery" in value):

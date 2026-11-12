@@ -79,6 +79,32 @@ TEST(OutcomeJson, CompleteReceiptPreservesIntegerPrecisionAndRecoveryEquality)
     EXPECT_EQ(json_adapter::ToJson(*recovered)->body, encoded->body);
 }
 
+TEST(OutcomeJson, BulkReceiptRoundTripsWithoutRelaxingOrdinaryBounds)
+{
+    auto outcome = Committed();
+    if (!outcome.result) {
+        throw std::runtime_error("expected committed receipt");
+    }
+    auto& result = *outcome.result;
+    result.rows_appended = 100'001;
+    result.data_files_added = 2;
+    EXPECT_FALSE(detail::EncodeOutcome(outcome));
+    result.receipt_version = 2;
+    const auto stored = detail::EncodeOutcome(outcome);
+    ASSERT_TRUE(stored);
+    EXPECT_EQ(*detail::DecodeOutcome(*stored), outcome);
+    EXPECT_EQ(JsonAt(json_adapter::ToJson(outcome)->body, "$.result.receipt_version").text, "2");
+    result.data_files_added = 1;
+    EXPECT_FALSE(detail::EncodeOutcome(outcome));
+    result.data_files_added = BulkAppendLimits::MaxFiles + 1;
+    EXPECT_FALSE(detail::EncodeOutcome(outcome));
+    result.data_files_added = 2;
+    result.compressed_data_bytes_added = (64LL << 20) + 1;
+    EXPECT_FALSE(detail::EncodeOutcome(outcome));
+    result.receipt_version = 3;
+    EXPECT_FALSE(detail::EncodeOutcome(outcome));
+}
+
 TEST(OutcomeJson, UnknownIs503AndRetainsEntireRecoveryContext)
 {
     const ErrorDetail first{"IO_ERROR", "directory sync \"failed\"\n", RetryHint::SameIdAfterReconcile};

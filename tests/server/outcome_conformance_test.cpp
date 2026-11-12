@@ -33,7 +33,9 @@ AppendOutcome NativeAppend(const TJson& fixture, const std::string& name)
     const std::string collection = fixture.at("collection_id");
     const std::string store = fixture.at("store_id");
     const std::string table = fixture.at("table_uuid");
-    const auto& request = fixture.at("appends").at(name == "committed_b" ? "b" : "a");
+    const bool bulk = name == "bulk_committed";
+    const auto& request =
+        bulk ? fixture.at("bulk_appends").at("bulk") : fixture.at("appends").at(name == "committed_b" ? "b" : "a");
     const std::string operation = request.at("operation_id");
     const std::string hash = request.at("payload_hash");
     if (name == "pre_binding_rejection" || name == "registered_failure") {
@@ -86,14 +88,22 @@ AppendOutcome NativeAppend(const TJson& fixture, const std::string& name)
             operation,
             hash,
             1,
-            second ? 9007199254740995LL : 9007199254740993LL,
-            second ? std::optional<int64_t>(9007199254740993LL) : std::nullopt,
-            second ? 1 : 3,
-            1,
-            second ? 124 : 123,
+            bulk         ? 9007199254740997LL
+                : second ? 9007199254740995LL
+                         : 9007199254740993LL,
+            bulk         ? std::optional<int64_t>(9007199254740995LL)
+                : second ? std::optional<int64_t>(9007199254740993LL)
+                         : std::nullopt,
+            bulk         ? 200'000
+                : second ? 1
+                         : 3,
+            bulk ? 2 : 1,
+            bulk         ? 67'108'864
+                : second ? 124
+                         : 123,
             1767225600123000LL,
             "local-delete-extra-v1",
-            1},
+            bulk ? 2 : 1},
         std::nullopt,
         std::nullopt};
 }
@@ -154,6 +164,67 @@ TEST(OutcomeConformance, CanonicalHashesAndTypedRowsMatchIndependentPreimages)
         ASSERT_TRUE(hash);
         EXPECT_EQ(*hash, request.at("payload_hash").get<std::string>());
         EXPECT_EQ(detail::Sha256(Unhex(request.at("canonical_hex"))), request.at("payload_hash").get<std::string>());
+    }
+}
+
+TEST(OutcomeConformance, BulkCanonicalStreamMatchesIndependentPreimage)
+{
+    const auto fixture = Fixture();
+    const auto schema = ParseSchema(fixture.at("schema"));
+    const auto& request = fixture.at("bulk_appends").at("bulk");
+    const auto header = detail::EncodeBulkAppendHeader(schema,
+        fixture.at("collection_id").get<std::string>(),
+        request.at("repeat_count").get<int64_t>());
+    ASSERT_TRUE(header);
+    EXPECT_EQ(*header, Unhex(request.at("canonical_header_hex")));
+    detail::TCanonicalHasher actual;
+    actual.AddBytes(*header);
+    TJson rows = TJson::array();
+    for (int row = 0; row < 1000; ++row) {
+        rows.push_back(request.at("row"));
+    }
+    const auto batch = ParseRows(schema, rows);
+    for (int chunk = 0; chunk < 200; ++chunk) {
+        ASSERT_TRUE(detail::UpdateFingerprintBatches(schema, {batch}, actual));
+    }
+    EXPECT_EQ(actual.ComputeDigest(), request.at("payload_hash").get<std::string>());
+}
+
+TEST(OutcomeConformance, InvalidReceiptValuesMatchSharedBounds)
+{
+    const auto fixture = Fixture();
+    for (const auto& mutation : fixture.at("invalid_receipts")) {
+        if (!mutation.contains("path")) {
+            // Native values always serialize every required receipt member.
+            continue;
+        }
+        SCOPED_TRACE(mutation.at("name").get<std::string>());
+        auto outcome = NativeAppend(fixture, mutation.at("case"));
+        if (!outcome.result) {
+            throw std::runtime_error("expected committed receipt");
+        }
+        auto& result = *outcome.result;
+        const auto path = mutation.at("path").get<std::string>();
+        if (path == "/result/hash_version") {
+            result.hash_version = mutation.at("value");
+        } else if (path == "/result/receipt_version") {
+            result.receipt_version = mutation.at("value");
+        } else {
+            const auto value = std::stoll(mutation.at("value").get<std::string>());
+            if (path == "/result/rows_appended") {
+                result.rows_appended = value;
+            } else if (path == "/result/data_files_added") {
+                result.data_files_added = value;
+            } else if (path == "/result/compressed_data_bytes_added") {
+                result.compressed_data_bytes_added = value;
+            } else if (path == "/result/snapshot_created_at_us") {
+                result.snapshot_created_at_us = value;
+            } else {
+                FAIL() << "Unhandled shared receipt mutation: " << path;
+            }
+        }
+        EXPECT_FALSE(detail::EncodeOutcome(outcome));
+        EXPECT_FALSE(json_adapter::ToJson(outcome));
     }
 }
 

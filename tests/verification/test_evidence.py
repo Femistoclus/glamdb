@@ -118,7 +118,7 @@ def test_recovery_detects_missing_duplicate_changed_and_malformed(verify):
 
 
 @pytest.mark.parametrize("change", [
-    {"receipt_version": 2}, {"hash_version": 2}, {"rows_appended": 0},
+    {"receipt_version": 3}, {"hash_version": 2}, {"rows_appended": 0},
     {"snapshot_id": True}, {"snapshot_created_at_us": "1"},
     {"payload_hash": "a" * 63}, {"operation_id": "no-uuid"},
     {"committed_at": "0"},

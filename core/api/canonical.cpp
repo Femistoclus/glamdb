@@ -317,12 +317,12 @@ Result<std::string> SchemaFingerprint(const SchemaSpec& schema)
     return Sha256(*encoded);
 }
 
-Result<std::string> EncodeAppendHeader(const SchemaSpec& schema, std::string_view collection_id, size_t rows)
+Result<std::string> EncodeBulkAppendHeader(const SchemaSpec& schema, std::string_view collection_id, int64_t rows)
 {
     try {
         ValidateSchema(schema);
         Require(ValidUuid(collection_id), "INVALID_ARGUMENT", "collection ID must be a canonical UUID");
-        Require(rows != 0 && rows <= 10000, "INVALID_ARGUMENT", "append requires 1..10000 rows");
+        Require(rows > 0 && rows <= BulkAppendLimits::MaxRows, "INVALID_ARGUMENT", "bulk row count exceeds its limit");
         Encoder out;
         out.bytes.assign("COLUMNAR-APPEND\0", 16);
         out.Number<uint16_t>(1);
@@ -341,6 +341,14 @@ Result<std::string> EncodeAppendHeader(const SchemaSpec& schema, std::string_vie
         detail.retry_hint = RetryHint::FixInput;
         return std::unexpected(std::move(detail));
     }
+}
+
+Result<std::string> EncodeAppendHeader(const SchemaSpec& schema, std::string_view collection_id, size_t rows)
+{
+    if (rows == 0 || rows > 10000) {
+        return std::unexpected(ErrorDetail{"INVALID_ARGUMENT", "append requires 1..10000 rows", RetryHint::FixInput});
+    }
+    return EncodeBulkAppendHeader(schema, collection_id, static_cast<int64_t>(rows));
 }
 
 namespace {

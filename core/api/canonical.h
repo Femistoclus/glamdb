@@ -3,6 +3,7 @@
 #include "storage/types.h"
 
 #include <array>
+#include <functional>
 #include <optional>
 #include <string_view>
 
@@ -11,6 +12,8 @@ class MemoryPool;
 }
 
 namespace glamdb::detail {
+
+struct TBulkInput;
 
 struct NormalizedInput
 {
@@ -24,8 +27,17 @@ struct NormalizedInput
     size_t decoded_bytes = 0;
     // Built during backend admission and retained until this append finishes.
     std::shared_ptr<arrow::RecordBatch> writer_batch;
+    std::shared_ptr<TBulkInput> bulk{};
 
     size_t GetRowCount() const;
+};
+
+struct TBulkInput
+{
+    int64_t Rows = 0;
+    // GetRowCount() == 0 means validated EOF. Each other result is one
+    // independently bounded chunk, with no cross-chunk row accumulation.
+    std::function<Result<NormalizedInput>()> Next;
 };
 
 // Fingerprinting uses fixed-size state, independent of owned payload admission.
@@ -75,6 +87,10 @@ std::string BoundedDiagnostic(std::string_view message);
 bool ValidDigest(std::string_view value);
 std::string Sha256(std::string_view input);
 Result<std::string> EncodeAppendHeader(const SchemaSpec& schema, std::string_view collection_id, size_t rows);
+Result<std::string> EncodeBulkAppendHeader(const SchemaSpec& schema, std::string_view collection_id, int64_t rows);
+Result<size_t> UpdateFingerprintBatches(const SchemaSpec& schema,
+    const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
+    TCanonicalHasher& hash);
 Result<std::string> EncodeSchema(const SchemaSpec& schema);
 Result<SchemaSpec> DecodeSchema(std::string_view bytes);
 Result<std::string> SchemaFingerprint(const SchemaSpec& schema);

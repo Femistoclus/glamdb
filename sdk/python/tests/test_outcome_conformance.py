@@ -21,7 +21,8 @@ def invoke(client, case):
     cid = FIXTURE["collection_id"]
     if case["kind"] == "create":
         return client.create_collection(FIXTURE["exact_name"], SCHEMA, collection_id=cid)
-    request = FIXTURE["appends"][case["request"]]
+    requests = FIXTURE["bulk_appends"] if case["request"] == "bulk" else FIXTURE["appends"]
+    request = requests[case["request"]]
     if case["kind"] == "lookup":
         return client.find_append_outcome(cid, request["operation_id"])
     return client.append(cid, request["rows"], operation_id=request["operation_id"], schema=SCHEMA)
@@ -57,6 +58,34 @@ def test_incomplete_or_inconsistent_recovery_fails_with_original_identity(invali
     if case["kind"] != "create":
         assert caught.value.operation_id == FIXTURE["appends"][case["request"]]["operation_id"]
     assert caught.value.raw == response
+
+
+@pytest.mark.parametrize("invalid", FIXTURE["invalid_receipts"], ids=lambda case: case["name"])
+def test_invalid_shared_receipt_is_rejected_without_losing_identity(invalid):
+    case = CASES[invalid["case"]]
+    response = copy.deepcopy(case["response"])
+    field = invalid.get("remove", invalid.get("path")).split("/")[-1]
+    if "remove" in invalid:
+        del response["result"][field]
+    else:
+        response["result"][field] = invalid["value"]
+    with Client("https://example.test", "token", transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=response))) as client:
+        with pytest.raises(ProtocolError) as caught:
+            invoke(client, case)
+    assert caught.value.collection_id == FIXTURE["collection_id"]
+    assert caught.value.operation_id == response["operation_id"]
+    assert caught.value.raw == response
+
+
+def test_bulk_shared_digest_has_a_bounded_reproducible_preimage():
+    request = FIXTURE["bulk_appends"]["bulk"]
+    digest = hashlib.sha256(bytes.fromhex(request["canonical_header_hex"]))
+    row = bytes.fromhex(request["canonical_row_hex"])
+    for _ in range(request["repeat_count"]):
+        digest.update(row)
+    assert digest.hexdigest() == request["payload_hash"]
+    assert int.from_bytes(bytes.fromhex(request["canonical_header_hex"])[-8:], "little") == 200000
 
 
 @pytest.mark.parametrize("name", ["unknown_publication", "blocked_lookup", "lost_create"])

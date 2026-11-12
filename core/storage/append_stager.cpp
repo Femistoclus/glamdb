@@ -14,6 +14,9 @@
 #include <iceberg/update/fast_append.h>
 #include <iceberg/util/macros.h>
 
+#include <set>
+#include <span>
+
 namespace NGlamDB::NStorage {
 using iceberg::Error;
 
@@ -79,23 +82,36 @@ iceberg::Result<TStagedAppend> CollectStage(std::shared_ptr<iceberg::Transaction
     return staged;
 }
 
-}
-
-iceberg::Result<TStagedAppend> StageAppend(std::shared_ptr<iceberg::Table> table,
-    const std::shared_ptr<iceberg::DataFile>& dataFile,
+iceberg::Result<TStagedAppend> StageFiles(std::shared_ptr<iceberg::Table> table,
+    std::span<const std::shared_ptr<iceberg::DataFile>> dataFiles,
     const std::unordered_map<std::string, std::string>& summary,
-    const std::shared_ptr<NIO::TIOAttempt>& attempt)
+    const std::shared_ptr<NIO::TIOAttempt>& attempt,
+    bool bulk)
 {
     auto result = CatchIcebergExceptions([&]() -> iceberg::Result<TStagedAppend> {
-        if (!table || !dataFile || !attempt) {
-            return iceberg::InvalidArgument("Append requires a table, data file and active attempt");
+        if (!table || !attempt || dataFiles.empty() || dataFiles.size() > (bulk ? 256U : 1U)) {
+            return iceberg::InvalidArgument("Append requires a table, bounded data files and active attempt");
         }
-        ICEBERG_RETURN_UNEXPECTED(CheckData(*table, *dataFile, *attempt));
+        const auto marker = summary.find("glamdb.bulk-version");
+        if ((bulk && (marker == summary.end() || marker->second != "1")) || (!bulk && marker != summary.end())) {
+            return iceberg::InvalidArgument("Append summary does not match its bulk profile");
+        }
+        std::set<std::string_view> paths;
+        for (const auto& dataFile : dataFiles) {
+            if (!dataFile || dataFile->record_count > (bulk ? 100000 : 10000) ||
+                dataFile->file_size_in_bytes > (32LL << 20) || !paths.insert(dataFile->file_path).second)
+            {
+                return iceberg::InvalidArgument("Append has invalid, duplicate or oversized data files");
+            }
+            ICEBERG_RETURN_UNEXPECTED(CheckData(*table, *dataFile, *attempt));
+        }
         RegisterStorageFormats();
         ICEBERG_ASSIGN_OR_RAISE(auto transaction,
             iceberg::Transaction::Make(std::move(table), iceberg::TransactionKind::kUpdate));
         ICEBERG_ASSIGN_OR_RAISE(auto append, transaction->NewFastAppend());
-        append->AppendFile(dataFile);
+        for (const auto& dataFile : dataFiles) {
+            append->AppendFile(dataFile);
+        }
         for (const auto& [key, value] : summary) {
             append->Set(key, value);
         }
@@ -113,6 +129,24 @@ iceberg::Result<TStagedAppend> StageAppend(std::shared_ptr<iceberg::Table> table
                     : std::errc::io_error));
     }
     return result;
+}
+
+}
+
+iceberg::Result<TStagedAppend> StageAppend(std::shared_ptr<iceberg::Table> table,
+    const std::shared_ptr<iceberg::DataFile>& dataFile,
+    const std::unordered_map<std::string, std::string>& summary,
+    const std::shared_ptr<NIO::TIOAttempt>& attempt)
+{
+    return StageFiles(std::move(table), std::span(&dataFile, 1), summary, attempt, false);
+}
+
+iceberg::Result<TStagedAppend> StageBulkAppend(std::shared_ptr<iceberg::Table> table,
+    const std::vector<std::shared_ptr<iceberg::DataFile>>& dataFiles,
+    const std::unordered_map<std::string, std::string>& summary,
+    const std::shared_ptr<NIO::TIOAttempt>& attempt)
+{
+    return StageFiles(std::move(table), dataFiles, summary, attempt, true);
 }
 
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <expected>
@@ -277,6 +278,43 @@ struct AppendRequest
     std::string operation_id;
     SnapshotPrecondition expected_snapshot;
     std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+};
+
+// Replayed synchronously for validation and production. Next returns nullptr
+// at EOF. Each immutable batch is bounded to 10,000 rows and 16 MiB; callbacks
+// must return promptly and must not reenter the engine writer.
+class BulkAppendSource
+{
+public:
+    virtual ~BulkAppendSource() = default;
+    virtual Status Rewind() = 0;
+    virtual Result<std::shared_ptr<arrow::RecordBatch>> Next() = 0;
+};
+
+struct BulkAppendRequest
+{
+    std::string collection_id;
+    std::string operation_id;
+    SnapshotPrecondition expected_snapshot{};
+    int64_t rows = 0;
+    std::shared_ptr<BulkAppendSource> source{};
+    // Cooperative; cancellation cannot revoke a successful outer COMMIT.
+    std::shared_ptr<const std::atomic<bool>> cancellation{};
+    std::chrono::milliseconds timeout{600000};
+};
+
+// Fixed development profile. Ordinary AppendDurable retains its own limits.
+struct BulkAppendLimits
+{
+    static constexpr int64_t MaxFiles = 256;
+    static constexpr int64_t MaxFileRows = 100'000;
+    static constexpr int64_t MaxRows = MaxFiles * MaxFileRows;
+    static constexpr int64_t TargetFileBytes = 8LL << 20;
+    static constexpr int64_t MaxFileInputBytes = 16LL << 20;
+    static constexpr int64_t MaxDecodedBytes = MaxFiles * MaxFileInputBytes;
+    static constexpr int64_t MemoryBytes = 128LL << 20;
+    static constexpr uint64_t AttemptDiskBytes = (8ULL << 30) + (32ULL << 20);
+    static constexpr uint64_t AttemptInodes = 320;
 };
 
 struct Limits

@@ -11,6 +11,7 @@
 #include <cstring>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace glamdb::detail {
@@ -483,6 +484,45 @@ Result<TFingerprintedInput> FingerprintInput(const SchemaSpec& schema,
         const auto shape = Inspect(schema, batches);
         return TFingerprintedInput{Fingerprint(schema, collection_id, batches, shape),
             ComputeReservation(schema, shape)};
+    } catch (const Failure& error) {
+        auto detail = error.detail;
+        detail.retry_hint = RetryHint::FixInput;
+        return std::unexpected(std::move(detail));
+    }
+}
+
+Result<size_t> UpdateFingerprintBatches(const SchemaSpec& schema,
+    const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
+    TCanonicalHasher& hash)
+{
+    try {
+        const auto shape = Inspect(schema, batches);
+        std::unordered_set<const arrow::Buffer*> retained;
+        size_t retainedBytes = 0;
+        for (const auto& batch : batches) {
+            for (const auto& column : batch->columns()) {
+                for (auto buffer : column->data()->buffers) {
+                    size_t depth = 0;
+                    while (buffer && buffer->parent()) {
+                        Require(++depth <= 64, "INPUT_TOO_LARGE", "Arrow buffer parent chain exceeds its limit");
+                        buffer = buffer->parent();
+                    }
+                    if (!buffer || !retained.insert(buffer.get()).second) {
+                        continue;
+                    }
+                    Require(buffer->capacity() >= 0 &&
+                            static_cast<uint64_t>(buffer->capacity()) <=
+                                static_cast<uint64_t>(BulkAppendLimits::MaxFileInputBytes) - retainedBytes,
+                        "INPUT_TOO_LARGE",
+                        "bulk source retains more than 16 MiB of Arrow buffers");
+                    retainedBytes += static_cast<size_t>(buffer->capacity());
+                }
+            }
+        }
+        for (const auto& batch : batches) {
+            HashRows(hash, ResolveColumns(schema, *batch, MapFields(schema, *batch, true)), batch->num_rows());
+        }
+        return shape.decoded_bytes;
     } catch (const Failure& error) {
         auto detail = error.detail;
         detail.retry_hint = RetryHint::FixInput;

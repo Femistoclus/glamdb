@@ -65,6 +65,7 @@ public:
     // AppendDurable still validates identity, payload and write admission.
     Result<SchemaSpec> SchemaForAppend(std::string_view collection_id) const;
     AppendOutcome AppendDurable(const AppendRequest& request);
+    AppendOutcome BulkAppendDurable(const BulkAppendRequest& request);
     Result<std::optional<AppendOutcome>> FindAppendOutcome(std::string_view collection_id,
         std::string_view operation_id) const;
     // Reads one fixed view. The cursor retains the store until it is released.
@@ -73,6 +74,7 @@ public:
     Status Shutdown(std::chrono::milliseconds timeout);
 
 private:
+    AppendOutcome AppendDurableImpl(const AppendRequest& request, const BulkAppendRequest* bulk);
     explicit Engine(std::shared_ptr<Impl> implementation);
     std::shared_ptr<Impl> impl_;
     friend struct detail::EngineFactory;

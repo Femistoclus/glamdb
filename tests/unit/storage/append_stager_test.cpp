@@ -114,11 +114,12 @@ protected:
         return std::string("store://") + StoreID + "/warehouse/" + CollectionID;
     }
 
-    void BindAppend(const std::string& attemptID = AppendID)
+    void BindAppend(const std::string& attemptID = AppendID, NIO::TAttemptLimits limits = {})
     {
         Scope_.reset();
-        auto attempt =
-            NIO::TIOAttempt::Make({StoreID, CollectionID, attemptID, NIO::EAttemptKind::Append, OperationID}, Latch_);
+        auto attempt = NIO::TIOAttempt::Make({StoreID, CollectionID, attemptID, NIO::EAttemptKind::Append, OperationID},
+            Latch_,
+            limits);
         ASSERT_TRUE(attempt);
         Attempt_ = std::move(attempt).Value();
         auto scope = IO_->BindAttempt(Attempt_);
@@ -162,6 +163,78 @@ protected:
         }
     }
 };
+
+TEST_F(TAppendStagerTest, BulkStagesEveryVerifiedFileInOneSnapshot)
+{
+    BindAppend(AppendID, NIO::TAttemptLimits::BulkAppend());
+    arrow::StringBuilder builder;
+    ASSERT_TRUE(builder.Append("duplicate").ok());
+    auto array = builder.Finish();
+    ASSERT_TRUE(array.ok());
+    const auto batch =
+        arrow::RecordBatch::Make(arrow::schema({arrow::field("key", arrow::utf8(), false)}), 1, {*array});
+    std::vector<std::shared_ptr<iceberg::DataFile>> files;
+    for (int index = 0; index < 2; ++index) {
+        const auto path =
+            Location() + "/data/" + OperationID + "-" + AppendID + "-0000" + std::to_string(index) + ".parquet";
+        auto written = WriteDataFile(IO_, Attempt_, *Table_->metadata(), path, {batch});
+        ASSERT_TRUE(written) << written.error().message;
+        files.push_back(written->DataFile);
+    }
+    const auto staged = StageBulkAppend(Table_, files, {{"glamdb.bulk-version", "1"}}, Attempt_);
+    ASSERT_TRUE(staged) << staged.error().message;
+    CheckUnpublished();
+    const auto snapshot = staged->Transaction->current().Snapshot();
+    ASSERT_TRUE(snapshot);
+    EXPECT_EQ((*snapshot)->summary.at("glamdb.bulk-version"), "1");
+    EXPECT_EQ((*snapshot)->summary.at(iceberg::SnapshotSummaryFields::kAddedDataFiles), "2");
+    EXPECT_EQ((*snapshot)->summary.at(iceberg::SnapshotSummaryFields::kAddedRecords), "2");
+    iceberg::SnapshotReader snapshotReader(snapshot->get());
+    const auto manifests = snapshotReader.Manifests(IO_);
+    ASSERT_TRUE(manifests) << manifests.error().message;
+    std::vector<std::string> actual;
+    for (const auto& manifest : *manifests) {
+        auto reader = iceberg::ManifestReader::Make(manifest, IO_, Table_->schema().value(), Table_->spec().value());
+        ASSERT_TRUE(reader) << reader.error().message;
+        const auto entries = (*reader)->Entries();
+        ASSERT_TRUE(entries) << entries.error().message;
+        for (const auto& entry : *entries) {
+            ASSERT_NE(entry.data_file, nullptr);
+            actual.push_back(entry.data_file->file_path);
+        }
+    }
+    ASSERT_EQ(actual.size(), files.size());
+    EXPECT_EQ(actual[0], files[0]->file_path);
+    EXPECT_EQ(actual[1], files[1]->file_path);
+    EXPECT_FALSE(Attempt_->FirstError());
+}
+
+TEST_F(TAppendStagerTest, BulkRequiresMarkerBeforeMetadataIO)
+{
+    PrepareData();
+    const auto eventCount = FS_->Events().size();
+    EXPECT_FALSE(StageBulkAppend(Table_, {Data_}, {}, Attempt_));
+    EXPECT_EQ(FS_->Events().size(), eventCount);
+    CheckUnpublished();
+}
+
+TEST_F(TAppendStagerTest, BulkRejectsDuplicateFilesBeforeMetadataIO)
+{
+    PrepareData();
+    const auto eventCount = FS_->Events().size();
+    EXPECT_FALSE(StageBulkAppend(Table_, {Data_, Data_}, {{"glamdb.bulk-version", "1"}}, Attempt_));
+    EXPECT_EQ(FS_->Events().size(), eventCount);
+    CheckUnpublished();
+}
+
+TEST_F(TAppendStagerTest, OrdinaryRejectsBulkMarkerBeforeMetadataIO)
+{
+    PrepareData();
+    const auto eventCount = FS_->Events().size();
+    EXPECT_FALSE(StageAppend(Table_, Data_, {{"glamdb.bulk-version", "1"}}, Attempt_));
+    EXPECT_EQ(FS_->Events().size(), eventCount);
+    CheckUnpublished();
+}
 
 constexpr std::string_view AsciiLower = "common_ascii_prefix_longer_than_16_a";
 constexpr std::int64_t MinTimestamp = -62135596800000000LL;

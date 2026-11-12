@@ -1,6 +1,6 @@
 """The independent oracle and SDK accept no schema or receipt that the core validators reject.
 
-The core rejects NUL in field names (ValidateSchema) and committed receipts with
+The core rejects NUL in field names (ValidateSchema) and ordinary receipts with
 compressed_data_bytes_added outside 1..32 MiB, parent_snapshot_id == snapshot_id or a
 durability_profile over 128 bytes (ValidateOutcome).
 """

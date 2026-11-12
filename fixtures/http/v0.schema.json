@@ -533,7 +533,11 @@
           "type": "string"
         },
         "receipt_version": {
-          "const": 1
+          "enum": [
+            1,
+            2
+          ],
+          "description": "Version 1: 1..10000 rows and one file. Version 2: 1..256 files, 1..25600000 rows, at most 100000 rows and 32 MiB per file in aggregate. Numeric profile bounds are checked by core and receipt readers."
         }
       },
       "required": [

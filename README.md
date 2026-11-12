@@ -52,10 +52,11 @@ Current work focuses on qualifying and improving the existing append engine:
 - Page-level and Bloom-filter pruning and broader scan memory qualification
   ([#46](https://github.com/glamourdb/glamdb/issues/46)).
 
-### Planned
+The embedded C++ API also supports [bounded streaming bulk append](docs/development/BULK_INGESTION.md):
+a replayable source produces multiple files with one atomic snapshot and receipt.
+Network upload adapters and 1 TiB qualification remain future work.
 
-- Streaming bulk ingestion with one atomic publication
-  ([#100](https://github.com/glamourdb/glamdb/issues/100)).
+### Planned
 - An explicit key-value mode with copy-on-write upserts, deletes, and batched
   point lookups ([#101](https://github.com/glamourdb/glamdb/issues/101)).
 - Configurable Parquet compression, encodings, and dictionary policies

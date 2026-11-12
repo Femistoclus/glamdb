@@ -285,6 +285,31 @@
           "receipt_version": 1
         }
       }
+    },
+    {
+      "name": "bulk_committed",
+      "kind": "lookup",
+      "request": "bulk",
+      "status": 200,
+      "response": {
+        "outcome": "committed",
+        "phase": "complete",
+        "operation_id": "10000000-0000-4000-8000-000000000006",
+        "result": {
+          "collection_id": "00112233-4455-6677-8899-aabbccddeeff",
+          "operation_id": "10000000-0000-4000-8000-000000000006",
+          "payload_hash": "409b463c6db13725e458365fc62aedabaf9403f28e6183b2c530486777fcfc5c",
+          "hash_version": 1,
+          "snapshot_id": "9007199254740997",
+          "parent_snapshot_id": "9007199254740995",
+          "rows_appended": "200000",
+          "data_files_added": "2",
+          "compressed_data_bytes_added": "67108864",
+          "snapshot_created_at_us": "1767225600123000",
+          "durability_profile": "local-delete-extra-v1",
+          "receipt_version": 2
+        }
+      }
     }
   ],
   "invalid_recovery": [
@@ -561,6 +586,120 @@
       "key": "later",
       "n": "-9223372036854775808",
       "ts": "0001-01-01T00:00:00.000001Z"
+    }
+  ],
+  "bulk_appends": {
+    "bulk": {
+      "operation_id": "10000000-0000-4000-8000-000000000006",
+      "row": {
+        "key": "same",
+        "n": null,
+        "ts": null
+      },
+      "repeat_count": 200000,
+      "canonical_header_hex": "434f4c554d4e41522d415050454e4400010000112233445566778899aabbccddeeff1eb5cc14fec568f06fd36d0f02a78888fcc348174626b71a2b5deb19d6b88c5d400d030000000000",
+      "canonical_row_hex": "010400000073616d650000",
+      "payload_hash": "409b463c6db13725e458365fc62aedabaf9403f28e6183b2c530486777fcfc5c"
+    }
+  },
+  "invalid_receipts": [
+    {
+      "name": "ordinary_rows_over_limit",
+      "case": "committed",
+      "path": "/result/rows_appended",
+      "value": "10001"
+    },
+    {
+      "name": "ordinary_multiple_files",
+      "case": "committed",
+      "path": "/result/data_files_added",
+      "value": "2"
+    },
+    {
+      "name": "ordinary_bytes_over_limit",
+      "case": "committed",
+      "path": "/result/compressed_data_bytes_added",
+      "value": "33554433"
+    },
+    {
+      "name": "bulk_unknown_receipt_version",
+      "case": "bulk_committed",
+      "path": "/result/receipt_version",
+      "value": 3
+    },
+    {
+      "name": "bulk_unknown_hash_version",
+      "case": "bulk_committed",
+      "path": "/result/hash_version",
+      "value": 2
+    },
+    {
+      "name": "bulk_empty",
+      "case": "bulk_committed",
+      "path": "/result/rows_appended",
+      "value": "0"
+    },
+    {
+      "name": "bulk_rows_over_limit",
+      "case": "bulk_committed",
+      "path": "/result/rows_appended",
+      "value": "25600001"
+    },
+    {
+      "name": "bulk_rows_exceed_files",
+      "case": "bulk_committed",
+      "path": "/result/rows_appended",
+      "value": "200001"
+    },
+    {
+      "name": "bulk_zero_files",
+      "case": "bulk_committed",
+      "path": "/result/data_files_added",
+      "value": "0"
+    },
+    {
+      "name": "bulk_files_over_limit",
+      "case": "bulk_committed",
+      "path": "/result/data_files_added",
+      "value": "257"
+    },
+    {
+      "name": "bulk_zero_bytes",
+      "case": "bulk_committed",
+      "path": "/result/compressed_data_bytes_added",
+      "value": "0"
+    },
+    {
+      "name": "bulk_bytes_exceed_files",
+      "case": "bulk_committed",
+      "path": "/result/compressed_data_bytes_added",
+      "value": "67108865"
+    },
+    {
+      "name": "bulk_missing_data_files_added",
+      "case": "bulk_committed",
+      "remove": "/result/data_files_added"
+    },
+    {
+      "name": "bulk_missing_compressed_data_bytes_added",
+      "case": "bulk_committed",
+      "remove": "/result/compressed_data_bytes_added"
+    },
+    {
+      "name": "bulk_missing_parent_snapshot_id",
+      "case": "bulk_committed",
+      "remove": "/result/parent_snapshot_id"
+    },
+    {
+      "name": "bulk_missing_durability_profile",
+      "case": "bulk_committed",
+      "remove": "/result/durability_profile"
+    },
+    {
+      "name": "bulk_timestamp_not_milliseconds",
+      "case": "bulk_committed",
+      "path": "/result/snapshot_created_at_us",
+      "value": "1767225600123001"
     }
   ]
 }

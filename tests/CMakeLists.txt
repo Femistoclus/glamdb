@@ -81,6 +81,19 @@ if(NOT GLAMDB_IO_ONLY)
             "${CMAKE_CURRENT_SOURCE_DIR}/integration/capacity_test.py" "$<TARGET_FILE:glamdb_capacity_bench>")
         set_tests_properties(glamdb.capacity_campaign PROPERTIES LABELS "integration;capacity" TIMEOUT 180)
 
+        add_executable(glamdb_bulk_ingestion_bench "${PROJECT_SOURCE_DIR}/benchmarks/bulk_ingestion.cpp")
+        set_target_properties(glamdb_bulk_ingestion_bench PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/benchmarks")
+        target_include_directories(glamdb_bulk_ingestion_bench PRIVATE "${PROJECT_SOURCE_DIR}")
+        target_include_directories(glamdb_bulk_ingestion_bench SYSTEM PRIVATE
+            "${PROJECT_SOURCE_DIR}/third_party/json/single_include")
+        target_link_libraries(glamdb_bulk_ingestion_bench PRIVATE
+            glamdb::core glamdb_storage glamdb_build_options)
+        add_test(NAME glamdb.bulk_ingestion COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/integration/bulk_ingestion_test.py"
+            "$<TARGET_FILE:glamdb_bulk_ingestion_bench>")
+        set_tests_properties(glamdb.bulk_ingestion PROPERTIES LABELS "integration;bulk" TIMEOUT 240)
+
         add_executable(glamdb_parquet_settings_bench "${PROJECT_SOURCE_DIR}/benchmarks/parquet_settings.cpp")
         target_include_directories(glamdb_parquet_settings_bench PRIVATE "${PROJECT_SOURCE_DIR}")
         target_link_libraries(glamdb_parquet_settings_bench PRIVATE glamdb::core glamdb_build_options Arrow::arrow_static)

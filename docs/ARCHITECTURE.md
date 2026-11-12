@@ -32,8 +32,9 @@ keys. A nonempty successful append publishes one snapshot; independent requests
 are not coalesced, and empty input is rejected before writing. One process owns
 the store, writes are serialized, and independent cursors can read concurrently.
 
-Upsert, delete, bulk ingestion, and compaction belong to the later explicit KV
-mode. Initial append has no payload journal, asynchronous queue, automatic file
+Upsert, delete and compaction belong to the later explicit KV mode.
+The [bounded bulk append extension](development/BULK_INGESTION.md) adds replayable
+streaming ingestion to append collections before KV, with one atomic publication. Initial append has no payload journal, asynchronous queue, automatic file
 deletion, snapshot expiration, or rollback to an older snapshot. Other later
 features and their prerequisites are listed in the roadmap.
 
@@ -189,7 +190,9 @@ checks; no one of them bounds process memory across stores.
 
 Small appends therefore do not imply large-scale ingestion: 1 TiB at 16 MiB per
 append needs at least 65,536 operations, exceeding the candidate history cap.
-The later bulk/compaction profile addresses this separately. Initial history
+The bounded bulk append extension amortizes publication over multiple files;
+its finite development profile and measured limits are documented separately.
+Larger bulk/compaction qualification remains future work. Initial history
 and receipts do not expire, and orphan files count toward physical capacity.
 Reject new work before publication when a bound is reached while retaining old
 reads and retries. A published state must reopen with the same limits.

@@ -10,7 +10,9 @@ const fixture = JSON.parse(
 const cases = Object.fromEntries(fixture.cases.map((value) => [value.name, value]));
 
 function invoke(client, example) {
-    const request = fixture.appends[example.request];
+    const request = (example.request === 'bulk' ? fixture.bulk_appends : fixture.appends)[
+        example.request
+    ];
     const path = `/collections/${fixture.collection_id}`;
     if (example.kind === 'create')
         return client.json('/collections', {
@@ -44,6 +46,42 @@ for (const example of fixture.cases) {
         assert.deepEqual(await invoke(clientFor(example), example), example.response);
     });
 }
+
+for (const invalid of fixture.invalid_receipts) {
+    test(`invalid committed receipt fails explicitly: ${invalid.name}`, async () => {
+        const example = cases[invalid.case];
+        const response = structuredClone(example.response);
+        const field = (invalid.remove ?? invalid.path).split('/').at(-1);
+        if (invalid.remove) delete response.result[field];
+        else response.result[field] = invalid.value;
+        await assert.rejects(invoke(clientFor(example, response), example), /receipt/i);
+    });
+}
+
+test('bulk lookup accepts the aggregate profile ceiling with exact wide byte counts', async () => {
+    const example = cases.bulk_committed;
+    const response = structuredClone(example.response);
+    Object.assign(response.result, {
+        rows_appended: '25600000',
+        data_files_added: '256',
+        compressed_data_bytes_added: '8589934592',
+    });
+    assert.deepEqual(await invoke(clientFor(example, response), example), response);
+});
+
+test('mock receipts can omit unavailable physical metrics', async () => {
+    const example = cases.committed;
+    const response = structuredClone(example.response);
+    response.mock = true;
+    for (const field of [
+        'data_files_added',
+        'compressed_data_bytes_added',
+        'parent_snapshot_id',
+        'durability_profile',
+    ])
+        delete response.result[field];
+    assert.deepEqual(await invoke(clientFor(example, response), example), response);
+});
 
 for (const invalid of fixture.invalid_recovery.filter(
     (value) => !value.clients || value.clients.includes('ui'),

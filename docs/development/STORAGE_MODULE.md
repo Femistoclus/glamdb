@@ -282,3 +282,11 @@ Raw generated logs include `artifacts/qualification-full-engine-check.log`,
 `artifacts/after-success-io.log` and `artifacts/p-io-final-evidence.log`.
 Earlier regression and installed-package evidence is retained in
 `artifacts/review-regression-before.log` and `artifacts/merged-install.log`.
+
+## Bulk append extension
+
+[Bulk ingestion](BULK_INGESTION.md) uses an explicit bounded I/O attempt profile,
+file rollover and `StageBulkAppend` to stage multiple verified files in one
+FastAppend. Supported bulk markers enable bounded multiple-entry manifests;
+ordinary unmarked transitions keep the one-file rule. Publication and recovery
+check actual aggregate rows/files/bytes against the summary and receipt.

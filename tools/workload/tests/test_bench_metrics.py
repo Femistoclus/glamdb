@@ -367,7 +367,11 @@ class Double(BaseHTTPRequestHandler):
             "payload_hash": digest,
             "hash_version": 1,
             "receipt_version": 1,
-            "snapshot_created_at_us": "1",
+            "data_files_added": "1",
+            "compressed_data_bytes_added": "128",
+            "parent_snapshot_id": None,
+            "durability_profile": "local-delete-extra-v1",
+            "snapshot_created_at_us": "1000",
         }
         return self.reply(
             200,

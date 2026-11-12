@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <barrier>
+#include <format>
 #include <limits>
 #include <stdexcept>
 #include <thread>
@@ -141,6 +142,29 @@ TEST(IoAttempt, RequiresExactDeclaredDataPath)
     RegisterData(attempt);
     EXPECT_EQ(attempt->Id(), KAttempt);
     EXPECT_EQ(attempt->DeclareDataFile(Data("00001")), std::errc::file_exists);
+}
+
+TEST(IoAttempt, BulkProfileAdmitsExactlyTheBoundedDeclaredDataFiles)
+{
+    const auto attempt = Attempt(TAttemptLimits::BulkAppend());
+    for (int index = 0; index < 256; ++index) {
+        const auto path = Data(std::format("{:05}", index));
+        ASSERT_FALSE(attempt->DeclareDataFile(path)) << index;
+        const auto registered = attempt->RegisterFile(path);
+        ASSERT_TRUE(registered) << index << ": " << registered.Error().message();
+        EXPECT_EQ(registered.Value(), EFileKind::Data);
+    }
+    EXPECT_EQ(attempt->Records().size(), 256);
+    EXPECT_EQ(attempt->DeclareDataFile(Data("00256")), std::errc::no_buffer_space);
+    EXPECT_EQ(attempt->Records().size(), 256);
+}
+
+TEST(IoAttempt, OrdinaryProfileStillRejectsASecondDeclaredDataFile)
+{
+    const auto attempt = Attempt();
+    RegisterData(attempt);
+    EXPECT_EQ(attempt->DeclareDataFile(Data("00001")), std::errc::file_exists);
+    EXPECT_EQ(attempt->Records().size(), 1);
 }
 
 TEST(IoAttempt, RestrictsCollectionAndFileInventory)

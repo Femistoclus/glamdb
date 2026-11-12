@@ -170,6 +170,11 @@ tests, an installed-library consumer, and passing quality checks with negative
 controls. Publish the measured supported limits and environment alongside the
 results; neither a successful compile nor the presence of `fsync` is sufficient.
 
+The append-only [bounded bulk extension](development/BULK_INGESTION.md) is
+implemented before KV: replayable two-pass input, multiple bounded files and one
+atomic snapshot/receipt. Its independent process/fault tests, over-1-GiB bounded-memory comparison and
+capacity-rejection campaigns are recorded in the [validation report](development/BULK_INGESTION_VALIDATION.md). This does not complete the KV or 1 TiB bulk gates.
+
 ## K: Key-value behavior, bulk ingestion, and compaction
 
 KV collections have an explicit mode. Upsert is full-row replacement, with the

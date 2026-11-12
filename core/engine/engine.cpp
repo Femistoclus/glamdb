@@ -2,6 +2,7 @@
 #include "core/telemetry/structured_log.h"
 
 #include "core/api/binary.h"
+#include "core/api/bulk_input.h"
 #include "core/api/canonical.h"
 #include "core/api/codec.h"
 #include "core/api/write_settings.h"
@@ -213,14 +214,16 @@ struct Engine::Impl
             32)));
     }
 
-    void ReserveAttempt()
+    void ReserveAttempt(bool bulk = false)
     {
         std::vector<std::shared_ptr<ResourceReservation>> reserved;
         reserved.push_back(Take(resources->Reserve(ResourceClass::Control, ControlMemoryBytes)));
         reserved.push_back(Take(resources->Reserve(ResourceClass::Completion, CompletionMemoryBytes)));
         reserved.push_back(Take(resources->Reserve(ResourceClass::Data, WriteDataMemoryBytes)));
         reserved.push_back(Take(resources->Reserve(ResourceClass::Metadata, MetadataWorkBytes)));
-        reserved.push_back(Take(resources->ReserveDevice(lease->Root().string(), AttemptDiskBytes, 64)));
+        reserved.push_back(Take(resources->ReserveDevice(lease->Root().string(),
+            bulk ? BulkAppendLimits::AttemptDiskBytes : AttemptDiskBytes,
+            bulk ? BulkAppendLimits::AttemptInodes : 64)));
         attempt_resources = std::move(reserved);
     }
 
@@ -1358,9 +1361,20 @@ Result<CollectionInfo> Engine::UpdateWriteSettings(const UpdateWriteSettingsRequ
 
 AppendOutcome Engine::AppendDurable(const AppendRequest& request)
 {
+    return AppendDurableImpl(request, nullptr);
+}
+
+AppendOutcome Engine::BulkAppendDurable(const BulkAppendRequest& request)
+{
+    return AppendDurableImpl({request.collection_id, request.operation_id, request.expected_snapshot, {}}, &request);
+}
+
+AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const BulkAppendRequest* bulk)
+{
     NGlamDB::NTelemetry::TOperationScope<AppendOutcome> metrics(NGlamDB::NTelemetry::EOperation::Append);
     const auto impl = impl_;
-    const auto deadline = std::chrono::steady_clock::now() + impl->limits.append_deadline;
+    const auto started = std::chrono::steady_clock::now();
+    auto deadline = started + impl->limits.append_deadline;
     // Retain the writer across catch handlers: recording a failure and setting
     // an unknown barrier are part of the serialized attempt, too.
     std::unique_lock writer_lock(impl->writer, std::defer_lock);
@@ -1397,7 +1411,20 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
             unresolved = impl->BlockedAppend(request);
             collection = impl->CachedCollection(request.collection_id);
         }
-        const auto fingerprinted = Take(FingerprintInput(collection.schema, request.collection_id, request.batches));
+        if (bulk) {
+            Require(bulk->source != nullptr && bulk->rows > 0 && bulk->rows <= BulkAppendLimits::MaxRows &&
+                    bulk->timeout.count() > 0 && bulk->timeout <= std::chrono::minutes(10),
+                "INVALID_ARGUMENT",
+                "bulk append requires a bounded source, row count and timeout");
+            deadline = started + bulk->timeout;
+        }
+        TFingerprintedInput fingerprinted;
+        if (bulk) {
+            fingerprinted.PayloadHash = Take(FingerprintBulkSource(collection.schema, *bulk, deadline));
+            fingerprinted.Reservation = static_cast<size_t>(BulkAppendLimits::MemoryBytes);
+        } else {
+            fingerprinted = Take(FingerprintInput(collection.schema, request.collection_id, request.batches));
+        }
         const auto& payload_hash = fingerprinted.PayloadHash;
         if (unresolved) {
             return metrics.Finish(UnresolvedAppend(*unresolved, payload_hash));
@@ -1513,8 +1540,6 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         }
         // Only a new operation needs owned payload memory. A retry has already
         // returned its original terminal receipt, even under a lower input cap.
-        // Computed by the fingerprint's inspection; normalization re-inspects
-        // the caller buffers and rejects a shape that no longer matches it.
         const auto reservation = fingerprinted.Reservation;
         {
             std::lock_guard lock(impl->state_mutex);
@@ -1527,8 +1552,17 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
             admission.bytes = reservation;
         }
         admission.shared_input = Take(impl->resources->Reserve(ResourceClass::Data, reservation));
-        impl->ReserveAttempt();
-        auto input = Take(NormalizeBatches(collection.schema, request.collection_id, request.batches, reservation));
+        impl->ReserveAttempt(bulk != nullptr);
+        NormalizedInput input;
+        if (bulk) {
+            input.payload_hash = payload_hash;
+            input.bulk =
+                Take(PrepareBulkInput(collection.schema, *bulk, payload_hash, deadline, [impl, expected_generation] {
+                    return impl->PublicationHealth(expected_generation);
+                }));
+        } else {
+            input = Take(NormalizeBatches(collection.schema, request.collection_id, request.batches, reservation));
+        }
         Require(input.payload_hash == payload_hash, "INVALID_ARGUMENT", "Arrow input changed during append");
         const auto base = impl->catalog->Base(request.collection_id);
         // The store may have been opened by a build without a stored codec.
@@ -1589,7 +1623,7 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
             std::nullopt,
             std::nullopt};
         Require(ValidateOutcome(committed).has_value() &&
-                receipt.rows_appended == static_cast<int64_t>(input.GetRowCount()),
+                receipt.rows_appended == (input.bulk ? input.bulk->Rows : static_cast<int64_t>(input.GetRowCount())),
             "IO_ERROR",
             "producer returned an invalid receipt or row count");
         {
@@ -1612,12 +1646,24 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
             receipt,
             [&](std::string_view location) -> Status {
                 context.candidate_metadata_location = std::string(location);
+                if (bulk && bulk->cancellation && bulk->cancellation->load()) {
+                    return std::unexpected(
+                        ErrorDetail{"CANCELLED", "bulk append was cancelled", RetryHint::NewOperationId});
+                }
                 auto verified = staged->VerifyClosure(location);
                 if (!verified) {
                     return verified;
                 }
                 if (!gate.owns_lock()) {
                     gate.lock();
+                }
+                if (bulk && bulk->cancellation && bulk->cancellation->load()) {
+                    return std::unexpected(
+                        ErrorDetail{"CANCELLED", "bulk append was cancelled", RetryHint::NewOperationId});
+                }
+                if (bulk && std::chrono::steady_clock::now() >= deadline) {
+                    return std::unexpected(
+                        ErrorDetail{"DEADLINE_EXCEEDED", "bulk append deadline expired", RetryHint::NewOperationId});
                 }
                 return impl->PublicationHealth(expected_generation);
             },

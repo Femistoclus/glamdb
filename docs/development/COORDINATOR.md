@@ -25,6 +25,11 @@ remain outside this MVP. A separate [quiesced backup tool](NATIVE_ACCEPTANCE.md)
 closes SQLite while retaining store ownership; it does not add a coordinator
 writer, background job or online backup protocol.
 
+The [bulk append extension](BULK_INGESTION.md) shares the same coordinator, binding
+and publication path. A bounded validation pass precedes lookup/binding; a checked
+production pass uses bounded chunks and one outer pointer/receipt transaction.
+Its result receipt version 2 extends counts without changing old receipts.
+
 ## Persistence and retry rules
 
 - One directory lease owns the store across threads/processes. Opening never

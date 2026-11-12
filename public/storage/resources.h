@@ -16,7 +16,7 @@ struct ResourceLimits
     // Reservation envelopes, not a promise about process RSS. Protected classes
     // cannot be borrowed by ordinary requests. Zero disables a class.
     std::array<uint64_t, 5> memory_bytes{2ULL << 30, 8ULL << 30, 16ULL << 20, 64ULL << 20, 4ULL << 30};
-    uint64_t device_reserved_bytes = 8ULL << 30;
+    uint64_t device_reserved_bytes = 16ULL << 30;
     uint64_t device_reserved_inodes = 65536;
     uint64_t device_free_bytes = 1ULL << 30;
     uint64_t device_free_inodes = 128;

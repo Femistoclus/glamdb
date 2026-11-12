@@ -38,9 +38,11 @@ def validate_receipt(receipt: dict) -> dict:
             raise ValueError(f"invalid {name}") from exc
     if not isinstance(receipt["payload_hash"], str) or not _SHA256.fullmatch(receipt["payload_hash"]):
         raise ValueError("payload_hash must be lowercase SHA256 hex")
-    for name in ("hash_version", "receipt_version"):
-        if type(receipt[name]) is not int or receipt[name] != 1:
-            raise ValueError(f"unsupported {name}")
+    if type(receipt["hash_version"]) is not int or receipt["hash_version"] != 1:
+        raise ValueError("unsupported hash_version")
+    version = receipt["receipt_version"]
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError("unsupported receipt_version")
     output["snapshot_id"] = str(_exact_integer(receipt["snapshot_id"]))
     if receipt["parent_snapshot_id"] is not None:
         output["parent_snapshot_id"] = str(_exact_integer(receipt["parent_snapshot_id"]))
@@ -49,8 +51,12 @@ def validate_receipt(receipt: dict) -> dict:
         if value < 0:
             raise ValueError(f"negative {name}")
         output[name] = value
-    if not 1 <= output["rows_appended"] <= 10000 or output["data_files_added"] != 1:
-        raise ValueError("append receipt requires 1..10000 rows and one data file")
+    rows, files = output["rows_appended"], output["data_files_added"]
+    if version == 1:
+        if not 1 <= rows <= 10000 or files != 1:
+            raise ValueError("ordinary append receipt requires 1..10000 rows and one data file")
+    elif not 1 <= rows <= 25600000 or not 1 <= files <= 256 or rows > files * 100000:
+        raise ValueError("bulk append receipt exceeds its file or row bounds")
     timestamp = _exact_integer(receipt["snapshot_created_at_us"])
     _exact_integer(timestamp, "timestamp_us_utc")
     if timestamp % 1000:
@@ -58,8 +64,8 @@ def validate_receipt(receipt: dict) -> dict:
     output["snapshot_created_at_us"] = str(timestamp)
     if not isinstance(receipt["durability_profile"], str) or not 1 <= len(receipt["durability_profile"].encode("utf-8")) <= 128:
         raise ValueError("durability_profile is required (1..128 UTF-8 bytes)")
-    if not 1 <= output["compressed_data_bytes_added"] <= 32 * 1024 * 1024:
-        raise ValueError("compressed_data_bytes_added must be 1..32 MiB")
+    if not 1 <= output["compressed_data_bytes_added"] <= files * 32 * 1024 * 1024:
+        raise ValueError("compressed_data_bytes_added must be 1..32 MiB per data file")
     if output["parent_snapshot_id"] is not None and output["parent_snapshot_id"] == output["snapshot_id"]:
         raise ValueError("parent_snapshot_id must differ from snapshot_id")
     return output

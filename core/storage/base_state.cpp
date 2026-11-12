@@ -26,6 +26,18 @@ namespace NGlamDB::NStorage {
 using iceberg::Error;
 namespace {
 
+constexpr std::uint64_t BulkFiles = 256;
+constexpr std::uint64_t BulkFileRows = 100000;
+constexpr std::uint64_t DataFileBytes = 32ULL << 20;
+
+struct TAppendCounts
+{
+    std::uint64_t Files = 0;
+    std::uint64_t Rows = 0;
+    std::uint64_t Bytes = 0;
+    std::set<std::string, std::less<>> Paths;
+};
+
 iceberg::Status CheckPath(std::string_view path, const NIO::TStoreUri& table, NIO::EFileKind kind)
 {
     const auto parsed = NIO::TStoreUri::Parse(path, table.StoreId());
@@ -124,7 +136,9 @@ iceberg::Result<TStorageUsage> CheckManifest(const std::shared_ptr<iceberg::File
     const std::shared_ptr<NIO::TIOAttempt>& attempt,
     const TStorageLimits& limits,
     TRecoveryVisited* visited,
-    TScanMembership* scanIndex)
+    TScanMembership* scanIndex,
+    bool bulk,
+    TAppendCounts& counts)
 {
     if (manifest.content != iceberg::ManifestContent::kData || manifest.partition_spec_id != metadata.default_spec_id ||
         manifest.added_snapshot_id != snapshot.snapshot_id || manifest.sequence_number != snapshot.sequence_number ||
@@ -140,41 +154,69 @@ iceberg::Result<TStorageUsage> CheckManifest(const std::shared_ptr<iceberg::File
             manifest.manifest_length,
             NIO::EFileKind::Manifest,
             limits.ManifestBytes,
-            1,
+            bulk ? BulkFiles : 1,
             attempt));
     ICEBERG_ASSIGN_OR_RAISE(auto schema, metadata.Schema());
     ICEBERG_ASSIGN_OR_RAISE(auto spec, metadata.PartitionSpec());
     ICEBERG_ASSIGN_OR_RAISE(auto reader, iceberg::ManifestReader::Make(manifest, fileIO, schema, spec));
     ICEBERG_ASSIGN_OR_RAISE(auto entries, reader->Entries());
-    if (entries.size() != 1 || !entries.front().data_file) {
-        return iceberg::ValidationFailed("An append manifest must contain one data file.");
+    if (entries.empty() || entries.size() > (bulk ? BulkFiles : 1)) {
+        return iceberg::ValidationFailed("An append manifest has an invalid data file count.");
     }
-    const auto& entry = entries.front();
-    if (entry.status != iceberg::ManifestStatus::kAdded || entry.snapshot_id != snapshot.snapshot_id ||
-        entry.sequence_number != snapshot.sequence_number || entry.file_sequence_number != snapshot.sequence_number ||
-        manifest.added_files_count != 1 || manifest.existing_files_count != 0 || manifest.deleted_files_count != 0 ||
-        manifest.added_rows_count != entry.data_file->record_count || manifest.existing_rows_count != 0 ||
-        manifest.deleted_rows_count != 0)
+    if (manifest.added_files_count != static_cast<std::int32_t>(entries.size()) || manifest.existing_files_count != 0 ||
+        manifest.deleted_files_count != 0 || manifest.existing_rows_count != 0 || manifest.deleted_rows_count != 0)
     {
         return iceberg::ValidationFailed("Manifest counters or entry inheritance differ.");
     }
-    if (visited) {
-        ICEBERG_ASSIGN_OR_RAISE(auto inserted, visited->Insert(NIO::EFileKind::Data, entry.data_file->file_path));
-        if (!inserted) {
-            return iceberg::ValidationFailed("Append reuses a retained data file.");
-        }
-    }
-    ICEBERG_ASSIGN_OR_RAISE(auto footerBytes, CheckData(fileIO, *entry.data_file, *schema, table, attempt));
-    ICEBERG_RETURN_UNEXPECTED(MarkVerified(attempt, manifest.manifest_path));
-    if (scanIndex) {
-        const auto& file = *entry.data_file;
-        scanIndex->Files.push_back({file.file_path, file.file_size_in_bytes, file.record_count, entry.data_file});
-    }
     TStorageUsage delta;
-    delta.DataFiles = 1;
     delta.Manifests = 1;
     delta.ManifestBytes = bytes;
-    delta.FooterBytes = footerBytes;
+    std::uint64_t manifestRows = 0;
+    for (const auto& entry : entries) {
+        if (!entry.data_file || entry.status != iceberg::ManifestStatus::kAdded ||
+            entry.snapshot_id != snapshot.snapshot_id || entry.sequence_number != snapshot.sequence_number ||
+            entry.file_sequence_number != snapshot.sequence_number)
+        {
+            return iceberg::ValidationFailed("Manifest counters or entry inheritance differ.");
+        }
+        const auto& file = *entry.data_file;
+        const auto maxFiles = bulk ? BulkFiles : 1;
+        const auto maxFileRows = bulk ? BulkFileRows : 10000;
+        if (file.record_count <= 0 || static_cast<std::uint64_t>(file.record_count) > maxFileRows ||
+            file.file_size_in_bytes <= 0 || static_cast<std::uint64_t>(file.file_size_in_bytes) > DataFileBytes ||
+            counts.Files >= maxFiles ||
+            static_cast<std::uint64_t>(file.record_count) > maxFiles * maxFileRows - counts.Rows ||
+            static_cast<std::uint64_t>(file.file_size_in_bytes) > maxFiles * DataFileBytes - counts.Bytes)
+        {
+            return iceberg::ValidationFailed("CAPACITY: Append data files exceed their profile.");
+        }
+        if (!counts.Paths.insert(file.file_path).second) {
+            return iceberg::ValidationFailed("Append reuses a retained data file.");
+        }
+        if (visited) {
+            ICEBERG_ASSIGN_OR_RAISE(auto inserted, visited->Insert(NIO::EFileKind::Data, file.file_path));
+            if (!inserted) {
+                return iceberg::ValidationFailed("Append reuses a retained data file.");
+            }
+        }
+        ICEBERG_ASSIGN_OR_RAISE(auto footerBytes, CheckData(fileIO, file, *schema, table, attempt));
+        const auto total = ReplaceUsage(delta, {.Next = {.DataFiles = 1, .FooterBytes = footerBytes}});
+        if (!total) {
+            return iceberg::ValidationFailed("Manifest usage overflows.");
+        }
+        delta = total.Value();
+        ++counts.Files;
+        counts.Rows += static_cast<std::uint64_t>(file.record_count);
+        counts.Bytes += static_cast<std::uint64_t>(file.file_size_in_bytes);
+        manifestRows += static_cast<std::uint64_t>(file.record_count);
+        if (scanIndex) {
+            scanIndex->Files.push_back({file.file_path, file.file_size_in_bytes, file.record_count, entry.data_file});
+        }
+    }
+    if (manifest.added_rows_count != static_cast<std::int64_t>(manifestRows)) {
+        return iceberg::ValidationFailed("Manifest counters or entry inheritance differ.");
+    }
+    ICEBERG_RETURN_UNEXPECTED(MarkVerified(attempt, manifest.manifest_path));
     return delta;
 }
 
@@ -267,6 +309,11 @@ iceberg::Result<TBaseState> CheckAppendClosureImpl(const std::shared_ptr<iceberg
             return iceberg::ValidationFailed("Invalid table location.");
         }
         ICEBERG_ASSIGN_OR_RAISE(auto snapshot, candidate.Metadata->Snapshot());
+        const auto marker = snapshot->summary.find("glamdb.bulk-version");
+        const auto bulk = marker != snapshot->summary.end();
+        if (bulk && marker->second != "1") {
+            return iceberg::ValidationFailed("Unsupported bulk append profile.");
+        }
         ICEBERG_RETURN_UNEXPECTED(CheckPath(snapshot->manifest_list, table.Value(), NIO::EFileKind::ManifestList));
         ICEBERG_ASSIGN_OR_RAISE(auto listBytes,
             CheckAvro(*fileIO,
@@ -294,6 +341,7 @@ iceberg::Result<TBaseState> CheckAppendClosureImpl(const std::shared_ptr<iceberg
             }
         }
         TStorageUsage delta;
+        TAppendCounts counts;
         delta.ManifestListBytes = listBytes;
         for (const auto& manifest : std::span(manifests).first(added)) {
             ICEBERG_ASSIGN_OR_RAISE(auto fileUsage,
@@ -305,7 +353,9 @@ iceberg::Result<TBaseState> CheckAppendClosureImpl(const std::shared_ptr<iceberg
                     attempt,
                     limits,
                     visited,
-                    scanIndex));
+                    scanIndex,
+                    bulk,
+                    counts));
             auto total = ReplaceUsage(delta, {.Next = fileUsage});
             if (!total) {
                 return iceberg::ValidationFailed("Manifest usage overflows.");
@@ -316,7 +366,17 @@ iceberg::Result<TBaseState> CheckAppendClosureImpl(const std::shared_ptr<iceberg
         // Recovery replays history against the final root, whose size older
         // commits never wrote; their manifest and list must still fit.
         const auto rootBytes = commitRoot ? candidate.Usage.RootBytes : 0;
-        if (delta.DataFiles != 1 || delta.ManifestBytes > limits.CommitBytes ||
+        const auto matches = [&](const std::string& key, std::uint64_t actual) {
+            const auto value = snapshot->summary.find(key);
+            return value != snapshot->summary.end() && value->second == std::to_string(actual);
+        };
+        using Fields = iceberg::SnapshotSummaryFields;
+        if (!matches(Fields::kAddedRecords, counts.Rows) || !matches(Fields::kAddedDataFiles, counts.Files) ||
+            !matches(Fields::kAddedFileSize, counts.Bytes))
+        {
+            return iceberg::ValidationFailed("Append summary counters differ from the verified data files.");
+        }
+        if ((!bulk && delta.DataFiles != 1) || delta.ManifestBytes > limits.CommitBytes ||
             listBytes > limits.CommitBytes - delta.ManifestBytes ||
             rootBytes > limits.CommitBytes - delta.ManifestBytes - listBytes)
         {

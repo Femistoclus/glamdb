@@ -166,7 +166,8 @@ private:
     void RequireVerified() const;
     NGlamDB::NStorage::TStorageUsage ComputeStoreUsage();
     std::shared_ptr<const NGlamDB::NStorage::TBaseState> ResolveBase(const BaseIdentity& base);
-    std::shared_ptr<ResourceReservation> ReserveRootMemory(std::string_view collectionID, uint64_t bytes, bool reuse);
+    std::shared_ptr<ResourceReservation>
+    ReserveRootMemory(std::string_view collectionID, uint64_t bytes, bool reuse, uint64_t indexBytes = 0);
     std::shared_ptr<const NGlamDB::NStorage::TBaseState> VerifyCollection(const BaseIdentity& base);
 };
 

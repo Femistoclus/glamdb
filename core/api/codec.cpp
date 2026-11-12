@@ -63,9 +63,15 @@ Status ValidateOutcome(const AppendOutcome& outcome)
         }
         const auto& result = *outcome.result;
         if (!ValidUuid(result.collection_id) || result.operation_id != outcome.operation_id ||
-            !ValidDigest(result.payload_hash) || result.hash_version != 1 || result.receipt_version != 1 ||
-            result.rows_appended < 1 || result.rows_appended > 10000 || result.data_files_added != 1 ||
-            result.compressed_data_bytes_added < 1 || result.compressed_data_bytes_added > 32LL * 1024 * 1024 ||
+            !ValidDigest(result.payload_hash) || result.hash_version != 1 ||
+            (result.receipt_version != 1 && result.receipt_version != 2) || result.rows_appended < 1 ||
+            result.rows_appended > (result.receipt_version == 2 ? BulkAppendLimits::MaxRows : 10000) ||
+            result.data_files_added < 1 ||
+            result.data_files_added > (result.receipt_version == 2 ? BulkAppendLimits::MaxFiles : 1) ||
+            result.rows_appended >
+                result.data_files_added * (result.receipt_version == 2 ? BulkAppendLimits::MaxFileRows : 10000) ||
+            result.compressed_data_bytes_added < 1 ||
+            result.compressed_data_bytes_added > result.data_files_added * (32LL << 20) ||
             result.snapshot_created_at_us < -62135596800000000LL ||
             result.snapshot_created_at_us > 253402300799999999LL || result.snapshot_created_at_us % 1000 != 0 ||
             result.durability_profile.empty() || result.durability_profile.size() > 128 ||

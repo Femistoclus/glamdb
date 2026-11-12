@@ -35,4 +35,9 @@ iceberg::Result<TStagedAppend> StageAppend(std::shared_ptr<iceberg::Table> table
     const std::unordered_map<std::string, std::string>& summary,
     const std::shared_ptr<NIO::TIOAttempt>& attempt);
 
+iceberg::Result<TStagedAppend> StageBulkAppend(std::shared_ptr<iceberg::Table> table,
+    const std::vector<std::shared_ptr<iceberg::DataFile>>& dataFiles,
+    const std::unordered_map<std::string, std::string>& summary,
+    const std::shared_ptr<NIO::TIOAttempt>& attempt);
+
 }

@@ -7,6 +7,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <vector>
 
 namespace NGlamDB::NIO {
@@ -27,6 +28,11 @@ struct TAttemptLimits
 {
     std::uint64_t NewFileBytes = 256ULL << 20;
     std::uint64_t IoBytes = 512ULL << 20;
+    std::size_t DataFiles = 1;
+
+    // Explicit finite profile for one multi-file append. Ordinary attempts
+    // retain the one-file declaration and registration limit.
+    static TAttemptLimits BulkAppend();
 };
 
 struct TDurableFileReceipt
@@ -127,7 +133,7 @@ private:
     TAttemptLimits Limits_;
     mutable std::mutex Mutex_;
     std::map<std::string, TEntry, std::less<>> Files_;
-    std::optional<std::string> DeclaredData_;
+    std::set<std::string, std::less<>> DeclaredData_;
     TAttemptBudget Budget_;
     std::error_code FirstError_;
     bool Sealed_ = false;

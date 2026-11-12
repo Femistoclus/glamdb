@@ -14,8 +14,11 @@ bool IsAttemptId(std::string_view value)
         (value[19] == '8' || value[19] == '9' || value[19] == 'a' || value[19] == 'b');
 }
 
-std::size_t FileLimit(EFileKind kind)
+std::size_t FileLimit(EFileKind kind, const TAttemptLimits& limits)
 {
+    if (kind == EFileKind::Data) {
+        return limits.DataFiles;
+    }
     return kind == EFileKind::Manifest ? 8 : 1;
 }
 
@@ -26,6 +29,12 @@ bool NextState(EFileState current, EFileState next)
         (current == EFileState::Closed && next == EFileState::DirSynced);
 }
 
+}
+
+TAttemptLimits TAttemptLimits::BulkAppend()
+{
+    constexpr auto bytes = (256ULL * (32ULL << 20)) + (32ULL << 20);
+    return {.NewFileBytes = bytes, .IoBytes = 4 * bytes, .DataFiles = 256};
 }
 
 TWriteReservation::TWriteReservation(std::shared_ptr<TIOAttempt> attempt, std::string path, std::uint64_t requested)
@@ -86,7 +95,8 @@ TIOAttempt::Make(TAttemptSpec spec, std::shared_ptr<TWriteLatch> latch, TAttempt
         !IsAttemptId(spec.AttemptId) ||
         (spec.Kind != EAttemptKind::Append && spec.Kind != EAttemptKind::CreateCollection) ||
         (spec.Kind == EAttemptKind::Append && (!spec.OperationId || !IsCanonicalUuid(*spec.OperationId))) ||
-        (spec.Kind == EAttemptKind::CreateCollection && spec.OperationId))
+        (spec.Kind == EAttemptKind::CreateCollection && spec.OperationId) || limits.DataFiles == 0 ||
+        limits.DataFiles > 256 || (spec.Kind == EAttemptKind::CreateCollection && limits.DataFiles != 1))
     {
         return std::errc::invalid_argument;
     }
@@ -157,8 +167,11 @@ std::error_code TIOAttempt::DeclareDataFile(std::string_view path)
     {
         return FailLocked(path, std::make_error_code(std::errc::invalid_argument));
     }
-    if (DeclaredData_) {
+    if (DeclaredData_.contains(path) || (Limits_.DataFiles == 1 && !DeclaredData_.empty())) {
         return FailLocked(path, std::make_error_code(std::errc::file_exists));
+    }
+    if (DeclaredData_.size() >= Limits_.DataFiles) {
+        return FailLocked(path, std::make_error_code(std::errc::no_buffer_space));
     }
     DeclaredData_.emplace(path);
     return {};
@@ -177,7 +190,7 @@ TResult<EFileKind> TIOAttempt::RegisterFile(std::string_view path)
     const auto kind = uri.Value().Kind();
     if (uri.Value().CollectionId() != Spec_.CollectionId ||
         (Spec_.Kind == EAttemptKind::CreateCollection && kind != EFileKind::Metadata) ||
-        (kind == EFileKind::Data && (!DeclaredData_ || *DeclaredData_ != path)))
+        (kind == EFileKind::Data && !DeclaredData_.contains(path)))
     {
         return FailLocked(path, std::make_error_code(std::errc::invalid_argument));
     }
@@ -187,7 +200,7 @@ TResult<EFileKind> TIOAttempt::RegisterFile(std::string_view path)
     const auto count = std::ranges::count_if(Files_, [kind](const auto& entry) {
         return entry.second.Record.Kind == kind;
     });
-    if (static_cast<std::size_t>(count) >= FileLimit(kind)) {
+    if (static_cast<std::size_t>(count) >= FileLimit(kind, Limits_)) {
         return FailLocked(path, std::make_error_code(std::errc::no_buffer_space));
     }
     Files_.emplace(std::string(path), TEntry{TFileRecord{std::string(path), kind}, 0});

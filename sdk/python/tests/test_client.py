@@ -455,7 +455,7 @@ def test_lookup_does_not_guess_original_payload_and_append_compares_digest_bytes
 
 @pytest.mark.parametrize("field,value", [
     ("rows_appended", 0), ("rows_appended", -1), ("rows_appended", True), ("rows_appended", "1.5"),
-    ("receipt_version", 2), ("receipt_version", True), ("snapshot_created_at_us", "253402300800000000"),
+    ("receipt_version", 3), ("receipt_version", True), ("snapshot_created_at_us", "253402300800000000"),
     ("snapshot_created_at_us", "not-microseconds"), ("data_files_added", -1), ("data_files_added", True),
     ("compressed_data_bytes_added", -1), ("compressed_data_bytes_added", None),
     ("parent_snapshot_id", True), ("parent_snapshot_id", 4), ("durability_profile", ""),
@@ -475,6 +475,29 @@ def test_committed_receipt_requires_shared_core_fields(field):
     with client_with(lambda request: reply(body)) as client:
         with pytest.raises(ProtocolError):
             client.find_append_outcome(CID, OP)
+
+
+@pytest.mark.parametrize("rows,files,size", [
+    (1, 1, 1), (100000, 1, 33554432), (200000, 2, 67108864),
+    (25600000, 256, 8589934592),
+])
+def test_lookup_accepts_bulk_receipt_bounds_without_uploading_input(rows, files, size):
+    body = committed()
+    body["result"].update(receipt_version=2, rows_appended=str(rows), data_files_added=str(files),
+                          compressed_data_bytes_added=str(size))
+    with client_with(lambda request: reply(body)) as client:
+        outcome = client.find_append_outcome(CID, OP)
+    assert outcome.outcome == "committed"
+    assert outcome.result == body["result"]
+
+
+def test_mock_receipt_can_omit_unavailable_physical_metrics():
+    body = committed()
+    body["mock"] = True
+    for field in ("data_files_added", "compressed_data_bytes_added", "parent_snapshot_id", "durability_profile"):
+        del body["result"][field]
+    with client_with(lambda request: reply(body)) as client:
+        assert client.find_append_outcome(CID, OP).result == body["result"]
 
 
 def test_database_selection_keeps_management_at_server_root():

@@ -12,9 +12,11 @@
 #include <arrow/io/memory.h>
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
+#include <format>
 #include <gtest/gtest.h>
 #include <iceberg/catalog/memory/in_memory_catalog.h>
 #include <iceberg/manifest/manifest_entry.h>
+#include <iceberg/manifest/manifest_writer.h>
 #include <iceberg/partition_spec.h>
 #include <iceberg/snapshot.h>
 #include <iceberg/sort_order.h>
@@ -219,13 +221,16 @@ protected:
         const std::shared_ptr<const TBaseState>& base,
         int rows,
         const std::function<void(TPublicationContext*, TPointerChange*)>& mutate = {},
-        const std::string& retainedDataPath = {})
+        const std::string& retainedDataPath = {},
+        int bulkFiles = 0,
+        bool duplicateBulkFile = false)
     {
         Scope_.reset();
         const auto attemptID = std::string("33333333-3333-7333-8333-33333333333") + std::to_string(index + 3);
         const auto operationID = std::string("44444444-4444-4444-8444-44444444444") + std::to_string(index);
         auto attempt = NIO::TIOAttempt::Make({StoreID, CollectionID, attemptID, NIO::EAttemptKind::Append, operationID},
-            Dirs_->Latch());
+            Dirs_->Latch(),
+            bulkFiles ? NIO::TAttemptLimits::BulkAppend() : NIO::TAttemptLimits{});
         if (!attempt) {
             return iceberg::IOError(attempt.Error().message());
         }
@@ -251,6 +256,13 @@ protected:
             data.DataFile->file_path = retainedDataPath;
         }
         DataLocations_.push_back(dataPath);
+        std::vector<std::shared_ptr<iceberg::DataFile>> dataFiles{data.DataFile};
+        for (int file = 1; file < bulkFiles; ++file) {
+            const auto path = std::format("{}/data/{}-{}-{:05}.parquet", Location_, operationID, attemptID, file);
+            ICEBERG_ASSIGN_OR_RAISE(auto next, WriteDataFile(IO_, Attempt_, *base->Metadata, path, {batch}));
+            dataFiles.push_back(next.DataFile);
+            DataLocations_.push_back(path);
+        }
         ICEBERG_ASSIGN_OR_RAISE(auto catalog, iceberg::InMemoryCatalog::Make("guard-test-double", IO_, Location_, {}));
         ICEBERG_ASSIGN_OR_RAISE(auto table,
             iceberg::Table::Make({.ns = {}, .name = "events"},
@@ -258,21 +270,51 @@ protected:
                 base->MetadataLocation,
                 IO_,
                 catalog));
-        const std::unordered_map<std::string, std::string> summary{{"glamdb.operation-id", operationID},
+        std::unordered_map<std::string, std::string> summary{{"glamdb.operation-id", operationID},
             {"glamdb.content-hash", "test-fixture-hash"}};
+        if (bulkFiles) {
+            summary.emplace("glamdb.bulk-version", "1");
+        }
         std::shared_ptr<iceberg::Transaction> transaction;
-        if (!reusesData) {
+        if (bulkFiles && !duplicateBulkFile) {
+            ICEBERG_ASSIGN_OR_RAISE(auto staged, StageBulkAppend(table, dataFiles, summary, Attempt_));
+            transaction = std::move(staged.Transaction);
+        } else if (!reusesData && !duplicateBulkFile) {
             ICEBERG_ASSIGN_OR_RAISE(auto staged, StageAppend(table, data.DataFile, summary, Attempt_));
             transaction = std::move(staged.Transaction);
         } else {
             ICEBERG_ASSIGN_OR_RAISE(transaction,
                 iceberg::Transaction::Make(std::move(table), iceberg::TransactionKind::kUpdate));
             ICEBERG_ASSIGN_OR_RAISE(auto append, transaction->NewFastAppend());
-            append->AppendFile(data.DataFile);
+            if (duplicateBulkFile) {
+                ICEBERG_ASSIGN_OR_RAISE(auto spec, base->Metadata->PartitionSpec());
+                ICEBERG_ASSIGN_OR_RAISE(auto schema, base->Metadata->Schema());
+                ICEBERG_ASSIGN_OR_RAISE(auto writer,
+                    iceberg::ManifestWriter::MakeWriter(2,
+                        std::nullopt,
+                        Location_ + "/metadata/" + attemptID + "-m0.avro",
+                        IO_,
+                        spec,
+                        schema));
+                ICEBERG_RETURN_UNEXPECTED(writer->WriteAddedEntry(data.DataFile));
+                ICEBERG_RETURN_UNEXPECTED(writer->WriteAddedEntry(data.DataFile));
+                ICEBERG_RETURN_UNEXPECTED(writer->Close());
+                ICEBERG_ASSIGN_OR_RAISE(auto manifest, writer->ToManifestFile());
+                append->AppendManifest(manifest);
+            } else {
+                append->AppendFile(data.DataFile);
+            }
             for (const auto& [key, value] : summary) {
                 append->Set(key, value);
             }
             ICEBERG_RETURN_UNEXPECTED(append->Commit());
+            if (duplicateBulkFile) {
+                ICEBERG_ASSIGN_OR_RAISE(auto snapshot, transaction->current().Snapshot());
+                snapshot->summary[iceberg::SnapshotSummaryFields::kAddedRecords] = std::to_string(2 * rows);
+                snapshot->summary[iceberg::SnapshotSummaryFields::kAddedDataFiles] = "2";
+                snapshot->summary[iceberg::SnapshotSummaryFields::kAddedFileSize] =
+                    std::to_string(2 * data.DataFile->file_size_in_bytes);
+            }
         }
         const auto location = Location_ + "/metadata/0000" + std::to_string(index) + "-" + attemptID + ".metadata.json";
         ICEBERG_RETURN_UNEXPECTED(iceberg::TableMetadataUtil::Write(*IO_, location, transaction->current()));
@@ -289,7 +331,8 @@ protected:
         return guard.GetCandidate();
     }
 
-    iceberg::Result<std::string> WriteRecoveryRoot(const iceberg::TableMetadata& metadata)
+    iceberg::Result<std::string> WriteRecoveryRoot(const iceberg::TableMetadata& metadata,
+        std::string_view version = "00009")
     {
         constexpr auto attemptID = "33333333-3333-7333-8333-333333333339";
         constexpr auto operationID = "44444444-4444-4444-8444-444444444449";
@@ -300,7 +343,7 @@ protected:
         }
         ICEBERG_ASSIGN_OR_RAISE(auto scope, IO_->BindAttempt(attempt.Value()));
         auto location = Location_;
-        location.append("/metadata/00009-").append(attemptID).append(".metadata.json");
+        location.append("/metadata/").append(version).append("-").append(attemptID).append(".metadata.json");
         ICEBERG_RETURN_UNEXPECTED(iceberg::TableMetadataUtil::Write(*IO_, location, metadata));
         return location;
     }
@@ -493,6 +536,103 @@ TEST_F(TPublicationGuardTest, WritesTwoAppendsAndReopensEveryRetainedFile)
     CheckRows(DataLocations_[0], 1000);
     CheckRows(DataLocations_[1], 10);
     ExpectFreshProcess(Root_, (*second)->MetadataLocation);
+}
+
+TEST_F(TPublicationGuardTest, BulkClosureAndRecoveryVerifyEveryFile)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto bulk = Append(1, create.GetCandidate(), 3, {}, {}, 2);
+    ASSERT_TRUE(bulk) << bulk.error().message;
+    EXPECT_EQ((*bulk)->Usage.DataFiles, 2);
+    EXPECT_EQ((*bulk)->Usage.Snapshots, 1);
+    ASSERT_NE((*bulk)->ScanIndex, nullptr);
+    EXPECT_EQ((*bulk)->ScanIndex->Files.size(), 2);
+    const auto next = Append(2, *bulk, 1);
+    ASSERT_TRUE(next) << next.error().message;
+    const auto recovered = VerifyReachable(IO_, (*next)->MetadataLocation, StoreID, CollectionID);
+    ASSERT_TRUE(recovered) << recovered.error().message;
+    EXPECT_EQ(recovered->Usage, (*next)->Usage);
+    ASSERT_EQ(DataLocations_.size(), 3);
+    CheckRows(DataLocations_[0], 3);
+    CheckRows(DataLocations_[1], 3);
+    CheckRows(DataLocations_[2], 1);
+}
+
+TEST_F(TPublicationGuardTest, BulkRecoveryRejectsMissingOrUnsupportedMarker)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto bulk = Append(1, create.GetCandidate(), 3, {}, {}, 2);
+    ASSERT_TRUE(bulk) << bulk.error().message;
+    int version = 10;
+    for (const auto marker : {std::string_view{}, std::string_view{"2"}}) {
+        auto metadata = std::make_shared<iceberg::TableMetadata>(*(*bulk)->Metadata);
+        auto snapshot = std::make_shared<iceberg::Snapshot>(*metadata->snapshots.front());
+        if (marker.empty()) {
+            snapshot->summary.erase("glamdb.bulk-version");
+        } else {
+            snapshot->summary["glamdb.bulk-version"] = marker;
+        }
+        metadata->snapshots.front() = snapshot;
+        const auto root = WriteRecoveryRoot(*metadata, "000" + std::to_string(version++));
+        ASSERT_TRUE(root) << root.error().message;
+        const auto recovered = VerifyReachable(IO_, *root, StoreID, CollectionID);
+        ASSERT_FALSE(recovered);
+        EXPECT_EQ(recovered.error().kind,
+            marker.empty() ? iceberg::ErrorKind::kInvalidArgument : iceberg::ErrorKind::kValidationFailed)
+            << recovered.error().message;
+    }
+}
+
+TEST_F(TPublicationGuardTest, BulkRecoveryRejectsSummaryCountersDifferentFromActualFiles)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto bulk = Append(1, create.GetCandidate(), 3, {}, {}, 2);
+    ASSERT_TRUE(bulk) << bulk.error().message;
+    int version = 10;
+    for (const auto& key : {iceberg::SnapshotSummaryFields::kAddedRecords,
+             iceberg::SnapshotSummaryFields::kAddedDataFiles,
+             iceberg::SnapshotSummaryFields::kAddedFileSize})
+    {
+        auto metadata = std::make_shared<iceberg::TableMetadata>(*(*bulk)->Metadata);
+        auto snapshot = std::make_shared<iceberg::Snapshot>(*metadata->snapshots.front());
+        snapshot->summary[key] = "18446744073709551616";
+        metadata->snapshots.front() = snapshot;
+        const auto root = WriteRecoveryRoot(*metadata, "000" + std::to_string(version++));
+        ASSERT_TRUE(root) << root.error().message;
+        const auto recovered = VerifyReachable(IO_, *root, StoreID, CollectionID);
+        ASSERT_FALSE(recovered);
+        EXPECT_EQ(recovered.error().kind, iceberg::ErrorKind::kValidationFailed);
+    }
+}
+
+TEST_F(TPublicationGuardTest, BulkClosureRejectsDuplicateDataPathsBeforePublication)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    std::string root;
+    const auto duplicate = Append(
+        1,
+        create.GetCandidate(),
+        3,
+        [&](auto* /*context*/, auto* change) {
+            root = change->NewLocation;
+        },
+        {},
+        1,
+        true);
+    ASSERT_FALSE(duplicate);
+    EXPECT_NE(duplicate.error().message.find("reuses"), std::string::npos) << duplicate.error().message;
+    ASSERT_FALSE(root.empty());
+    const auto readOnly = IO_->ReadOnlyView();
+    ASSERT_TRUE(readOnly);
+    EXPECT_FALSE(VerifyReachable(*readOnly, root, StoreID, CollectionID));
 }
 
 // An append's staged root replaces the parse of its durable file only when
