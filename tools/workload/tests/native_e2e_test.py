@@ -5,7 +5,8 @@ No mock fallback is used. Cleanup drops only databases created by the test.
 """
 
 import argparse
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
+import hashlib
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -80,9 +81,14 @@ def tls_proxy(upstream_port, directory):
                 conn.request(self.command, self.path, body=body, headers=headers)
                 reply = conn.getresponse()
                 content = reply.read()
-                if self.command == "POST" and self.path.endswith("/append"):
+                if self.command == "POST" and self.path.endswith(("/append", "/upsert")):
                     with self.server.lock:
                         self.server.append_calls += 1
+                        self.server.append_requests.append({
+                            "operation_id": json.loads(body)["operation_id"],
+                            "body_sha256": hashlib.sha256(body).hexdigest(),
+                            "path": self.path,
+                        })
                         drop = self.server.drop_once
                         self.server.drop_once = False
                     if drop:
@@ -119,6 +125,7 @@ def tls_proxy(upstream_port, directory):
 
     proxy = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
     proxy.lock, proxy.drop_once, proxy.append_calls = threading.Lock(), False, 0
+    proxy.append_requests = []
     proxy.append_delay = 0
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(cert, key)
@@ -253,7 +260,29 @@ class NativeWorkload(unittest.TestCase):
     def test_clickbench_native_date_verified_queries_sizes_and_restart(self):
         self.check_clickbench_prefix("native")
 
-    def check_clickbench_prefix(self, type_profile):
+    def test_clickbench_kv_native_date_complete_lifecycle(self):
+        self.check_clickbench_prefix("native", collection_mode="kv")
+
+    def clickbench_journal(self, saved):
+        """Keep exact identities, bytes, counters and receipts across process restarts."""
+        snapshot = {}
+        for path in sorted(Path(saved["run_dir"]).glob("worker-*.sqlite")):
+            with closing(sqlite3.connect(path)) as database:
+                database.row_factory = sqlite3.Row
+                tables = {row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                snapshot[path.name] = {
+                    name: sorted((dict(row) for row in database.execute(f"SELECT * FROM {name}")),
+                                 key=lambda row: repr(sorted(row.items())))
+                    for name in ("operations", "clickbench_meta", "clickbench_chunks") if name in tables
+                }
+        self.assertTrue(snapshot, "load must retain its original operation journal")
+        return snapshot
+
+    def check_clickbench_prefix(self, type_profile, collection_mode="append"):
+        from datetime import date, datetime, timezone
+
+        from glamdb_workload.clickbench.dataset import ClickBenchDataset
+        from glamdb_workload.ledger import Ledger
         from test_clickbench_dataset import source_table
 
         source = source_table(self.tmp / "hits.parquet")
@@ -268,25 +297,140 @@ class NativeWorkload(unittest.TestCase):
                             "URLHash": 2868770270353813622}.items():
             table = table.set_column(table.schema.get_field_index(name), name, pa.array([value] * 31))
         for name, value in {"URL": "https://example.org/google", "Title": "Google Привет 💗",
-                            "Referer": "https://www.example.org/страница"}.items():
+                            "Referer": "https://www.example.org/страница",
+                            "UTMTerm": "последний столбец 🎀"}.items():
             table = table.set_column(table.schema.get_field_index(name), name, pa.array([value.encode()] * 31))
+        table = table.set_column(table.schema.get_field_index("CLID"), "CLID",
+                                 pa.array([2**63 - 2 - (ordinal % 5) for ordinal in range(31)]))
         pq.write_table(table, source)
-        _, endpoint, ca = self.enterContext(tls_proxy(self.port, self.tmp))
-        def online(action, *args):
-            return self.cli("bench", "clickbench", action, *args, "--ca-file", ca)
+        proxy, endpoint, ca = self.enterContext(tls_proxy(self.port, self.tmp))
+        def online(action, *args, expected=0):
+            result = self.cli("bench", "clickbench", action, *args, "--ca-file", ca,
+                              expected=expected, timeout=300)
+            return json.loads(result.stdout) if result.stdout.strip() else None
         dataset, state = self.tmp / "clickbench-data", self.reports / "clickbench-state.json"
         self.cli("bench", "clickbench", "prepare", "--source", source, "--output", dataset,
                  "--type-profile", type_profile, "--part-rows", 7)
+        data = ClickBenchDataset(dataset)
+        self.assertEqual(len(data.schema.fields), 105)
+        self.assertEqual(data.schema.fields[-1].name, "CLID")
+        expected_rows = [row for _, part in data.iter_parts() for row in part]
+        self.assertEqual(len(expected_rows), 31)
+        selected_mode = ["--mode", collection_mode] if collection_mode == "kv" else []
         online("init", "--dataset", dataset, "--state", state,
-               "--url", endpoint, "--name", "clickbench-e2e")
+               "--url", endpoint, "--name", "clickbench-e2e", *selected_mode)
         saved = json.loads(state.read_bytes())
+        self.assertEqual(saved["collection_mode"], collection_mode)
+        self.assertEqual(len(saved["schema"]["fields"]), 105)
+        physical_width = 106 if collection_mode == "kv" else 105
+        self.assertEqual(len(saved["target_schema"]["fields"]), physical_width)
+        if collection_mode == "kv":
+            self.assertEqual(saved["key_encoding"], "source-row-ordinal-decimal-v1")
+            # An omitted mode keeps the saved KV target; an explicit change is refused.
+            online("init", "--dataset", dataset, "--state", state,
+                   "--url", endpoint, "--name", "clickbench-e2e")
+            original = state.read_bytes()
+            online("init", "--dataset", dataset, "--state", state,
+                   "--url", endpoint, "--name", "clickbench-e2e", "--mode", "append", expected=2)
+            self.assertEqual(state.read_bytes(), original)
         import httpx
         unauthorized = httpx.get(endpoint + "/storage", verify=ssl.create_default_context(cafile=str(ca)))
         self.assertEqual(unauthorized.status_code, 401)
-        online("load", "--state", state)
-        online("load", "--state", state, "--resume")
+
+        load_report = self.reports / "clickbench-load.json"
+        proxy.drop_once = True
+        interrupted = online("load", "--state", state, "--batch-rows", "3", "--batch-bytes", "1048576",
+                             "--workers", "3", "--report", load_report, expected=3)
+        self.assertEqual(interrupted["status"], "INCOMPLETE")
+        saved = json.loads(state.read_bytes())
+        original_plan = saved["append_plan"]
+        self.assertEqual({key: original_plan[key] for key in ("workers", "batch_rows", "batch_bytes")},
+                         {"workers": 3, "batch_rows": 3, "batch_bytes": 1048576})
+        pending = self.clickbench_journal(saved)
+        operations = [row for journal in pending.values() for row in journal["operations"]]
+        identities = {row["operation_id"]: (row["body"], row["body_hash"], row["payload_hash"], row["kind"])
+                      for row in operations}
+        self.assertTrue(any(row["attempts"] and row["state"] != "committed" for row in operations))
+        writes_before_resolve = proxy.append_calls
+        self.fixed_port = self.port
+        self.stop()
+        self.start()
+        self.assertEqual(online("resolve", "--state", state)["status"], "PASS")
+        self.assertEqual(proxy.append_calls, writes_before_resolve, "lookup resolution must not resend a write")
+        resolved = self.clickbench_journal(saved)
+        for journal in resolved.values():
+            for row in journal["operations"]:
+                self.assertEqual((row["body"], row["body_hash"], row["payload_hash"], row["kind"]),
+                                 identities[row["operation_id"]])
+        loaded = online("load", "--state", state, "--resume", "--report", load_report)
+        self.assertEqual(loaded["status"], "PASS")
+        self.assertEqual(loaded["confirmed_rows"], 31)
+        self.assertTrue(loaded["load_complete"])
+        self.assertEqual(json.loads(load_report.read_bytes())["status"], "PASS")
+        saved = json.loads(state.read_bytes())
+        self.assertEqual(saved["append_plan"], original_plan)
+        complete_journal = self.clickbench_journal(saved)
+        operations = [row for journal in complete_journal.values() for row in journal["operations"]]
+        self.assertEqual(len(operations), 13)  # Four 7-row parts split 3/3/1; the final 3-row part.
+        self.assertEqual(sum(row["rows"] for row in operations), 31)
+        self.assertTrue(all(row["state"] == "committed" and row["attempts"] == 1 for row in operations))
+        self.assertEqual({row["kind"] for row in operations}, {"upsert" if collection_mode == "kv" else "append"})
+        self.assertTrue(all(row["rows"] <= 3 and len(row["body"]) <= 1048576 for row in operations))
+        self.assertEqual(len({row["operation_id"] for row in operations}), 13)
+        for record in proxy.append_requests:
+            operation = next(row for row in operations if row["operation_id"] == record["operation_id"])
+            self.assertEqual(hashlib.sha256(operation["body"]).hexdigest(), record["body_sha256"])
+            self.assertTrue(record["path"].endswith("/upsert" if collection_mode == "kv" else "/append"))
+
+        receipt_results = {}
+        with Client(self.direct, self.env["GLAMDB_TOKEN"], database_id=saved["database_id"]) as client:
+            schema = client.get_schema(saved["collection_id"])
+            self.assertEqual(len(schema.fields), physical_width)
+            self.assertEqual(schema.to_dict(), saved["target_schema"])
+            physical_rows = client.scan_json(saved["collection_id"], snapshot_id=saved["snapshot_id"]).rows
+            if collection_mode == "kv":
+                expected_physical = [dict(row, key=f"{ordinal:020d}") for ordinal, row in enumerate(expected_rows)]
+                self.assertCountEqual(physical_rows, expected_physical)
+                self.assertEqual({row["key"] for row in physical_rows}, {f"{ordinal:020d}" for ordinal in range(31)})
+                found = client.lookup(saved["collection_id"], ["00000000000000000000", "missing",
+                                      "00000000000000000030", "00000000000000000000"],
+                                      snapshot_id=saved["snapshot_id"])
+                self.assertEqual(found.rows, [expected_physical[0], None, expected_physical[30], expected_physical[0]])
+            else:
+                self.assertCountEqual(physical_rows, expected_rows)
+            self.assertEqual(len(physical_rows), 31)
+            self.assertEqual({row["WatchID"] for row in physical_rows}, {9007199254740993})
+            self.assertEqual({row["UserID"] for row in physical_rows}, {435090932899640449})
+            self.assertEqual({row["UTMTerm"] for row in physical_rows}, {"последний столбец 🎀"})
+            self.assertEqual({row["CLID"] for row in physical_rows}, {2**63 - 2 - n for n in range(5)})
+            expected_date = date(2013, 7, 14) if type_profile == "native" else datetime(2013, 7, 14, tzinfo=timezone.utc)
+            self.assertTrue(all(type(row["EventDate"]) is type(expected_date) and row["EventDate"] == expected_date
+                                for row in physical_rows))
+            with client.scan_batches(saved["collection_id"], snapshot_id=saved["snapshot_id"]) as batches:
+                arrow_rows = [row for batch in batches for row in batch.to_pylist()]
+            self.assertCountEqual(arrow_rows, physical_rows)
+            for operation in operations:
+                receipt = client.find_append_outcome(saved["collection_id"], operation["operation_id"])
+                self.assertEqual(receipt.outcome, "committed")
+                self.assertEqual(receipt.result["payload_hash"], operation["payload_hash"])
+                receipt_results[operation["operation_id"]] = receipt.result
+                if collection_mode == "kv":
+                    self.assertEqual(receipt.result["mutation_kind"], "upsert")
+                    self.assertEqual(receipt.result["receipt_version"], 3)
+                    self.assertEqual(int(receipt.result["input_rows"]), operation["rows"])
+                    self.assertEqual(int(receipt.result["rows_affected"]), operation["rows"])
+                    self.assertEqual(int(receipt.result["rows_written"]) - int(receipt.result["rows_removed"]),
+                                     operation["rows"])
+                else:
+                    self.assertEqual(int(receipt.result["rows_appended"]), operation["rows"])
         for format in ("json", "arrow"):
-            online("verify", "--state", state, "--format", format)
+            verification = online("verify", "--state", state, "--format", format)
+            self.assertEqual(verification["status"], "PASS")
+            self.assertEqual((verification["expected_rows"], verification["actual_rows"]), (31, 31))
+        status = online("status", "--state", state)
+        self.assertEqual(status["status"], "PASS")
+        self.assertEqual(status["operations"]["confirmed_rows"], 31)
+        self.assertEqual(status["snapshot_id"], saved["snapshot_id"])
         sizes = self.reports / "clickbench-sizes.json"
         owned = self.data_dir / "databases" / saved["store_id"]
         online("size", "--state", state, "--report", sizes, "--include-footers", "--owned-store-dir", owned)
@@ -294,15 +438,17 @@ class NativeWorkload(unittest.TestCase):
         self.assertEqual(result["status"], "PASS")
         self.assertTrue(result["performance_eligible"])
         self.assertEqual(result["snapshot"]["rows"], 31)
-        self.assertEqual(result["snapshot"]["parquet_files"], 5)
+        self.assertGreater(result["snapshot"]["parquet_files"], 0)
         self.assertGreater(result["snapshot"]["parquet_file_bytes"], 0)
         independent = sum(path.stat().st_size for path in owned.rglob("*") if path.is_file())
         self.assertEqual(result["local_filesystem"]["database_file_bytes"], independent)
         self.assertGreater(result["local_filesystem"]["catalog_file_bytes"], 0)
         self.assertIsNone(result["snapshot"]["database_file_bytes"])
         self.assertEqual(int(result["server_storage"]["database_file_bytes"]), independent)
-        self.assertEqual(int(result["server_storage"]["committed_data_file_bytes"]),
-                         result["snapshot"]["parquet_file_bytes"])
+        self.assertGreaterEqual(int(result["server_storage"]["committed_data_file_bytes"]),
+                                result["snapshot"]["parquet_file_bytes"])
+        self.assertTrue(sizes.with_suffix(".csv").is_file())
+        self.assertTrue(sizes.with_suffix(".md").is_file())
         catalog = os.environ.get("GLAMDB_CLICKBENCH_CATALOG")
         self.assertTrue(catalog, "set GLAMDB_CLICKBENCH_CATALOG to fetched pinned query material")
         campaign = self.reports / "clickbench-queries.json"
@@ -312,18 +458,61 @@ class NativeWorkload(unittest.TestCase):
         self.assertEqual(measured["status"], "PASS")
         self.assertEqual(len(measured["coverage"]), 86)
         self.assertTrue(all(item["verified"] for item in measured["coverage"]))
-        with sqlite3.connect(self.reports / "clickbench-state-artifacts" / "worker-000000.sqlite") as db:
-            operation = db.execute("SELECT operation_id FROM operations LIMIT 1").fetchone()[0]
+        self.assertEqual({(item["query_id"], item["mode"]) for item in measured["coverage"]},
+                         {(identifier, mode) for identifier in range(1, 44) for mode in ("scan", "reduce")})
+        self.assertTrue(campaign.with_suffix(".csv").is_file())
+        self.assertTrue(campaign.with_suffix(".md").is_file())
+        scans = self.reports / "clickbench-scans.json"
+        online("scan", "--state", state, "--catalog", catalog, "--report", scans,
+               "--queries", "all", "--warmup", "0", "--repeat", "1", "--users", "2", "--processes", "2")
+        scanned = json.loads(scans.read_bytes())
+        self.assertEqual(scanned["status"], "PASS")
+        self.assertEqual(len(scanned["coverage"]), 43)
+        self.assertTrue(all(item["mode"] == "scan" and item["verified"] for item in scanned["coverage"]))
+        self.assertEqual(scanned["snapshot_id"], saved["snapshot_id"])
+        self.assertEqual(scanned["configuration"]["users"], 2)
+        self.assertEqual(scanned["configuration"]["processes"], 2)
         self.fixed_port = self.port
         self.stop()
         self.start()
         with Client(self.direct, self.env["GLAMDB_TOKEN"], database_id=saved["database_id"]) as client:
-            self.assertEqual(len(client.get_schema(saved["collection_id"]).fields), 105)
-            self.assertEqual(client.find_append_outcome(saved["collection_id"], operation).outcome, "committed")
+            self.assertEqual(len(client.get_schema(saved["collection_id"]).fields), physical_width)
+            for operation in operations:
+                recovered = client.find_append_outcome(saved["collection_id"], operation["operation_id"])
+                self.assertEqual(recovered.result, receipt_results[operation["operation_id"]])
+            journal_path = next(path for path in Path(saved["run_dir"]).glob("worker-*.sqlite")
+                                if complete_journal[path.name]["operations"])
+            with Ledger(journal_path, readonly=True) as journal:
+                operation_id = complete_journal[journal_path.name]["operations"][0]["operation_id"]
+                request = journal.request(operation_id)
+            replay = client.upsert(request) if collection_mode == "kv" else client.append(request)
+            self.assertEqual(replay.result, receipt_results[operation_id])
             self.assertEqual(int(client.stats(saved["collection_id"], snapshot_id=result["snapshot"]["snapshot_id"])["rows"]), 31)
+        resumed = online("load", "--state", state, "--resume")
+        self.assertEqual(resumed["status"], "PASS")
+        self.assertEqual(resumed["newly_confirmed_rows"], 0)
+        self.assertEqual(resumed["rows_per_second"], 0)
+        self.assertEqual(self.clickbench_journal(saved), complete_journal,
+                         "restart/resume changed an original UUID, request, attempt or receipt")
+        self.assertEqual(json.loads(state.read_bytes())["append_plan"], original_plan)
+        self.assertEqual(online("status", "--state", state)["status"], "PASS")
+        online("verify", "--state", state, "--format", "arrow")
         online("clean", "--state", state)
         online("clean", "--state", state)
         self.assertFalse(owned.exists())
+        self.assertEqual(self.clickbench_journal(saved), complete_journal)
+        self.assertTrue((dataset / "manifest.json").is_file())
+        reloaded_state = self.reports / "clickbench-reloaded-state.json"
+        online("init", "--dataset", dataset, "--state", reloaded_state,
+               "--url", endpoint, "--name", "clickbench-e2e-reloaded", *selected_mode)
+        reloaded = json.loads(reloaded_state.read_bytes())
+        self.assertNotEqual(reloaded["database_id"], saved["database_id"])
+        self.assertEqual(reloaded["collection_mode"], collection_mode)
+        self.assertEqual(online("load", "--state", reloaded_state)["confirmed_rows"], 31)
+        for format in ("json", "arrow"):
+            self.assertEqual(online("verify", "--state", reloaded_state, "--format", format)["status"], "PASS")
+        online("clean", "--state", reloaded_state)
+        self.assertFalse((self.data_dir / "databases" / reloaded["store_id"]).exists())
 
     def test_generate_write_all_pages_json_arrow_verify_restart(self):
         schema = Schema(

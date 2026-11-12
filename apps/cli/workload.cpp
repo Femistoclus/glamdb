@@ -107,7 +107,8 @@ std::shared_ptr<TArguments> Command(CLI::App& app, std::vector<std::string> pref
 
 void Value(CLI::App& app, TArguments& args, const std::string& name, const char* help, bool required = false)
 {
-    auto* option = app.add_option(name, args.Values[name], help);
+    const auto canonical = name.substr(0, name.find(','));
+    auto* option = app.add_option(name, args.Values[canonical], help);
     if (required) {
         option->required();
     }
@@ -204,26 +205,34 @@ void AddWorkloadCommands(CLI::App& app, std::optional<int>& exitCode)
     auto* fetch = clickbench->add_subcommand("fetch-queries", "Fetch pinned query material and its original license");
     auto fetching = Command(*fetch, {"bench", "clickbench", "fetch-queries"}, exitCode);
     Value(*fetch, *fetching, "--output", "New cache directory; checksums are pinned in the adapter", true);
-    auto* query =
-        clickbench->add_subcommand("query", "Run all scan/reduce scenarios with independent source validation");
-    auto querying = Command(*query, {"bench", "clickbench", "query"}, exitCode);
-    for (const auto* name : {"--state", "--catalog", "--report"}) {
-        Value(*query, *querying, name, "Original state, pinned query cache, or output JSON report", true);
-    }
-    for (const auto* name : {"--source",
-             "--ids",
-             "--mode",
-             "--warmup",
-             "--repeats",
-             "--timeout",
-             "--ca-file",
-             "--memory-bytes",
-             "--temp-bytes",
-             "--max-candidate-bytes",
-             "--max-result-rows",
-             "--max-result-bytes"})
-    {
-        Value(*query, *querying, name, "Query campaign setting; see tools/workload/CLICKBENCH.md");
+    for (const auto* action : {"query", "scan"}) {
+        auto* query =
+            clickbench->add_subcommand(action, "Run all scan/reduce scenarios with independent source validation");
+        auto querying = Command(*query, {"bench", "clickbench", action}, exitCode);
+        Value(*query, *querying, "--state", "Original ClickBench run state", true);
+        Value(*query, *querying, "--catalog", "Pinned query material directory", true);
+        Value(*query, *querying, "--report", "JSON report path; CSV and Markdown use the same stem", true);
+        Value(*query, *querying, "--ids,--queries", "all or comma-separated query numbers Q1-Q43 (default all)");
+        Value(*query, *querying, "--repeats,--repeat", "Measured repetitions (default 3)");
+        Value(*query, *querying, "--users", "Concurrent Locust users (default 1)");
+        Value(*query, *querying, "--processes", "Client worker processes (default 1)");
+        Value(*query,
+            *querying,
+            "--mode",
+            std::string_view(action) == "scan" ? "scan, reduce or both (default scan)"
+                                               : "scan, reduce or both (default both)");
+        Value(*query, *querying, "--source", "Original source Parquet path; required for reduce and both modes");
+        for (const auto* name : {"--warmup",
+                 "--timeout",
+                 "--ca-file",
+                 "--memory-bytes",
+                 "--temp-bytes",
+                 "--max-candidate-bytes",
+                 "--max-result-rows",
+                 "--max-result-bytes"})
+        {
+            Value(*query, *querying, name, "Query campaign setting; see tools/workload/CLICKBENCH.md");
+        }
     }
     auto* prepare = clickbench->add_subcommand("prepare", "Convert all 105 columns to immutable bounded parts");
     auto preparation = Command(*prepare, {"bench", "clickbench", "prepare"}, exitCode);
@@ -241,7 +250,7 @@ void AddWorkloadCommands(CLI::App& app, std::optional<int>& exitCode)
     Value(*prepare, *preparation, "--max-converted-bytes", "Converted dataset budget (default 8589934592)");
     const std::map<std::string_view, const char*> clickbenchDescriptions{
         {"init", "Create a dedicated database and collection for the prepared dataset"},
-        {"load", "Append the prepared dataset using saved immutable requests"},
+        {"load", "Load the prepared dataset using saved immutable append or upsert requests"},
         {"status", "Show saved target identity, progress and unresolved operations"},
         {"resolve", "Look up saved operation outcomes; resend only with --retry"},
         {"verify", "Compare stored rows with the prepared source dataset"},
@@ -268,6 +277,7 @@ void AddWorkloadCommands(CLI::App& app, std::optional<int>& exitCode)
                     true);
             }
             Value(*command, *args, "--limits", "Explicit finite database limits JSON");
+            Value(*command, *args, "--mode", "Collection mode: append or kv (new runs default to append)");
             Value(*command,
                 *args,
                 "--max-journal-bytes",
@@ -277,6 +287,10 @@ void AddWorkloadCommands(CLI::App& app, std::optional<int>& exitCode)
                 "--test-backend",
                 "Explicit mock test fixture only; excluded from performance results");
         } else if (action == "load") {
+            Value(*command, *args, "--batch-rows", "Maximum rows per immutable write (default 10000)");
+            Value(*command, *args, "--batch-bytes", "Maximum bytes per immutable write (default 8388608)");
+            Value(*command, *args, "--workers", "Workers assigned disjoint source parts (default 1)");
+            Value(*command, *args, "--report", "Optional JSON load report path");
             Flag(*command,
                 *args,
                 "--resume",

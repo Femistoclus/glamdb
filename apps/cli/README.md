@@ -264,7 +264,13 @@ See the
 [workload guide](../../tools/workload/README.md) for installation, exact outcome
 journals, Locust reports and native E2E. Ordinary requests do not require Python.
 
-ClickBench commands and examples: [workload adapter](../../tools/workload/CLICKBENCH.md).
+`bench clickbench prepare/init/load/status/resolve/verify/size/scan/query/clean`
+provides the complete hits lifecycle. New runs default to append; `init --mode kv`
+adds a duplicate-safe source-ordinal key. Loading freezes row/byte bounds and
+disjoint worker assignments; scans and client reductions support finite Locust
+users/processes with JSON/CSV/Markdown timing reports. See the
+[ClickBench recipes](../../tools/workload/CLICKBENCH.md) for source preparation,
+all 43 queries, capacity profiles, recovery and exact-identity cleanup.
 
 ## Native bulk upload
 

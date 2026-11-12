@@ -751,12 +751,21 @@ Prometheus and Loki dashboard queries with their respective engines.
 Telegram summaries use bounded, escaped native Alertmanager HTML groups; run
 `tools/alerting/check.py` for template rendering and loopback delivery checks.
 
-ClickBench preparation/loading/verification supports native DATE or explicit
-legacy-date profiles and preserves all 105 columns and exact append identities.
-Query campaigns validate all 43 scan/reduce readings. See
-[ClickBench](tools/workload/CLICKBENCH.md) and [physical inventory](docs/development/STORAGE_FOOTPRINT.md).
-The complete hits load remains blocked by the 4096-operation/history profile;
-do not raise constants, drop receipts, or replicate the dataset across workers.
+ClickBench has a complete network CLI lifecycle and all 43 scan/reduce workloads.
+Append is the default; KV adds a source-ordinal key while preserving all 105
+logical fields and duplicate rows. Official UInt16 EventDate uses epoch days;
+physical source types determine conversions. Freeze row/wire-bounded requests,
+worker assignments and original IDs/bodies before writes. Locust schedules
+disjoint writes under one publication gate and finite concurrent query rounds.
+Verify source rows, requests, authoritative receipts and the full pinned multiset
+before completion; failed verification revokes it. Query SQL reductions include
+bounded temporary DuckDB staging and remain labelled GlamDB + DuckDB.
+The adapter accepts persisted scalable operation/history profiles without an
+extra 4096-operation ceiling. Full-source conversion, journals and verification
+need explicit finite client/server disk budgets; do not drop receipts or replicate
+the source across workers. See [ClickBench](tools/workload/CLICKBENCH.md),
+[executed validation](docs/development/CLICKBENCH_VALIDATION.md) and
+[physical inventory](docs/development/STORAGE_FOOTPRINT.md).
 
 ## Validation and reporting
 

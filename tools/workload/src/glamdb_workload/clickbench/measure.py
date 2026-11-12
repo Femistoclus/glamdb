@@ -15,6 +15,7 @@ from uuid import UUID
 from ..runtime import client_for
 from .ingest import Blocked, _backend, _config, _dataset, read_state
 from .model import read_json, save_json
+from .target import collection_mode
 
 
 def _integer(value, name):
@@ -212,6 +213,7 @@ def measure(path, report, *, owned_store_dir=None, include_footers=False, timeou
         if server_storage is not None and local["database_file_bytes"] != int(server_storage["database_file_bytes"]):
             raise ValueError("local and server store sizes changed between checkpoints; retry without external writers")
     result = {"status": "PASS" if verified else "INCOMPLETE", "verification": "PASS" if verified else "NOT_VERIFIED",
+              "collection_mode": collection_mode(state),
               "dataset_hash": data.digest, "source": data.manifest["source"],
               "profile": data.manifest["profile"], "type_profile": data.manifest["type_profile"],
               "converted_bytes": data.manifest["converted_bytes"], "load_id": state["load_id"],
@@ -221,7 +223,7 @@ def measure(path, report, *, owned_store_dir=None, include_footers=False, timeou
               "journal_file_bytes": sum(item.stat().st_size for item in run.glob("worker-*.sqlite")),
               "performance_eligible": verified and state["performance_eligible"]}
     save_json(report, result)
-    flat = {"status": result["status"], "profile": result["profile"],
+    flat = {"status": result["status"], "profile": result["profile"], "collection_mode": result["collection_mode"],
             "verification": result["verification"], "performance_eligible": result["performance_eligible"],
             **{key: value for key, value in sizes.items() if not isinstance(value, dict)}}
     flat["performance_eligible"] = result["performance_eligible"]

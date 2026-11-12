@@ -93,31 +93,80 @@ class BridgeTest(unittest.TestCase):
                 self.assertEqual(args[args.index("--consume") + 1], "batches")
 
     def test_clickbench_commands_forward_options_without_shell_or_target_overrides(self):
-        self.module.write_text("import json,sys\nprint(json.dumps(sys.argv[1:]))\n")
-        path = str(self.root / "ClickBench run with spaces.json")
-        for action, options in (
-            ("fetch-queries", ["--output", "reference with spaces"]),
-            ("query", ["--state", path, "--catalog", "reference", "--report", "queries.json",
-                       "--source", "hits.parquet", "--ids", "1,20,24", "--mode", "both",
-                       "--warmup", "0", "--repeats", "1", "--memory-bytes", "67108864"]),
-            ("prepare", ["--source", "hits.parquet", "--output", "data", "--type-profile", "legacy-date", "--rows", "31"]),
-            ("init", ["--state", path, "--dataset", "data", "--name", "hits", "--url", "https://example.org",
-                      "--limits", "limits.json", "--max-journal-bytes", "1024", "--test-backend", "mock"]),
-            ("load", ["--state", path, "--resume"]),
-            ("resolve", ["--state", path, "--retry"]),
-            ("verify", ["--state", path, "--format", "arrow"]),
-            ("size", ["--state", path, "--report", "sizes.json", "--include-footers", "--owned-store-dir", "/store"]),
-            ("status", ["--state", path]),
-            ("clean", ["--state", path]),
+        self.module.write_text("import json,sys\nprint(json.dumps(sys.argv[1:]))\nsys.exit(3)\n")
+        path = str(self.root / "ClickBench run $(literal) with spaces.json")
+        connection = ["--state", path, "--ca-file", "ca with spaces.pem", "--timeout", "17.5"]
+        queries = [*connection, "--catalog", "reference", "--report", "queries.json",
+                   "--source", "hits.parquet", "--ids", "1,20,43", "--mode", "both", "--warmup", "0",
+                   "--repeats", "1", "--users", "4", "--processes", "2", "--memory-bytes", "67108864",
+                   "--temp-bytes", "134217728", "--max-candidate-bytes", "268435456",
+                   "--max-result-rows", "1000", "--max-result-bytes", "33554432"]
+        for action, values, flags in (
+            ("fetch-queries", ["--output", "reference with spaces"], []),
+            ("query", queries, []),
+            ("scan", queries, []),
+            ("prepare", ["--source", "hits.parquet", "--output", "data", "--type-profile", "legacy-date",
+                         "--rows", "31", "--part-rows", "7", "--part-bytes", "1048576",
+                         "--max-source-bytes", "8388608", "--max-converted-bytes", "4194304"], []),
+            ("init", [*connection, "--dataset", "data", "--name", "hits", "--url", "https://example.org",
+                      "--limits", "limits.json", "--max-journal-bytes", "1024", "--test-backend", "mock",
+                      "--mode", "kv"], []),
+            ("load", [*connection, "--batch-rows", "7", "--batch-bytes", "1048576", "--workers", "3",
+                      "--report", "load with spaces.json"], ["--resume"]),
+            ("resolve", connection, ["--retry"]),
+            ("verify", [*connection, "--format", "arrow"], []),
+            ("size", [*connection, "--report", "sizes.json", "--owned-store-dir", "/store"], ["--include-footers"]),
+            ("status", connection, []),
+            ("clean", connection, []),
         ):
-            result = subprocess.run([CLI, "bench", "clickbench", action, *options], env=self.env,
-                                    text=True, capture_output=True, timeout=10)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            args = json.loads(result.stdout)
-            self.assertEqual(args[:3], ["bench", "clickbench", action])
-            for value in options:
-                self.assertIn(value, args)
-            self.assertNotIn(self.env["GLAMDB_TOKEN"], result.stdout + result.stderr)
+            with self.subTest(action=action):
+                result = subprocess.run([CLI, "bench", "clickbench", action, *values, *flags], env=self.env,
+                                        text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 3, result.stderr)
+                args = json.loads(result.stdout)
+                self.assertEqual(args[:3], ["bench", "clickbench", action])
+                forwarded = args[3:]
+                for flag in flags:
+                    self.assertEqual(forwarded.count(flag), 1)
+                    forwarded.remove(flag)
+                self.assertEqual(len(forwarded), len(values))
+                self.assertEqual(dict(zip(forwarded[::2], forwarded[1::2])),
+                                 dict(zip(values[::2], values[1::2])))
+                self.assertNotIn(self.env["GLAMDB_TOKEN"], result.stdout + result.stderr)
+
+    def test_clickbench_query_aliases_forward_one_canonical_value(self):
+        self.module.write_text("import json,sys\nprint(json.dumps(sys.argv[1:]))\n")
+        for action in ("query", "scan"):
+            for ids, repeats in (("--ids", "--repeats"), ("--queries", "--repeat")):
+                with self.subTest(action=action, ids=ids, repeats=repeats):
+                    result = subprocess.run(
+                        [CLI, "bench", "clickbench", action, "--state", "state.json", "--catalog", "cache",
+                         "--report", "scans.json", ids, "1,43", repeats, "2", "--users", "3", "--processes", "2"],
+                        env=self.env, text=True, capture_output=True, timeout=10,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    args = json.loads(result.stdout)
+                    self.assertEqual(args[:3], ["bench", "clickbench", action])
+                    self.assertEqual(dict(zip(args[3::2], args[4::2])), {
+                        "--state": "state.json", "--catalog": "cache", "--report": "scans.json",
+                        "--ids": "1,43", "--repeats": "2", "--users": "3", "--processes": "2",
+                    })
+
+    def test_clickbench_saved_state_commands_reject_target_overrides_before_python(self):
+        self.module.write_text('raise RuntimeError("child must not start")\n')
+        for action in ("load", "resolve", "verify", "status", "size", "clean", "query", "scan"):
+            with self.subTest(action=action):
+                extra = ["--report", "sizes.json"] if action == "size" else []
+                if action in ("query", "scan"):
+                    extra = ["--catalog", "cache", "--report", "queries.json"]
+                result = subprocess.run(
+                    [CLI, "bench", "clickbench", action, "--state", "state.json", *extra,
+                     "--url", "https://another.example"],
+                    env=self.env, text=True, capture_output=True, timeout=10,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertNotIn("child must not start", result.stderr)
 
     def test_missing_python_is_actionable(self):
         self.env["GLAMDB_PYTHON"] = str(self.root / "no python")
