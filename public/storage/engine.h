@@ -92,6 +92,7 @@ public:
     Status Shutdown(std::chrono::milliseconds timeout);
 
 private:
+    void CloseOnCorruption(const ErrorDetail& error) const;
     CreateOutcome CreateCollectionImpl(const CreateCollectionRequest& request,
         std::string_view migrationIdentity,
         std::string_view migrationOperation = {});

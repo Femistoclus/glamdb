@@ -46,6 +46,26 @@ The 520-operation/260-root probe also checks referenced/unreferenced bytes befor
 and after reopen. These are finite correctness checks, not larger-history or
 power-loss qualification.
 
+## Follow-up lookup and workbench regressions
+
+`tests/vertical/kv_lookup_test.cpp` rewrites a retained Parquet file with duplicate
+keys while preserving its schema, row count and file length. Current and historical
+lookups must report corruption and close read/write admission. Scan creation,
+receipt lookup and a missing-key delete remain blocked; reconciliation fails until
+the original bytes are restored. Successful reconciliation restores lookup, the
+original receipt and new writes. Invalid keys and lookup result-memory exhaustion
+are separate controls that must leave a healthy store available.
+
+`ui/tests/e2e/native.spec.mjs` covers imported delete and compaction requests with
+both committed and definitely-not-committed receipts, resolved through exact retry
+or outcome lookup. Transport failures keep the pending operation's original kind,
+ID and payload. Terminal outcomes restore an editable upsert form without losing
+the query draft, including when the post-commit metadata refresh fails. Each case
+submits a fresh upsert with a new ID, reads its row back from the native server and
+checks that the original terminal receipt is unchanged. The export/reload/import
+scenario also checks that returning to Data studio does not resurrect a pending
+panel for a completed delete.
+
 ## Invariants exercised
 
 | Contract | Executable coverage |

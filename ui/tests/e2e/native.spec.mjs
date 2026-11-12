@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 
 const token = process.env.GLAMDB_E2E_TOKEN ?? 'e2e-only-local-token';
 
@@ -717,6 +718,13 @@ test('native KV no-op receipt exports, imports and retries after reload without 
     await expect(
         page.getByRole('table', { name: 'Published snapshot operations' }).locator('tbody tr'),
     ).toHaveCount(0);
+    await navigate(page, 'Data studio');
+    await expect(
+        page.locator('#write-form').getByLabel('key row 1', { exact: true }),
+    ).toBeEnabled();
+    await expect(
+        page.getByRole('button', { name: 'Review or retry same operation', exact: true }),
+    ).toHaveCount(0);
 });
 
 test('native snapshot selection keeps the same read and write forms and their drafts', async ({
@@ -777,3 +785,197 @@ test('native snapshot selection keeps the same read and write forms and their dr
         fullPage: true,
     });
 });
+
+for (const action of ['delete', 'compact']) {
+    for (const scenario of [
+        { outcome: 'committed', resolution: 'retry' },
+        { outcome: 'committed', resolution: 'lookup' },
+        { outcome: 'definitely_not_committed', resolution: 'retry' },
+        { outcome: 'definitely_not_committed', resolution: 'lookup' },
+        { outcome: 'committed', resolution: 'retry', refreshFails: true },
+    ]) {
+        const suffix = `${action}_${scenario.outcome}_${scenario.resolution}${scenario.refreshFails ? '_refresh' : ''}`;
+        test(`native imported ${suffix} restores a fresh upsert`, async ({ page }) => {
+            const headers = { Authorization: `Bearer ${token}` };
+            const created = await page.request.post('/databases', {
+                headers,
+                data: { name: suffix },
+            });
+            expect(created.ok()).toBe(true);
+            const database = await created.json();
+            const collectionId = randomUUID(),
+                operationId = randomUUID();
+            const schema = { fields: [{ name: 'key', type: 'string', nullable: false }] };
+            const collectionPath = `/databases/${database.database_id}/collections/${collectionId}`;
+            const collection = await page.request.post(
+                `/databases/${database.database_id}/collections`,
+                {
+                    headers,
+                    data: { collection_id: collectionId, name: 'keys', mode: 'kv', schema },
+                },
+            );
+            expect(collection.ok()).toBe(true);
+            const body =
+                action === 'delete'
+                    ? { keys: ['missing', 'missing'] }
+                    : { max_files: '4', target_file_bytes: '1024' };
+            if (scenario.outcome === 'definitely_not_committed') body.expected_snapshot = '1';
+            const originalRequest = { ...body, operation_id: operationId };
+            // The server completes the original request; the imported file
+            // represents a client that lost that response before saving it.
+            const original = await (
+                await page.request.post(`${collectionPath}/${action}`, {
+                    headers,
+                    data: originalRequest,
+                })
+            ).json();
+            expect(original.outcome).toBe(scenario.outcome);
+            const recovery = {
+                format: 'glamdb-pending-request',
+                version: 1,
+                scope: {
+                    server_url: new URL(created.url()).origin,
+                    database_id: database.database_id,
+                    store_id: database.store?.store_id ?? null,
+                    backend: 'local',
+                    mock: false,
+                },
+                request: {
+                    kind: 'append',
+                    action,
+                    collection_id: collectionId,
+                    operation_id: operationId,
+                    schema,
+                    body,
+                },
+            };
+            await connect(page);
+            await useDatabase(page, suffix);
+            const requests = [];
+            page.on('request', (request) => {
+                if (new URL(request.url()).pathname === `${collectionPath}/${action}`)
+                    requests.push(request.postDataJSON());
+            });
+            await page.getByRole('button', { name: 'Pending requests', exact: true }).click();
+            await page.getByLabel('Recovery JSON file').setInputFiles({
+                name: 'pending.json',
+                mimeType: 'application/json',
+                buffer: Buffer.from(JSON.stringify(recovery)),
+            });
+            await page.getByRole('button', { name: 'Import pending request', exact: true }).click();
+            const dialog = page.getByRole('dialog');
+            await expect(dialog).not.toBeVisible();
+            const pending = page.locator('.write-panel');
+            await expect(pending).toContainText('A mutation is pending');
+            await expect(page.locator('#write-form')).toHaveCount(0);
+            expect(requests).toHaveLength(0);
+            await page.getByLabel('Result limit').fill('42');
+            await page
+                .locator('#query-form')
+                .evaluate((node) => (globalThis.recoveryReadForm = node));
+
+            if (scenario.resolution === 'retry') {
+                await page.route(
+                    `**${collectionPath}/${action}`,
+                    (route) => route.abort('failed'),
+                    { times: 1 },
+                );
+                await page
+                    .getByRole('button', { name: 'Review or retry same operation', exact: true })
+                    .click();
+                await dialog
+                    .getByRole('button', { name: 'Retry same operation', exact: true })
+                    .click();
+                await expect(
+                    dialog.getByText('Outcome unresolved · keep this operation ID'),
+                ).toBeVisible();
+                await expect(dialog.locator('textarea')).toHaveAttribute('readonly', '');
+                await expect(pending).toContainText('A mutation is pending');
+                expect(requests).toEqual([originalRequest]);
+                if (scenario.refreshFails)
+                    await page.route(`**${collectionPath}`, (route) => route.abort('failed'), {
+                        times: 1,
+                    });
+                await dialog
+                    .getByRole('button', { name: 'Retry same operation', exact: true })
+                    .click();
+                await expect(
+                    dialog.getByText(
+                        scenario.outcome === 'committed'
+                            ? `${action === 'delete' ? 'Delete' : 'Compaction'} committed`
+                            : 'Definitely not committed',
+                        { exact: true },
+                    ),
+                ).toBeVisible();
+                expect(requests).toEqual([originalRequest, originalRequest]);
+                if (scenario.refreshFails) {
+                    await expect(dialog.locator('#modal-error')).not.toHaveText('');
+                    await expect(dialog.locator('#append-outcome')).not.toContainText('unresolved');
+                }
+                await expect(
+                    dialog.getByRole('button', {
+                        name: scenario.outcome === 'committed' ? 'Committed' : 'Not committed',
+                        exact: true,
+                    }),
+                ).toBeDisabled();
+                await dialog.getByRole('button', { name: 'Close dialog' }).click();
+            } else {
+                await page.route(
+                    `**${collectionPath}/operations/${operationId}`,
+                    (route) => route.abort('failed'),
+                    { times: 1 },
+                );
+                const failed = page.waitForEvent('requestfailed', (request) =>
+                    request.url().endsWith(`/operations/${operationId}`),
+                );
+                await pending.getByRole('button', { name: 'Check outcome', exact: true }).click();
+                await failed;
+                await expect(pending).toContainText('A mutation is pending');
+                await pending.getByRole('button', { name: 'Check outcome', exact: true }).click();
+                expect(requests).toHaveLength(0);
+            }
+
+            const write = page.locator('#write-form');
+            await expect(write.getByLabel('key row 1', { exact: true })).toBeEnabled();
+            await expect(page.getByLabel('Result limit')).toHaveValue('42');
+            if (
+                scenario.resolution === 'lookup' ||
+                scenario.outcome === 'definitely_not_committed' ||
+                scenario.refreshFails
+            )
+                await expect
+                    .poll(() =>
+                        page
+                            .locator('#query-form')
+                            .evaluate((node) => node === globalThis.recoveryReadForm),
+                    )
+                    .toBe(true);
+            await expect(
+                page.getByRole('button', { name: 'Review or retry same operation', exact: true }),
+            ).toHaveCount(0);
+            await write.locator('[data-write-row] summary').first().click();
+            await write.getByLabel('key row 1', { exact: true }).fill('fresh');
+            const submitted = page.waitForRequest((request) =>
+                request.url().endsWith(`${collectionPath}/upsert`),
+            );
+            await write.getByRole('button', { name: 'Upsert rows', exact: true }).click();
+            const upsert = (await submitted).postDataJSON();
+            expect(upsert.operation_id).not.toBe(operationId);
+            expect(upsert.rows).toEqual([{ key: 'fresh' }]);
+            await expect(write.getByText('Upsert committed', { exact: true })).toBeVisible();
+            const lookup = await (
+                await page.request.post(`${collectionPath}/lookup`, {
+                    headers,
+                    data: { keys: ['fresh'] },
+                })
+            ).json();
+            expect(lookup.rows).toEqual([{ key: 'fresh' }]);
+            const retained = await (
+                await page.request.get(`${collectionPath}/operations/${operationId}`, { headers })
+            ).json();
+            expect(retained.outcome).toBe(scenario.outcome);
+            expect(retained.result).toEqual(original.result);
+            expect(retained.error).toEqual(original.error);
+        });
+    }
+}

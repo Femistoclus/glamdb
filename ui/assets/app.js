@@ -831,7 +831,9 @@ function writePanel() {
         pendingForCollection(state.collectionId) ??
         state.operations.find(
             (op) =>
-                op.operationId === state.writeOperationId && op.collectionId === state.collectionId,
+                op.operationId === state.writeOperationId &&
+                op.collectionId === state.collectionId &&
+                !['delete', 'compact'].includes(op.action),
         );
     const controls = isKV()
         ? `<div class="button-row" style="margin:12px 0">${kvEnabled('lookup') ? '<button class="button small" data-action="lookup-keys">Lookup keys</button>' : ''}${kvEnabled('delete') ? '<button class="button small" data-action="delete-keys">Delete keys</button>' : ''}${kvEnabled('compact') ? '<button class="button small" data-action="compact-files">Compact files</button>' : ''}</div>`
@@ -1868,6 +1870,12 @@ function saveOutcome(operation, outcome) {
     if (existing < 0) state.operations.push(operation);
     else state.operations[existing] = operation;
     if (state.mutation?.operationId === operation.operationId) state.mutation = operation;
+    if (
+        operation.terminal &&
+        ['delete', 'compact'].includes(operation.action) &&
+        state.writeOperationId === operation.operationId
+    )
+        state.writeOperationId = null;
     return outcome;
 }
 function showAppendOutcome(operation, payload) {
@@ -1910,6 +1918,19 @@ function showAppendOutcome(operation, payload) {
             if (form.elements.rows) form.elements.rows.readOnly = true;
             else lockWriteForm(form);
         }
+    }
+    if (
+        operation.terminal &&
+        ['delete', 'compact'].includes(operation.action) &&
+        state.tab === 'data' &&
+        state.collectionId === operation.collectionId
+    ) {
+        try {
+            readQuery();
+        } catch {
+            /* Preserve incomplete query drafts while resolving a mutation. */
+        }
+        renderWritePanel();
     }
 }
 async function appendForm(form) {

@@ -240,6 +240,7 @@ Result<LookupResult> Engine::Lookup(const LookupRequest& request) const
         }
         return result;
     } catch (const Failure& failure) {
+        CloseOnCorruption(failure.detail);
         return std::unexpected(failure.detail);
     } catch (const std::bad_alloc&) {
         return std::unexpected(

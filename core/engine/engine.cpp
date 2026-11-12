@@ -1053,6 +1053,11 @@ std::shared_ptr<ResourceOwner> Engine::GetResourceOwner() const
     return impl_->resources;
 }
 
+void Engine::CloseOnCorruption(const ErrorDetail& error) const
+{
+    impl_->CloseOnCorruption(error);
+}
+
 Engine::~Engine() = default;
 
 Result<std::shared_ptr<Engine>> CreateStore(const CreateStoreRequest& request)
