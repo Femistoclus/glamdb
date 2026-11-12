@@ -1,4 +1,5 @@
 import { validateRecovery } from './recovery.js';
+import { validateArrowFraming, validateArrowHeaders } from './arrow.js';
 
 export class APIError extends Error {
     constructor(status, payload) {
@@ -203,8 +204,9 @@ export class WorkbenchAPI {
         const accept = 'application/vnd.apache.arrow.stream';
         const cursor = await this.openScan(path, body, signal, accept);
         let cleanup = cursor;
+        let response;
         try {
-            const response = await this.request(path, {
+            response = await this.request(path, {
                 method: 'POST',
                 body: cursor ? { cursor } : body,
                 signal,
@@ -219,18 +221,21 @@ export class WorkbenchAPI {
                     'This export requires multiple pages. Reduce the preview limit or use the Python SDK for a full Arrow scan.',
                 );
             }
+            const expected = validateArrowHeaders(response.headers, body?.snapshot_id);
             const bytes = await this.readBytes(response);
-            const expected = response.headers.get('X-Content-SHA256');
-            if (expected) {
-                const digest = await crypto.subtle.digest('SHA-256', bytes);
-                const actual = Array.from(new Uint8Array(digest), (byte) =>
-                    byte.toString(16).padStart(2, '0'),
-                ).join('');
-                if (actual !== expected.toLowerCase())
-                    throw new Error('Arrow download checksum mismatch');
-            }
+            const digest = await crypto.subtle.digest('SHA-256', bytes);
+            const actual = Array.from(new Uint8Array(digest), (byte) =>
+                byte.toString(16).padStart(2, '0'),
+            ).join('');
+            if (actual !== expected) throw new Error('Arrow download checksum mismatch');
+            validateArrowFraming(bytes);
             return bytes;
         } finally {
+            try {
+                await response?.body?.cancel();
+            } catch {
+                /* Preserve the original failure while still cancelling the scan. */
+            }
             if (cleanup) await this.cancelScan(path, cleanup);
         }
     }

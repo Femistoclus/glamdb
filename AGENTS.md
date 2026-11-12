@@ -281,6 +281,12 @@ The check script also packages/serves the public demo under /glamdb/ and verifie
 requests, token prompt, cross-visitor state or credential files are introduced.
 See [validation](docs/development/WORKBENCH_VALIDATION.md) for exact evidence and
 limits. Keep secrets in environment or process memory; never browser storage.
+Arrow downloads require the preview's fixed snapshot, MIME, identity encoding,
+length, checksum and complete modern IPC framing before saving. The SDK checks
+the first page against requested/opened snapshots and preserves consumer/decode
+errors through owner cleanup; returned batches retain their buffers. See
+[client conformance](docs/development/CLIENT_CONFORMANCE.md) for separate native
+and mock export/ownership tests and the browser framing validator's scope.
 Mock faults require explicit development configuration. Do not give the mock a
 production store path. Every production write must eventually use the C++ core.
 

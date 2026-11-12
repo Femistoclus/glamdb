@@ -1,5 +1,56 @@
 # Workbench validation record
 
+## Arrow downloads and SDK stream ownership — 2026-11-12
+
+Issue #57, based on official `main` at `d7c6be1`. Executed on Linux x86-64,
+Python 3.13.18, HTTPX 0.28.1, PyArrow 25.0.0, Node 24.13.0 and pinned
+Playwright 1.56.1/Chromium 1194. The existing native Debug service supplies real
+exports; no native runtime, dependencies or persistent format changed.
+
+- **PASS — 903 repository Python tests**, explicit mock profile. One later-page
+  fault case is explicitly skipped because the legacy mock has no cursor pages.
+- **PASS — 38 native SDK/setup/lifecycle tests**, including 23 SDK TCP/TLS,
+  export-integrity and owner-lifetime cases. These require real native storage;
+  native setup never falls back to mock.
+- **PASS — 160 Node tests**, including 24 browser Arrow envelope cases.
+- **PASS — ten native Chromium scenarios and 44 mock/static Chromium scenarios.**
+  Empty downloads retain schema; an append after preview does not change its
+  download; corrupted checksum/EOS/snapshot responses start no download, and a
+  subsequent healthy export succeeds. PyArrow independently decodes saved files.
+- **PASS — five native Arrow IPC encoder cases**, after rebuilding
+  `glamdb_transport_test`: scalars/snapshot, empty schema, zero-column rows,
+  schema/batch/EOS capacity accounting and invalid schema/unresolved view.
+- **PASS — UI formatting, changed-file Python compilation, local documentation
+  targets and whitespace checks.**
+
+Focused regressions failed before the corresponding fixes. A fresh independent
+review and Node/PyArrow probes found malformed schema-table pointers and metadata
+versions, cleanup replacing consumer/later-page protocol errors, and the valid
+null initial selector. Those cases now pass, including real native simultaneous
+later-page snapshot/transport-close failure. No substantive review finding remains.
+The bounded browser Message-envelope checker was retained over buffering SDK
+responses or adding another Arrow runtime; logical schema/value decoding remains
+with native/PyArrow encoding and integration tests, as described in
+[client conformance](CLIENT_CONFORMANCE.md).
+
+The full mock run exposed collection-budget interference from the additional
+scenarios; they now own a separate disposable mock process. Two existing pending
+recovery scenarios timed out during concurrent runs and passed in the final
+sequential full run, without changing those tests or their implementation.
+Chromium required the already available local shared-library bundle through
+`LD_LIBRARY_PATH`; no system package or host trust-store changes were needed.
+Python retains the existing Starlette/httpx deprecation warning.
+
+Commands are in [CLIENT_CONFORMANCE.md](CLIENT_CONFORMANCE.md). Native pytest
+additionally selects `tests/integration/test_backend_harness.py` and
+`tests/integration/test_browser_lifecycle.py`. Encoder checks use
+`cmake --build build/local --target glamdb_transport_test --parallel 2` and
+`ctest --test-dir build/local -R '^glamdb\.transport\.ArrowIpc\.' --output-on-failure`.
+Raw logs, exact commands and the review record remain in ignored
+`artifacts/issue57/`, with separate native/mock browser reports. Sanitizers,
+restart/restore and physical power-loss qualification were **NOT RUN** for this
+client/transport change.
+
 ## Native browser process lifecycle — 2026-11-12
 
 Follow-up to the #53 conformance implementation merged in PR #144, based on

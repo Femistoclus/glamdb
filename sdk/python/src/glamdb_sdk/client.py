@@ -112,7 +112,11 @@ class Client:
         return self
 
     def __exit__(self, *args: Any) -> None:
-        self.close()
+        try:
+            self.close()
+        except BaseException:
+            if args[0] is None:
+                raise
 
     def close(self) -> None:
         if self._closed:
@@ -877,6 +881,15 @@ class Client:
             stream = ScanStream(response, budget, max_read_bytes=self._max_arrow_read_bytes,
                                 on_close=(lambda stream: None) if paged else self._streams.discard,
                                 cleanup_queue=self._cleanup)
+            try:
+                if (snapshot_id is not ANY
+                        and stream.snapshot_id != (None if snapshot_id is None else str(int64(snapshot_id)))):
+                    raise ProtocolError("Arrow response returned a different requested snapshot", collection_id=cid)
+                if opened is not None and "snapshot_id" in opened and opened["snapshot_id"] != stream.snapshot_id:
+                    raise ProtocolError("Arrow response returned a different opened snapshot", collection_id=cid)
+            except BaseException:
+                stream._close_preserving_error()
+                raise
         except BaseException:
             # ScanStream closes HTTP/Arrow owners on construction failure, but
             # no public iterator exists yet to release the server-side cursor.
