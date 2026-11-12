@@ -22,7 +22,8 @@ from .kv import validate_mutation_receipt
 from .predicates import Predicate
 from .request import AppendRequest, MutationRequest, _check_request_size, bounded_keys, json_bytes, schema_fingerprint, uuid_string
 from .recovery import validate_append_recovery, validate_create_recovery
-from .snapshot_archive import hot_snapshots_value, reported_hot_snapshots, validate_archive_status
+from .snapshot_archive import (KEEP_ALL_SNAPSHOTS_IN_ROOT, hot_snapshots_value, reported_collection_hot_snapshots,
+                               validate_archive_status)
 from .transport import JSON_ACCEPT_ENCODING, Deadline, read_json, translate_transport
 from .write_settings import canonical_write_settings, request_write_settings, write_settings_version
 
@@ -505,9 +506,14 @@ class Client:
         definition: send the same value when repeating a lost create.
         ``hot_snapshots`` (1..2^40, append collections on servers advertising
         ``features.snapshot_archive``) keeps only the newest snapshots in the
-        Iceberg root and archives older ones, which stay readable. It is also
-        part of the definition: a repeated create with another value is
-        refused with 409 ``SNAPSHOT_ARCHIVE_MISMATCH``.
+        Iceberg root and archives older ones, which stay readable. None (the
+        default) omits it: such servers then give a new append collection
+        their default (100, reported with ``hot_snapshots_defaulted``); 0
+        (``KEEP_ALL_SNAPSHOTS_IN_ROOT``) creates it without an archive. The
+        effective value is also part of the definition: a repeated create
+        with another effective value is refused with 409
+        ``SNAPSHOT_ARCHIVE_MISMATCH`` (an omitted value matches the default
+        and an explicit 100).
         """
         cid = uuid_string(collection_id, "collection_id")
         schema = self._schema(schema)
@@ -577,22 +583,26 @@ class Client:
             raise ProtocolError("resolved collection mode differs from the original create", raw=info)
         if not same:
             raise ProtocolError("resolved collection UUID, exact name, or schema does not match original create", raw=info)
-        if "hot_snapshots" in info:
-            try:
-                current_hot = reported_hot_snapshots(info["hot_snapshots"])
-            except ValidationError as exc:
-                raise ProtocolError("collection reports an invalid hot_snapshots", raw=info) from exc
-        elif hot_snapshots is not None:
+        try:
+            reported_hot = reported_collection_hot_snapshots(info)
+        except ValidationError as exc:
+            raise ProtocolError("collection reports an invalid hot_snapshots", raw=info) from exc
+        if reported_hot is None and hot_snapshots is not None:
             # Servers without the snapshot archive (the mock, older native
             # builds) cannot have applied it; such a create must not pass.
             raise ProtocolError("created collection does not report the requested hot_snapshots", raw=info)
+        # The server compares a repeated create's effective value with the
+        # one the collection was created with; the reported value is the
+        # current one, which an update can change. A GET proves the creation
+        # value only when no archive exists at all (no member), for a KV
+        # collection (never archived) asked without a value, or while the
+        # value is still the server's default and the create omitted it.
+        if authoritative or reported_hot is None:
+            hot_proved = True
+        elif mode == "kv":
+            hot_proved = hot_snapshots in (None, KEEP_ALL_SNAPSHOTS_IN_ROOT)
         else:
-            current_hot = None
-        # The server compares a repeated create with the value the collection
-        # was created with; the reported value is the current one, which an
-        # update can change. A resolved collection proves a setting-free
-        # creation only while it reports none, and never proves a setting.
-        hot_proved = authoritative or (hot_snapshots is None and current_hot is None)
+            hot_proved = hot_snapshots is None and reported_hot[1]
         if "write_settings" not in info and "write_settings_version" not in info:
             # Servers without write settings (the mock, older native builds)
             # cannot have applied any; a request that carried them must not pass.
@@ -625,9 +635,10 @@ class Client:
         """Resolve a lost create without guessing its write settings.
 
         When the current collection cannot prove the creation settings (any
-        settings were ever stored), the original create is repeated: it changes
-        nothing for an existing collection, and the server compares it with the
-        settings the collection was created with.
+        write settings were ever stored, or ``hot_snapshots`` is not the
+        server's default for a create that omitted it), the original create
+        is repeated: it changes nothing for an existing collection, and the
+        server compares it with the settings the collection was created with.
         """
         cid = uuid_string(collection_id, "collection_id")
         schema = self._schema(schema)
@@ -697,6 +708,7 @@ class Client:
         Counts are decimal strings observed from the server's confirmed view;
         ``archive_pending`` is the number of root snapshots above
         ``hot_snapshots`` that ``archive_snapshots`` can still move.
+        ``hot_snapshots`` is the effective value, ``"0"`` without an archive.
         """
         cid, path = self._path(collection_id, "snapshot-archive")
         value = self._read(path, deadline=deadline, collection_id=cid)
@@ -707,7 +719,7 @@ class Client:
 
     def update_snapshot_archive(self, collection_id: str | UUID, hot_snapshots: int | str | None, *,
                                 deadline: float | None = None) -> dict[str, Any]:
-        """Replace ``hot_snapshots`` (1..2^40, or None to stop archiving later snapshots).
+        """Replace ``hot_snapshots`` (1..2^40, or 0/None to stop archiving later snapshots).
 
         Later appends and ``archive_snapshots`` apply it; nothing moves now and
         archived snapshots never return to the root. Returns the collection.
@@ -715,19 +727,20 @@ class Client:
         ``OutcomeUnknownError`` (503 ``RECOVERY_REQUIRED``: reconcile first)
         repeat it. KV collections refuse a value with 409
         ``COLLECTION_MODE_MISMATCH``; a value above the retention policy's
-        ``keep_last`` is refused with 400 ``INVALID_ARGUMENT``.
+        ``keep_last`` is refused with 400 ``INVALID_ARGUMENT``. Any update
+        makes the value explicit (``hot_snapshots_defaulted`` false).
         """
         cid, path = self._path(collection_id, "snapshot-archive")
         hot = hot_snapshots_value(hot_snapshots)
+        hot = KEEP_ALL_SNAPSHOTS_IN_ROOT if hot is None else hot
         budget = Deadline(deadline, collection_id=cid)
-        status, value = self._json("POST", path, budget, write=True,
-                                   body=json_bytes({"hot_snapshots": None if hot is None else str(hot)}))
+        status, value = self._json("POST", path, budget, write=True, body=json_bytes({"hot_snapshots": str(hot)}))
         if status != 200:
             self._http_error(status, value, budget)
         try:
             if value.get("collection_id") != cid:
                 raise ProtocolError("snapshot archive response names a different collection")
-            if "hot_snapshots" not in value or reported_hot_snapshots(value["hot_snapshots"]) != hot:
+            if reported_collection_hot_snapshots(value) != (hot, False):
                 raise ProtocolError("snapshot archive response differs from the request")
         except ValidationError as exc:
             raise ProtocolError("snapshot archive response has an invalid hot_snapshots",

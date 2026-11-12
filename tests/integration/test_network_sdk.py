@@ -266,7 +266,11 @@ def test_snapshot_archive_keeps_history_readable_or_is_refused_explicitly(server
             with pytest.raises(HTTPError) as refused:
                 client.create_collection("archive", SCHEMA, collection_id=cid, hot_snapshots=2)
             assert refused.value.status_code == 422 and refused.value.collection_id == cid
+            with pytest.raises(HTTPError) as refused:
+                client.create_collection("archive", SCHEMA, collection_id=cid, hot_snapshots=0)
+            assert refused.value.status_code == 422
             create(client, name="archive", collection_id=cid)
+            assert "hot_snapshots" not in client.resolve_create("archive", SCHEMA, collection_id=cid)
             with pytest.raises(ProtocolError):
                 client.resolve_create("archive", SCHEMA, collection_id=cid, hot_snapshots=2)
             for call in (lambda: client.snapshot_archive(cid), lambda: client.update_snapshot_archive(cid, 2),
@@ -281,6 +285,20 @@ def test_snapshot_archive_keeps_history_readable_or_is_refused_explicitly(server
         assert client.resolve_create("archive", SCHEMA, collection_id=cid, hot_snapshots=2)["hot_snapshots"] == "2"
         with pytest.raises(ProtocolError):
             client.resolve_create("archive", SCHEMA, collection_id=cid, hot_snapshots=3)
+        # Omitted: the server default; explicit 0: no archive. Repeated
+        # creation compares effective values.
+        defaulted, none = str(uuid4()), str(uuid4())
+        info = client.create_collection("archive_default", SCHEMA, collection_id=defaulted).info
+        assert (info["hot_snapshots"], info["hot_snapshots_defaulted"]) == ("100", True)
+        assert client.resolve_create("archive_default", SCHEMA, collection_id=defaulted) == info
+        assert client.create_collection("archive_default", SCHEMA, collection_id=defaulted,
+                                        hot_snapshots=100).info == info
+        info = client.create_collection("archive_none", SCHEMA, collection_id=none, hot_snapshots=0).info
+        assert (info["hot_snapshots"], info["hot_snapshots_defaulted"]) == ("0", False)
+        refused = client.create_collection("archive_none", SCHEMA, collection_id=none)
+        assert refused.error.code == "SNAPSHOT_ARCHIVE_MISMATCH"
+        with pytest.raises(ProtocolError):
+            client.resolve_create("archive_none", SCHEMA, collection_id=none)
         receipts, expected = [], []
         for index in range(12):
             rows = [{"key": f"k-{index}", "n": 9007199254740993 + index}]
@@ -307,7 +325,7 @@ def test_snapshot_archive_keeps_history_readable_or_is_refused_explicitly(server
             assert client.stats(cid, snapshot_id=snapshot)["rows"] == str(index + 1)
             assert len(client.files(cid, snapshot_id=snapshot).items) == index + 1
         updated = client.update_snapshot_archive(cid, None)
-        assert updated["hot_snapshots"] is None and client.update_snapshot_archive(cid, None) == updated
+        assert updated["hot_snapshots"] == "0" and client.update_snapshot_archive(cid, 0) == updated
         assert client.snapshot_archive(cid)["archive_pending"] == "0"
         assert client.update_snapshot_archive(cid, 1)["hot_snapshots"] == "1"
         moved = client.archive_snapshots(cid)

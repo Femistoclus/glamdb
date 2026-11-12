@@ -335,31 +335,45 @@ Servers advertising `features.snapshot_archive` (native local storage) keep only
 the newest `hot_snapshots` snapshots of an append collection in the Iceberg root;
 older snapshots move to the catalog archive and stay readable by ID through
 `snapshots`, `stats`, `files`, `file`, `explain` and scans exactly as before.
+A new append collection created without `hot_snapshots` gets the server's
+default (100); pass `KEEP_ALL_SNAPSHOTS_IN_ROOT` (0) to create it without an
+archive. KV collections never have one.
 
 ```python
-created = client.create_collection("events", schema, collection_id=collection_id,
-                                   hot_snapshots=100)   # 1..2**40, part of the definition
+from glamdb_sdk import KEEP_ALL_SNAPSHOTS_IN_ROOT
+
+created = client.create_collection("events", schema, collection_id=collection_id)
+created.info["hot_snapshots"], created.info["hot_snapshots_defaulted"]   # "100", True
+client.create_collection("audit", schema, collection_id=other_id,
+                         hot_snapshots=KEEP_ALL_SNAPSHOTS_IN_ROOT)       # no archive; 1..2**40 for a value
 status = client.snapshot_archive(collection_id)         # {"hot_snapshots": "100", "root_snapshots": ...}
-client.update_snapshot_archive(collection_id, 50)       # later appends apply it; None stops archiving
+client.update_snapshot_archive(collection_id, 50)       # later appends apply it; 0 or None stops archiving
 while True:                                             # bounded maintenance, at most 1024 per call
     status = client.archive_snapshots(collection_id)
     if status["archive_pending"] == "0":
         break
 ```
 
-Counts are decimal strings. `hot_snapshots` is part of the collection definition:
-repeating a lost create with another value is refused (409
-`SNAPSHOT_ARCHIVE_MISMATCH`, a `definitely_not_committed` outcome). The reported
-value is the current one, so `resolve_create` repeats the original create when a
-value was requested or is reported, and the server compares it with the created
-value. `update_snapshot_archive` is idempotent and returns the collection; after
-a lost response or `OutcomeUnknownError` (503 `RECOVERY_REQUIRED`) reconcile if
-requested and repeat the same call, as for `archive_snapshots`. KV collections
-refuse a value and maintenance with 409 `COLLECTION_MODE_MISMATCH`; values
-outside 1..2^40 raise `ValidationError` before sending. The mock does not
-implement the archive: it rejects `hot_snapshots` (422) and has no archive routes
-(404), and the SDK raises `ProtocolError` if a collection created with
-`hot_snapshots` does not report it.
+Counts are decimal strings. Collections report the effective `hot_snapshots`
+(`"0"` without an archive) and `hot_snapshots_defaulted` (the value came from the
+server default and was never set; any update clears it). The effective value is
+part of the collection definition: repeating a lost create with another effective
+value is refused (409 `SNAPSHOT_ARCHIVE_MISMATCH`, a `definitely_not_committed`
+outcome). An omitted value matches a defaulted collection and one created with an
+explicit 100; an explicit 0 matches only a collection without an archive, so a
+create that omits the value no longer matches a collection created without an
+archive by an older server. The reported value is the current one, so
+`resolve_create` accepts a resolved collection only when that proves the creation
+(a still-defaulted value for a create that omitted it, a KV collection without a
+value, or a server without the archive); otherwise it repeats the original create
+and the server compares it with the created value. `update_snapshot_archive` is
+idempotent and returns the collection; after a lost response or
+`OutcomeUnknownError` (503 `RECOVERY_REQUIRED`) reconcile if requested and repeat
+the same call, as for `archive_snapshots`. KV collections refuse a nonzero value
+and maintenance with 409 `COLLECTION_MODE_MISMATCH`; values outside 0..2^40 raise
+`ValidationError` before sending. The mock does not implement the archive: it
+rejects `hot_snapshots` (422) and has no archive routes (404), and the SDK raises
+`ProtocolError` if a collection created with `hot_snapshots` does not report it.
 
 ## Scalars, predicates and metadata
 
