@@ -526,22 +526,72 @@ TEST_F(TRowGroupLayoutTest, RowExactlyAtTheBoundIsAcceptedAndOneByteOverIsReject
     EXPECT_EQ(CountEvents(NTesting::EIOOp::CreateExclusive), created);
 }
 
-// A write failure after earlier row groups reached the file still leaves an
-// unpublished, unverified file and the first error.
-TEST_F(TRowGroupLayoutTest, WriteFailureAfterAnEarlierRowGroupLeavesNoReceipt)
+// A write failure after a complete row group reached the file still leaves an
+// unpublished, unverified file and the first error. A fault-free run of the
+// same deterministic input locates the first low-level write that starts
+// after the first row group's bytes; the second run fails exactly there.
+TEST_F(TRowGroupLayoutTest, WriteFailureAfterACompleteRowGroupLeavesNoReceipt)
 {
     TDataWriterLimits limits;
     limits.MaxRowGroupBytes = 64 << 10;
     std::vector<std::optional<std::size_t>> lengths(3000, 7);
     lengths[1500] = 40 << 10;
-    Fs_->AddRule(
-        {NTesting::EIOOp::Write, "*.parquet", 2, 1, std::make_error_code(std::errc::no_space_on_device), std::nullopt});
-    EXPECT_FALSE(Write({Payloads(lengths)}, limits));
+    const auto batch = Payloads(lengths);
+    const auto parquetWrites = [&](std::size_t from) {
+        std::vector<NTesting::TIOEvent> writes;
+        const auto events = Fs_->Events();
+        for (std::size_t index = from; index < events.size(); ++index) {
+            if (events[index].Op == NTesting::EIOOp::Write && events[index].Path.ends_with(".parquet")) {
+                writes.push_back(events[index]);
+            }
+        }
+        return writes;
+    };
+
+    auto from = Fs_->Events().size();
+    ASSERT_TRUE(Write({batch}, limits));
+    const auto footer = Footer();
+    ASSERT_GE(footer->num_row_groups(), 2);
+    const auto second = footer->RowGroup(1)->ColumnChunk(0);
+    const auto firstGroupEnd = static_cast<std::uint64_t>(
+        second->has_dictionary_page() ? second->dictionary_page_offset() : second->data_page_offset());
+    std::uint64_t written = 0;
+    std::uint64_t occurrence = 0;
+    for (const auto& write : parquetWrites(from)) {
+        if (written >= firstGroupEnd) {
+            break;
+        }
+        ++occurrence;
+        written += write.Bytes;
+    }
+    ++occurrence;
+    ASSERT_GE(written, firstGroupEnd);
+    ASSERT_LE(occurrence, parquetWrites(from).size()) << "no low-level write starts after the first row group";
+    TearDown();
+    SetUp();
+
+    Fs_->AddRule({NTesting::EIOOp::Write,
+        "*.parquet",
+        occurrence,
+        1,
+        std::make_error_code(std::errc::no_space_on_device),
+        std::nullopt});
+    from = Fs_->Events().size();
+    EXPECT_FALSE(Write({batch}, limits));
+    const auto writes = parquetWrites(from);
+    ASSERT_EQ(writes.size(), occurrence);
+    std::uint64_t before = 0;
+    for (std::size_t index = 0; index + 1 < writes.size(); ++index) {
+        EXPECT_FALSE(writes[index].Error);
+        before += writes[index].Bytes;
+    }
+    // Prerequisite: the whole first row group was in the file before the fault.
+    EXPECT_GE(before, firstGroupEnd);
+    EXPECT_EQ(writes.back().Error, std::errc::no_space_on_device);
     EXPECT_EQ(Attempt_->FirstError(), std::errc::no_space_on_device);
     EXPECT_TRUE(Attempt_->Receipts().empty());
     EXPECT_FALSE(Attempt_->Record(Path_).Value().FormatVerified);
-    EXPECT_GE(CountEvents(NTesting::EIOOp::Write), 2U);
-    EXPECT_EQ(CountEvents(NTesting::EIOOp::SyncFile), 0U);
+    EXPECT_EQ(Attempt_->Record(Path_).Value().State, NIO::EFileState::Failed);
 }
 
 // Uniform rows keep the previous layout: the bound divided by the row size.
