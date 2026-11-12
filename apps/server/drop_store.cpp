@@ -229,8 +229,14 @@ bool IsRecoveryName(std::string_view name)
 
 bool IsDataName(std::string_view name)
 {
-    return name.size() == 36 + 1 + 36 + std::string_view("-00000.parquet").size() && IsUuid(name.substr(0, 36)) &&
-        name[36] == '-' && IsUuid(name.substr(37, 36)) && name.ends_with("-00000.parquet");
+    if (name.size() != 36 + 1 + 36 + std::string_view("-00000.parquet").size()) {
+        return false;
+    }
+    // Both bulk append and KV producers emit at most 256 files per attempt.
+    // Fixed width makes the lexical bound equivalent to the numeric bound.
+    const auto ordinal = name.substr(74, 5);
+    return IsUuid(name.substr(0, 36)) && name[36] == '-' && IsUuid(name.substr(37, 36)) && name[73] == '-' &&
+        IsDigits(ordinal) && ordinal < "00256" && name.ends_with(".parquet");
 }
 
 bool IsMetadataName(std::string_view name)

@@ -11,6 +11,7 @@ import tempfile
 from glamdb_sdk.request import json_bytes, uuid_string
 
 from .runtime import validate_url
+from .tpch_target import collection_mode
 
 SECRET_KEYS = frozenset({'token', 'access_token', 'refresh_token', 'client_secret',
                          'authorization', 'password'})
@@ -77,6 +78,7 @@ def read_state(path):
     if not isinstance(value, dict) or type(value.get('version')) is not int or value['version'] != 1:
         raise ValueError('benchmark run state requires version 1')
     _no_secrets(value)
+    collection_mode(value)
     if not isinstance(value.get('url'), str):
         raise ValueError('benchmark run state requires its original server URL')
     validate_url(value['url'])

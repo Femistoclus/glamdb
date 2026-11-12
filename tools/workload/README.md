@@ -209,7 +209,7 @@ provenance, exact scale, schemas, partition plan and every part's size/hash.
 glamdb-cli bench tpch generate --scale-factor 0.01 --dbgen /path/to/dbgen \
   --distributions /path/to/dists.dss --type-profile native --output tpch-data/
 glamdb-cli bench tpch init --url http://127.0.0.1:8080 --dataset tpch-data/ \
-  --name tpch-small --state tpch-run.json
+  --name tpch-small --state tpch-run.json --mode kv
 glamdb-cli bench tpch load --state tpch-run.json --batch-rows 10000 --workers 2
 glamdb-cli bench tpch status --state tpch-run.json
 glamdb-cli bench tpch verify --state tpch-run.json --format arrow --level full
@@ -229,7 +229,7 @@ or publish QphH results.
 | Command | Controls beyond required `--state` |
 | --- | --- |
 | `generate` | Requires `--scale-factor`, `--output`, `--dbgen`, `--type-profile`; accepts `--generator-parts`, `--part-rows`, `--part-bytes`, `--distributions`, `--dbgen-sha256`. No state file. |
-| `init` | Requires `--url`, `--dataset`, `--name`; optional `--limits FILE` JSON object and `--table-prefix`. |
+| `init` | Requires `--url`, `--dataset`, `--name`; optional `--mode append\|kv` (new runs default to append), `--limits FILE` JSON object and `--table-prefix`. |
 | `load` | `--batch-rows 10000`, `--batch-bytes 8388608`, `--workers 1`, explicit `--resume`. |
 | `resolve` | Lookup only by default; explicit `--retry` may resend verified original requests. |
 | `verify` | `--format arrow\|json`, `--level full\|rows` (defaults `arrow`, `full`). |
@@ -244,6 +244,15 @@ load planning. `init` explicitly creates a dedicated database and eight
 collections; a complete load uses immutable chunks and disjoint worker
 assignments. Effective writer concurrency remains one. Unlike generic
 `bench write`, workers never each append a full copy of the dataset.
+
+KV targets add a required string key derived from the natural primary key,
+including PARTSUPP/LINEITEM composites; generated files and all 61 source fields
+remain unchanged. State, frozen plans and journal requests preserve the original
+mode and mutation kind. Missing modes in old states/plans mean append. Repeated
+init without `--mode` preserves the saved mode; a conflicting explicit mode is
+refused. Scan reports label collection mode separately from scan/reduce mode.
+KV load metrics report physical COW row/file counters separately from confirmed
+source rows; only insert-only committed upserts advance this initial load.
 
 Keep the generated data, run state and adjacent journal together through
 recovery. A resumed load must retain the original dataset, target, chunk

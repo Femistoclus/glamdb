@@ -170,10 +170,11 @@ void AddWorkloadCommands(CLI::App& app, std::optional<int>& exitCode)
             Value(*command, *args, "--name", "Dedicated managed database name", true);
             Value(*command, *args, "--limits", "Explicit database limits as a JSON file");
             Value(*command, *args, "--table-prefix", "Collection name prefix (default empty)");
+            Value(*command, *args, "--mode", "Collection mode: append or kv (new runs default to append)");
         } else if (mode == "load") {
-            Value(*command, *args, "--batch-rows", "Maximum rows per immutable append (default 10000)");
-            Value(*command, *args, "--batch-bytes", "Maximum bytes per immutable append (default 8388608)");
-            Value(*command, *args, "--workers", "Workers assigned disjoint append parts (default 1)");
+            Value(*command, *args, "--batch-rows", "Maximum rows per immutable write (default 10000)");
+            Value(*command, *args, "--batch-bytes", "Maximum bytes per immutable write (default 8388608)");
+            Value(*command, *args, "--workers", "Workers assigned disjoint source parts (default 1)");
             Flag(*command, *args, "--resume", "Resume the original saved load plan and requests");
         } else if (mode == "resolve") {
             Flag(*command, *args, "--retry", "Explicitly resend verified original OPERATION_NOT_FOUND requests");

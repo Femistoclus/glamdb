@@ -80,7 +80,7 @@ Only successful conversion of all eight tables publishes `complete:true`.
 Each table has its own `TABLE/manifest.json`; `generator.log` records generator
 output. Generation does not resume or overwrite an existing output directory.
 Loading validates the completed dataset, schemas, part sizes and checksums before
-creating an append plan.
+creating an immutable load plan.
 
 The initial metadata profile permits 65,536 parts overall, a 1 MiB top manifest,
 32 MiB per-table manifests and 64 MiB of table manifests overall. These limits
@@ -97,7 +97,17 @@ All 61 source fields, their canonical names/order, required values, comments,
 addresses and other strings are retained. The schema/conversion authority is
 [`tpch_schema.py`](../../tools/workload/src/glamdb_workload/tpch_schema.py).
 PARTSUPP uses `(part, supplier)` and LINEITEM uses `(order, line number)` as
-composite logical keys; the adapter adds no artificial `key` field.
+composite logical keys. Generated datasets retain exactly those 61 fields.
+`init --mode kv` adds a required string `key` to each target schema without
+rewriting the source dataset. All source field IDs, types and values remain
+unchanged; `key` has the next field ID. Append targets retain the source schema.
+
+KV keys encode the natural primary key: add 2^63 to each signed int64 component,
+format it as exactly 20 decimal digits, then join components with `:`. For
+example, LINEITEM `(order=1, line=23)` becomes
+`09223372036854775809:09223372036854775831`. This encoding is unambiguous and
+preserves numeric tuple order as bytewise key order, including sparse order
+keys. Both type profiles use the same encoding (`int64-offset-decimal-v1`).
 
 | Table | Columns | SF=1 rows | Scaling |
 | --- | ---: | ---: | --- |
@@ -136,7 +146,7 @@ or 300 for verification and scans. There is no TLS-verification bypass.
 
 ```sh
 glamdb-cli bench tpch init --url http://127.0.0.1:8080 \
-  --dataset /tmp/tpch-small --name tpch-small-run1 --state /tmp/tpch-run.json
+  --dataset /tmp/tpch-small --name tpch-small-run1 --state /tmp/tpch-run.json --mode kv
 glamdb-cli bench tpch load --state /tmp/tpch-run.json \
   --batch-rows 10000 --batch-bytes 8388608 --workers 2
 glamdb-cli bench tpch status --state /tmp/tpch-run.json
@@ -147,6 +157,13 @@ collections, checks capabilities/readiness and saves original endpoint and
 database/store/collection identities. Creation is distinct from reopening.
 An uncertain creation reply returns INCOMPLETE; repeating explicit `init` uses
 the saved identities to finish creation rather than allocate another target.
+`--mode append|kv` selects the immutable collection mode. New targets default
+to `append`; use `--mode kv` to measure full-row upserts. An omitted mode on a
+repeated init keeps the saved mode. Legacy states and plans without a mode
+remain append; an explicit conflicting mode is refused before lifecycle writes.
+Load, resolve, verify and scan always use the saved mode. The scan subcommand's
+`--mode scan|reduce` independently selects query behavior.
+
 `--table-prefix PREFIX` labels collection names; benchmark metadata stays in
 local state/journals and does not consume a ninth collection.
 
@@ -164,7 +181,7 @@ for the native profile (#154), and sufficient configurable operation/history
 budgets for larger scales (#156). Optional extra eight-table variants require
 larger collection capacity (#155); the canonical dataset needs only eight.
 
-Ordinary append retains the 10,000-row / 16 MiB input ceiling. Load defaults
+Ordinary append and upsert retain the 10,000-row / 16 MiB input ceiling. Load defaults
 to 10,000 rows / 8 MiB per request and can split source parts under both caps.
 Actual source part boundaries, byte limits and existing bound failures matter:
 at 10,000 rows/request the row-count lower bounds are 869 operations for SF=1
@@ -172,7 +189,7 @@ and 8,661 for SF=10; 1,000-row source parts already require at least 8,664 for
 SF=1. The load preflight checks planned counts against advertised operation and
 history capacity, including retained manifest counts and the native recovery
 workspace envelope `8192 * (1 + snapshots + manifests + data_files)`.
-These are lower-bound checks; manifest merging can add retained metadata.
+These are lower-bound checks; manifest merging and KV COW rewrites can add retained metadata/data files.
 Physical byte, device, catalog, shared-memory and free-space
 admission still occur on the server. Insufficient capacity produces a refusal;
 the workload never silently raises limits, shards a target or expires history.
@@ -181,13 +198,16 @@ the workload never silently raises limits, shards a target or expires history.
 There is one write authority and effective publication concurrency is one.
 This differs from generic `bench write`, whose workers each consume a full
 dataset copy. Additional load workers do not multiply rows or promise parallel
-engine commits. Ordinary appends use JSON even when scans use Arrow.
+engine commits. Both write modes use JSON even when scans use Arrow.
 
 Before sending, load freezes each chunk's table, part ordinal/range, worker
 assignment and operation UUID. The UUID derives from the original load and
 collection identities and chunk boundaries, independent of worker execution.
 The local SQLite journal commits the exact prepared SDK body, canonical hash
-and request-body checksum before sending, then records its outcome. Identities
+and request-body checksum before sending, then records its outcome. The journal
+also preserves the mutation kind; old journals migrate as append without
+changing any original request bytes. The frozen plan binds the collection mode
+and, for KV, the key encoding. Identities
 and plans remain immutable; progress and receipts are updated durably.
 
 Keep the generated dataset, state file and adjacent journal throughout recovery.
@@ -227,6 +247,10 @@ operator action; the workload never creates a new request identity to hide it.
 After all chunks are confirmed, load performs full verification before setting
 `load_complete`. Verification compares every table's complete row multiset,
 including duplicate multiplicities, with the local dataset and checks receipts.
+KV verification also compares every derived key. Since source primary keys are
+unique and targets begin empty, each upsert must create a snapshot and its
+`rows_written - rows_removed` must equal `input_rows`. A replacement or no-op
+cannot be counted as newly loaded data.
 Load, resolve and verify validate the complete frozen plan checksum and its
 state/journal inventory. Verification checks every original receipt and the
 initial empty, first committed and final table snapshots. Removing an earlier
@@ -241,6 +265,8 @@ close/cancel owned cursors. There is no assumed global cross-table transaction.
 Historical snapshot and operation retention remain server responsibilities.
 `status` exposes original identities, completeness, unresolved work, selected
 snapshots, capabilities and limits without rebinding the run to another server.
+Its report includes `collection_mode`. Load metrics and scan reports carry the
+same mode so append and KV measurements remain distinguishable.
 Its journal connection is read-only and can inspect an active run. Mutating
 lifecycle commands and cleanup hold the same exclusive local run lock.
 
@@ -345,7 +371,7 @@ for a completed manifest; cleanup returns 0 only for a validated drop response.
 | Evidence | Status and boundary |
 | --- | --- |
 | Command routing and exact cleanup | Focused Python boundary tests, real HTTP cleanup and standalone CLI bridge checks cover options, status exits, argv, identity checks and child lifecycle. |
-| Native SF=0.01 HTTP and verified-TLS lifecycles | **PASS**, native and legacy encodings, 86,805 rows, Q1–Q22 candidate scans, exact Q1/Q6, restart/resume, cleanup/reload and fault cases. See [validation and independent review](TPC_H_VALIDATION.md) for executed scope and runtime qualification. |
+| Native SF=0.01 HTTP and verified-TLS lifecycles | **PASS**, append and KV targets, native and legacy encodings, 86,805 rows, Q1–Q22 candidate scans, exact Q1/Q6, restart/resume, cleanup/reload and fault cases. See [validation and independent review](TPC_H_VALIDATION.md) for executed scope and runtime qualification. |
 | Full SF=1 CLI HTTP lifecycle and measurements | **NOT RUN**. |
 | Full SF=10 CLI HTTP lifecycle and measurements | **NOT RUN**. Requires an explicit sufficient operation/history/device profile. |
 | Earlier SF=10 retained-history campaign | Separate [executed capacity evidence](SCALABLE_HISTORY_VALIDATION.md), using its documented producer and scalar profile; does not validate this command family or native DECIMAL/DATE ingestion. |
@@ -357,3 +383,26 @@ and executes the existing native verified-TLS workload E2E without mock fallback
 Those generic E2E results alone do not establish the full TPC-H acceptance rows
 above. Keep exact commands, environment, statuses and raw campaign artifacts
 when adding measured evidence.
+
+## Comparing append and KV
+
+Use the same generated dataset, explicit row/byte/worker settings, server limits,
+transport and scan parameters for two separate states initialized with
+`--mode append` and `--mode kv`. Alternate run order, use fresh targets, retain
+all raw reports and compare several repetitions. Do not compare different
+source/type profiles or interpret warmup as a controlled cold-cache experiment.
+
+`elapsed_seconds`/`rows_per_second` cover the publishing loop; planning,
+preflight and full verification are separate, and `command_elapsed_seconds`
+includes them. `committed_parquet_bytes` sums uniquely committed files written,
+including retained COW history. It is not the size of only the final live view.
+KV metrics additionally expose `input_rows`, `rows_affected`, `rows_written`,
+`rows_removed`, added/removed file counts and bytes removed from the live view,
+plus `row_write_amplification = rows_written / input_rows`. Removing a file from
+the live view does not reclaim its historical bytes.
+
+Scan projections continue to select original TPC-H fields. Compare per-query
+latency for the same scan/reduction mode; scan candidates and exact Q1/Q6
+reductions are different workloads. Neither result is an official TPC-H score.
+See [the recorded comparison](TPC_H_VALIDATION.md#append-and-kv-comparison) for
+the default-mode decision and its measurement limits.

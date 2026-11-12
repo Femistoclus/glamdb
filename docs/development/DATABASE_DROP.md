@@ -17,6 +17,10 @@ refuses a new deletion before data removal instead of expiring retry protection.
 Unknown IDs return 404; invalid requests return 400; mismatched identities,
 unexpected files, replaced directories and unsafe paths return a precondition
 error (412). An owned directory returns `STATE_IN_USE` and cannot be removed.
+Owned data filenames include the canonical five-digit producer ordinals
+`00000` through `00255`, covering ordinary append, bulk append and KV COW
+outputs. Malformed or out-of-profile ordinals remain unexpected contents and
+are rejected before any removal, under the same ownership and path checks.
 The `dropping` descriptor retains the cleanup error and its retry hint.
 An uncertain registry result requires restart (`RECOVERY_REQUIRED`), never an
 automatic destructive retry under a new identity. Failed or interrupted cleanup

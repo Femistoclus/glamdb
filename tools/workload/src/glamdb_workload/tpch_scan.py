@@ -28,6 +28,7 @@ from glamdb_sdk.request import uuid_string
 from .dataset import write_json
 from .runtime import client_for, error_code, failure_kind, read_mode
 from .tpch_queries import make_reducer, query_plans, reference_results
+from .tpch_target import collection_mode, target_schema
 
 
 TABLES = frozenset({"region", "nation", "supplier", "customer", "part", "partsupp", "orders", "lineitem"})
@@ -280,7 +281,7 @@ def _preflight(saved, dataset, plans, config):
         for table in sorted(TABLES):
             target = saved["tables"][table]
             schema = client.get_schema(target["collection_id"], deadline=config["timeout"])
-            if schema != Schema.from_dict(target["schema"]) or schema != dataset.tables[table].schema:
+            if schema != Schema.from_dict(target["schema"]) or schema != target_schema(dataset.tables[table].schema, collection_mode(saved)):
                 raise ValueError("benchmark schema changed for " + table)
     return {"root_capabilities": root_capabilities, "capabilities": capabilities, "database": database, "sdk_version": version("glamdb-sdk"), "locust_version": version("locust")}
 
@@ -329,7 +330,7 @@ def run(state, *, queries="all", mode="scan", format="arrow", consume="batches",
             stage.update(collection_id=saved["tables"][stage["table"]]["collection_id"], snapshot_id=saved["snapshots"][stage["table"]])
     config = {"url": saved["url"], "database": saved["database_id"], "store_id": saved["store_id"],
               "timeout": timeout, "ca_file": ca_file, "queries": queries, "plans": plans,
-              "mode": mode, "format": format, "consume": consume,
+              "mode": mode, "collection_mode": collection_mode(saved), "format": format, "consume": consume,
               "users": users, "processes": processes, "warmup": warmup, "repeat": repeat,
               # Interrupted users must unwind SDK cursor contexts before the
               # supervisor's two-second process-group termination deadline.

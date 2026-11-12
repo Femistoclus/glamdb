@@ -153,7 +153,7 @@ class BridgeTest(unittest.TestCase):
                           "--generator-parts", "4", "--part-rows", "9000", "--part-bytes", "7000000",
                           "--distributions", "dists.dss", "--dbgen-sha256", "a" * 64], []),
             ("init", [*connection, "--url", "https://example.org", "--dataset", "dataset",
-                      "--name", "tpch-run", "--limits", "limits.json", "--table-prefix", "v_"], []),
+                      "--name", "tpch-run", "--limits", "limits.json", "--table-prefix", "v_", "--mode", "kv"], []),
             ("load", [*connection, "--batch-rows", "8000", "--batch-bytes", "6000000",
                       "--workers", "4"], ["--resume"]),
             ("resolve", connection, ["--retry"]),

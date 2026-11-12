@@ -46,7 +46,7 @@ def adapters(monkeypatch):
          "--name", "tpch-run", "--state", "run.json"],
         "tpch_lifecycle.initialize", (),
         {"url": "http://127.0.0.1:8080", "dataset": "data", "name": "tpch-run",
-         "state": "run.json", "limits": None, "table_prefix": "", "timeout": 30.0,
+         "state": "run.json", "limits": None, "table_prefix": "", "mode": None, "timeout": 30.0,
          "ca_file": None},
     ),
     (
@@ -114,7 +114,7 @@ def test_init_reads_limits_file_before_creating_target(adapters, tmp_path, capsy
     assert calls == [("tpch_lifecycle.initialize", (), {
         "url": "https://example.org", "dataset": "data", "name": "tpch-run",
         "state": "run.json", "limits": {"max_collections": 16, "max_operations": 12000},
-        "table_prefix": "variant_", "timeout": 12.5, "ca_file": "ca.pem",
+        "table_prefix": "variant_", "mode": None, "timeout": 12.5, "ca_file": "ca.pem",
     })]
     assert capsys.readouterr().err == ""
 
@@ -191,3 +191,11 @@ def test_invalid_cli_arguments_stop_before_adapters(adapters, capsys, arguments)
     assert error.value.code == 2
     assert calls == []
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize('mode', ['append', 'kv'])
+def test_init_accepts_explicit_collection_mode(adapters, mode):
+    calls, _ = adapters
+    assert main(['bench', 'tpch', 'init', '--url', 'http://127.0.0.1:8080',
+                 '--dataset', 'data', '--name', 'run', '--state', 'run.json', '--mode', mode]) == 0
+    assert calls[0][2]['mode'] == mode

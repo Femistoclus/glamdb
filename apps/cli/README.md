@@ -295,7 +295,7 @@ migration remain native C++ facade operations. See the
 glamdb-cli bench tpch generate --scale-factor 0.01 --dbgen /path/to/dbgen \
   --type-profile native --output tpch-data/
 glamdb-cli bench tpch init --url http://127.0.0.1:8080 --dataset tpch-data/ \
-  --name tpch-small --state tpch-run.json
+  --name tpch-small --state tpch-run.json --mode kv
 glamdb-cli bench tpch load --state tpch-run.json
 glamdb-cli bench tpch scan --state tpch-run.json --queries all --mode scan \
   --format arrow --consume batches --report tpch-scans/
@@ -303,7 +303,12 @@ glamdb-cli bench tpch clean --state tpch-run.json
 ```
 
 Generation requires explicit `native` or `legacy-scaled` type selection and
-reference TPC-H Tools 3.0.1 provenance. `init --limits FILE` reads an explicit
+reference TPC-H Tools 3.0.1 provenance. `init --mode append|kv` chooses the
+collection mode (new runs default to append). KV targets derive a required
+string key from each table's primary key, retaining all 61 original fields.
+Subsequent commands keep the saved mode, including old append runs; the scan
+subcommand's `--mode scan|reduce` controls query behavior independently.
+`init --limits FILE` reads an explicit
 JSON limits object; commands never raise limits automatically. `load --resume`
 retains the original immutable plan and journal, while `resolve` only looks up
 outcomes unless `--retry` is explicit. Completed loads pin all eight table views.

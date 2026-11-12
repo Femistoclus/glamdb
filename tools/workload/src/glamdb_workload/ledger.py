@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 from urllib.parse import quote
 
-from glamdb_sdk import AppendRequest
+from glamdb_sdk import AppendRequest, MutationRequest
 
 STATES = (
     "prepared",
@@ -41,6 +41,9 @@ class Ledger:
                 state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
                 error_code TEXT, outcome TEXT);
         """)
+        if 'kind' not in {row['name'] for row in self.db.execute('PRAGMA table_info(operations)')}:
+            with self.db:
+                self.db.execute("ALTER TABLE operations ADD COLUMN kind TEXT NOT NULL DEFAULT 'append'")
 
     def __enter__(self):
         return self
@@ -49,22 +52,27 @@ class Ledger:
         self.db.close()
 
     def prepare(self, request):
+        kind = request.kind if isinstance(request, MutationRequest) else 'append'
+        if kind not in ('append', 'upsert'):
+            raise ValueError('row workload journal supports append and upsert only')
         digest = hashlib.sha256(request.body).hexdigest()
         old = self.db.execute(
             "SELECT * FROM operations WHERE operation_id=?", (request.operation_id,)
         ).fetchone()
         if old is not None:
-            if (old["body_hash"], old["payload_hash"], old["collection_id"]) != (
+            if (old["body_hash"], old["payload_hash"], old["collection_id"], old['kind']) != (
                 digest,
                 request.payload_hash,
                 request.collection_id,
+                kind,
             ):
                 raise ValueError("operation identity conflicts with immutable payload")
             return
         rows = json.loads(request.body)["rows"]
         with self.db:
             self.db.execute(
-                "INSERT INTO operations VALUES (?,?,?,?,?,?,?, ?,0,NULL,NULL)",
+                "INSERT INTO operations (operation_id,collection_id,payload_hash,body,body_hash,"
+                "rows,bytes,state,kind) VALUES (?,?,?,?,?,?,?,?,?)",
                 (
                     request.operation_id,
                     request.collection_id,
@@ -74,6 +82,7 @@ class Ledger:
                     len(rows),
                     len(request.body),
                     "prepared",
+                    kind,
                 ),
             )
 
@@ -85,9 +94,13 @@ class Ledger:
             raise ValueError("unknown journal operation")
         if hashlib.sha256(row["body"]).hexdigest() != row["body_hash"]:
             raise ValueError("journal payload hash mismatch")
-        return AppendRequest(
-            row["collection_id"], row["operation_id"], row["payload_hash"], row["body"]
-        )
+        kind = row['kind'] if 'kind' in row.keys() else 'append'
+        args = (row["collection_id"], row["operation_id"], row["payload_hash"], row["body"])
+        if kind == 'upsert':
+            return MutationRequest(*args, kind)
+        if kind != 'append':
+            raise ValueError('unsupported journal operation kind')
+        return AppendRequest(*args)
 
     def attempted(self, operation_id):
         with self.db:

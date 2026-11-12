@@ -270,6 +270,7 @@ def on_quitting(environment, **kwargs):
     elapsed = max(0.000001, max(ends) - min(starts)) if starts and ends else None
     counts = measured["counts"]
     result = {"status": status, "mode": state.config["mode"],
+              "collection_mode": state.config.get("collection_mode", "append"),
               "result_verified": state.config["mode"] == "reduce" and status == "PASS" and counts["verified_queries"] == expected,
               "counts": counts, "queries": measured["queries"], "stages": measured["stages"],
               "warmup": dict(warmup["counts"], stages=warmup["stages"], rejections_by_code=warmup["rejections_by_code"], errors_by_code=warmup["errors_by_code"]),

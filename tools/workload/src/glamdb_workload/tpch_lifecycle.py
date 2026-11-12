@@ -1,4 +1,4 @@
-"""Explicit managed targets and immutable, bounded ordinary-append plans."""
+"""Explicit managed targets and immutable, bounded append/upsert plans."""
 
 import hashlib
 import hmac
@@ -10,7 +10,7 @@ import resource
 import time
 from uuid import UUID, uuid4, uuid5
 
-from glamdb_sdk import AppendOutcome, AppendRequest, HTTPError, OutcomeUnknownError, ProtocolError, TransportError
+from glamdb_sdk import AppendOutcome, HTTPError, MutationRequest, OutcomeUnknownError, ProtocolError, TransportError
 from glamdb_sdk.codec import decode_rows
 from glamdb_sdk.errors import ValidationError
 from glamdb_sdk.request import json_bytes
@@ -18,6 +18,7 @@ from glamdb_sdk.request import json_bytes
 from .ledger import Ledger
 from .runtime import add_stage, client_for, error_code, failure_kind, latency_report, stage_report
 from .tpch_state import client_config, read_state, run_lock, write_state
+from .tpch_target import KEY_ENCODING, collection_mode, prepare_request, target_schema
 
 
 def _plan_digest(log):
@@ -44,10 +45,14 @@ def freeze_plan(log, dataset, saved, *, batch_rows, batch_bytes, workers):
     ''')
     config = {'load_id': saved['load_id'], 'dataset_sha256': saved['dataset_sha256'],
               'collections': {name: info['collection_id'] for name, info in saved['tables'].items()},
-              'batch_rows': batch_rows, 'batch_bytes': batch_bytes, 'workers': workers}
+              'batch_rows': batch_rows, 'batch_bytes': batch_bytes, 'workers': workers,
+              'collection_mode': collection_mode(saved)}
+    if collection_mode(saved) == 'kv':
+        config['key_encoding'] = KEY_ENCODING
     old = log.db.execute("SELECT value FROM benchmark_meta WHERE key='plan'").fetchone()
     if old is not None:
         previous = json.loads(old[0])
+        previous['config'].setdefault('collection_mode', 'append')
         if previous['config'] != config:
             raise ValueError('append plan differs from its immutable original configuration')
         if previous['summary'].get('sha256') != _plan_digest(log):
@@ -68,8 +73,8 @@ def freeze_plan(log, dataset, saved, *, batch_rows, batch_bytes, workers):
                                               f'{collection}/{part_ordinal}/{start}:{end}'))
                         try:
                             # Longest signed snapshot identity bounds the actual request suffix.
-                            request = AppendRequest.prepare(collection, operation, source.schema,
-                                                            rows[start:end], -9223372036854775808)
+                            request = prepare_request(saved, table, source.schema, operation,
+                                                      rows[start:end], -9223372036854775808)
                             if len(request.body) <= batch_bytes:
                                 break
                         except ValidationError:
@@ -131,7 +136,9 @@ def validate_saved_plan(log, dataset, saved):
                 or row['bytes'] != row['body_bytes'] or row['payload_hash'] != row['chunk_hash']
                 or row['collection_id'] != saved['tables'][row['table_name']]['collection_id']):
             raise ValueError('journal accounting or identity differs from its immutable source chunk')
-        log.request(row['operation_id'])  # Check the immutable request-body digest before recovery/progress.
+        request = log.request(row['operation_id'])  # Validate body digest before recovery/progress.
+        if getattr(request, 'kind', 'append') != ('upsert' if collection_mode(saved) == 'kv' else 'append'):
+            raise ValueError('journal mutation kind differs from the immutable load plan')
     return plan
 
 
@@ -145,7 +152,7 @@ def _dataset(saved):
     ids = set()
     for table, source in data.tables.items():
         info = saved['tables'][table]
-        if info['schema'] != source.schema.to_dict() or info['collection_id'] in ids:
+        if info['schema'] != target_schema(source.schema, collection_mode(saved)).to_dict() or info['collection_id'] in ids:
             raise ValueError('run schema or collection assignment differs from its original dataset')
         ids.add(info['collection_id'])
     return data
@@ -153,13 +160,14 @@ def _dataset(saved):
 
 def _capabilities(client, saved, *, deadline, writable=True):
     caps = client.capabilities(deadline=deadline)
-    required = ('append', 'scan', 'scan_pagination', 'scan_cancel', 'stats', 'snapshots')
+    required = ('scan', 'scan_pagination', 'scan_cancel', 'stats', 'snapshots')
+    required += ('key_value', 'upsert') if collection_mode(saved) == 'kv' else ('append',)
     if caps.get('mock') is not False or caps.get('backend') != 'local':
         raise ValueError('TPC-H requires the real native storage backend; no mock fallback')
     if caps.get('store_id') != saved['store_id']:
         raise ValueError('server store identity differs from the saved benchmark target')
     if any(caps.get('features', {}).get(key) is not True for key in required):
-        raise ValueError('server lacks required append, scan or fixed-snapshot metadata capabilities')
+        raise ValueError('server lacks required write, scan or fixed-snapshot metadata capabilities')
     if writable and caps.get('health', {}).get('write_ready') is not True:
         raise ValueError('database is not write-ready; reopen/recovery is an explicit operator action')
     return caps
@@ -189,8 +197,10 @@ def _check_heads(client, saved, data, *, deadline):
     stats = {}
     for table, source in data.tables.items():
         info = saved['tables'][table]
-        if client.get_schema(info['collection_id'], deadline=deadline) != source.schema:
+        if client.get_schema(info['collection_id'], deadline=deadline) != target_schema(source.schema, collection_mode(saved)):
             raise ValueError('server schema differs from the saved benchmark schema')
+        if client.get_collection(info['collection_id'], deadline=deadline).get('mode', 'append') != collection_mode(saved):
+            raise ValueError('server collection mode differs from the saved benchmark target')
         current = client.stats(info['collection_id'], deadline=deadline)
         if (current['snapshot_id'] != info['snapshot_id'] or
                 int(current['rows']) != info.get('confirmed_rows', 0)):
@@ -199,10 +209,10 @@ def _check_heads(client, saved, data, *, deadline):
     return stats
 
 
-def initialize(*, url, dataset, name, state, limits=None, table_prefix='', timeout=30.0, ca_file=None):
+def initialize(*, url, dataset, name, state, limits=None, table_prefix='', mode=None, timeout=30.0, ca_file=None):
     try:
         return _initialize(url=url, dataset=dataset, name=name, state=state, limits=limits,
-                           table_prefix=table_prefix, timeout=timeout, ca_file=ca_file)
+                           table_prefix=table_prefix, mode=mode, timeout=timeout, ca_file=ca_file)
     except (TransportError, ProtocolError, HTTPError) as error:
         if isinstance(error, HTTPError) and error.status_code < 500:
             raise
@@ -212,11 +222,13 @@ def initialize(*, url, dataset, name, state, limits=None, table_prefix='', timeo
                 'reason': 'repeat explicit init with the saved original identities; no request was replayed'}
 
 
-def _initialize(*, url, dataset, name, state, limits=None, table_prefix='', timeout=30.0, ca_file=None):
+def _initialize(*, url, dataset, name, state, limits=None, table_prefix='', mode=None, timeout=30.0, ca_file=None):
     from .tpch_dataset import TPCHDataset
     from .tpch_verify import verify_source
     if not isinstance(name, str) or not name or not isinstance(table_prefix, str):
         raise ValueError('benchmark database name and optional table prefix must be strings')
+    if mode is not None:
+        collection_mode({'collection_mode': mode})
     data = TPCHDataset(dataset)
     state = Path(state).resolve()
     state.parent.mkdir(parents=True, exist_ok=True)
@@ -226,14 +238,16 @@ def _initialize(*, url, dataset, name, state, limits=None, table_prefix='', time
     with run_lock(state):
         if state.exists():
             saved = read_state(state)
-            if any(saved.get(key) != value for key, value in requested.items()):
+            if (any(saved.get(key) != value for key, value in requested.items())
+                    or (mode is not None and mode != collection_mode(saved))):
                 raise ValueError('init differs from the saved original target; use a new state for a new run')
         else:
+            mode = mode or 'append'
             dbid = str(uuid4())
-            saved = dict(requested, version=1, database_id=dbid, store_id=dbid,
+            saved = dict(requested, version=1, database_id=dbid, store_id=dbid, collection_mode=mode,
                          load_id=str(uuid4()), phase='initializing', load_complete=False,
                          tables={table: {'collection_id': str(uuid4()), 'name': table_prefix + table,
-                                         'schema': source.schema.to_dict(), 'initial_snapshot': None,
+                                         'schema': target_schema(source.schema, mode).to_dict(), 'initial_snapshot': None,
                                          'snapshot_id': None, 'confirmed_rows': 0, 'created': False}
                                  for table, source in data.tables.items()},
                          snapshots=dict.fromkeys(data.tables),
@@ -256,17 +270,22 @@ def _initialize(*, url, dataset, name, state, limits=None, table_prefix='', time
             write_state(state, saved)
         with client_for(config) as client:
             caps = _capabilities(client, saved, deadline=timeout)
-            physical_types = {field.type for source in data.tables.values() for field in source.schema.fields}
+            mode = collection_mode(saved)
+            physical_types = {field.type for source in data.tables.values() for field in target_schema(source.schema, mode).fields}
             if not physical_types <= set(caps.get('schema_types', [])):
                 raise ValueError('server does not support the explicitly selected type profile (#154)')
             saved['capabilities'] = caps
             for table, source in data.tables.items():
                 info = saved['tables'][table]
+                schema = target_schema(source.schema, mode)
+                if info['schema'] != schema.to_dict():
+                    raise ValueError('saved target schema differs from the original collection mode')
                 if info['created']:
-                    if client.get_schema(info['collection_id'], deadline=timeout) != source.schema:
+                    if (client.get_schema(info['collection_id'], deadline=timeout) != schema
+                            or client.get_collection(info['collection_id'], deadline=timeout).get('mode', 'append') != mode):
                         raise ValueError('initialized collection schema changed')
                     continue
-                outcome = client.create_collection(info['name'], source.schema,
+                outcome = client.create_collection(info['name'], schema, mode=mode,
                                                    collection_id=info['collection_id'], deadline=timeout)
                 if outcome.outcome != 'committed':
                     saved['phase'] = 'initialization_' + outcome.outcome
@@ -278,6 +297,7 @@ def _initialize(*, url, dataset, name, state, limits=None, table_prefix='', time
             saved['phase'] = 'initialized'
             write_state(state, saved)
         return {'status': 'PASS', 'phase': 'initialized', 'database_id': saved['database_id'],
+                'collection_mode': collection_mode(saved),
                 'tables': {name: info['collection_id'] for name, info in saved['tables'].items()},
                 'type_profile': data.profile, 'scale_factor': data.scale_factor, 'state': str(state)}
 
@@ -298,6 +318,24 @@ def load_chunk(dataset, chunk):
     return selected
 
 
+def _receipt_matches_rows(request, result):
+    rows = len(request.to_dict()['rows'])
+    try:
+        if not isinstance(result.get('snapshot_id'), str):
+            return False
+        if isinstance(request, MutationRequest):
+            # Source primary keys are unique and the target starts empty. COW
+            # may rewrite existing rows, but the live-row delta must equal input.
+            return (result.get('receipt_version') == 3 and result.get('mutation_kind') == 'upsert'
+                    and result.get('snapshot_created') is True
+                    and int(result.get('input_rows', -1)) == rows
+                    and int(result.get('rows_affected', -1)) == rows
+                    and int(result['rows_written']) - int(result['rows_removed']) == rows)
+        return int(result.get('rows_appended', -1)) == rows
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def record_outcome(log, request, outcome, *, authoritative=False):
     state = outcome.outcome
     code = outcome.error.code if outcome.error else None
@@ -307,8 +345,7 @@ def record_outcome(log, request, outcome, *, authoritative=False):
     elif state == 'committed':
         if not isinstance(result, dict) or not hmac.compare_digest(result.get('payload_hash', ''), request.payload_hash):
             state, code = 'conflict', 'OPERATION_CONFLICT'
-        elif (int(result.get('rows_appended', -1)) != len(request.to_dict()['rows'])
-              or not isinstance(result.get('snapshot_id'), str)):
+        elif not _receipt_matches_rows(request, result):
             state, code = 'protocol_error', 'RECEIPT_ROW_COUNT_MISMATCH'
     elif state == 'definitely_not_committed' and not authoritative:
         # Admission can reject before binding an ID. A failed POST proves that
@@ -333,7 +370,8 @@ def record_outcome(log, request, outcome, *, authoritative=False):
 def _send_once(client, log, request, *, deadline):
     log.attempted(request.operation_id)
     try:
-        return record_outcome(log, request, client.append(request, deadline=deadline))
+        send = client.upsert if isinstance(request, MutationRequest) else client.append
+        return record_outcome(log, request, send(request, deadline=deadline))
     except (TransportError, ProtocolError, HTTPError) as error:
         state = ('commit_unknown' if isinstance(error, OutcomeUnknownError) else
                  'transport_error' if isinstance(error, TransportError) else 'protocol_error')
@@ -396,9 +434,8 @@ def _execute_load(client, log, data, saved, path, config, workers):
                     if (current['snapshot_id'] != info['snapshot_id'] or
                             int(current['rows']) != info['confirmed_rows']):
                         raise ValueError('foreign writes changed a benchmark collection before append')
-                    request = AppendRequest.prepare(info['collection_id'], chunk['operation_id'],
-                                                    data.tables[chunk['table_name']].schema, rows,
-                                                    info['snapshot_id'])
+                    request = prepare_request(saved, chunk['table_name'], data.tables[chunk['table_name']].schema,
+                                              chunk['operation_id'], rows, info['snapshot_id'])
                     if request.payload_hash != chunk['payload_hash'] or len(request.body) > saved['append_plan']['batch_bytes']:
                         raise ValueError('prepared body differs from the immutable append plan')
                     prepared = time.perf_counter()
@@ -424,7 +461,7 @@ def _execute_load(client, log, data, saved, path, config, workers):
                     record = log.db.execute('SELECT error_code FROM operations WHERE operation_id=?',
                                              (request.operation_id,)).fetchone()
                     kind = 'SDK' if event_error is None else failure_kind(record[0] or state)
-                    self.environment.events.request.fire(request_type=kind, name='tpch/append',
+                    self.environment.events.request.fire(request_type=kind, name='tpch/' + getattr(request, 'kind', 'append'),
                                                           response_time=(sent - journaled) * 1000,
                                                           response_length=len(request.body), exception=event_error)
                 except BaseException as error:
@@ -454,14 +491,25 @@ def _execute_load(client, log, data, saved, path, config, workers):
 
 def load_byte_metrics(log, data):
     parquet = 0
+    kv = dict.fromkeys(('input_rows', 'rows_affected', 'rows_written', 'rows_removed',
+                        'data_files_added', 'data_files_removed', 'compressed_data_bytes_removed'), 0)
+    has_kv = False
     for row in log.db.execute("SELECT outcome FROM operations WHERE state='committed'"):
-        value = json.loads(row['outcome'])['result'].get('compressed_data_bytes_added')
+        result = json.loads(row['outcome'])['result']
+        if result.get('mutation_kind') == 'upsert':
+            has_kv = True
+            for key in kv:
+                kv[key] += int(result[key])
+        value = result.get('compressed_data_bytes_added')
         if value is None:
             parquet = None
             break
         parquet += int(value)
-    return {'source_tbl_bytes': data.manifest['source_bytes'], 'dataset_jsonl_bytes': data.manifest['bytes'],
-            'confirmed_wire_bytes': log.summary()['confirmed_bytes'], 'committed_parquet_bytes': parquet}
+    metrics = {'source_tbl_bytes': data.manifest['source_bytes'], 'dataset_jsonl_bytes': data.manifest['bytes'],
+               'confirmed_wire_bytes': log.summary()['confirmed_bytes'], 'committed_parquet_bytes': parquet}
+    if has_kv:
+        metrics['kv_mutations'] = dict(kv, row_write_amplification=kv['rows_written'] / kv['input_rows'])
+    return metrics
 
 
 def load(state, *, batch_rows=10000, batch_bytes=8 * 1024**2, workers=1, resume=False, timeout=30.0, ca_file=None):
@@ -508,7 +556,7 @@ def load(state, *, batch_rows=10000, batch_bytes=8 * 1024**2, workers=1, resume=
                 metrics = _execute_load(client, log, data, saved, path, config, workers)
                 elapsed = time.perf_counter() - began
                 totals = log.summary()
-                metrics.update(load_byte_metrics(log, data))
+                metrics.update(load_byte_metrics(log, data), collection_mode=collection_mode(saved))
                 loaded_rows = totals['confirmed_rows'] - before['confirmed_rows']
                 loaded_bytes = totals['confirmed_bytes'] - before['confirmed_bytes']
                 metrics.update(elapsed_seconds=elapsed, cpu_seconds=time.process_time() - cpu,
@@ -554,9 +602,8 @@ def resolve(state, *, retry=False, timeout=30.0, ca_file=None):
                 if chunk is None:
                     raise ValueError('journal contains an operation outside the immutable append plan')
                 body = request.to_dict()
-                rebuilt = AppendRequest.prepare(request.collection_id, request.operation_id,
-                                                data.tables[chunk['table_name']].schema,
-                                                load_chunk(data, chunk), body.get('expected_snapshot'))
+                rebuilt = prepare_request(saved, chunk['table_name'], data.tables[chunk['table_name']].schema,
+                                          request.operation_id, load_chunk(data, chunk), body.get('expected_snapshot'))
                 if request != rebuilt or request.payload_hash != chunk['payload_hash']:
                     raise ValueError('saved retry body/hash differs from its immutable original source chunk')
                 try:
@@ -613,6 +660,7 @@ def status(state, *, timeout=30.0, ca_file=None):
     with client_for(config) as client:
         caps = client.capabilities(deadline=timeout)
     return {'status': 'PASS' if saved.get('load_complete') and not (operations or {}).get('pending') else 'INCOMPLETE',
+            'collection_mode': collection_mode(saved),
             'phase': saved.get('phase'), 'database_id': saved['database_id'],
             'database': database, 'load_complete': saved.get('load_complete', False),
             'operations': operations, 'snapshots': saved.get('snapshots'),

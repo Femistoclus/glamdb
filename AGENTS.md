@@ -51,6 +51,8 @@ are implemented. They can use the native Asio HTTP server over the public Engine
 `--data-dir` starts with no databases; authenticated API/UI operations create,
 list, open, close and reconcile databases. Authenticated native operators can
 explicitly drop an initialized database with its original store identity;
+managed cleanup recognizes canonical file ordinals 00000–00255 from KV/bulk
+writes while refusing malformed or out-of-profile filenames;
 the SDK/CLI expose exact retries and `bench tpch clean --state`. The standalone
 CLI also routes the complete TPC-H generation/init/load/resolve/verify/scan/status
 lifecycle through the optional workload package. See
@@ -694,7 +696,13 @@ TPC-H generation requires explicit `--type-profile native|legacy-scaled` and
 reference TPC-H Tools 3.0.1 provenance. Preserve all eight tables/61 columns and
 exact decimal/date values. Bound both row buffers and metadata; the initial
 profile admits at most 65,536 parts and refuses oversized layouts without
-truncating data. `init` explicitly creates a dedicated managed target;
+truncating data. `init --mode append|kv` explicitly creates a dedicated managed
+target (new runs default to append; omitted mode keeps an existing run). KV adds
+a required string key from ordered, fixed-width int64 primary-key components;
+source datasets and all 61 fields stay unchanged. Persist collection mode and
+mutation kind through plan/journal/retry; missing legacy modes mean append.
+Require insert-only KV receipts (net live rows equal input), report COW counters
+separately, and verify derived keys as well as original fields;
 `load` assigns disjoint immutable chunks while publication remains serialized.
 Keep state, dataset hashes, original UUID/body/hash and receipts through resume;
 never replace a pending request or silently change the plan/limits. Full

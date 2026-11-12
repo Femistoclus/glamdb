@@ -52,7 +52,7 @@ def tls_proxy(upstream_port, directory):
         def forward(self):
             size = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(size) if size else None
-            is_append = self.command == "POST" and self.path.endswith("/append")
+            is_append = self.command == "POST" and self.path.endswith(("/append", "/upsert"))
             lifecycle_kind = None
             if self.command == "POST":
                 if self.path == "/databases":
