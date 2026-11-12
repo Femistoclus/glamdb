@@ -2,7 +2,9 @@
 
 ``legacy_prepare.py`` is a frozen copy of the old codec/request code and acts as
 the oracle: for every input, ``payload_hash`` and ``body`` must be equal, and an
-invalid input must raise the same exception type with the same message.
+invalid input within the wire budget must raise the same exception type with
+the same message. Canonical-valid requests exceeding the native HTTP wire
+ceiling are now rejected locally, as covered by the boundary test below.
 """
 
 from collections.abc import Mapping
@@ -14,7 +16,7 @@ import random
 
 import pytest
 
-from glamdb_sdk import Field, Schema
+from glamdb_sdk import Field, Schema, ValidationError
 from glamdb_sdk.codec import _canonical_row_size, encode_rows, format_timestamp, row_plan
 from glamdb_sdk.models import ANY
 from glamdb_sdk.request import AppendRequest, canonical_payload_hash, schema_fingerprint
@@ -214,8 +216,15 @@ def test_row_and_batch_byte_limits_match_at_the_boundary():
     # 8 exact-limit rows are 16 MiB; one more NULL-free byte overflows the batch.
     small = Schema([Field("s", "string", False)])
     exact = [{"s": "x" * (1024**2 - 5)}] * 16
-    assert assert_same(small, lambda: exact)[0] == "ok"
-    assert assert_same(small, lambda: exact + [{"s": ""}])[0] == "error"
+    # The legacy canonical-only preparation admitted this, but JSON framing
+    # exceeds the native HTTP wire ceiling even without scalar escaping.
+    assert old_prepare(small, exact)
+    with pytest.raises(ValidationError, match="16 MiB.*serialized"):
+        new_prepare(small, exact)
+    with pytest.raises(ValidationError, match="16 MiB canonical"):
+        old_prepare(small, exact + [{"s": ""}])
+    with pytest.raises(ValidationError, match="16 MiB.*serialized"):
+        new_prepare(small, exact + [{"s": ""}])
 
 
 INVALID_VALUES = {

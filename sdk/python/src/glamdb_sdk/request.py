@@ -13,6 +13,12 @@ from .models import ANY
 
 APPEND_ROW_LIMIT = 10000
 APPEND_CANONICAL_LIMIT = 16 * 1024**2
+REQUEST_BODY_LIMIT = 16 * 1024**2
+
+
+def _check_request_size(size: int) -> None:
+    if size > REQUEST_BODY_LIMIT:
+        raise ValidationError("request exceeds 16 MiB serialized JSON bytes")
 
 
 def uuid_string(value: str | UUID, label: str) -> str:
@@ -29,6 +35,15 @@ def json_bytes(value: Any) -> bytes:
         return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
     except (TypeError, ValueError, UnicodeError) as exc:
         raise ValidationError("request is not valid finite UTF-8 JSON") from exc
+
+
+def _append_wire_row(body: bytearray, row: dict[str, Any], separator: bool, suffix_size: int) -> None:
+    # A normalized row is bounded by its independent 2 MiB decoded limit.
+    wire = json_bytes(row)
+    _check_request_size(len(body) + separator + len(wire) + suffix_size)
+    if separator:
+        body.extend(b",")
+    body.extend(wire)
 
 
 def schema_fingerprint(schema: Schema) -> bytes:
@@ -103,6 +118,12 @@ class AppendRequest:
         digest = _payload_digest(collection_id, plan.fingerprint, expected_rows) if sized else None
         pending: list[bytes] = []  # canonical rows, bounded by the 16 MiB budget
         owned = []
+        prefix = b'{"operation_id":' + json_bytes(operation_id) + b',"rows":['
+        suffix_budget = 2 if expected_snapshot is ANY else len(b'],"expected_snapshot":"-9223372036854775808"}')
+        row_frame = len(json_bytes({field.name: None for field in schema.fields})) - 4 * len(schema.fields)
+        wire_bound = len(prefix) + suffix_budget
+        body = None
+        suffix = b""
         canonical_bytes = 0
         encode_row = plan.encode_row
         for row in rows:
@@ -112,6 +133,22 @@ class AppendRequest:
             canonical_bytes += len(canonical)
             if canonical_bytes > APPEND_CANONICAL_LIMIT:
                 raise ValidationError("append exceeds 16 MiB canonical decoded bytes")
+            # Every JSON scalar fits within six times its canonical bytes;
+            # names/framing are accounted separately. Keep the fast whole-body
+            # encoder only while that conservative upper bound fits. Otherwise
+            # switch to bounded row serialization before consuming another row.
+            wire_bound += row_frame + 6 * len(canonical) + bool(owned)
+            if body is None and wire_bound > REQUEST_BODY_LIMIT:
+                suffix = b"]"
+                if expected_snapshot is not ANY:
+                    snapshot_value = None if expected_snapshot is None else str(int64(expected_snapshot))
+                    suffix += b',"expected_snapshot":' + json_bytes(snapshot_value)
+                suffix += b"}"
+                body = bytearray(prefix)
+                for index, previous in enumerate(owned):
+                    _append_wire_row(body, previous, index != 0, len(suffix))
+            if body is not None:
+                _append_wire_row(body, encoded, bool(owned), len(suffix))
             owned.append(encoded)
             if digest is not None:
                 digest.update(canonical)
@@ -132,10 +169,16 @@ class AppendRequest:
             payload_hash = canonical_payload_hash(collection_id, schema, owned)
         else:
             payload_hash = digest.hexdigest()
-        value = {"operation_id": operation_id, "rows": owned}
-        if expected_snapshot is not ANY:
-            value["expected_snapshot"] = None if expected_snapshot is None else str(int64(expected_snapshot))
-        return cls(collection_id, operation_id, payload_hash, json_bytes(value))
+        if body is None:
+            value = {"operation_id": operation_id, "rows": owned}
+            if expected_snapshot is not ANY:
+                value["expected_snapshot"] = None if expected_snapshot is None else str(int64(expected_snapshot))
+            frozen = json_bytes(value)
+            _check_request_size(len(frozen))
+            return cls(collection_id, operation_id, payload_hash, frozen)
+        _check_request_size(len(body) + len(suffix))
+        body.extend(suffix)
+        return cls(collection_id, operation_id, payload_hash, bytes(body))
 
     def to_dict(self) -> dict[str, Any]:
         """Return a detached view; editing it cannot change a retry body."""

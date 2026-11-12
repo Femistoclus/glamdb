@@ -15,7 +15,7 @@
   "catalog": "/state/resources.sqlite",
   "csrf_secret_file": "/run/secrets/glamdb/csrf.secret",
   "site": "/srv/glamdb/ui",
-  "theme": "/srv/glamdb/ui/theme.json",
+  "theme": "/srv/glamdb/ui/config/theme.json",
   "public_origin": "https://workbench.example.com",
   "cerbos_target": "cerbos:3593",
   "cerbos_plaintext": true,

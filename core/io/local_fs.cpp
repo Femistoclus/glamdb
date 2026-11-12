@@ -113,7 +113,10 @@ std::error_code MeasureDirectory(int fd,
     std::chrono::steady_clock::time_point deadline,
     const std::function<bool()>& cancelled)
 {
-    std::unique_ptr<DIR, decltype(&::closedir)> directory(::fdopendir(fd), ::closedir);
+    const auto closeDirectory = [](DIR* value) noexcept {
+        ::closedir(value);
+    };
+    std::unique_ptr<DIR, decltype(closeDirectory)> directory(::fdopendir(fd), closeDirectory);
     if (!directory) {
         const auto error = LastError();
         ::close(fd);

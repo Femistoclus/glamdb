@@ -20,6 +20,15 @@
 namespace glamdb::NServer {
 using namespace NTransport;
 namespace {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+template <class T>
+using TAtomicSharedPtr = std::atomic<std::shared_ptr<T>>;
+#else
+// libc++ 18 supports shared_ptr atomic free functions without the specialization.
+template <class T>
+using TAtomicSharedPtr = std::shared_ptr<T>;
+#endif
+
 TJson EncodeLimits(const Limits& limits)
 {
     return {{"max_operations", limits.max_operations},
@@ -99,7 +108,7 @@ struct TEntry
     bool Retired = false;
     std::optional<TDropIdentity> DropIdentity;
     std::optional<TDropIdentity> RootIdentity;
-    std::shared_ptr<const TJson> Descriptor;
+    TAtomicSharedPtr<const TJson> Descriptor;
 };
 TJson Describe(const TEntry& entry)
 {
@@ -358,7 +367,7 @@ struct TDatabases::TImpl
     std::map<std::string, std::shared_ptr<TEntry>> Entries;
     std::atomic<bool> Healthy{true};
     using TEntries = std::vector<std::shared_ptr<TEntry>>;
-    std::shared_ptr<const TEntries> PublishedEntries = std::make_shared<const TEntries>();
+    TAtomicSharedPtr<const TEntries> PublishedEntries = std::make_shared<const TEntries>();
     std::function<void(const std::string&)> ScanCanceller;
     std::function<void(std::string_view)> DropCheckpoint;
 

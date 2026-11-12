@@ -19,6 +19,15 @@
 namespace glamdb::NServer {
 using namespace NTransport;
 namespace {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+template <class T>
+using TAtomicSharedPtr = std::atomic<std::shared_ptr<T>>;
+#else
+// libc++ 18 supports shared_ptr atomic free functions without the specialization.
+template <class T>
+using TAtomicSharedPtr = std::shared_ptr<T>;
+#endif
+
 constexpr uint64_t ReplayMemoryBytes = 2 * MaxResponseBytes + (64ULL << 10);
 constexpr std::array RejectionNames{"global_live_limit",
     "database_live_limit",
@@ -118,8 +127,7 @@ struct TScans::TImpl
         std::atomic<bool> Cancelled{false}, Complete{false}, Busy{false};
         const int64_t Created = Now();
         std::atomic<int64_t> Touched{Created};
-        // LLVM 18 supports the C++23 shared_ptr atomic free functions.
-        std::shared_ptr<ScanCursor> Cursor;
+        TAtomicSharedPtr<ScanCursor> Cursor;
         std::deque<std::shared_ptr<arrow::RecordBatch>> Pending;
         std::deque<std::shared_ptr<arrow::RecordBatch>>* Rollback = nullptr;
         ScanInfo Info;

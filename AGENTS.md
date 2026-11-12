@@ -214,7 +214,10 @@ Preserve these boundaries when adding or changing engine behavior:
   ID to its canonical content hash before file I/O. Persist the committed
   outcome atomically with the catalog pointer. The same ID and hash return the
   original terminal outcome, including failure; a different hash conflicts.
-  Outcomes survive restart and do not expire. Healthy terminal receipt lookups
+  Outcomes survive restart and do not expire. The
+  [receipt retention decision](docs/development/RESOURCE_BUDGETS.md#operation-receipt-retention-decision)
+  keeps them permanent; larger budget-derived operation/history profiles remain
+  tracked in #156. Healthy terminal receipt lookups
   use the verified generation and query one catalog record without rereading
   warehouse files or enumerating history. Lookup is not a scrub: observed
   corruption or uncertain publication requires full reconciliation and its
@@ -304,6 +307,9 @@ Shared literal outcome/scalar vectors live in `fixtures/http/outcomes-v0.json`;
 see [the fixture guide](fixtures/http/README.md) for their native, SDK, mock and UI
 consumers. Keep complete recovery contexts in test doubles. Missing recovery
 fields are protocol errors; supported extension fields remain in client responses.
+SDK append preparation bounds canonical decoded bytes and serialized JSON bytes
+independently. Requests above the native 16 MiB wire ceiling fail locally,
+including explicitly constructed prepared bodies; response limits are separate.
 For branding/static hosting read [PUBLIC_DEMO.md](docs/development/PUBLIC_DEMO.md).
 Preserve the supplied PNGs unchanged. Brand paths must be local assets; sizes
 belong in theme.json. Asset URLs must support both / and /glamdb/.

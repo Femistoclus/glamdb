@@ -156,6 +156,62 @@ and journals, the service registry and recovery workspaces. The owner samples
 filesystem availability again after restart and atomically accounts for pending growth;
 external ENOSPC/EIO must still propagate through the durable outcome protocol.
 
+## Operation receipt retention decision
+
+Decision for [issue #171](https://github.com/glamourdb/glamdb/issues/171):
+**permanent receipts, with a larger operation ceiling derived from
+`max_catalog_bytes`**. Retain every bound operation ID/hash and its successful
+or failed terminal outcome for the lifetime of the store. There is no retention
+window or opt-in expiration policy. Implementation and qualification of the
+larger operation/history profile belong to
+[issue #156](https://github.com/glamourdb/glamdb/issues/156); this decision
+resolves the retention question without claiming that profile is implemented.
+
+Permanent retention preserves retries after arbitrary delays and process
+restarts. Expiring a receipt without retaining its ID/hash binding could execute
+an old operation again; retaining a binding alone cannot return the original
+complete outcome. A safe expiration policy would also need a distinct
+"outcome no longer retained" result across native, HTTP and SDK contracts.
+That protocol and its persistent state are unnecessary for the selected policy.
+Keep the existing outcome formats and fixtures unchanged.
+
+The [capacity campaign](CAPACITY_CAMPAIGN.md#executed-measurements-2026-11-12)
+measured 3,801,088 catalog bytes at 4,096 committed ordinary appends across two
+collections. This supports keeping receipts, but is a measurement of one schema
+and workload, not a fixed bytes-per-operation allowance or evidence for a larger
+supported ceiling. Failed bound operations also consume permanent capacity;
+retaining receipts does not promise unlimited ingestion.
+
+The implementation boundary is explicit:
+
+- **Current:** `max_operations` defaults to 4,096 and accepts only 1–4,096 in
+  the catalog and HTTP configuration. `max_catalog_bytes` independently caps
+  SQLite pages, and admission requires 24,576 bytes of freelist/growth headroom
+  for a binding and terminal receipt. Raising the byte limit alone does not
+  raise the operation limit. Aggregate snapshot, manifest and recovery limits
+  can refuse new appends independently.
+- **Larger profile in #156:** derive the supported operation ceiling from the
+  configured catalog byte budget, allowing for variable receipts, collection
+  records, indexes, page overhead and completion headroom. Coordinate it with
+  retained-history, memory and recovery budgets. Replace bounded all-at-once
+  catalog inventories where needed: `Database::Query` currently caps a result
+  at 8,192 rows and 32 MiB. Measure ingestion and same-profile fresh-process
+  reopen before advertising a larger supported profile; extrapolating the
+  campaign's average catalog size is insufficient.
+
+Neither capacity pressure nor closing/reopening a database removes a binding or
+receipt. A matching ID/hash returns the original terminal outcome, including
+failure, before new-operation capacity checks; a different hash conflicts.
+Existing bindings are retained while binding, publication or failure recording
+is uncertain; keep the write barrier until authoritative reconciliation and its
+durability fence succeed. `CommitUnknown` alone does not prove a binding exists:
+if recovery proves the binding rolled back, the original ID can be bound on retry.
+Exhaustion refuses new work without recycling bound IDs or discarding outcomes
+or snapshots.
+Lower-limit reopen must preserve the store and reject an insufficient profile;
+restoring the original adequate limits must permit recovery. These requirements
+also apply to the larger profile in #156.
+
 ## Admission, release and errors
 
 For new work the required order is process/store admission, transport decode
