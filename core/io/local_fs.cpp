@@ -99,7 +99,10 @@ std::error_code AddTreeBytes(const struct stat& info, std::uint64_t limit, std::
 std::error_code
 MeasureDirectory(int fd, const struct stat* expected, unsigned depth, std::uint64_t& total, std::uint64_t limit)
 {
-    std::unique_ptr<DIR, decltype(&::closedir)> directory(::fdopendir(fd), ::closedir);
+    const auto closeDirectory = [](DIR* value) noexcept {
+        ::closedir(value);
+    };
+    std::unique_ptr<DIR, decltype(closeDirectory)> directory(::fdopendir(fd), closeDirectory);
     if (!directory) {
         const auto error = LastError();
         ::close(fd);

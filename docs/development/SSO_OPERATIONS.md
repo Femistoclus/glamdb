@@ -135,7 +135,7 @@ sudo install -d -m 700 -o glamdb -g glamdb /var/lib/glamdb/access/state/backups
 ```
 
 Keep a reviewed checkout at `/opt/glamdb`, readable by that account. Preserve
-the supplied logo PNGs byte-for-byte and use the shipped runtime `ui/theme.json`
+the supplied logo PNGs byte-for-byte and use the shipped runtime `ui/config/theme.json`
 for the pink theme. The image does not copy the UI; Compose mounts the reviewed
 UI directory read-only. Never place credentials, the catalog, database stores,
 backup files, identity exports or generated private configuration under `ui/`.

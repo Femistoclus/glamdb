@@ -50,8 +50,10 @@ iceberg::Status CheckNewSnapshot(const iceberg::TableMetadata& base,
 {
     const auto& snapshot = *candidate.snapshots.back();
     ICEBERG_RETURN_UNEXPECTED(CheckSnapshotTimestamp(snapshot));
-    const auto parent = base.current_snapshot_id == iceberg::kInvalidSnapshotId ? std::optional<std::int64_t>{}
-                                                                                : base.current_snapshot_id;
+    std::optional<std::int64_t> parent{};
+    if (base.current_snapshot_id != iceberg::kInvalidSnapshotId) {
+        parent = base.current_snapshot_id;
+    }
     if (snapshot.snapshot_id == iceberg::kInvalidSnapshotId || snapshot.parent_snapshot_id != parent ||
         snapshot.snapshot_id != candidate.current_snapshot_id ||
         snapshot.sequence_number != candidate.last_sequence_number ||
