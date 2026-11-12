@@ -200,18 +200,22 @@ std::vector<std::string> Split(const std::string& path)
 }
 } // namespace
 
-TRoutes::TRoutes(std::shared_ptr<Engine> engine, std::filesystem::path uiRoot, std::string token)
+TRoutes::TRoutes(std::shared_ptr<Engine> engine, std::filesystem::path uiRoot, std::string token, TScanLimits scans)
     : Resources_(engine->GetResourceOwner())
-    , Scans_(std::make_shared<TScans>())
+    , Scans_(std::make_shared<TScans>(scans, Resources_))
     , Metadata_(std::make_shared<TMetadata>())
+    , DatabaseID_(engine->GetStoreInfo().store_id)
     , Engine_(std::move(engine))
     , UIRoot_(std::move(uiRoot))
     , Token_(std::move(token))
 { }
 
-TRoutes::TRoutes(std::shared_ptr<TDatabases> databases, std::filesystem::path uiRoot, std::string token)
+TRoutes::TRoutes(std::shared_ptr<TDatabases> databases,
+    std::filesystem::path uiRoot,
+    std::string token,
+    TScanLimits scans)
     : Resources_(databases->GetResourceOwner())
-    , Scans_(std::make_shared<TScans>())
+    , Scans_(std::make_shared<TScans>(scans, Resources_))
     , Metadata_(std::make_shared<TMetadata>())
     , Databases_(std::move(databases))
     , UIRoot_(std::move(uiRoot))
@@ -232,6 +236,36 @@ TRoutes::TRoutes(std::shared_ptr<TDatabases> databases, std::filesystem::path ui
 std::shared_ptr<ResourceOwner> TRoutes::GetResourceOwner() const
 {
     return Resources_;
+}
+
+TJson TRoutes::DescribeCapabilities(const EngineCapabilities& capabilities,
+    const std::optional<StoreHealth>& health,
+    bool databaseManagement,
+    const std::string& storeID) const
+{
+    auto value = CapabilitiesJson(capabilities, health, databaseManagement, storeID, Scans_->GetLimits());
+    value["scan_sessions"] = Scans_->GetStatistics(storeID);
+    const auto usage = Resources_->GetUsage();
+    value["shared_resources"] = {{"memory_limits_bytes", Resources_->GetLimits().memory_bytes},
+        {"memory_bytes", usage.memory_bytes},
+        {"memory_peak_bytes", usage.memory_peak}};
+    THttpActivity activity;
+    {
+        std::lock_guard lock(HttpObservation_->Mutex);
+        activity = HttpObservation_->Activity;
+    }
+    value["http_activity"] = {{"connected_clients", activity.Connected},
+        {"pending_calls", activity.Pending},
+        {"executing_calls", activity.Executing},
+        {"waiting_bodies", activity.BodyWaiters},
+        {"oldest_queue_age_ms", activity.OldestQueueAgeMs}};
+    return value;
+}
+
+void TRoutes::SetHttpActivity(THttpActivity activity)
+{
+    std::lock_guard lock(HttpObservation_->Mutex);
+    HttpObservation_->Activity = activity;
 }
 
 bool TRoutes::IsAuthorized(const TRequest& request) const
@@ -261,15 +295,26 @@ TResponse TRoutes::Handle(const TRequest& request) const
         }
         const bool protectedCall = UsesProtectedAdmission(request) && request.Body.size() <= (64ULL << 10);
         const auto resource = protectedCall ? ResourceClass::Completion : ResourceClass::Data;
+        const auto [path, query] = ParseTarget(request.Target);
+        (void)query;
+        const bool scan = request.Method == "POST" &&
+            (path.starts_with("/collections/") || path.starts_with("/databases/")) &&
+            (path.ends_with("/scan") || path.ends_with("/scan/open"));
         // JSON DOM/cells/Arrow copies and response assembly coexist. Ordinary
         // requests cannot use protected lookup/lifecycle capacity.
-        auto work = Unwrap(
-            Resources_->Reserve(resource, protectedCall ? 4ULL << 20 : (128ULL << 20) + request.Body.size() * 32));
+        // Scan assembly is admitted by TScans, where completed replay can be
+        // reclaimed. Only request parsing belongs to this earlier boundary.
+        auto work = Unwrap(Resources_->Reserve(resource,
+            protectedCall ? 4ULL << 20 : (scan ? 64ULL << 10 : 128ULL << 20) + request.Body.size() * 32));
         auto response = Route(request);
         Require(response.Body.size() <= MaxResponseBytes, "response exceeds transport limit", "INPUT_TOO_LARGE");
-        response.ResourceLease =
-            Unwrap(Resources_->Reserve(resource, static_cast<uint64_t>(response.Body.capacity()) * 2 + (64ULL << 10)));
+        if (!response.ResourceLease) {
+            response.ResourceLease = Unwrap(
+                Resources_->Reserve(resource, static_cast<uint64_t>(response.Body.capacity()) * 2 + (64ULL << 10)));
+        }
         return response;
+    } catch (const TScanAdmissionFailure& error) {
+        return ScanAdmissionResponse(error);
     } catch (const TFailure& error) {
         return {ErrorStatus(error.Detail), EncodeError(error.Detail).dump()};
     } catch (const detail::Failure& error) {
@@ -338,7 +383,7 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
     }
     if (request.Method == "GET" && path == "/capabilities") {
         Require(query.empty(), "unknown capability parameter");
-        return JsonResponse(CapabilitiesJson(Engine_ ? Engine_->GetCapabilities() : InstalledCapabilities(),
+        return JsonResponse(DescribeCapabilities(Engine_ ? Engine_->GetCapabilities() : InstalledCapabilities(),
             Engine_ ? std::optional(Engine_->GetHealth()) : std::nullopt,
             static_cast<bool>(Databases_),
             Engine_ ? Engine_->GetStoreInfo().store_id : std::string{}));
@@ -364,7 +409,7 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
                 return Databases_->Use(
                     parts[1],
                     [&](const auto& engine) {
-                        return JsonResponse(CapabilitiesJson(engine->GetCapabilities(),
+                        return JsonResponse(DescribeCapabilities(engine->GetCapabilities(),
                             health,
                             false,
                             engine->GetStoreInfo().store_id));
@@ -377,7 +422,7 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
                     error.Detail.code);
                 // Installed operations are independent of lifecycle admission.
                 // Keep health inspectable while the per-store gate is unavailable.
-                return JsonResponse(CapabilitiesJson(InstalledCapabilities(), health, false, parts[1]));
+                return JsonResponse(DescribeCapabilities(InstalledCapabilities(), health, false, parts[1]));
             }
         }
         if (parts.size() == 3 && request.Method == "POST" &&
@@ -490,7 +535,7 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
         return JsonResponse(FileJson(*Engine_, id, parts[3], query));
     }
     if (request.Method == "POST" && parts.size() == 3 && action == "explain") {
-        return JsonResponse(ExplainJson(*Engine_, id, body));
+        return JsonResponse(ExplainJson(*Engine_, id, body, Scans_->GetLimits()));
     }
     const auto info = Unwrap(Engine_->GetCollection(id));
     Require(query.empty(), "unknown query parameter");

@@ -186,6 +186,10 @@ if(TARGET glamdb_server)
         "$<TARGET_FILE:glamdb_server>" "${glamdb_test_cli}" "${PROJECT_SOURCE_DIR}/ui"
         "$<TARGET_FILE:glamdb_resource_profile_driver>")
     set_tests_properties(glamdb.scan_http PROPERTIES LABELS "integration;http;scan" TIMEOUT 420)
+    add_test(NAME glamdb.scan_policy COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/server/scan_policy_test.py"
+        "$<TARGET_FILE:glamdb_server>" "${glamdb_test_cli}" "${PROJECT_SOURCE_DIR}/ui")
+    set_tests_properties(glamdb.scan_policy PROPERTIES LABELS "integration;http;scan;resources" TIMEOUT 240)
 endif()
 if(TARGET glamdb_transport)
     find_package(OpenSSL REQUIRED COMPONENTS Crypto)
