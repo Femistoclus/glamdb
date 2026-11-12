@@ -234,6 +234,96 @@ TEST_F(ScanRangeReadTest, ColumnChunkReadFailureIsAnIOErrorThatKeepsReadiness)
     EXPECT_EQ(Drain({.collection_id = test::collection_id}).Rows.size(), Rows_.size());
 }
 
+TEST_F(ScanRangeReadTest, LimitedScansReportDataFileCloseFailures)
+{
+    const auto closeFails = [&] {
+        Faults_->AddRule({EIOOp::Close, "*.parquet", 1, 100, std::make_error_code(std::errc::io_error), std::nullopt});
+    };
+    const auto clearFaults = [&] {
+        // A rule stops matching after its repeats; consume them with a full scan
+        // that is allowed to fail.
+        for (int attempt = 0; attempt < 200; ++attempt) {
+            const auto cursor = Engine_->Scan({.collection_id = test::collection_id, .limit = 0});
+            ASSERT_TRUE(cursor);
+            ASSERT_TRUE((*cursor)->Next());
+            auto probe = Engine_->Scan({.collection_id = test::collection_id});
+            ASSERT_TRUE(probe);
+            Result<std::shared_ptr<arrow::RecordBatch>> next;
+            do {
+                next = (*probe)->Next();
+            } while (next && *next);
+            if (next) {
+                return;
+            }
+        }
+        FAIL() << "close faults did not drain";
+    };
+    const auto expectCloseFailure = [&](std::shared_ptr<ScanCursor> cursor, int64_t expectedRows) {
+        int64_t rows = 0;
+        Result<std::shared_ptr<arrow::RecordBatch>> next;
+        while ((next = cursor->Next()) && *next) {
+            rows += (*next)->num_rows();
+        }
+        EXPECT_EQ(rows, expectedRows);
+        ASSERT_FALSE(next) << "a failed close was reported as EOS";
+        EXPECT_EQ(next.error().code, "IO_ERROR") << next.error().message;
+        EXPECT_EQ(cursor->Profile().state, ScanState::Failed);
+        EXPECT_TRUE(Engine_->GetHealth().read_available);
+    };
+
+    // The limit ends the scan inside the file.
+    closeFails();
+    expectCloseFailure(*Engine_->Scan({.collection_id = test::collection_id, .limit = 1}), 1);
+    clearFaults();
+    // The limit ends the scan exactly at the end of the file, before its EOF was read.
+    closeFails();
+    expectCloseFailure(
+        *Engine_->Scan({.collection_id = test::collection_id, .limit = static_cast<int64_t>(Rows_.size())}),
+        static_cast<int64_t>(Rows_.size()));
+    clearFaults();
+    // A zero limit opens no data file, so nothing can fail to close.
+    closeFails();
+    const auto zero = Engine_->Scan({.collection_id = test::collection_id, .limit = 0});
+    ASSERT_TRUE(zero);
+    const auto empty = (*zero)->Next();
+    ASSERT_TRUE(empty);
+    EXPECT_EQ(*empty, nullptr);
+    EXPECT_EQ((*zero)->Profile().state, ScanState::Complete);
+    clearFaults();
+    // Cancellation after the limit is still reported as cancellation; the
+    // close is best effort there.
+    closeFails();
+    const auto cancelled = Engine_->Scan({.collection_id = test::collection_id, .limit = 1});
+    ASSERT_TRUE(cancelled);
+    ASSERT_TRUE((*cancelled)->Next());
+    (*cancelled)->Cancel();
+    const auto stopped = (*cancelled)->Next();
+    ASSERT_FALSE(stopped);
+    EXPECT_EQ(stopped.error().code, "CANCELLED");
+    clearFaults();
+
+    // The limit is reached on a later file: the newest file (two rows) is read
+    // to its end and closed, then the limit ends the scan inside this fixture's file.
+    const auto appended = Engine_->AppendDurable({test::collection_id, SecondOperation, {}, {Batch(SecondRows)}});
+    ASSERT_EQ(appended.disposition, CommitDisposition::Committed);
+    const auto later = Engine_->Scan({.collection_id = test::collection_id,
+        .limit = static_cast<int64_t>(SecondRows.size()) + 1,
+        .batch_rows = static_cast<int64_t>(SecondRows.size())});
+    ASSERT_TRUE(later);
+    int64_t rows = 0;
+    // The first batch is the newest file; the second opens the older one.
+    for (int batch = 0; batch < 2; ++batch) {
+        const auto next = (*later)->Next();
+        ASSERT_TRUE(next && *next) << (next ? std::string("EOS") : next.error().message);
+        rows += (**next).num_rows();
+    }
+    EXPECT_EQ(rows, static_cast<int64_t>(SecondRows.size()) + 1);
+    closeFails();
+    expectCloseFailure(*later, 0);
+    clearFaults();
+    EXPECT_EQ(Drain({.collection_id = test::collection_id}).Rows.size(), Rows_.size() + SecondRows.size());
+}
+
 TEST_F(ScanRangeReadTest, ResourceErrorUnderTheDecoderKeepsItsClassification)
 {
     Faults_->AddRule(

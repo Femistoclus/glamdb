@@ -525,6 +525,12 @@ private:
                 return produced;
             }
         }
+        // Normal completion (all files read or the limit reached, possibly
+        // inside an open file) closes the open data file through the checked
+        // path, so a close failure is an error rather than EOS. Cancellation is
+        // observed first; its cleanup, like a failed scan's, is best effort.
+        CheckActive();
+        CloseFile();
         Release();
         CheckActive();
         LimitStopped_ = Remaining_ && *Remaining_ == 0;
