@@ -1,0 +1,75 @@
+logging {
+  level = "warn"
+}
+
+loki.process "application" {
+  forward_to = [loki.write.local.receiver]
+  stage.json {
+    drop_malformed = true
+    expressions = {
+      schema = "schema",
+      timestamp = "timestamp",
+      level = "level",
+      event = "event",
+      operation = "operation",
+      outcome = "outcome",
+      request_id = "request_id",
+      org_id = "org_id",
+      database_id = "database_id",
+      duration_us = "duration_us",
+      revision = "revision",
+      row_count = "row_count",
+      status_code = "status_code",
+    }
+  }
+  stage.template {
+    source = "valid"
+    template = `{{ if and (eq (printf "%v" .schema) "1") (regexMatch "^[a-f0-9]{32}$" (printf "%v" .request_id)) }}true{{ else }}false{{ end }}`
+  }
+  stage.labels {
+    values = { valid = "" }
+  }
+  stage.match {
+    selector = "{valid=\"false\"}"
+    action = "drop"
+    drop_counter_reason = "invalid_schema"
+  }
+  // Rebuild each record; unlisted fields never leave the collector.
+  stage.template {
+    source = "safe"
+    template = `{"schema":1,"service":"glamdb","timestamp":{{ if regexMatch "^([0-9]{19}|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{6}Z)$" (printf "%v" .timestamp) }}{{ printf "%q" .timestamp }}{{ else }}"invalid"{{ end }},"level":{{ if regexMatch "^(info|warn|error)$" (printf "%v" .level) }}{{ printf "%q" .level }}{{ else }}"error"{{ end }},"event":{{ if regexMatch "^(access_denied|database_created|database_deleted|logger_health|org_created|org_deleted|org_updated|recovery_required|request_completed|runtime_started|runtime_stopped|session_ended|session_started|storage_failed)$" (printf "%v" .event) }}{{ printf "%q" .event }}{{ else }}"request_completed"{{ end }},"operation":{{ if regexMatch "^(append|auth|collections|create_store|database|health|inspect_store|operation|organization|other|quiesce_store|scan|session|snapshots)$" (printf "%v" .operation) }}{{ printf "%q" .operation }}{{ else }}"other"{{ end }},"outcome":{{ if regexMatch "^(cancelled|denied|error|ok|unknown)$" (printf "%v" .outcome) }}{{ printf "%q" .outcome }}{{ else }}"error"{{ end }},"request_id":{{ if regexMatch "^([a-f0-9]{32})$" (printf "%v" .request_id) }}{{ printf "%q" .request_id }}{{ else }}"invalid"{{ end }},"duration_us":{{ if .duration_us }}{{ .duration_us | int64 }}{{ else }}0{{ end }},"revision":{{ if .revision }}{{ .revision | int64 }}{{ else }}0{{ end }},"row_count":{{ if .row_count }}{{ .row_count | int64 }}{{ else }}0{{ end }},"status_code":{{ if .status_code }}{{ .status_code | int64 }}{{ else }}0{{ end }},"org_id":{{ if regexMatch "^([a-z][a-z0-9_-]{0,63}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$" (printf "%v" .org_id) }}{{ printf "%q" .org_id }}{{ else }}""{{ end }},"database_id":{{ if regexMatch "^([a-z][a-z0-9_-]{0,63}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$" (printf "%v" .database_id) }}{{ printf "%q" .database_id }}{{ else }}""{{ end }}}`
+  }
+  stage.output {
+    source = "safe"
+  }
+  stage.json {
+    expressions = { level = "level", event = "event", timestamp = "timestamp" }
+  }
+  stage.timestamp {
+    source = "timestamp"
+    format = "RFC3339Nano"
+    fallback_formats = ["UnixNs"]
+    action_on_failure = "skip"
+  }
+  stage.labels {
+    values = { level = "", event = "" }
+  }
+  stage.label_drop {
+    values = ["filename", "valid", "job", "stream"]
+  }
+}
+
+loki.write "local" {
+  max_streams = 128
+  endpoint {
+    name = "glamdb"
+    url = sys.env("LOKI_PUSH_URL")
+    batch_size = "256KiB"
+    batch_wait = "1s"
+    remote_timeout = "5s"
+    min_backoff_period = "500ms"
+    max_backoff_period = "5s"
+    max_backoff_retries = 6
+    retry_on_http_429 = true
+  }
+}

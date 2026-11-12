@@ -19,7 +19,7 @@ if(GLAMDB_BUILD_DEPENDENCIES)
 endif()
 
 include(GNUInstallDirs)
-option(GLAMDB_IO_ONLY "Build IO components without the engine and CLI" OFF)
+option(GLAMDB_IO_ONLY "Build independent IO and telemetry without the engine and CLI" OFF)
 # The engine needs the storage adapters for collections, appends and scans.
 if(GLAMDB_IO_ONLY)
     set(glamdb_storage_default OFF)

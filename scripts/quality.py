@@ -18,7 +18,7 @@ SOURCE_DIRS = ("public", "core", "apps", "tests", "probes", "examples", "benchma
 STANDALONE_SOURCE_DIRS = ("probes/build_install", "probes/toolchain")
 HEADERS = {".h", ".hh", ".hpp", ".hxx", ".ipp", ".tpp"}
 TRANSLATION_UNITS = {".c", ".cc", ".cpp", ".cxx"}
-IO_SOURCE_DIRS = ("core/io", "core/storage", "tests/unit/io", "tests/unit/storage",
+IO_SOURCE_DIRS = ("core/io", "core/storage", "core/telemetry", "tests/logging", "tests/unit/io", "tests/unit/storage",
                   "probes/io", *STANDALONE_SOURCE_DIRS)
 IO_SOURCE_FILES = {"public/storage/schema.h", "tests/unit/core_test.cpp",
                    "tests/support/fault_fs.h", "tests/support/fault_fs.cpp",
