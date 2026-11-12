@@ -1397,7 +1397,8 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
             unresolved = impl->BlockedAppend(request);
             collection = impl->CachedCollection(request.collection_id);
         }
-        const auto payload_hash = Take(FingerprintBatches(collection.schema, request.collection_id, request.batches));
+        const auto fingerprinted = Take(FingerprintInput(collection.schema, request.collection_id, request.batches));
+        const auto& payload_hash = fingerprinted.PayloadHash;
         if (unresolved) {
             return metrics.Finish(UnresolvedAppend(*unresolved, payload_hash));
         }
@@ -1512,7 +1513,9 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         }
         // Only a new operation needs owned payload memory. A retry has already
         // returned its original terminal receipt, even under a lower input cap.
-        const auto reservation = Take(InputReservation(collection.schema, request.batches));
+        // Computed by the fingerprint's inspection; normalization re-inspects
+        // the caller buffers and rejects a shape that no longer matches it.
+        const auto reservation = fingerprinted.Reservation;
         {
             std::lock_guard lock(impl->state_mutex);
             impl->CheckHealthy(expected_generation);
@@ -1525,7 +1528,7 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         }
         admission.shared_input = Take(impl->resources->Reserve(ResourceClass::Data, reservation));
         impl->ReserveAttempt();
-        auto input = Take(NormalizeBatches(collection.schema, request.collection_id, request.batches));
+        auto input = Take(NormalizeBatches(collection.schema, request.collection_id, request.batches, reservation));
         Require(input.payload_hash == payload_hash, "INVALID_ARGUMENT", "Arrow input changed during append");
         const auto base = impl->catalog->Base(request.collection_id);
         // The store may have been opened by a build without a stored codec.
@@ -1586,7 +1589,7 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
             std::nullopt,
             std::nullopt};
         Require(ValidateOutcome(committed).has_value() &&
-                receipt.rows_appended == static_cast<int64_t>(input.rows.size()),
+                receipt.rows_appended == static_cast<int64_t>(input.GetRowCount()),
             "IO_ERROR",
             "producer returned an invalid receipt or row count");
         {

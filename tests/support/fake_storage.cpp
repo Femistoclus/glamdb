@@ -200,7 +200,7 @@ Result<std::unique_ptr<detail::StagedAppend>> FakeStorage::PrepareAppend(const S
         1,
         snapshot,
         binding.base.current_snapshot_id,
-        static_cast<int64_t>(input.rows.size()),
+        static_cast<int64_t>(input.GetRowCount()),
         1,
         123,
         1700000000000000LL + static_cast<int64_t>(metadata.tags.size()) * 1000,

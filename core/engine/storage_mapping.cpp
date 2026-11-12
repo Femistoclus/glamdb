@@ -5,6 +5,7 @@
 #include <arrow/api.h>
 
 #include <cstddef>
+#include <cstring>
 #include <string>
 #include <type_traits>
 #include <variant>
@@ -204,6 +205,64 @@ int64_t EstimateRecordBatchBytes(const SchemaSpec& schema, const std::vector<Row
         }
     }
     return total;
+}
+
+int64_t EstimateRecordBatchBytes(const SchemaSpec& schema, const arrow::RecordBatch& columns)
+{
+    const auto count = columns.num_rows();
+    const auto bitmap = (count + 7) / 8;
+    int64_t total = 0;
+    for (size_t column = 0; column < schema.fields.size(); ++column) {
+        total += bitmap;
+        switch (schema.fields[column].type) {
+            case FieldType::String: {
+                // Owned columns start at offset zero with no bytes behind NULLs.
+                const auto& strings = static_cast<const arrow::StringArray&>(*columns.column(static_cast<int>(column)));
+                total += 4 * (count + 1) + strings.total_values_length();
+                break;
+            }
+            case FieldType::Bool:
+                total += bitmap;
+                break;
+            case FieldType::Int64:
+            case FieldType::Float64:
+            case FieldType::TimestampUsUtc:
+                total += 8 * count;
+                break;
+        }
+    }
+    return total;
+}
+
+Result<std::shared_ptr<arrow::RecordBatch>> CopyRecordBatch(const arrow::RecordBatch& batch, arrow::MemoryPool* pool)
+{
+    if (pool == nullptr) {
+        pool = arrow::default_memory_pool();
+    }
+    std::vector<std::shared_ptr<arrow::Array>> columns;
+    columns.reserve(static_cast<size_t>(batch.num_columns()));
+    for (int column = 0; column < batch.num_columns(); ++column) {
+        const auto& source = *batch.column_data(column);
+        std::vector<std::shared_ptr<arrow::Buffer>> buffers;
+        buffers.reserve(source.buffers.size());
+        for (const auto& buffer : source.buffers) {
+            if (buffer == nullptr) {
+                buffers.push_back(nullptr);
+                continue;
+            }
+            auto copy = arrow::AllocateBuffer(buffer->size(), pool);
+            if (!copy.ok()) {
+                return std::unexpected(ArrowError(copy.status()));
+            }
+            auto* out = (*copy)->mutable_data();
+            std::memcpy(out, buffer->data(), static_cast<size_t>(buffer->size()));
+            std::memset(out + buffer->size(), 0, static_cast<size_t>((*copy)->capacity() - buffer->size()));
+            buffers.push_back(std::shared_ptr<arrow::Buffer>(std::move(*copy)));
+        }
+        columns.push_back(arrow::MakeArray(
+            arrow::ArrayData::Make(source.type, source.length, std::move(buffers), source.null_count, source.offset)));
+    }
+    return arrow::RecordBatch::Make(batch.schema(), batch.num_rows(), std::move(columns));
 }
 
 } // namespace glamdb::detail
