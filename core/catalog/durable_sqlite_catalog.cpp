@@ -606,13 +606,24 @@ void DurableSqliteCatalogStore::ForEachOperation(const OperationConsumer& consum
     Require(OperationCount() <= limits_.max_operations,
         "CONFIG_TOO_SMALL",
         "operation count exceeds configured capacity");
+    const auto select = "SELECT " + std::string(operation_columns) + " FROM operations WHERE ";
+    constexpr std::string_view order = " ORDER BY collection_id,operation_id LIMIT 256";
+    const std::string collection(collection_id);
     std::string last_collection;
     std::string last_operation;
-    while (true) {
-        const auto rows = database_.Query("SELECT " + std::string(operation_columns) +
-                " FROM operations WHERE (collection_id,operation_id)>(?,?) "
-                "AND (?='' OR collection_id=?) ORDER BY collection_id,operation_id LIMIT 256",
-            {last_collection, last_operation, std::string(collection_id), std::string(collection_id)});
+    for (bool first = true;; first = false) {
+        // One collection seeks its primary-key prefix instead of filtering all
+        // later keys of the store; pages and their order are unchanged.
+        std::vector<SqlRow> rows;
+        if (collection.empty()) {
+            rows = database_.Query(select + "(collection_id,operation_id)>(?,?)" + std::string(order),
+                {last_collection, last_operation});
+        } else if (first) {
+            rows = database_.Query(select + "collection_id=?" + std::string(order), {collection});
+        } else {
+            rows = database_.Query(select + "collection_id=? AND operation_id>?" + std::string(order),
+                {collection, last_operation});
+        }
         if (rows.empty()) {
             break;
         }
