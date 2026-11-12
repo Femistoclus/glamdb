@@ -217,8 +217,9 @@ appends then keep only the newest snapshots in the Iceberg root and move older
 ones, still readable, to catalog archive rows in the same outer transaction;
 `Engine::ArchiveSnapshots` is the bounded maintenance call. The first stored
 setting introduces catalog version 5; stores without it are unchanged. See
-[the snapshot archive tier](docs/development/SNAPSHOT_ARCHIVE.md); HTTP/SDK/CLI
-adapters are not provided yet.
+[the snapshot archive tier](docs/development/SNAPSHOT_ARCHIVE.md). Native HTTP
+(`features.snapshot_archive`, `.../snapshot-archive` routes), the SDK and both
+CLIs expose the setting, status and maintenance; the mock refuses them.
 General garbage collection, asynchronous admission, replication,
 multiple writers, and schema evolution are outside the initial append scope. Consult
 [docs/ROADMAP.md](docs/ROADMAP.md) when assessing feature scope; its current

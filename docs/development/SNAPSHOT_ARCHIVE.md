@@ -33,6 +33,27 @@ keep at least the hot snapshots: `hot_snapshots` greater than `keep_last` is
 complete root history; the setting and archive maintenance return
 `COLLECTION_MODE_MISMATCH` for them, like retention.
 
+## HTTP, SDK and CLI
+
+The native server advertises `features.snapshot_archive`. `POST .../collections`
+accepts `hot_snapshots` (decimal string or null) and collections report it
+(`null` when unset). `GET .../collections/{id}/snapshot-archive` returns the
+`GetSnapshotArchive` counts, `POST` on the same route with
+`{"hot_snapshots":"N"|null}` calls `UpdateSnapshotArchive` and returns the
+collection, and `POST .../snapshot-archive/maintenance` with `{}` runs one
+`ArchiveSnapshots` call and adds `snapshots_archived`. A repeated creation with
+another value is 409 `SNAPSHOT_ARCHIVE_MISMATCH`, KV refusal 409
+`COLLECTION_MODE_MISMATCH`, and an uncertain COMMIT 503 `RECOVERY_REQUIRED`
+(reconcile, then repeat the same request). History, statistics, files, file
+details, explain, scans and outcome lookups need no new routes: archived
+snapshots answer through them exactly as while hot. The Python SDK adds
+`create_collection(..., hot_snapshots=)`, `snapshot_archive`,
+`update_snapshot_archive` and `archive_snapshots`; `glamdb-cli` and offline
+`glamdb-admin` add `create-collection --hot-snapshots N`, `snapshot-archive
+[--hot-snapshots N | --unset]` and `archive-snapshots`. The disposable mock does
+not implement the archive and refuses the setting. See the
+[HTTP contract](HTTP_SERVER.md#snapshot-archive) for the exact shapes.
+
 ## Appends and maintenance
 
 An append whose root would hold more than `hot_snapshots + min(hot_snapshots,
@@ -163,6 +184,12 @@ appends, two collections, a setting change, retention and retries, catalog
 tampering, altered or missing lists, process exits around the archiving COMMIT
 with fresh-process verification, lost COMMIT replies, lower-limit reopen,
 compatibility without the setting and KV rejection.
+`glamdb.routes.TSnapshotArchiveRoutesTest.*` and `glamdb.native_snapshot_archive`
+check the HTTP adapter (in process with lost-COMMIT faults, and a real server
+with restart), `glamdb.cli_data` the CLI and offline admin commands, and
+`sdk/python/tests/test_snapshot_archive.py` plus the `snapshot_archive` scenario
+of `tests/integration/test_network_sdk.py` the SDK against fixtures, the mock
+and native storage.
 `SnapshotArchiveCost.*` measures root bytes and catalog work per append at two
 history lengths; `GLAMDB_ARCHIVE_COST=1008,5004` selects the campaign lengths.
 
