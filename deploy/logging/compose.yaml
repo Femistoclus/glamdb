@@ -1,0 +1,61 @@
+name: glamdb-logging
+services:
+  loki:
+    image: grafana/loki:3.7.9@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28
+    command: ["-config.file=/etc/loki/loki.yaml", "-config.expand-env=true"]
+    user: "10001:10001"
+    environment:
+      LOKI_LISTEN_ADDRESS: 0.0.0.0
+      LOKI_HTTP_PORT: "3100"
+      LOKI_GRPC_PORT: "9095"
+      LOKI_DATA_DIR: /loki
+    volumes:
+      - ./loki.yaml:/etc/loki/loki.yaml:ro
+      - ${GLAMDB_LOKI_DATA_DIR:?set an owned quota-limited Loki directory}:/loki
+    ports:
+      - "127.0.0.1:${LOKI_HTTP_PORT:-3100}:3100"
+    networks: [observability]
+    read_only: true
+    tmpfs: ["/tmp:size=64m,noexec,nosuid,nodev"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    cpus: 1.5
+    pids_limit: 256
+    restart: unless-stopped
+    logging:
+      driver: local
+      options: {max-size: "10m", max-file: "3"}
+  alloy:
+    image: grafana/alloy:v1.21.3@sha256:8ab871206bd2d8f89277f53abffee5f452a293980788d52f85fa183a87a505a4
+    command: ["run", "--server.http.listen-addr=0.0.0.0:12345", "--storage.path=/var/lib/alloy", "/etc/alloy"]
+    user: "${GLAMDB_ALLOY_UID:?set the collector UID}:${GLAMDB_ALLOY_GID:?set the collector GID}"
+    group_add: ["${GLAMDB_JOURNAL_GID:?set the systemd-journal group GID}"]
+    environment:
+      GLAMDB_JOURNAL_MATCHES: ${GLAMDB_JOURNAL_MATCHES:?set a specific application unit match}
+      GLAMDB_ENVIRONMENT: ${GLAMDB_ENVIRONMENT:-local}
+      LOKI_PUSH_URL: http://loki:3100/loki/api/v1/push
+    volumes:
+      - ./config.alloy:/etc/alloy/config.alloy:ro
+      - ./sources/journal.alloy:/etc/alloy/source.alloy:ro
+      - /var/log/journal:/var/log/journal:ro
+      - /etc/machine-id:/etc/machine-id:ro
+      - ${GLAMDB_ALLOY_STATE_DIR:?set an owned Alloy state directory}:/var/lib/alloy
+    ports:
+      - "127.0.0.1:${ALLOY_HTTP_PORT:-12345}:12345"
+    networks: [observability]
+    read_only: true
+    tmpfs: ["/tmp:size=32m,noexec,nosuid,nodev"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+    restart: unless-stopped
+    logging:
+      driver: local
+      options: {max-size: "10m", max-file: "3"}
+networks:
+  observability:
+    name: glamdb-observability
+    external: true

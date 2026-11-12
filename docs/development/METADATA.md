@@ -130,6 +130,24 @@ candidate was read. Open profiles are partial. Cancellation is observable
 before another `Next()`; terminal complete/failed states are retained through
 shutdown. Custom cursors may leave unsupported counters unavailable.
 
+Native profiles separate `rows_filtered` (decoded rows rejected by the exact
+predicate) and `rows_limited` (matching decoded rows discarded by the limit).
+Unread rows are not estimated. `limit_stops` and `cancellation_stops` are each
+zero or one: the former records delivering the requested limit (or completing a zero limit),
+the latter records cancellation observed by `Next()` while open. Repeated EOS
+or cancellation calls do not increment them. `data_files_pruned` and
+`row_groups_pruned` are measured zero in the current scanner.
+
+`arrow_bytes` and `peak_arrow_bytes` measure live/high-water allocation sizes in
+that cursor's Arrow pool, covering decoding and retained output; they exclude
+allocation padding, accounting nodes, whole-file copies and non-Arrow envelopes.
+`output_metadata_bytes` and `peak_output_metadata_bytes` measure reservations for
+original output descriptors. Live counters can fall when another thread releases
+a retained result; peaks persist. Neither is process RSS. `ResourceOwner::GetUsage()`
+remains the authority for combined class reservations. Custom cursors leave
+unsupported measurements unavailable. These added counters are public C++ API
+observations; HTTP scan responses retain their existing wire contract.
+
 [HTTP metadata routes](HTTP_SERVER.md) adapt these methods into the existing
 SDK/workbench types. Counts/identities use decimal strings; unavailable values
 remain null with explicit metric kinds. File details distinguish descriptor

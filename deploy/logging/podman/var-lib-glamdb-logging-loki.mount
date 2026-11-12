@@ -1,0 +1,13 @@
+[Unit]
+Description=Dedicated 1 GiB filesystem for GlamDB Loki
+Before=glamdb-logging-loki.service
+
+[Mount]
+What=/var/lib/glamdb/logging/loki.ext4
+Where=/var/lib/glamdb/logging/loki
+Type=ext4
+Options=loop,nodev,nosuid,noexec
+TimeoutSec=30
+
+[Install]
+WantedBy=multi-user.target

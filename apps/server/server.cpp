@@ -17,6 +17,7 @@
 
 namespace glamdb::NServer {
 using namespace NTransport;
+using namespace NGlamDB::NTelemetry;
 namespace {
 using TTcp = asio::ip::tcp;
 bool IsControlBody(const TRequest& request)
@@ -29,6 +30,42 @@ bool IsControlBody(const TRequest& request)
         (split != std::string::npos &&
             (suffix == "/open" || suffix == "/close" || suffix == "/reconcile" || suffix == "/discard")) ||
         (suffix.starts_with("/collections/") && suffix.ends_with("/scan/cancel"));
+}
+ELogOperation ClassifyOperation(const TRequest& request) noexcept
+{
+    try {
+        const auto [path, query] = ParseTarget(request.Target);
+        (void)query;
+        const auto split = path.starts_with("/databases/") ? path.find('/', 11) : std::string::npos;
+        const auto suffix = split == std::string::npos ? path : path.substr(split);
+        if (path == "/healthz" || suffix == "/readyz" || suffix == "/capabilities") {
+            return ELogOperation::Health;
+        }
+        if (suffix.starts_with("/collections/")) {
+            if (suffix.find("/operations/") != std::string::npos) {
+                return ELogOperation::Operation;
+            }
+            if (suffix.ends_with("/append")) {
+                return ELogOperation::Append;
+            }
+            if (suffix.find("/scan") != std::string::npos || suffix.ends_with("/explain")) {
+                return ELogOperation::Scan;
+            }
+            if (suffix.find("/snapshots") != std::string::npos) {
+                return ELogOperation::Snapshots;
+            }
+            return ELogOperation::Collections;
+        }
+        if (suffix == "/collections") {
+            return ELogOperation::Collections;
+        }
+        if (path == "/databases" || path.starts_with("/databases/")) {
+            return ELogOperation::Database;
+        }
+    } catch (...) {
+        return ELogOperation::Other;
+    }
+    return ELogOperation::Other;
 }
 class TSession;
 struct TCallQueue
@@ -44,9 +81,10 @@ struct TCallQueue
 };
 struct TState
 {
-    explicit TState(TRoutes& routes, std::chrono::milliseconds timeout)
+    explicit TState(TRoutes& routes, std::chrono::milliseconds timeout, TStructuredLogger* logger)
         : Routes(routes)
         , Timeout(timeout)
+        , Logger(logger)
     { }
     asio::io_context IO;
     void PumpBodies();
@@ -60,6 +98,7 @@ struct TState
     std::map<std::string, size_t> HeaderPeers;
     std::deque<std::shared_ptr<TSession>> BodyWaiters;
     std::chrono::milliseconds Timeout;
+    TStructuredLogger* Logger;
     size_t Headers = 0, Bodies = 0, OrdinaryBodies = 0;
     bool BodyPumping = false;
 };
@@ -74,6 +113,7 @@ public:
         , Socket_(std::move(socket))
         , Timer_(state.IO)
         , State_(state)
+        , RequestID_(state.Logger ? state.Logger->NewRequestID() : 0)
     { }
     template <class F>
     void Guard(F&& action) noexcept
@@ -135,6 +175,11 @@ public:
         WatchWorker();
         asio::post(Queue_->Pool, [self = shared_from_this(), guard = asio::make_work_guard(State_.IO)]() mutable {
             try {
+                // First use initializes this stable worker before entering the engine.
+                if (self->State_.Logger) {
+                    self->State_.Logger->RegisterProducerThread();
+                }
+                TLogScope scope(self->State_.Logger, self->Operation_, self->RequestID_);
                 auto response = self->State_.Routes.Handle(self->Request_);
                 self->WorkerDone_.store(true);
                 asio::post(self->State_.IO, [self, response = std::move(response), guard = std::move(guard)]() mutable {
@@ -243,6 +288,7 @@ private:
             return;
         }
         Closed_ = true;
+        LogCompletion();
         ++Generation_;
         std::error_code ignored;
         try {
@@ -278,6 +324,7 @@ private:
             return;
         }
         Request_ = ParseHeaders(std::string_view(Input_).substr(0, size));
+        Operation_ = ClassifyOperation(Request_);
         if (!State_.Routes.IsAuthorized(Request_)) {
             Write(ErrorResponse(401, "UNAUTHORIZED", "bearer token required"));
             return;
@@ -452,6 +499,7 @@ private:
         // Health observation is bounded and does no I/O. Keep it available even
         // when operation lookups occupy every control worker behind a writer.
         if (Request_.Method == "GET" && (path == "/healthz" || suffix == "/capabilities" || suffix == "/readyz")) {
+            TLogScope scope(State_.Logger, Operation_, RequestID_);
             Write(State_.Routes.Handle(Request_));
             return;
         }
@@ -494,6 +542,7 @@ private:
         if (Closed_ || Writing_) {
             return;
         }
+        StatusCode_ = static_cast<std::uint32_t>(response.Status);
         ReleaseCall();
         ReleaseBody();
         ReleaseHeaders();
@@ -508,6 +557,8 @@ private:
         const std::array buffers{asio::buffer(Header_), asio::buffer(Output_)};
         asio::async_write(Socket_, buffers, [self = shared_from_this()](const std::error_code& error, size_t) {
             self->Guard([&] {
+                self->ResponseSent_ = !error;
+                self->LogCompletion();
                 if (error || self->BodyComplete_) {
                     self->Finish();
                 } else {
@@ -520,6 +571,25 @@ private:
                 }
             });
         });
+    }
+    void LogCompletion() noexcept
+    {
+        if (Logged_ || !State_.Logger) {
+            return;
+        }
+        Logged_ = true;
+        const auto outcome = !ResponseSent_            ? ELogOutcome::Cancelled
+            : StatusCode_ == 401 || StatusCode_ == 403 ? ELogOutcome::Denied
+            : StatusCode_ >= 400                       ? ELogOutcome::Error
+                                                       : ELogOutcome::Ok;
+        const auto elapsed =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - Started_).count();
+        State_.Logger->TryLog({.Event = ELogEvent::RequestCompleted,
+            .Operation = Operation_,
+            .Outcome = outcome,
+            .RequestID = RequestID_,
+            .DurationUs = static_cast<std::uint64_t>(elapsed),
+            .StatusCode = StatusCode_});
     }
     void Drain()
     {
@@ -551,6 +621,11 @@ private:
     bool Processing_ = false, Writing_ = false, Closed_ = false;
     bool Queued_ = false, Active_ = false, BodyComplete_ = false, HeaderProbe_ = false, WaitingBody_ = false;
     bool WorkerStarted_ = false;
+    const std::uint64_t RequestID_;
+    const std::chrono::steady_clock::time_point Started_ = std::chrono::steady_clock::now();
+    ELogOperation Operation_ = ELogOperation::Other;
+    std::uint32_t StatusCode_ = 0;
+    bool ResponseSent_ = false, Logged_ = false;
 };
 
 void TState::ReapWorkers()
@@ -634,10 +709,19 @@ void RunServer(TRoutes& routes,
     std::string_view address,
     uint16_t port,
     std::chrono::milliseconds timeout,
-    size_t maxConnections)
+    size_t maxConnections,
+    TStructuredLogger* logger)
 {
     Require(maxConnections > 0 && maxConnections <= 96, "connection ceiling must be 1..96");
-    TState state(routes, timeout);
+    std::unique_ptr<TLogRuntime> ownedRuntime;
+    if (!logger) {
+        ownedRuntime = std::make_unique<TLogRuntime>();
+        logger = ownedRuntime->Get();
+    }
+    if (logger) {
+        logger->RegisterProducerThread();
+    }
+    TState state(routes, timeout, logger);
     TTcp::acceptor acceptor(state.IO, TTcp::endpoint(asio::ip::make_address(address), port));
     asio::steady_timer retry(state.IO);
     asio::signal_set signals(state.IO, SIGINT, SIGTERM);
@@ -729,5 +813,8 @@ void RunServer(TRoutes& routes,
     state.Control.Pool.join();
     state.Lifecycle.Pool.join();
     state.ReapWorkers();
+    if (ownedRuntime) {
+        ownedRuntime->SetResult(true);
+    }
 }
 } // namespace glamdb::NServer

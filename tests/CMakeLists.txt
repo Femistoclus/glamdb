@@ -199,3 +199,21 @@ if(TARGET glamdb_routes)
         "${CMAKE_CURRENT_SOURCE_DIR}/server/resource_profile_test.py" "$<TARGET_FILE:glamdb_resource_profile_driver>")
     set_tests_properties(glamdb.resource_profile PROPERTIES LABELS "integration;http;resources" TIMEOUT 240)
 endif()
+add_executable(glamdb_logging_probe logging/logging_probe.cpp)
+target_include_directories(glamdb_logging_probe PRIVATE "${PROJECT_SOURCE_DIR}")
+target_link_libraries(glamdb_logging_probe PRIVATE glamdb_logging glamdb_build_options)
+add_test(NAME glamdb.logging
+    COMMAND "${CMAKE_COMMAND}" -E env "GLAMDB_LOG_PROBE=$<TARGET_FILE:glamdb_logging_probe>"
+            "${Python3_EXECUTABLE}" -m unittest discover -s "${PROJECT_SOURCE_DIR}/tests/logging" -v)
+set_tests_properties(glamdb.logging PROPERTIES LABELS "unit;logging" TIMEOUT 60)
+
+if(TARGET glamdb_server)
+    set(glamdb_logging_admin "-")
+    if(TARGET glamdb_admin)
+        set(glamdb_logging_admin "$<TARGET_FILE:glamdb_admin>")
+    endif()
+    add_test(NAME glamdb.server_logging COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/server/logging_test.py"
+        "$<TARGET_FILE:glamdb_server>" "${glamdb_logging_admin}")
+    set_tests_properties(glamdb.server_logging PROPERTIES LABELS "integration;http;logging" TIMEOUT 90)
+endif()
