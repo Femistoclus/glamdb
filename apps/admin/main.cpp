@@ -21,6 +21,8 @@ try {
     glamdb::Limits limits;
     auto* create = app.add_subcommand("create-store", "Create an empty store");
     auto* inspect = app.add_subcommand("inspect-store", "Inspect an existing store");
+    auto* verify = app.add_subcommand("verify-store",
+        "Open an existing store by full verification of its retained history instead of its checkpoints");
     auto* read = app.add_subcommand("read", "Read a bounded snapshot from an offline store");
     auto* quiesce = app.add_subcommand("quiesce-store", "Close SQLite and retain store ownership until stdin closes");
     glamdb::NClient::TDataCommand data;
@@ -34,7 +36,7 @@ try {
         command->add_option("--ca-file", remote.CaFile, "Additional PEM certificate authority (remote only)");
         command->add_option("--timeout", remote.TimeoutSeconds, "Whole request deadline in seconds (remote only)");
     }
-    for (auto* command : {create, inspect, read, quiesce}) {
+    for (auto* command : {create, inspect, verify, read, quiesce}) {
         command->add_option("--root", root, "Absolute store path")->required();
         command->add_option("--store-id", id, "Store UUID")->required();
         command->add_option("--max-collections", limits.max_collections, "Collection limit (default 8)")
@@ -82,7 +84,8 @@ try {
     }
     const auto opened = create->parsed()
         ? glamdb::CreateStore({.store_id = id, .absolute_root = root, .limits = limits})
-        : glamdb::OpenExisting({.absolute_root = root, .expected_store_id = id, .limits = limits});
+        : glamdb::OpenExisting(
+              {.absolute_root = root, .expected_store_id = id, .limits = limits, .verify_full = verify->parsed()});
     if (!opened) {
         std::cerr << opened.error().code << ": " << opened.error().message << '\n';
         return 1;
@@ -142,9 +145,14 @@ try {
     }
     // StoreInfo contains validated UUID/profile tokens, never arbitrary
     // strings.
+    // verify-store: the open above re-verified every receipt, archive row,
+    // retained transition and data-file footer and re-established the
+    // checkpoints; a failure exits 1 with the engine's code (CORRUPTION, ...).
     if (!read->parsed()) {
         std::cout << "{\"store_id\":\"" << info.store_id << "\",\"profile_id\":\"" << info.profile_id
-                  << "\",\"format_version\":" << info.format_version << ",\"durability_validation\":\"designed\"}\n";
+                  << "\",\"format_version\":" << info.format_version
+                  << (verify->parsed() ? ",\"verification\":\"full\"" : "")
+                  << ",\"durability_validation\":\"designed\"}\n";
     }
     const auto closed = (*opened)->Shutdown(std::chrono::milliseconds(5000));
     if (!closed) {
@@ -181,6 +189,7 @@ try {
     const auto requestID = logger ? logger->NewRequestID() : 0;
     const auto operation = argc > 1 && std::string_view(argv[1]) == "create-store" ? ELogOperation::CreateStore
         : argc > 1 && std::string_view(argv[1]) == "inspect-store"                 ? ELogOperation::InspectStore
+        : argc > 1 && std::string_view(argv[1]) == "verify-store"                  ? ELogOperation::InspectStore
         : argc > 1 && std::string_view(argv[1]) == "read"                          ? ELogOperation::Scan
         : argc > 1 && std::string_view(argv[1]) == "quiesce-store"                 ? ELogOperation::QuiesceStore
                                                                                    : ELogOperation::Other;

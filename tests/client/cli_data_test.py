@@ -214,7 +214,16 @@ class NativeCommands(unittest.TestCase):
         common = ["--collection-id", COLLECTION]
         create = ["create-collection", *common, "--name", "events", "--schema", schema]
         created = self.run_command(ADMIN, *create[:1], *self.local, *create[1:], "--hot-snapshots", "2")
-        self.assertEqual(created["hot_snapshots"], "2")
+        self.assertEqual((created["hot_snapshots"], created["hot_snapshots_defaulted"]), ("2", False))
+        # Omitted: the default; "0": no archive. Both offline.
+        defaulted = ["create-collection", "--collection-id", str(uuid.uuid4()), "--name", "defaulted",
+                     "--schema", schema]
+        info = self.run_command(ADMIN, *defaulted[:1], *self.local, *defaulted[1:])
+        self.assertEqual((info["hot_snapshots"], info["hot_snapshots_defaulted"]), ("100", True))
+        none = ["create-collection", "--collection-id", str(uuid.uuid4()), "--name", "none", "--schema", schema,
+                "--hot-snapshots", "0"]
+        info = self.run_command(ADMIN, *none[:1], *self.local, *none[1:])
+        self.assertEqual((info["hot_snapshots"], info["hot_snapshots_defaulted"]), ("0", False))
         snapshots = []
         for index in range(7):
             row = dict(ROWS[0], key=f"k-{index}")
@@ -248,19 +257,59 @@ class NativeCommands(unittest.TestCase):
         self.assertEqual(self.run_command(CLI, *create, "--url", url, "--hot-snapshots", "2"), offline["collection"])
         mismatch = self.run_command(CLI, *create, "--url", url, "--hot-snapshots", "1", code=1)
         self.assertEqual(json.loads(mismatch.stdout)["error"]["code"], "SNAPSHOT_ARCHIVE_MISMATCH")
-        invalid = self.run_command(CLI, "snapshot-archive", "--url", url, *common, "--hot-snapshots", "0", code=1)
+        # Remote creation compares effective values too.
+        self.assertEqual(self.run_command(CLI, *defaulted, "--url", url, "--hot-snapshots", "100")["name"],
+                         "defaulted")
+        mismatch = self.run_command(CLI, *none[:-2], "--url", url, code=1)
+        self.assertEqual(json.loads(mismatch.stdout)["error"]["code"], "SNAPSHOT_ARCHIVE_MISMATCH")
+        self.assertEqual(self.run_command(CLI, *none, "--url", url)["hot_snapshots"], "0")
+        invalid = self.run_command(CLI, "snapshot-archive", "--url", url, *common, "--hot-snapshots", "-1", code=1)
         self.assertEqual(json.loads(invalid.stdout)["error"]["code"], "INVALID_ARGUMENT")
         unset = self.run_command(CLI, "snapshot-archive", "--url", url, *common, "--unset")
-        self.assertIsNone(unset["hot_snapshots"])
+        self.assertEqual((unset["hot_snapshots"], unset["hot_snapshots_defaulted"]), ("0", False))
         self.assertEqual(self.run_command(CLI, "snapshot-archive", "--url", url, *common, "--unset"), unset)
+        self.assertEqual(self.run_command(CLI, "snapshot-archive", "--url", url, *common, "--hot-snapshots", "0"),
+                         unset)
         idle = self.run_command(CLI, "archive-snapshots", "--url", url, *common)
-        self.assertEqual((idle["snapshots_archived"], idle["archive_pending"], idle["hot_snapshots"]), ("0", "0", None))
+        self.assertEqual((idle["snapshots_archived"], idle["archive_pending"], idle["hot_snapshots"]), ("0", "0", "0"))
         self.run_command(CLI, "snapshot-archive", "--url", url, *common, "--hot-snapshots", "2", "--unset", code=2)
         server.terminate()
         self.assertEqual(server.wait(timeout=15), 0)
         # The unset setting and the archive survive restart and offline reopen.
         self.assertEqual(self.run_command(ADMIN, "snapshot-archive", *self.local, *common),
-                         dict(offline["snapshot-archive"], hot_snapshots=None, archive_pending="0"))
+                         dict(offline["snapshot-archive"], hot_snapshots="0", archive_pending="0"))
+
+    def test_verify_store_reproves_history_that_a_checkpoint_open_trusts(self):
+        schema = self.body_file("schema.json", SCHEMA)
+        # The default archive tier gives the store verified checkpoints.
+        created = self.run_command(ADMIN, "create-collection", *self.local, "--collection-id", COLLECTION,
+                                   "--name", "events", "--schema", schema)
+        self.assertEqual(created["hot_snapshots_defaulted"], True)
+        for index in range(3):
+            body = self.body_file("append.json", {"operation_id": str(uuid.uuid4()),
+                                                  "rows": [dict(ROWS[0], key=f"k-{index}")]})
+            self.run_command(ADMIN, "append", *self.local, "--collection-id", COLLECTION, "--body", body)
+        inspected = self.run_command(ADMIN, "inspect-store", *self.local)
+        self.assertNotIn("verification", inspected)
+        verified = self.run_command(ADMIN, "verify-store", *self.local)
+        self.assertEqual(verified, dict(inspected, verification="full"))
+        # Remote and data options do not apply; ownership is required.
+        self.run_command(ADMIN, "verify-store", "--root", str(self.root), code=2)
+        self.run_command(ADMIN, "verify-store", *self.local, "--url", "http://127.0.0.1:1", code=2)
+        # A damaged footer of an older, still current data file: the checkpoint
+        # open does not read it, full verification refuses the store.
+        files = sorted(self.root.rglob("*.parquet"), key=lambda path: path.stat().st_mtime_ns)
+        self.assertEqual(len(files), 3)
+        with files[0].open("r+b") as data:
+            data.seek(-4, os.SEEK_END)
+            data.write(b"XXXX")
+        self.run_command(ADMIN, "inspect-store", *self.local)
+        refused = self.run_command(ADMIN, "verify-store", *self.local, code=1)
+        self.assertIn("CORRUPTION: ", refused.stderr)
+        # Detected corruption drops the checkpoints: the next default open
+        # verifies fully and refuses the store as well.
+        again = self.run_command(ADMIN, "inspect-store", *self.local, code=1)
+        self.assertIn("CORRUPTION: ", again.stderr)
 
     def test_offline_stdout_failure_preserves_committed_operation(self):
         self.create_collection()

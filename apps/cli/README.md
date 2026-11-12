@@ -128,6 +128,14 @@ The optional `glamdb-admin` executable retains local `create-store --root ...
 --store-id ...` and `inspect-store` for offline administration. Build the full
 repository with `-DGLAMDB_BUILD_ADMIN=ON` to enable it. It links the engine and must
 not open a store already owned by the server.
+`inspect-store` opens like the server: a catalog version 6 store (any store with
+a snapshot archive) is rebuilt from its verified checkpoints, the current root
+and current manifests. `verify-store --root ... --store-id ...` instead opens with
+full verification: every receipt, archive row, retained transition and data-file
+footer is re-proved and the checkpoints are re-established. It prints the store
+identity with `"verification":"full"` and exits 1 with the engine code (for
+example `CORRUPTION`) otherwise. On a running server, `POST
+/databases/{id}/reconcile` performs the same full verification.
 
 ## Data and inspection commands
 
@@ -139,7 +147,7 @@ creates a missing store.
 
 | Command | Additional options | Result |
 | --- | --- | --- |
-| `create-collection` | `--collection-id UUID --name NAME --schema FILE [--write-settings FILE] [--hot-snapshots N]` | Created collection or original matching collection |
+| `create-collection` | `--collection-id UUID --name NAME --schema FILE [--write-settings FILE] [--hot-snapshots N\|0]` | Created collection or original matching collection |
 | `collections` | None | Collection inventory |
 | `resolve-collection` | `--name NAME` | Exact-name lookup, including after a lost create reply |
 | `collection` | `--collection-id UUID` | Collection identity and schema |
@@ -170,10 +178,15 @@ an applied command succeeds unchanged, a stale version fails with
 `WRITE_SETTINGS_CONFLICT` (see the [HTTP contract](../../docs/development/HTTP_SERVER.md)).
 `--hot-snapshots N` (1..2^40, append collections) keeps only the newest N
 snapshots in the Iceberg root; older ones move to the catalog archive and remain
-readable through `snapshots`, `scan`, `files` and `file`. On creation it is part
-of the definition (`SNAPSHOT_ARCHIVE_MISMATCH` for another value). `snapshot-archive`
+readable through `snapshots`, `scan`, `files` and `file`. Without the option, a
+new append collection on a server advertising `features.snapshot_archive` gets
+the default (100, reported with `hot_snapshots_defaulted: true`);
+`--hot-snapshots 0` creates it without an archive. On creation the effective
+value is part of the definition (`SNAPSHOT_ARCHIVE_MISMATCH` for another value;
+an omitted option matches the default or an explicit 100). `snapshot-archive`
 without options shows `{hot_snapshots, root_snapshots, archived_snapshots,
-expired_snapshots, archive_pending}`; `--unset` stops archiving later snapshots.
+expired_snapshots, archive_pending}` (`"0"`: no archive); `--hot-snapshots 0`
+or `--unset` stops archiving later snapshots.
 Repeat `archive-snapshots` while `archive_pending` is not `"0"`. An uncertain
 update or maintenance (`RECOVERY_REQUIRED`) exits 3: reconcile, then repeat the
 same command.

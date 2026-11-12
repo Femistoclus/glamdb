@@ -94,15 +94,15 @@ std::vector<CLI::App*> AddDataCommands(CLI::App& app, TDataCommand& data)
             command->add_option("--hot-snapshots",
                 data.HotSnapshots,
                 "Newest snapshots kept in the Iceberg root; older ones are archived and stay readable "
-                "(append collections, part of the definition)");
+                "(append collections, part of the definition). Omitted: the server default; 0: no archive");
         }
         if (action == "snapshot-archive") {
             auto* set = command->add_option("--hot-snapshots",
                 data.HotSnapshots,
-                "Set hot_snapshots for later appends and archive maintenance");
+                "Set hot_snapshots for later appends and archive maintenance (0 stops archiving)");
             auto* unset = command->add_flag("--unset",
                 data.UnsetHotSnapshots,
-                "Stop archiving later snapshots; archived snapshots stay archived");
+                "Stop archiving later snapshots (same as --hot-snapshots 0); archived snapshots stay archived");
             set->excludes(unset);
             unset->excludes(set);
         }
@@ -208,7 +208,7 @@ TRequest BuildDataRequest(const TDataCommand& data)
         if (data.Command == "snapshot-archive" && (!data.HotSnapshots.empty() || data.UnsetHotSnapshots)) {
             request.Method = "POST";
             request.Body =
-                TJson{{"hot_snapshots", data.UnsetHotSnapshots ? TJson(nullptr) : TJson(data.HotSnapshots)}}.dump();
+                TJson{{"hot_snapshots", data.UnsetHotSnapshots ? std::string("0") : data.HotSnapshots}}.dump();
         } else if (data.Command == "archive-snapshots") {
             request.Method = "POST";
             request.Body = "{}";
