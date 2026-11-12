@@ -26,7 +26,8 @@ uses unscoped collection routes and does not offer database management.
 `glamdb-cli` is a standalone network client with DNS and verified HTTPS; it does
 not link the engine or storage libraries. `create-store --name analytics` calls
 the managed database API. The optional `glamdb-admin` contains offline
-`create-store`/`inspect-store`, bounded snapshot `read`, and `quiesce-store`, which acquire core ownership and fail with
+`create-store`/`inspect-store`, bounded snapshot `read`, `quiesce-store`, and named
+collection/schema/append/scan/operation/snapshot/file commands. Offline commands acquire core ownership and fail with
 `STATE_IN_USE` while the server owns the store. See the [client guide](../../apps/cli/README.md)
 for its independent build and TLS configuration. Online:
 
@@ -181,6 +182,12 @@ separate, broader development profile.
 
 CLI mapping: `create-store` → `POST /databases`; `request` exposes every route
 in the tables above. Offline `glamdb-admin` uses `CreateStore` / `OpenExisting`.
+Both CLIs also expose named data/inspection commands; admin `--url` mode uses
+HTTP exclusively. Named scans and snapshot/file inventories follow fixed-view
+pages within their result bounds. Named commands return `3` for complete native
+unknown or recovery-blocked outcomes, while `request` retains HTTP-level exits.
+See the [CLI guide](../../apps/cli/README.md). `glamdb serve` is an alias for
+server startup and preserves explicit creation and ownership rules.
 
 The transport owns HTTP parsing, codecs, authentication, connection admission
 and static UI assets. Core owns store identity/locking, schema validation,

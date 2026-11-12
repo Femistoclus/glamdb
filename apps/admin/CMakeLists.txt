@@ -1,5 +1,7 @@
+add_library(glamdb_admin_commands STATIC data.cpp)
+target_link_libraries(glamdb_admin_commands PUBLIC glamdb_core glamdb_transport glamdb_cli_commands PRIVATE glamdb_build_options)
 add_executable(glamdb_admin main.cpp)
 set_target_properties(glamdb_admin PROPERTIES OUTPUT_NAME glamdb-admin)
-target_link_libraries(glamdb_admin PRIVATE glamdb_build_options glamdb_core glamdb_transport CLI11::CLI11 glamdb_logging)
+target_link_libraries(glamdb_admin PRIVATE glamdb_build_options glamdb_admin_commands glamdb_logging)
 target_include_directories(glamdb_admin PRIVATE "${PROJECT_SOURCE_DIR}")
 install(TARGETS glamdb_admin RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")

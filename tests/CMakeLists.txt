@@ -81,6 +81,11 @@ if(NOT GLAMDB_IO_ONLY)
     gtest_discover_tests(glamdb_fault TEST_PREFIX glamdb.fault. PROPERTIES LABELS fault TIMEOUT 30)
 
     if(TARGET glamdb_admin)
+        add_executable(glamdb_admin_result_test admin/result_test.cpp)
+        target_link_libraries(glamdb_admin_result_test PRIVATE glamdb_admin_commands glamdb_build_options GTest::gtest_main)
+        target_compile_definitions(glamdb_admin_result_test PRIVATE
+            GLAMDB_OUTCOME_FIXTURE="${PROJECT_SOURCE_DIR}/fixtures/http/outcomes-v0.json")
+        gtest_discover_tests(glamdb_admin_result_test TEST_PREFIX glamdb.admin_result. PROPERTIES LABELS unit TIMEOUT 30)
         add_test(NAME glamdb.admin COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/integration/cli_test.py" "$<TARGET_FILE:glamdb_admin>")
         set_tests_properties(glamdb.admin PROPERTIES LABELS integration TIMEOUT 30)
     endif()
@@ -137,6 +142,17 @@ if(TARGET glamdb_server)
     set(glamdb_test_cli "$<TARGET_FILE:glamdb_cli>")
     if(GLAMDB_TEST_CLI_EXECUTABLE)
         set(glamdb_test_cli "${GLAMDB_TEST_CLI_EXECUTABLE}")
+    endif()
+    if(TARGET glamdb_admin)
+        add_test(NAME glamdb.cli_data COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/client/cli_data_test.py"
+            "${glamdb_test_cli}" "$<TARGET_FILE:glamdb_admin>" "$<TARGET_FILE:glamdb_server>")
+        set_tests_properties(glamdb.cli_data PROPERTIES LABELS "integration;http;cli" TIMEOUT 180)
+        if(GLAMDB_ENABLE_MSAN)
+            # System OpenSSL is not instrumented. Other network scenarios use
+            # the ordinary standalone CLI selected above; admin stays native.
+            set_property(TEST glamdb.cli_data APPEND PROPERTY ENVIRONMENT "GLAMDB_TEST_ADMIN_HTTP=0")
+        endif()
     endif()
     add_test(NAME glamdb.native_metadata COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/server/native_metadata_test.py"

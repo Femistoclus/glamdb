@@ -10,6 +10,7 @@ try {
     using namespace NGlamDB::NTelemetry;
     TLogOptions logOptions;
     CLI::App app{"GlamDB native HTTP server"};
+    app.add_subcommand("serve", "Serve an existing store or a managed database directory")->fallthrough();
     std::string root, storeID, uiRoot, dataDir;
     std::string address = "127.0.0.1";
     uint16_t port = 8080;

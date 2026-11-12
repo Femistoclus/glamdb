@@ -2,10 +2,12 @@
 #include "storage/engine.h"
 
 #include "apps/transport/codec.h"
+#include "data.h"
 
 #include <CLI/CLI.hpp>
 
 #include <chrono>
+#include <csignal>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -20,6 +22,15 @@ try {
     auto* inspect = app.add_subcommand("inspect-store", "Inspect an existing store");
     auto* read = app.add_subcommand("read", "Read a bounded snapshot from an offline store");
     auto* quiesce = app.add_subcommand("quiesce-store", "Close SQLite and retain store ownership until stdin closes");
+    glamdb::NClient::TDataCommand data;
+    glamdb::NClient::TRequest remote;
+    for (auto* command : glamdb::NClient::AddDataCommands(app, data)) {
+        command->add_option("--root", root, "Absolute offline store path");
+        command->add_option("--store-id", id, "Expected offline store UUID");
+        command->add_option("--url", remote.Url, "HTTP(S) server base URL; uses HTTP without opening a store");
+        command->add_option("--ca-file", remote.CaFile, "Additional PEM certificate authority (remote only)");
+        command->add_option("--timeout", remote.TimeoutSeconds, "Whole request deadline in seconds (remote only)");
+    }
     for (auto* command : {create, inspect, read, quiesce}) {
         command->add_option("--root", root, "Absolute store path")->required();
         command->add_option("--store-id", id, "Store UUID")->required();
@@ -38,6 +49,27 @@ try {
     } catch (const CLI::ParseError& error) {
         const auto code = app.exit(error);
         return code == 0 ? 0 : 2;
+    }
+    if (!data.Command.empty()) {
+        using glamdb::NTransport::Require;
+        Require(remote.Url.empty() || (root.empty() && id.empty()), "--url cannot be combined with --root/--store-id");
+        Require(!remote.Url.empty() || (!root.empty() && !id.empty()),
+            "offline commands require --root and --store-id");
+        Require(!remote.Url.empty() || data.DatabaseID.empty(), "--database-id is remote only");
+        auto request = glamdb::NClient::BuildDataRequest(data);
+        glamdb::NClient::TResponse response;
+        glamdb::Status shutdown;
+        if (!remote.Url.empty()) {
+            request.Url = glamdb::NClient::JoinDataUrl(remote.Url, request.Url);
+            request.CaFile = remote.CaFile;
+            request.TimeoutSeconds = remote.TimeoutSeconds;
+            response = glamdb::NClient::SendDataRequest(request, data);
+        } else {
+            const auto engine = glamdb::NTransport::Unwrap(glamdb::OpenExisting({root, id}));
+            response = glamdb::NAdmin::RunDataCommand(*engine, data, request);
+            shutdown = engine->Shutdown(std::chrono::milliseconds(5000));
+        }
+        return glamdb::NAdmin::WriteDataResponse(response, shutdown, {.Data = std::cout, .Diagnostics = std::cerr});
     }
     const auto opened = create->parsed() ? glamdb::CreateStore({id, root}) : glamdb::OpenExisting({root, id});
     if (!opened) {
@@ -114,9 +146,12 @@ try {
         return 1;
     }
     return 0;
+} catch (const glamdb::NClient::TOutcomeUnknown& error) {
+    std::cerr << error.what() << '\n';
+    return 3;
 } catch (const glamdb::NTransport::TFailure& error) {
     std::cerr << error.Detail.code << ": " << error.Detail.message << '\n';
-    return 1;
+    return error.Detail.code == "RECOVERY_REQUIRED" || error.Detail.code == "OPERATION_IN_PROGRESS" ? 3 : 1;
 } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return 1;
@@ -126,6 +161,9 @@ try {
 
 int main(int argc, char** argv)
 try {
+#ifdef SIGPIPE
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
     using namespace NGlamDB::NTelemetry;
     TLogRuntime logging;
     auto* logger = logging.Get();

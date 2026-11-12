@@ -60,7 +60,15 @@ authenticated database lifecycle and scan cancellation, including through a TLS
 proxy; public/static POSTs cannot spend that reserve. Excess bodies wait within
 the connection ceiling and their original read deadline.
 The network CLI also builds independently with OpenSSL; optional offline commands
-are in `apps/admin` and never required for server initialization.
+are in `apps/admin` and never required for server initialization. Both expose
+named collection/schema, append, scan, operation, snapshot and file commands.
+The admin tool's `--url` mode calls HTTP without opening an engine; offline
+commands require explicit root/identity and fail while the server owns the store.
+Command grammar in `apps/cli/data.*` has no core dependency; metadata JSON in
+`apps/transport/metadata.*` is shared with HTTP. Named JSON scans complete remote
+pages within 10,000 rows/16 MiB, cancel unfinished cursors, and distinguish
+unresolved outcomes (exit 3) from definite failures (exit 1). See the
+[CLI guide](apps/cli/README.md). `glamdb serve` aliases existing server startup.
 Collection routes are scoped by `/databases/{id}`; optional legacy
 `--root/--store-id` mode retains unscoped routes. A
 separate, explicitly disposable in-memory mock remains a development profile. The architecture and
@@ -207,7 +215,7 @@ Preserve these boundaries when adding or changing engine behavior:
 | `core/io/` | Independent local filesystem, attempts, receipts, durable files and copying (`glamdb_io`). |
 | `core/storage/` | FileIO, Parquet writer, Iceberg staging, publication/recovery and capacity checks (`glamdb_storage`). |
 | `apps/cli/`, `apps/client/` | Standalone `glamdb-cli`: network database management and HTTP/HTTPS requests, without engine dependencies. |
-| `apps/admin/` | Optional offline `glamdb-admin` store creation/inspection utility. |
+| `apps/admin/` | Optional `glamdb-admin` store creation, offline data/inspection facade commands, and HTTP mode. |
 | `apps/server/`, `apps/transport/` | `glamdb`: Asio HTTP server, shared precise codecs and native outcome serialization. |
 | `cmake/` | Build options, sanitizers, quality targets, and dependency recipes. |
 | `tests/` | Native unit/recovery/SqlCatalog/VFS/consumer suites, `vertical/` public-API storage tests, `mock/` in-memory scan tests, verification and actual SDK HTTP/HTTPS tests. |
@@ -526,6 +534,10 @@ the network CLI and codecs. `GLAMDB_BUILD_ADMIN=ON` additionally builds the offl
 `glamdb-admin`; it is not required to initialize or operate a server. Run native browser checks with `GLAMDB_NATIVE_SERVER`
 pointing to the built server; `GLAMDB_E2E_PYTHON` can select
 the workbench Python environment. See the native HTTP guide for exact commands.
+`glamdb.cli_data` (storage and admin enabled) runs real local/remote command parity,
+restart/retry, precise scalar, pagination/bound and ownership tests. Run
+`ctest --preset local -R 'glamdb\.(cli_data|cli_network|admin)' --output-on-failure`.
+Literal wire outcome tests in `glamdb.cli_network` are separate protocol evidence.
 
 SIGINT/SIGTERM close socket and scan admission and mark active scans cancelled
 before worker draining. Cancellation never waits on a scan's session lock; retain

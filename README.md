@@ -149,6 +149,14 @@ command exposes every HTTP route; `--body` implies POST. Scan responses include
 `next_cursor` when another page is available. For scripts that consume complete
 results, the Python SDK handles pagination automatically.
 
+Named commands also cover `create-collection`, `collections`, `resolve-collection`,
+`collection`, `schema`, `append`, `scan`, `operation`, `snapshots`, `files`, and
+`file`. Use `--url` and `--database-id` with `glamdb-cli`. The optional
+`glamdb-admin` offers the same commands offline with `--root` and `--store-id`,
+or remotely with `--url`. Named scans complete HTTP pages within a 10,000-row,
+16 MiB result bound. See the [CLI guide](apps/cli/README.md) for commands, input
+formats and the distinct failure/unresolved exit codes.
+
 ### Python SDK
 
 Install the SDK from the checkout with Python 3.10 or later:

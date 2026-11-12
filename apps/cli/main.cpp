@@ -1,4 +1,5 @@
 #include "apps/client/http.h"
+#include "data.h"
 #include "workload.h"
 #include <CLI/CLI.hpp>
 #include <cerrno>
@@ -147,10 +148,14 @@ try {
     glamdb::NClient::AddWorkloadCommands(app, workloadExitCode);
     auto* request = app.add_subcommand("request", "Call any server API route; write exact response bytes");
     auto* create = app.add_subcommand("create-store", "Create a database through the running server");
+    glamdb::NClient::TDataCommand data;
+    auto commands = glamdb::NClient::AddDataCommands(app, data);
+    commands.push_back(request);
+    commands.push_back(create);
     glamdb::NClient::TRequest input;
     std::string url, host = "127.0.0.1", path, file, output, headers, name;
     uint16_t port = 8080;
-    for (auto* command : {request, create}) {
+    for (auto* command : commands) {
         command->add_option("--url", url, "Full http(s) URL (create-store: server base URL)");
         command->add_option("--host", host, "Loopback HTTP hostname; use --url for HTTPS");
         command->add_option("--port", port, "HTTP port");
@@ -177,15 +182,20 @@ try {
     if (workloadExitCode) {
         return *workloadExitCode;
     }
-    if (!url.empty() &&
-        (request->count("--host") || request->count("--port") || create->count("--host") || create->count("--port")))
-    {
-        throw std::runtime_error("--url cannot be combined with --host/--port");
+    for (const auto* command : commands) {
+        if (!url.empty() && (command->count("--host") || command->count("--port"))) {
+            throw std::runtime_error("--url cannot be combined with --host/--port");
+        }
     }
     if (headers == "-" || (!headers.empty() && headers == output)) {
         throw std::runtime_error("headers require a separate output file");
     }
-    if (create->parsed()) {
+    if (!data.Command.empty()) {
+        auto prepared = glamdb::NClient::BuildDataRequest(data);
+        path = std::move(prepared.Url);
+        input.Method = std::move(prepared.Method);
+        input.Body = std::move(prepared.Body);
+    } else if (create->parsed()) {
         path = "/databases";
         input.Method = "POST";
         input.Body = nlohmann::json{{"name", name}}.dump();
@@ -238,7 +248,10 @@ try {
     // Validate and reserve both destinations before a request can mutate data.
     auto bodyOutput = PrepareOutput(output);
     auto headerOutput = PrepareOutput(headers);
-    const auto response = glamdb::NClient::SendRequest(input);
+    const auto response =
+        data.Command.empty() ? glamdb::NClient::SendRequest(input) : glamdb::NClient::SendDataRequest(input, data);
+    const auto result = data.Command.empty() ? (response.Status >= 200 && response.Status < 300 ? 0 : 1)
+                                             : glamdb::NClient::DataExitCode(response);
     try {
         if (!headers.empty()) {
             Write(headers, HeaderJson(response).dump(2) + '\n', headerOutput.get());
@@ -250,9 +263,9 @@ try {
             std::cerr << "; server operation may already have committed";
         }
         std::cerr << '\n';
-        return 4;
+        return result == 3 ? 3 : 4;
     }
-    return response.Status >= 200 && response.Status < 300 ? 0 : 1;
+    return result;
 } catch (const glamdb::NClient::TOutcomeUnknown& error) {
     std::cerr << error.what() << '\n';
     return 3;
