@@ -9,6 +9,9 @@ records in Parquet files, manages snapshots with Apache Iceberg, and uses SQLite
 for its catalog and write outcomes. Use it as an embedded C++ library or through
 the HTTP server, browser workbench, command-line client, and Python SDK.
 
+<sub>GlamDB is a software project developed for a hackathon at ITMO University
+and is not intended for production use.</sub>
+
 **GlamDB is in early development.** The current engine is an append-only store
 for local disk, with one owning process, one serialized writer per store, and
 concurrent snapshot readers. Power-loss durability qualification is still pending.
