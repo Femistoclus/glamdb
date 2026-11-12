@@ -438,6 +438,56 @@ TEST_F(TSnapshotArchiveTest, NewAppendCollectionsDefaultToTheArchiveTier)
     EXPECT_FALSE(Engine_->GetCollection(kvID)->hot_snapshots);
 }
 
+// A repeated creation that omits hot_snapshots matches a collection whose
+// setting is still defaulted, even when it was created under another default
+// value (simulated by rewriting the stored values to 50); explicit values
+// compare with the created value. Status reports the defaulted flag too.
+TEST_F(TSnapshotArchiveTest, OmittedRetryMatchesADefaultedCollectionWhateverTheDefaultWas)
+{
+    Create(std::nullopt);
+    ASSERT_TRUE(Engine_->Shutdown(std::chrono::seconds(5)));
+    Engine_.reset();
+    {
+        detail::Database catalog;
+        catalog.Open(Root_ / "catalog.sqlite", SQLITE_OPEN_READWRITE, {});
+        catalog.Execute("UPDATE collection_snapshot_archive SET created_hot_snapshots=50, hot_snapshots=50 "
+                        "WHERE collection_id=?",
+            {std::string(test::collection_id)});
+        ASSERT_EQ(catalog.Changes(), 1);
+    }
+    Reopen();
+    auto info = Engine_->GetCollection(test::collection_id);
+    ASSERT_TRUE(info);
+    EXPECT_EQ(info->hot_snapshots, 50);
+    EXPECT_TRUE(info->hot_snapshots_defaulted);
+    auto status = Engine_->GetSnapshotArchive(test::collection_id);
+    ASSERT_TRUE(status) << status.error().message;
+    EXPECT_EQ(status->hot_snapshots, 50);
+    EXPECT_TRUE(status->hot_snapshots_defaulted);
+    CreateCollectionRequest retry{test::collection_id, "events", Schema};
+    EXPECT_EQ(Engine_->CreateCollection(retry).disposition, CommitDisposition::Committed);
+    retry.hot_snapshots = DefaultHotSnapshots;
+    EXPECT_EQ(test::Present(Engine_->CreateCollection(retry).error).code, "SNAPSHOT_ARCHIVE_MISMATCH");
+    retry.hot_snapshots = 50;
+    EXPECT_EQ(Engine_->CreateCollection(retry).disposition, CommitDisposition::Committed);
+    retry.hot_snapshots = KeepAllSnapshotsInRoot;
+    EXPECT_EQ(test::Present(Engine_->CreateCollection(retry).error).code, "SNAPSHOT_ARCHIVE_MISMATCH");
+    // Maintenance reports the same flag.
+    const auto maintained = Engine_->ArchiveSnapshots(test::collection_id);
+    ASSERT_TRUE(maintained) << maintained.error().message;
+    EXPECT_TRUE(maintained->hot_snapshots_defaulted);
+    // Once set explicitly the setting is no longer a default: only the
+    // explicit created value matches.
+    ASSERT_TRUE(Engine_->UpdateSnapshotArchive({test::collection_id, 50}));
+    status = Engine_->GetSnapshotArchive(test::collection_id);
+    ASSERT_TRUE(status);
+    EXPECT_FALSE(status->hot_snapshots_defaulted);
+    retry.hot_snapshots.reset();
+    EXPECT_EQ(test::Present(Engine_->CreateCollection(retry).error).code, "SNAPSHOT_ARCHIVE_MISMATCH");
+    retry.hot_snapshots = 50;
+    EXPECT_EQ(Engine_->CreateCollection(retry).disposition, CommitDisposition::Committed);
+}
+
 // A retention keep_last below a defaulted hot_snapshots lowers it in the
 // expiration's transaction; an explicitly set value is refused instead.
 TEST_F(TSnapshotArchiveTest, RetentionLowersOnlyADefaultedSetting)

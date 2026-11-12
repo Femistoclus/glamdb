@@ -1462,7 +1462,7 @@ CreateOutcome Engine::CreateCollectionImpl(const CreateCollectionRequest& reques
             "INVALID_ARGUMENT",
             "invalid collection ID or exact name");
         Require(!request.hot_snapshots ||
-                (*request.hot_snapshots >= KeepAllSnapshotsInRoot && *request.hot_snapshots <= (1LL << 40)),
+                (*request.hot_snapshots >= KeepAllSnapshotsInRoot && *request.hot_snapshots <= MaxHotSnapshots),
             "INVALID_ARGUMENT",
             "hot_snapshots must be 0 (keep all in the root) or 1..1099511627776");
         Require(request.mode == CollectionMode::Append || request.mode == CollectionMode::KeyValue,
@@ -1551,7 +1551,12 @@ CreateOutcome Engine::CreateCollectionImpl(const CreateCollectionRequest& reques
                 Require(impl->catalog->CreatedWriteSettings(collection.collection_id) == settings,
                     "WRITE_SETTINGS_MISMATCH",
                     "write settings differ from original creation");
-                Require(impl->catalog->CreatedHotSnapshots(collection.collection_id) == hot,
+                // An omitted field matches a collection whose setting is
+                // still the creation default, whatever value that default had
+                // when it was created; an explicit value (or the absence of
+                // the archive) must equal the created value.
+                Require(hotDefaulted ? collection.hot_snapshots_defaulted
+                                     : impl->catalog->CreatedHotSnapshots(collection.collection_id) == hot,
                     "SNAPSHOT_ARCHIVE_MISMATCH",
                     "hot_snapshots differs from original creation");
                 context = CreateRecoveryContext{impl->info.store_id,
@@ -1841,7 +1846,8 @@ Result<SnapshotArchiveStatus> Engine::GetSnapshotArchive(std::string_view id) co
         Require(expired.has_value(), "CORRUPTION", "invalid expiration watermark");
         SnapshotArchiveStatus status{.hot_snapshots = collection.hot_snapshots,
             .root_snapshots = static_cast<int64_t>(metadata.snapshots.size()),
-            .expired_snapshots = *expired};
+            .expired_snapshots = *expired,
+            .hot_snapshots_defaulted = collection.hot_snapshots_defaulted};
         if (!metadata.snapshots.empty()) {
             status.archived_snapshots = metadata.snapshots.front()->sequence_number - 1 - *expired;
         }
@@ -1868,7 +1874,7 @@ Result<CollectionInfo> Engine::UpdateSnapshotArchive(const UpdateSnapshotArchive
     try {
         Require(ValidUuid(request.collection_id), "INVALID_ARGUMENT", "collection ID must be a canonical UUID");
         Require(!request.hot_snapshots ||
-                (*request.hot_snapshots >= KeepAllSnapshotsInRoot && *request.hot_snapshots <= (1LL << 40)),
+                (*request.hot_snapshots >= KeepAllSnapshotsInRoot && *request.hot_snapshots <= MaxHotSnapshots),
             "INVALID_ARGUMENT",
             "hot_snapshots must be 0 (keep all in the root) or 1..1099511627776");
         const std::optional<int64_t> hot =

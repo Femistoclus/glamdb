@@ -7,17 +7,23 @@
 namespace glamdb {
 namespace {
 
-constexpr TStorageContractVersion CurrentVersion{1, 0};
+constexpr TStorageContractVersion FirstVersion{1, 0};
+// 1.1 adds the snapshot archive and verified-checkpoint operations, features
+// and limits; 1.0 describes exactly what it did before.
+constexpr TStorageContractVersion CurrentVersion{1, 1};
 
 void AddOperations(TStorageContract& contract, std::initializer_list<EStorageOperation> operations)
 {
     contract.Operations.insert(contract.Operations.end(), operations.begin(), operations.end());
 }
 
-TStorageContract DescribeContract(CollectionMode mode, const EngineCapabilities& capabilities, const Limits& limits)
+TStorageContract DescribeContract(TStorageContractVersion version,
+    CollectionMode mode,
+    const EngineCapabilities& capabilities,
+    const Limits& limits)
 {
     TStorageContract contract;
-    contract.Version = CurrentVersion;
+    contract.Version = version;
     contract.Mode = mode;
     contract.EffectiveLimits = {.Engine = limits,
         .SchemaFields = static_cast<int64_t>(MaxSchemaFields),
@@ -85,6 +91,25 @@ TStorageContract DescribeContract(CollectionMode mode, const EngineCapabilities&
     {
         contract.Features.push_back(EStorageFeature::TypedNulls);
     }
+    if (version < CurrentVersion) {
+        return contract;
+    }
+    // Full verification is the store-wide recovery path, like Reconcile.
+    contract.Operations.push_back(EStorageOperation::VerifyStoreFull);
+    // Archive maintenance is native append-only, like retention.
+    if (native && capabilities.snapshot_archive && mode == CollectionMode::Append &&
+        contract.HasOperation(EStorageOperation::Append))
+    {
+        AddOperations(contract, {EStorageOperation::UpdateSnapshotArchive, EStorageOperation::ArchiveSnapshots});
+        contract.EffectiveLimits.DefaultHotSnapshots = glamdb::DefaultHotSnapshots;
+        contract.EffectiveLimits.MaxHotSnapshots = glamdb::MaxHotSnapshots;
+        if (contract.HasOperation(EStorageOperation::SnapshotHistory) || contract.HasOperation(EStorageOperation::Scan))
+        {
+            contract.Features.push_back(EStorageFeature::ArchivedSnapshotReads);
+        }
+        // Stores with a KV collection always open by full verification.
+        contract.Features.push_back(EStorageFeature::CheckpointOpen);
+    }
     return contract;
 }
 
@@ -109,10 +134,16 @@ Result<TStorageContract> NegotiateStorageContract(const TStorageContractRequest&
     {
         return std::unexpected(ErrorDetail{"INVALID_ARGUMENT", "invalid contract version range or collection mode"});
     }
-    if (request.MinVersion > CurrentVersion || request.MaxVersion < CurrentVersion) {
+    // The highest implemented version inside the inclusive range.
+    TStorageContractVersion version;
+    if (request.MinVersion <= CurrentVersion && request.MaxVersion >= CurrentVersion) {
+        version = CurrentVersion;
+    } else if (request.MinVersion <= FirstVersion && request.MaxVersion >= FirstVersion) {
+        version = FirstVersion;
+    } else {
         return std::unexpected(ErrorDetail{"UNSUPPORTED_CONTRACT_VERSION", "no supported contract version in range"});
     }
-    auto contract = DescribeContract(request.Mode, capabilities, limits);
+    auto contract = DescribeContract(version, request.Mode, capabilities, limits);
     for (const auto operation : request.RequiredOperations) {
         if (!contract.HasOperation(operation)) {
             return std::unexpected(ErrorDetail{"UNSUPPORTED_OPERATION",

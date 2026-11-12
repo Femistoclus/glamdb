@@ -273,6 +273,8 @@ struct CollectionInfo
 // hot_snapshots of a new append collection whose creation does not choose
 // one, when the storage backend supports the snapshot archive.
 inline constexpr int64_t DefaultHotSnapshots = 100;
+// Largest explicit hot_snapshots value.
+inline constexpr int64_t MaxHotSnapshots = 1LL << 40;
 // Explicit hot_snapshots value for "no archive": every retained snapshot
 // stays in the Iceberg root.
 inline constexpr int64_t KeepAllSnapshotsInRoot = 0;
@@ -313,6 +315,10 @@ struct SnapshotArchiveStatus
     int64_t archive_pending = 0;
     // Snapshots this maintenance call moved to the archive.
     int64_t snapshots_archived = 0;
+    // As CollectionInfo::hot_snapshots_defaulted: hot_snapshots is the
+    // creation default (possibly lowered to a retention keep_last) and was
+    // never set explicitly.
+    bool hot_snapshots_defaulted = false;
     bool operator==(const SnapshotArchiveStatus&) const = default;
 };
 

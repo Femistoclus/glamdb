@@ -25,7 +25,9 @@ development. The checkout implements the SQLite catalog, synchronous write and
 recovery coordinator, canonical Arrow input, public C++ facade, outcome JSON,
 and network CLI. The installed [native storage contract](docs/development/STORAGE_CONTRACT.md)
 adds pure version/feature negotiation and an Engine convenience method, with
-operation support by append/KV mode and effective limits. Discovery is separate
+operation support by append/KV mode and effective limits; version 1.1 adds the
+snapshot archive, checkpoint open and full verification (1.0 stays negotiable
+unchanged). Discovery is separate
 from readiness; independent read views, splits, staged sessions, stable C ABI and
 Flight are explicitly unsupported. Keep publication on the existing Engine path.
 Independent durable I/O and Arrow/Parquet/Iceberg

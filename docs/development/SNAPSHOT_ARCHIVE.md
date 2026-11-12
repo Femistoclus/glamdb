@@ -34,11 +34,16 @@ backends without it), `KeepAllSnapshotsInRoot` (0) means no archive, and
 the catalog like an explicit one; `CollectionInfo::hot_snapshots` reports it
 (absent: no archive) and `CollectionInfo::hot_snapshots_defaulted` whether it
 came from the default and was never set explicitly (catalog table
-`collection_hot_defaults`, version 6). A repeated creation compares effective
-values (`SNAPSHOT_ARCHIVE_MISMATCH` otherwise): omitting the field matches a
-collection that received the default or was created with an explicit 100; an
-explicit opt-out matches neither. A creation retry that omits the field no
-longer matches a collection created before the default existed.
+`collection_hot_defaults`, version 6); `SnapshotArchiveStatus` (status and
+maintenance results) reports the same `hot_snapshots_defaulted`. A repeated
+creation that omits the field matches exactly a collection whose setting is
+still defaulted, whatever numeric default was current when it was created (a
+later binary may change `DefaultHotSnapshots`); an explicit value, including
+`KeepAllSnapshotsInRoot`, must equal the value the collection was created with
+(`SNAPSHOT_ARCHIVE_MISMATCH` otherwise). So an explicit 100 also matches a
+collection that received the default of 100, an explicit opt-out matches only a
+collection created without the archive, and an omitted field matches neither a collection created
+before the default existed nor one whose setting was later set explicitly.
 `UpdateSnapshotArchive` replaces the value with an explicit one under the
 writer, is applied once when repeated and moves nothing by itself; an absent
 value or `KeepAllSnapshotsInRoot` stops archiving later snapshots. Raising it

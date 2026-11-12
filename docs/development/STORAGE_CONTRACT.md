@@ -1,6 +1,7 @@
 # Compute-facing native storage contract
 
-The installed `storage/contract.h` defines native semantic contract **1.0**.
+The installed `storage/contract.h` defines native semantic contract **1.1**
+(and still negotiates **1.0** unchanged).
 `Engine::NegotiateStorageContract(request)` describes supported operations for an
 intended collection mode and returns the engine's effective limits. It is a
 convenience over the pure `glamdb::NegotiateStorageContract(request,
@@ -26,7 +27,7 @@ boundary. Arrow batches are the existing public data interchange.
 // engine is an already opened glamdb::Engine.
 glamdb::TStorageContractRequest request;
 request.MinVersion = {1, 0};
-request.MaxVersion = {1, 0};
+request.MaxVersion = {1, 1};
 request.Mode = glamdb::CollectionMode::Append;
 request.RequiredOperations = {
     glamdb::EStorageOperation::Scan,
@@ -44,7 +45,10 @@ auto contract = engine.NegotiateStorageContract(request);
 
 Versions are `(Major, Minor)` pairs ordered lexicographically. The request range
 is inclusive and negotiation selects the highest implemented version in it.
-Only 1.0 is implemented; a range spanning several majors can still select 1.0.
+1.0 and 1.1 are implemented; a range spanning several majors can still select
+1.1. The request's default range is exactly 1.0, which describes precisely what
+1.0 did: none of the 1.1 operations, features or limits below appear in it, and
+requiring them in a 1.0-only range fails closed.
 A new major denotes incompatible semantics; a minor may add optional capabilities
 without changing existing behavior. Callers must require every operation/feature
 they depend on and inspect the returned version. Unknown optional discoveries
@@ -107,9 +111,12 @@ operations are conservatively withheld from custom backends.
 | `Reconcile` | `Reconcile` (store-wide recovery) | Yes | Yes |
 | `StorageFootprint` | `GetStorageFootprint` (store-wide physical inventory) | Yes | Yes |
 | `Shutdown` | `Shutdown` (store lifecycle) | Yes | Yes |
+| `UpdateSnapshotArchive` (1.1) | `UpdateSnapshotArchive`, `GetSnapshotArchive`; `CreateCollection` `hot_snapshots` | Yes | No |
+| `ArchiveSnapshots` (1.1) | `ArchiveSnapshots` (separate explicit maintenance) | Yes | No |
+| `VerifyStoreFull` (1.1) | `VerifyStoreFull`, `OpenStoreRequest::verify_full` (store-wide full verification) | Yes | Yes |
 
-Catalog discovery, outcome lookup, reconciliation and shutdown are coordinator
-operations advertised even without a storage producer. This does not fabricate
+Catalog discovery, outcome lookup, reconciliation, full verification (1.1) and
+shutdown are coordinator operations advertised even without a storage producer. This does not fabricate
 collections or outcomes: unknown collections still fail, and an unknown operation
 returns an absent optional only after an authoritative successful lookup.
 Storage-disabled builds omit physical reads/writes and creation; existing calls
@@ -121,7 +128,21 @@ operation.
 Implemented semantic features are `TypedNulls`, `FixedSnapshotScan`,
 `PreserveAppendDuplicates` (append only), `AuthoritativeOutcomes`,
 `SnapshotPreconditions` (when writes are supported), and `DurableNoOp` (native
-KV mutation support). KV upsert replaces full rows and deterministically applies
+KV mutation support). Contract 1.1 adds the snapshot archive the way retention
+is described: native append-only maintenance, advertised only by a local
+backend whose capabilities include `snapshot_archive` and append support.
+`ArchivedSnapshotReads` means snapshots older than a collection's hot window
+remain readable by ID through history, statistics, files, file details, explain
+and scan (each use binds the archive row to its committed receipt). `CheckpointOpen`
+means a fresh open of an archive-tier store (catalog version 6, every
+collection append-mode with a checkpoint) rebuilds state from verified
+checkpoints, the current root and the current manifests instead of re-verifying
+history and data-file footers; any mismatch falls back to full verification,
+and a detected corruption deletes the checkpoints before it is reported. Use
+`VerifyStoreFull` or `verify_full` when an open must re-prove every receipt,
+archived row, transition and footer. KV negotiation advertises neither feature
+(stores with a KV collection always open by full verification). See
+[the snapshot archive tier](SNAPSHOT_ARCHIVE.md). KV upsert replaces full rows and deterministically applies
 last-wins duplicate input; keyed delete is safe for absent/repeated keys. This
 is not SQL MERGE or arbitrary update support. See [KV mode](KV_MODE.md).
 
@@ -198,7 +219,9 @@ deadline and retained-history budgets. The additional fields expose current
 validation ceilings: 128 schema fields, 10,000 ordinary append/upsert input rows,
 16 MiB canonical decoded append/upsert input bytes, 65,536 scan batch rows,
 25,600,000 bulk rows, 4 GiB bulk decoded bytes, 4,096 lookup keys and 10,000 delete
-keys. `AppendRows` and `AppendDecodedBytes` constrain ordinary `AppendDurable`
+keys. Contract 1.1 adds `DefaultHotSnapshots` (100: the `hot_snapshots` a new
+append collection gets when creation omits it) and `MaxHotSnapshots` (2^40),
+both 0 unless `UpdateSnapshotArchive` is advertised. `AppendRows` and `AppendDecodedBytes` constrain ordinary `AppendDurable`
 and `UpsertDurable` input before KV duplicate resolution. They remain applicable
 in KV mode when `Upsert` is advertised, even though `Append` is not advertised.
 Other operation ceilings apply when their corresponding operation is advertised.
@@ -215,7 +238,7 @@ still fail due to `RECOVERY_REQUIRED`, `OPERATION_IN_PROGRESS`,
 reservation, a readiness result or a power-loss durability qualification.
 
 The following `EStorageFeature` values are reserved descriptions of future
-capabilities and are **never advertised by 1.0**: `IndependentReadView`,
+capabilities and are **never advertised by 1.0 or 1.1**: `IndependentReadView`,
 `ScanSplits`, `StagedWrites`, `StableCAbi`, `ArrowFlight`, `RemoteDescriptors`,
 `Overwrite`, `Merge`, `SqlMutations`, `SchemaEvolution` and
 `CrossCollectionTransactions`. Requiring any of them fails explicitly. Native
@@ -224,6 +247,8 @@ scan cursors and bulk sources do not imply support for these protocols.
 ## Executable evidence
 
 `StorageContract.*` unit tests cover compatible/disjoint/reversed ranges,
+1.0 versus 1.1 descriptions, archive/checkpoint operations, features and limits
+by mode and backend,
 required/unknown features and operations, invalid modes, append/KV capability
 differences, backend availability, conservative custom-backend support, effective
 limits and readiness-independent

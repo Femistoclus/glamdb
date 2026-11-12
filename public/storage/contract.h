@@ -38,7 +38,11 @@ enum class EStorageOperation : uint16_t {
     MigrateAppendToKV,
     Reconcile,
     StorageFootprint,
-    Shutdown
+    Shutdown,
+    // Contract 1.1: snapshot archive maintenance and explicit full verification.
+    UpdateSnapshotArchive,
+    ArchiveSnapshots,
+    VerifyStoreFull
 };
 
 enum class EStorageFeature : uint16_t {
@@ -48,7 +52,7 @@ enum class EStorageFeature : uint16_t {
     AuthoritativeOutcomes,
     SnapshotPreconditions,
     DurableNoOp,
-    // Proposed capabilities: never advertised by contract 1.0.
+    // Proposed capabilities: never advertised by contract 1.0 or 1.1.
     IndependentReadView,
     ScanSplits,
     StagedWrites,
@@ -59,7 +63,12 @@ enum class EStorageFeature : uint16_t {
     Merge,
     SqlMutations,
     SchemaEvolution,
-    CrossCollectionTransactions
+    CrossCollectionTransactions,
+    // Contract 1.1: snapshots older than a collection's hot window stay
+    // readable by ID from the catalog archive; a fresh open of an archive-tier
+    // store rebuilds from verified checkpoints instead of re-verifying history.
+    ArchivedSnapshotReads,
+    CheckpointOpen
 };
 
 struct TStorageContractRequest
@@ -88,6 +97,10 @@ struct TStorageContractLimits
     int64_t BulkDecodedBytes = 0;
     int64_t LookupKeys = 0;
     int64_t DeleteKeys = 0;
+    // Contract 1.1, when UpdateSnapshotArchive is advertised: hot_snapshots of
+    // a new append collection that does not choose one, and its largest value.
+    int64_t DefaultHotSnapshots = 0;
+    int64_t MaxHotSnapshots = 0;
 };
 
 struct TStorageContract
