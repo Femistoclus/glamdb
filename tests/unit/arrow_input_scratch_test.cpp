@@ -210,7 +210,7 @@ TPreparationMemory Measure(const std::vector<std::shared_ptr<arrow::RecordBatch>
     memory.FingerprintHeap = MeasureHeapPeak([&] {
         const auto fingerprinted = FingerprintInput(schema, CollectionID, batches);
         EXPECT_TRUE(fingerprinted) << fingerprinted.error().message;
-        memory.Reservation = fingerprinted ? fingerprinted->reservation : 0;
+        memory.Reservation = fingerprinted ? fingerprinted->Reservation : 0;
     });
     arrow::ProxyMemoryPool pool(arrow::default_memory_pool());
     memory.NormalizeHeap = MeasureHeapPeak([&] {
@@ -223,10 +223,10 @@ TPreparationMemory Measure(const std::vector<std::shared_ptr<arrow::RecordBatch>
 
 void ExpectBounded(const TPreparationMemory& many, const TPreparationMemory& single)
 {
-    SCOPED_TRACE(::testing::Message() << "reservation=" << many.Reservation << " fingerprint heap="
-                                      << many.FingerprintHeap << " normalize heap=" << many.NormalizeHeap
-                                      << " normalize arrow=" << many.NormalizeArrow << " single-batch heap="
-                                      << single.FingerprintHeap << "/" << single.NormalizeHeap);
+    SCOPED_TRACE(
+        ::testing::Message() << "reservation=" << many.Reservation << " fingerprint heap=" << many.FingerprintHeap
+                             << " normalize heap=" << many.NormalizeHeap << " normalize arrow=" << many.NormalizeArrow
+                             << " single-batch heap=" << single.FingerprintHeap << "/" << single.NormalizeHeap);
     std::printf("reservation=%zu fingerprint_heap=%lld normalize_heap=%lld normalize_arrow=%lld "
                 "single_batch_heap=%lld/%lld\n",
         many.Reservation,

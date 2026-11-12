@@ -43,9 +43,9 @@ TEST(ArrowInputReservation, NullHeavyReservationCoversOwnedRowsAndWriterAllocati
     const auto normalized =
         NormalizeBatches(schema, "00112233-4455-6677-8899-aabbccddeeff", {batch}, std::nullopt, &ownedPool);
     ASSERT_TRUE(normalized);
-    ASSERT_NE(normalized->columns, nullptr);
+    ASSERT_NE(normalized->Columns, nullptr);
     arrow::ProxyMemoryPool pool(arrow::default_memory_pool());
-    const auto writerBatch = CopyRecordBatch(*normalized->columns, &pool);
+    const auto writerBatch = CopyRecordBatch(*normalized->Columns, &pool);
     ASSERT_TRUE(writerBatch);
     // The reservation must at least cover these simultaneous live allocations;
     // the canonical NULL encoding alone does not measure the writer's slots.
@@ -130,14 +130,14 @@ TEST(ArrowInputReservation, FingerprintInspectionYieldsTheSameReservation)
         for (const auto& batches : inputs) {
             const auto fingerprinted = FingerprintInput(schema, "00112233-4455-6677-8899-aabbccddeeff", batches);
             ASSERT_TRUE(fingerprinted) << fingerprinted.error().message;
-            EXPECT_EQ(fingerprinted->reservation, InputReservation(schema, batches).value());
-            EXPECT_EQ(fingerprinted->payload_hash,
+            EXPECT_EQ(fingerprinted->Reservation, InputReservation(schema, batches).value());
+            EXPECT_EQ(fingerprinted->PayloadHash,
                 FingerprintBatches(schema, "00112233-4455-6677-8899-aabbccddeeff", batches).value());
             const auto normalized =
-                NormalizeBatches(schema, "00112233-4455-6677-8899-aabbccddeeff", batches, fingerprinted->reservation);
+                NormalizeBatches(schema, "00112233-4455-6677-8899-aabbccddeeff", batches, fingerprinted->Reservation);
             ASSERT_TRUE(normalized) << normalized.error().message;
-            EXPECT_EQ(normalized->payload_hash, fingerprinted->payload_hash);
-            for (const auto other : {fingerprinted->reservation - 1, fingerprinted->reservation + 1}) {
+            EXPECT_EQ(normalized->payload_hash, fingerprinted->PayloadHash);
+            for (const auto other : {fingerprinted->Reservation - 1, fingerprinted->Reservation + 1}) {
                 const auto changed = NormalizeBatches(schema, "00112233-4455-6677-8899-aabbccddeeff", batches, other);
                 ASSERT_FALSE(changed);
                 EXPECT_EQ(changed.error().code, "INVALID_ARGUMENT");

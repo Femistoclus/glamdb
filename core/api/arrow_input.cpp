@@ -79,76 +79,77 @@ struct Shape
 // Typed view of one schema field in one batch, resolved once per batch so
 // per-cell loops read raw buffers instead of boxed arrow::Array accessors.
 // Readers mirror the arrow::Array accessors exactly, including slice offsets.
-struct Column
+struct TColumnView
 {
-    FieldType type = FieldType::String;
-    bool nullable = true;
+    FieldType Type = FieldType::String;
+    bool Nullable = true;
     // Omitted nullable field: every value is NULL.
-    bool present = false;
+    bool Present = false;
     // Without a validity bitmap Array::IsNull reports null_count == length.
-    bool all_null = false;
-    size_t max_length = 0;
-    int64_t offset = 0;
-    const uint8_t* validity = nullptr;
+    bool AllNull = false;
+    size_t MaxLength = 0;
+    int64_t Offset = 0;
+    const uint8_t* Validity = nullptr;
     // Value bitmap (bool), fixed-width values, or string offsets.
-    const uint8_t* values = nullptr;
-    const char* data = nullptr;
-    int64_t data_bytes = 0;
+    const uint8_t* Values = nullptr;
+    const char* Data = nullptr;
+    int64_t DataBytes = 0;
 
     bool IsNull(int64_t row) const
     {
-        if (!present) {
+        if (!Present) {
             return true;
         }
-        return validity != nullptr ? !arrow::bit_util::GetBit(validity, offset + row) : all_null;
+        return Validity != nullptr ? !arrow::bit_util::GetBit(Validity, Offset + row) : AllNull;
     }
-    template <class T>
-    T Value(int64_t row) const
+    template <typename T>
+    T GetValue(int64_t row) const
     {
         T value;
-        std::memcpy(&value, values + (offset + row) * static_cast<int64_t>(sizeof(T)), sizeof(T));
+        std::memcpy(&value, Values + (Offset + row) * static_cast<int64_t>(sizeof(T)), sizeof(T));
         return value;
     }
-    bool Bool(int64_t row) const
+    bool GetBool(int64_t row) const
     {
-        return arrow::bit_util::GetBit(values, offset + row);
+        return arrow::bit_util::GetBit(Values, Offset + row);
     }
-    int32_t Begin(int64_t row) const
+    int32_t GetBegin(int64_t row) const
     {
-        return Value<int32_t>(row);
+        return GetValue<int32_t>(row);
     }
-    int32_t Length(int64_t row) const
+    int32_t GetLength(int64_t row) const
     {
-        return Value<int32_t>(row + 1) - Value<int32_t>(row);
+        return GetValue<int32_t>(row + 1) - GetValue<int32_t>(row);
     }
-    std::string_view Text(int64_t row) const
+    std::string_view GetText(int64_t row) const
     {
-        return {data + Begin(row), static_cast<size_t>(Length(row))};
+        return {Data + GetBegin(row), static_cast<size_t>(GetLength(row))};
     }
 };
 
-std::vector<Column> Columns(const SchemaSpec& schema, const arrow::RecordBatch& batch, const std::vector<int>& mapping)
+std::vector<TColumnView>
+ResolveColumns(const SchemaSpec& schema, const arrow::RecordBatch& batch, const std::vector<int>& mapping)
 {
-    std::vector<Column> columns;
+    std::vector<TColumnView> columns;
     columns.reserve(mapping.size());
     for (size_t field = 0; field < mapping.size(); ++field) {
-        Column column;
-        column.type = schema.fields[field].type;
-        column.nullable = schema.fields[field].nullable;
-        column.max_length = schema.fields[field].name == "key" ? 1024 : 1024 * 1024;
+        TColumnView column;
+        column.Type = schema.fields[field].type;
+        column.Nullable = schema.fields[field].nullable;
+        column.MaxLength = schema.fields[field].name == "key" ? 1024 : 1024 * 1024;
         if (mapping[field] >= 0) {
             const auto& data = *batch.column_data(mapping[field]);
             const auto buffer = [&data](size_t index) -> const uint8_t* {
                 return index < data.buffers.size() && data.buffers[index] != nullptr ? data.buffers[index]->data()
                                                                                      : nullptr;
             };
-            column.present = true;
-            column.offset = data.offset;
-            column.validity = buffer(0);
-            column.all_null = column.validity == nullptr && data.null_count == data.length;
-            column.values = buffer(1);
-            column.data = reinterpret_cast<const char*>(buffer(2));
-            column.data_bytes = column.data == nullptr ? 0 : data.buffers[2]->size();
+            column.Present = true;
+            column.Offset = data.offset;
+            column.Validity = buffer(0);
+            column.AllNull = column.Validity == nullptr && data.null_count == data.length;
+            column.Values = buffer(1);
+            column.Data = reinterpret_cast<const char*>(buffer(2));
+            column.DataBytes = column.Data == nullptr ? 0 : data.buffers[2]->size();
         }
         columns.push_back(column);
     }
@@ -169,25 +170,25 @@ Shape Inspect(const SchemaSpec& schema, const std::vector<std::shared_ptr<arrow:
             "INVALID_ARGUMENT",
             "append requires at most 10000 rows");
         shape.rows += static_cast<size_t>(batch->num_rows());
-        const auto columns = Columns(schema, *batch, MapFields(schema, *batch));
+        const auto columns = ResolveColumns(schema, *batch, MapFields(schema, *batch));
         for (int64_t row = 0; row < batch->num_rows(); ++row) {
             size_t bytes = schema.fields.size();
             for (const auto& column : columns) {
                 if (column.IsNull(row)) {
-                    Require(column.nullable, "INVALID_ARGUMENT", "NULL in required Arrow field");
-                    shape.null_slot_bytes += column.type == FieldType::String ? 4
-                        : column.type == FieldType::Bool                      ? 1
+                    Require(column.Nullable, "INVALID_ARGUMENT", "NULL in required Arrow field");
+                    shape.null_slot_bytes += column.Type == FieldType::String ? 4
+                        : column.Type == FieldType::Bool                      ? 1
                                                                               : 8;
                     continue;
                 }
-                if (column.type == FieldType::String) {
-                    const auto length = column.Length(row);
-                    Require(static_cast<size_t>(length) <= column.max_length,
+                if (column.Type == FieldType::String) {
+                    const auto length = column.GetLength(row);
+                    Require(static_cast<size_t>(length) <= column.MaxLength,
                         "INVALID_ARGUMENT",
                         "oversized Arrow string");
                     bytes += 4 + static_cast<size_t>(length);
                 } else {
-                    bytes += column.type == FieldType::Bool ? 1 : 8;
+                    bytes += column.Type == FieldType::Bool ? 1 : 8;
                 }
             }
             shape.decoded_bytes += bytes;
@@ -202,46 +203,46 @@ Shape Inspect(const SchemaSpec& schema, const std::vector<std::shared_ptr<arrow:
 
 // Canonical row-major encoding of one batch, with the value checks of the
 // owned-row encoder.
-void HashRows(CanonicalHasher& hash, const std::vector<Column>& columns, int64_t rows)
+void HashRows(TCanonicalHasher& hash, const std::vector<TColumnView>& columns, int64_t rows)
 {
     for (int64_t row = 0; row < rows; ++row) {
         for (const auto& column : columns) {
             if (column.IsNull(row)) {
-                Require(column.nullable, "INVALID_ARGUMENT", "NULL in required field");
-                hash.Number(uint8_t{0});
+                Require(column.Nullable, "INVALID_ARGUMENT", "NULL in required field");
+                hash.AddNumber(uint8_t{0});
                 continue;
             }
-            hash.Number(uint8_t{1});
-            switch (column.type) {
+            hash.AddNumber(uint8_t{1});
+            switch (column.Type) {
                 case FieldType::String: {
-                    const auto value = column.Text(row);
-                    Require(value.size() <= column.max_length && ValidUtf8(value),
+                    const auto value = column.GetText(row);
+                    Require(value.size() <= column.MaxLength && ValidUtf8(value),
                         "INVALID_ARGUMENT",
                         "invalid UTF-8 string");
-                    hash.Number(static_cast<uint32_t>(value.size()));
-                    hash.Bytes(value);
+                    hash.AddNumber(static_cast<uint32_t>(value.size()));
+                    hash.AddBytes(value);
                     break;
                 }
                 case FieldType::Bool:
-                    hash.Number(static_cast<uint8_t>(column.Bool(row) ? 1 : 0));
+                    hash.AddNumber(static_cast<uint8_t>(column.GetBool(row) ? 1 : 0));
                     break;
                 case FieldType::Int64:
                 case FieldType::TimestampUsUtc: {
-                    const auto value = column.Value<int64_t>(row);
-                    Require(column.type == FieldType::Int64 ||
+                    const auto value = column.GetValue<int64_t>(row);
+                    Require(column.Type == FieldType::Int64 ||
                             (value >= -62135596800000000LL && value <= 253402300799999999LL),
                         "INVALID_ARGUMENT",
                         "timestamp outside years 0001..9999");
-                    hash.Number(value);
+                    hash.AddNumber(value);
                     break;
                 }
                 case FieldType::Float64: {
-                    auto value = column.Value<double>(row);
+                    auto value = column.GetValue<double>(row);
                     Require(std::isfinite(value), "INVALID_ARGUMENT", "non-finite float");
                     if (value == 0) {
                         value = 0.0;
                     }
-                    hash.Number(std::bit_cast<uint64_t>(value));
+                    hash.AddNumber(std::bit_cast<uint64_t>(value));
                     break;
                 }
             }
@@ -250,10 +251,10 @@ void HashRows(CanonicalHasher& hash, const std::vector<Column>& columns, int64_t
 }
 
 // Caller buffers differ from what was inspected or fingerprinted.
-struct InputChanged
+struct TInputChanged
 { };
 
-ErrorDetail InputChangedError()
+ErrorDetail MakeInputChangedError()
 {
     // The same error as the coordinator's hash comparison.
     return {"INVALID_ARGUMENT", "Arrow input changed during append", RetryHint::OperatorAction};
@@ -293,7 +294,7 @@ struct TOwnedColumn
 };
 
 // Appends rows [0, count) of one batch's column at `first` of the owned column.
-void CopyRows(TOwnedColumn& owned, const Column& column, FieldType type, int64_t first, int64_t count)
+void CopyRows(TOwnedColumn& owned, const TColumnView& column, FieldType type, int64_t first, int64_t count)
 {
     auto* valid = owned.Validity->mutable_data();
     auto* values = owned.Values->mutable_data();
@@ -309,27 +310,29 @@ void CopyRows(TOwnedColumn& owned, const Column& column, FieldType type, int64_t
         arrow::bit_util::SetBit(valid, row);
         switch (type) {
             case FieldType::String: {
-                const auto begin = column.Begin(source);
-                const auto length = column.Length(source);
+                const auto begin = column.GetBegin(source);
+                const auto length = column.GetLength(source);
                 if (begin < 0 || length < 0 || length > owned.DataBytes - owned.Written ||
-                    static_cast<int64_t>(begin) + length > column.data_bytes)
+                    static_cast<int64_t>(begin) + length > column.DataBytes)
                 {
-                    throw InputChanged{};
+                    throw TInputChanged{};
                 }
-                std::memcpy(owned.Data->mutable_data() + owned.Written, column.data + begin, static_cast<size_t>(length));
+                std::memcpy(owned.Data->mutable_data() + owned.Written,
+                    column.Data + begin,
+                    static_cast<size_t>(length));
                 owned.Written += length;
                 reinterpret_cast<int32_t*>(values)[row + 1] = owned.Written;
                 break;
             }
             case FieldType::Bool:
-                if (column.Bool(source)) {
+                if (column.GetBool(source)) {
                     arrow::bit_util::SetBit(values, row);
                 }
                 break;
             case FieldType::Int64:
             case FieldType::Float64:
             case FieldType::TimestampUsUtc: {
-                auto value = column.Value<int64_t>(source);
+                auto value = column.GetValue<int64_t>(source);
                 if (type == FieldType::Float64 && std::bit_cast<double>(value) == 0) {
                     value = std::bit_cast<int64_t>(0.0);
                 }
@@ -355,18 +358,18 @@ std::shared_ptr<arrow::RecordBatch> OwnBatches(const SchemaSpec& schema,
 {
     std::vector<TOwnedColumn> owned(schema.fields.size());
     for (const auto& batch : batches) {
-        const auto columns = Columns(schema, *batch, MapFields(schema, *batch, true));
+        const auto columns = ResolveColumns(schema, *batch, MapFields(schema, *batch, true));
         for (size_t field = 0; field < columns.size(); ++field) {
-            if (columns[field].type != FieldType::String) {
+            if (columns[field].Type != FieldType::String) {
                 continue;
             }
             for (int64_t row = 0; row < batch->num_rows(); ++row) {
                 if (!columns[field].IsNull(row)) {
-                    owned[field].DataBytes += columns[field].Length(row);
+                    owned[field].DataBytes += columns[field].GetLength(row);
                 }
             }
             if (owned[field].DataBytes < 0 || owned[field].DataBytes > 16LL * 1024 * 1024) {
-                throw InputChanged{};
+                throw TInputChanged{};
             }
         }
     }
@@ -390,7 +393,7 @@ std::shared_ptr<arrow::RecordBatch> OwnBatches(const SchemaSpec& schema,
     }
     int64_t first = 0;
     for (const auto& batch : batches) {
-        const auto columns = Columns(schema, *batch, MapFields(schema, *batch, true));
+        const auto columns = ResolveColumns(schema, *batch, MapFields(schema, *batch, true));
         for (size_t field = 0; field < columns.size(); ++field) {
             CopyRows(owned[field], columns[field], schema.fields[field].type, first, batch->num_rows());
         }
@@ -400,19 +403,22 @@ std::shared_ptr<arrow::RecordBatch> OwnBatches(const SchemaSpec& schema,
     arrays.reserve(owned.size());
     for (size_t field = 0; field < owned.size(); ++field) {
         auto& column = owned[field];
-        std::vector<std::shared_ptr<arrow::Buffer>> buffers{
-            column.NullCount == 0 ? nullptr : std::move(column.Validity), std::move(column.Values)};
+        std::vector<std::shared_ptr<arrow::Buffer>> buffers{column.NullCount == 0 ? nullptr
+                                                                                  : std::move(column.Validity),
+            std::move(column.Values)};
         if (column.Data != nullptr) {
             buffers.push_back(std::move(column.Data));
         }
         column.Validity.reset();
-        arrays.push_back(arrow::MakeArray(arrow::ArrayData::Make(
-            MakeArrowType(schema.fields[field].type), rows, std::move(buffers), column.NullCount)));
+        arrays.push_back(arrow::MakeArray(arrow::ArrayData::Make(MakeArrowType(schema.fields[field].type),
+            rows,
+            std::move(buffers),
+            column.NullCount)));
     }
     return arrow::RecordBatch::Make(MakeArrowSchema(schema), rows, std::move(arrays));
 }
 
-size_t Reservation(const SchemaSpec& schema, const Shape& shape)
+size_t ComputeReservation(const SchemaSpec& schema, const Shape& shape)
 {
     // Payload bytes: the owned rows, the canonical string while hashing and
     // the Arrow batch with builder growth (4 copies). STL cells, including
@@ -436,12 +442,12 @@ std::string Fingerprint(const SchemaSpec& schema,
     if (!header) {
         throw Failure(header.error());
     }
-    CanonicalHasher hash;
-    hash.Bytes(*header);
+    TCanonicalHasher hash;
+    hash.AddBytes(*header);
     for (const auto& batch : batches) {
-        HashRows(hash, Columns(schema, *batch, MapFields(schema, *batch, true)), batch->num_rows());
+        HashRows(hash, ResolveColumns(schema, *batch, MapFields(schema, *batch, true)), batch->num_rows());
     }
-    return hash.Digest();
+    return hash.ComputeDigest();
 }
 
 } // namespace
@@ -450,7 +456,7 @@ Result<size_t> InputReservation(const SchemaSpec& schema,
     const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches)
 {
     try {
-        return Reservation(schema, Inspect(schema, batches));
+        return ComputeReservation(schema, Inspect(schema, batches));
     } catch (const Failure& error) {
         auto detail = error.detail;
         detail.retry_hint = RetryHint::FixInput;
@@ -466,16 +472,17 @@ Result<std::string> FingerprintBatches(const SchemaSpec& schema,
     if (!result) {
         return std::unexpected(result.error());
     }
-    return result->payload_hash;
+    return result->PayloadHash;
 }
 
-Result<FingerprintedInput> FingerprintInput(const SchemaSpec& schema,
+Result<TFingerprintedInput> FingerprintInput(const SchemaSpec& schema,
     std::string_view collection_id,
     const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches)
 {
     try {
         const auto shape = Inspect(schema, batches);
-        return FingerprintedInput{Fingerprint(schema, collection_id, batches, shape), Reservation(schema, shape)};
+        return TFingerprintedInput{Fingerprint(schema, collection_id, batches, shape),
+            ComputeReservation(schema, shape)};
     } catch (const Failure& error) {
         auto detail = error.detail;
         detail.retry_hint = RetryHint::FixInput;
@@ -494,15 +501,15 @@ Result<NormalizedInput> NormalizeBatches(const SchemaSpec& schema,
         // exactly the memory the owned copy reads. A shape that differs from
         // the admitted reservation means the caller changed the input.
         const auto shape = Inspect(schema, batches);
-        if (reserved && Reservation(schema, shape) != *reserved) {
-            return std::unexpected(InputChangedError());
+        if (reserved && ComputeReservation(schema, shape) != *reserved) {
+            return std::unexpected(MakeInputChangedError());
         }
         // The only copy of caller memory: canonical owned columns. Every
         // later check, the hash and the writer read this copy, never the
         // caller's buffers again.
         const auto rows = static_cast<int64_t>(shape.rows);
         NormalizedInput result;
-        result.columns = OwnBatches(schema, batches, rows, pool);
+        result.Columns = OwnBatches(schema, batches, rows, pool);
         std::vector<int> identity(schema.fields.size());
         for (size_t field = 0; field < identity.size(); ++field) {
             identity[field] = static_cast<int>(field);
@@ -511,15 +518,15 @@ Result<NormalizedInput> NormalizeBatches(const SchemaSpec& schema,
         if (!header) {
             throw Failure(header.error());
         }
-        CanonicalHasher hash;
-        hash.Bytes(*header);
-        HashRows(hash, Columns(schema, *result.columns, identity), rows);
-        result.decoded_bytes = hash.Size() - header->size();
+        TCanonicalHasher hash;
+        hash.AddBytes(*header);
+        HashRows(hash, ResolveColumns(schema, *result.Columns, identity), rows);
+        result.decoded_bytes = hash.GetSize() - header->size();
         Require(result.decoded_bytes <= 16ULL * 1024 * 1024, "INPUT_TOO_LARGE", "append exceeds decoded input limit");
-        result.payload_hash = hash.Digest();
+        result.payload_hash = hash.ComputeDigest();
         return result;
-    } catch (const InputChanged&) {
-        return std::unexpected(InputChangedError());
+    } catch (const TInputChanged&) {
+        return std::unexpected(MakeInputChangedError());
     } catch (const Failure& error) {
         auto detail = error.detail;
         detail.retry_hint = RetryHint::FixInput;
@@ -527,9 +534,9 @@ Result<NormalizedInput> NormalizeBatches(const SchemaSpec& schema,
     }
 }
 
-size_t NormalizedInput::RowCount() const
+size_t NormalizedInput::GetRowCount() const
 {
-    return columns != nullptr ? static_cast<size_t>(columns->num_rows()) : rows.size();
+    return Columns != nullptr ? static_cast<size_t>(Columns->num_rows()) : rows.size();
 }
 
 } // namespace glamdb::detail

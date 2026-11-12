@@ -3,11 +3,8 @@
 #include "storage/types.h"
 
 #include <array>
-#include <bit>
-#include <cstring>
 #include <optional>
 #include <string_view>
-#include <type_traits>
 
 namespace arrow {
 class MemoryPool;
@@ -22,13 +19,13 @@ struct NormalizedInput
     // Columns (rows stays empty): NormalizeBatches. One batch in schema order
     // (MakeArrowSchema) holding the same canonical values MakeRecordBatch
     // would build from the normalized rows.
-    std::shared_ptr<arrow::RecordBatch> columns;
+    std::shared_ptr<arrow::RecordBatch> Columns;
     std::string payload_hash;
     size_t decoded_bytes = 0;
     // Built during backend admission and retained until this append finishes.
     std::shared_ptr<arrow::RecordBatch> writer_batch;
 
-    size_t RowCount() const;
+    size_t GetRowCount() const;
 };
 
 // Fingerprinting uses fixed-size state, independent of owned payload admission.
@@ -50,47 +47,26 @@ private:
 // Streams canonical bytes into SHA-256 through a fixed buffer: the digest is
 // the hash of exactly the bytes Encoder would have produced, without
 // materializing them or updating the hash once per tiny field.
-class CanonicalHasher
+class TCanonicalHasher
 {
 public:
-    template <class T>
-    void Number(T value)
-    {
-        using U = std::make_unsigned_t<T>;
-        if (sizeof(T) > buffer_.size() - used_) {
-            Flush();
-        }
-        // Little-endian, as Encoder::Number; a local cursor because char
-        // stores may alias the members.
-        auto* out = buffer_.data() + used_;
-        if constexpr (std::endian::native == std::endian::little) {
-            std::memcpy(out, &value, sizeof(T));
-        } else {
-            auto bits = static_cast<uint64_t>(std::bit_cast<U>(value));
-            for (size_t i = 0; i < sizeof(T); ++i) {
-                out[i] = static_cast<char>(bits & 255);
-                bits >>= 8;
-            }
-        }
-        used_ += sizeof(T);
-        bytes_ += sizeof(T);
-    }
-    void Bytes(std::string_view bytes);
+    // Little-endian, as Encoder::Number.
+    template <typename T>
+    void AddNumber(T value);
+    void AddBytes(std::string_view bytes);
     // Same encoding and size check as Encoder::Text.
-    void Text(std::string_view text);
+    void AddText(std::string_view text);
     // Canonical bytes passed so far.
-    uint64_t Size() const
-    {
-        return bytes_;
-    }
-    std::string Digest();
+    uint64_t GetSize() const;
+    std::string ComputeDigest();
 
 private:
+    Sha256State Hash_;
+    std::array<char, 4096> Buffer_{};
+    size_t Used_ = 0;
+    uint64_t Bytes_ = 0;
+
     void Flush();
-    Sha256State hash_;
-    std::array<char, 4096> buffer_{};
-    size_t used_ = 0;
-    uint64_t bytes_ = 0;
 };
 
 bool ValidUuid(std::string_view value);
@@ -120,18 +96,22 @@ Result<std::string> FingerprintBatches(const SchemaSpec& schema,
     std::string_view collection_id,
     const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches);
 
-struct FingerprintedInput
+struct TFingerprintedInput
 {
-    std::string payload_hash;
+    std::string PayloadHash;
     // InputReservation of the same inspection.
-    size_t reservation = 0;
+    size_t Reservation = 0;
 };
 
 // FingerprintBatches and InputReservation from one inspection of the batches.
-Result<FingerprintedInput> FingerprintInput(const SchemaSpec& schema,
+Result<TFingerprintedInput> FingerprintInput(const SchemaSpec& schema,
     std::string_view collection_id,
     const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches);
 Result<size_t> InputReservation(const SchemaSpec& schema,
     const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches);
 
 } // namespace glamdb::detail
+
+#define GLAMDB_CORE_API_CANONICAL_INL_H_
+#include "canonical-inl.h"
+#undef GLAMDB_CORE_API_CANONICAL_INL_H_

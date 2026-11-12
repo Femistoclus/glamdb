@@ -17,7 +17,7 @@ namespace {
 using namespace std::chrono_literals;
 using namespace glamdb::vertical;
 
-class AppendInputOwnershipTest : public ::testing::Test
+class TAppendInputOwnershipTest : public ::testing::Test
 {
 protected:
     // Declared first: destroyed after the engine closes its SQLite connection.
@@ -73,7 +73,7 @@ void SetValue(const arrow::RecordBatch& batch, int64_t row, int64_t value)
     std::memcpy(Mutable(batch, 1, 1) + (data.offset + row) * sizeof(int64_t), &value, sizeof(value));
 }
 
-TEST_F(AppendInputOwnershipTest, MutatingCallerBuffersAfterReturnChangesNothingCommitted)
+TEST_F(TAppendInputOwnershipTest, MutatingCallerBuffersAfterReturnChangesNothingCommitted)
 {
     const auto batch = Batch(FirstRows);
     const auto expectedHash = detail::FingerprintBatches(Schema, test::collection_id, {batch});
@@ -97,7 +97,7 @@ TEST_F(AppendInputOwnershipTest, MutatingCallerBuffersAfterReturnChangesNothingC
 }
 
 // Owned columns of sliced and chunked input store exactly the input values.
-TEST_F(AppendInputOwnershipTest, SlicedAndChunkedInputStoresExactValues)
+TEST_F(TAppendInputOwnershipTest, SlicedAndChunkedInputStoresExactValues)
 {
     const std::vector<TInputRow> rows{
         {"dup", 1, 0.5, true, 10},
@@ -136,7 +136,7 @@ TEST_F(AppendInputOwnershipTest, SlicedAndChunkedInputStoresExactValues)
 // copy then no longer matches the fingerprint (value change) or its
 // reservation (shape change) and the call fails before binding.
 class TInputChangedAfterFingerprintTest
-    : public AppendInputOwnershipTest
+    : public TAppendInputOwnershipTest
     , public ::testing::WithParamInterface<bool>
 { };
 

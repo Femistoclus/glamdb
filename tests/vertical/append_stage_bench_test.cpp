@@ -333,11 +333,11 @@ TEST(AppendStageBench, NativeAppendStagesByShape)
             }));
             ASSERT_TRUE(normalized) << normalized.error().message;
             decoded = normalized->decoded_bytes;
-            if (normalized->columns != nullptr) {
+            if (normalized->Columns != nullptr) {
                 // Columnar owned input: no per-row stages; the writer batch is a copy.
                 owned.push_back(0);
                 makeBatch.push_back(Time([&] {
-                    ASSERT_TRUE(detail::CopyRecordBatch(*normalized->columns, nullptr));
+                    ASSERT_TRUE(detail::CopyRecordBatch(*normalized->Columns, nullptr));
                 }));
                 continue;
             }
@@ -461,11 +461,11 @@ TEST(AppendStageBench, OwnedInputBytesByShape)
         const std::vector<std::shared_ptr<arrow::RecordBatch>> batches{MakeBatch(schema, shape.Rows, 0)};
         arrow::ProxyMemoryPool ownedPool(arrow::default_memory_pool());
         const auto columns = detail::NormalizeBatches(schema, test::collection_id, batches, std::nullopt, &ownedPool);
-        ASSERT_TRUE(columns && columns->columns);
+        ASSERT_TRUE(columns && columns->Columns);
         arrow::ProxyMemoryPool copyPool(arrow::default_memory_pool());
-        ASSERT_TRUE(detail::CopyRecordBatch(*columns->columns, &copyPool));
+        ASSERT_TRUE(detail::CopyRecordBatch(*columns->Columns, &copyPool));
 
-        const auto rows = detail::NormalizeRows(schema, test::collection_id, ToRows(schema, *columns->columns));
+        const auto rows = detail::NormalizeRows(schema, test::collection_id, ToRows(schema, *columns->Columns));
         ASSERT_TRUE(rows);
         ASSERT_EQ(rows->payload_hash, columns->payload_hash);
         std::size_t rowBytes = rows->rows.capacity() * sizeof(Row);

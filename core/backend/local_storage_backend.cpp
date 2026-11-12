@@ -255,7 +255,7 @@ void CheckWriterInput(const SchemaSpec& schema, const NormalizedInput& input, co
     if (limits.MaxInputBytes <= 0 || limits.MaxRows <= 0 || limits.MaxRowGroupBytes <= 0 || limits.MaxFileBytes <= 0) {
         Fail("INVALID_ARGUMENT", "append", "data writer limits must be positive");
     }
-    const auto rows = input.RowCount();
+    const auto rows = input.GetRowCount();
     if (rows == 0 || static_cast<int64_t>(rows) > limits.MaxRows) {
         Fail("INVALID_ARGUMENT", "append", std::format("an append must contain 1..{} rows", limits.MaxRows));
     }
@@ -265,9 +265,9 @@ void CheckWriterInput(const SchemaSpec& schema, const NormalizedInput& input, co
     }
     // Per row: the fixed slots plus the string bytes.
     std::vector<int64_t> rowBytes(rows, fixedRowBytes);
-    if (input.columns != nullptr) {
-        if (input.columns->num_columns() != static_cast<int>(schema.fields.size()) ||
-            !input.columns->schema()->Equals(*MakeArrowSchema(schema)))
+    if (input.Columns != nullptr) {
+        if (input.Columns->num_columns() != static_cast<int>(schema.fields.size()) ||
+            !input.Columns->schema()->Equals(*MakeArrowSchema(schema)))
         {
             Fail("INVALID_ARGUMENT", "append", "input columns do not match the collection schema");
         }
@@ -276,7 +276,7 @@ void CheckWriterInput(const SchemaSpec& schema, const NormalizedInput& input, co
                 continue;
             }
             const auto& strings =
-                static_cast<const arrow::StringArray&>(*input.columns->column(static_cast<int>(column)));
+                static_cast<const arrow::StringArray&>(*input.Columns->column(static_cast<int>(column)));
             for (size_t row = 0; row < rows; ++row) {
                 if (strings.IsValid(static_cast<int64_t>(row))) {
                     rowBytes[row] += strings.value_length(static_cast<int64_t>(row));
@@ -310,7 +310,7 @@ void CheckWriterInput(const SchemaSpec& schema, const NormalizedInput& input, co
     }
     // An upper bound of the Arrow buffers WriteDataFile receives, so the
     // writer cannot reject what this preflight admitted.
-    const auto totalBytes = input.columns != nullptr ? EstimateRecordBatchBytes(schema, *input.columns)
+    const auto totalBytes = input.Columns != nullptr ? EstimateRecordBatchBytes(schema, *input.Columns)
                                                      : EstimateRecordBatchBytes(schema, input.rows);
     if (totalBytes < 0 || totalBytes > limits.MaxInputBytes) {
         throw Failure({"RESOURCE_EXHAUSTED", "append: Input buffers exceed their byte limit.", RetryHint::FixInput});
@@ -652,8 +652,8 @@ Status TLocalStorageBackend::CheckAppendAdmissible(const StoreInfo& store,
         CheckUsage(NStorage::CheckStorageCapacity(minUsage, Options_.Storage),
             "RESOURCE_EXHAUSTED",
             "storage capacity");
-        auto batch = input.columns != nullptr
-            ? CopyRecordBatch(*input.columns, Options_.InputPool.get())
+        auto batch = input.Columns != nullptr
+            ? CopyRecordBatch(*input.Columns, Options_.InputPool.get())
             : MakeRecordBatch(collection.schema, input.rows, Options_.InputPool.get());
         if (!batch) {
             throw Failure(batch.error());
@@ -712,7 +712,7 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
             NStorage::WriteDataFile(FileIO_, attempt, *base->Metadata, dataPath, {input.writer_batch}, Options_.Writer),
             "IO_ERROR",
             "write data file");
-        Require(data.DataFile != nullptr && data.DataFile->record_count == static_cast<int64_t>(input.RowCount()),
+        Require(data.DataFile != nullptr && data.DataFile->record_count == static_cast<int64_t>(input.GetRowCount()),
             "IO_ERROR",
             "data file does not contain every input row");
         CheckDeadline(deadline);
@@ -753,7 +753,7 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
             .hash_version = 1,
             .snapshot_id = staged.SnapshotID,
             .parent_snapshot_id = staged.ParentID,
-            .rows_appended = static_cast<int64_t>(input.RowCount()),
+            .rows_appended = static_cast<int64_t>(input.GetRowCount()),
             .data_files_added = 1,
             .compressed_data_bytes_added = data.DataFile->file_size_in_bytes,
             .snapshot_created_at_us = SnapshotTimeUs(*snapshot, "IO_ERROR"),

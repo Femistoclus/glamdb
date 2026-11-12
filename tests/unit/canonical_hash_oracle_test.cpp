@@ -173,51 +173,51 @@ TEST(CanonicalHashOracle, HasherMatchesTheMaterializedEncoding)
     std::mt19937_64 random(11);
     for (int round = 0; round < 50; ++round) {
         Encoder encoder;
-        CanonicalHasher hasher;
+        TCanonicalHasher hasher;
         for (int step = 0; step < 400; ++step) {
             switch (random() % 6) {
                 case 0: {
                     const auto value = static_cast<uint8_t>(random());
                     encoder.Number(value);
-                    hasher.Number(value);
+                    hasher.AddNumber(value);
                     break;
                 }
                 case 1: {
                     const auto value = static_cast<uint16_t>(random());
                     encoder.Number(value);
-                    hasher.Number(value);
+                    hasher.AddNumber(value);
                     break;
                 }
                 case 2: {
                     const auto value = static_cast<uint32_t>(random());
                     encoder.Number(value);
-                    hasher.Number(value);
+                    hasher.AddNumber(value);
                     break;
                 }
                 case 3: {
                     const auto value = static_cast<int64_t>(random());
                     encoder.Number(value);
-                    hasher.Number(value);
+                    hasher.AddNumber(value);
                     break;
                 }
                 case 4: {
                     const std::string text(random() % (round % 2 == 0 ? 64 : 9000), static_cast<char>(random()));
                     encoder.Text(text);
-                    hasher.Text(text);
+                    hasher.AddText(text);
                     break;
                 }
                 default: {
                     const std::string bytes(random() % 4200, static_cast<char>(random()));
                     encoder.bytes += bytes;
-                    hasher.Bytes(bytes);
+                    hasher.AddBytes(bytes);
                     break;
                 }
             }
-            ASSERT_EQ(hasher.Size(), encoder.bytes.size());
+            ASSERT_EQ(hasher.GetSize(), encoder.bytes.size());
         }
-        EXPECT_EQ(hasher.Digest(), Sha256(encoder.bytes));
+        EXPECT_EQ(hasher.ComputeDigest(), Sha256(encoder.bytes));
     }
-    EXPECT_EQ(CanonicalHasher().Digest(), Sha256(""));
+    EXPECT_EQ(TCanonicalHasher().ComputeDigest(), Sha256(""));
 }
 
 TEST(CanonicalHashOracle, AllInputPathsMatchTheOracle)
@@ -249,20 +249,20 @@ TEST(CanonicalHashOracle, AllInputPathsMatchTheOracle)
         EXPECT_EQ(normalized->decoded_bytes, decoded);
         // The owned columns hold exactly what the writer batch built from the
         // normalized rows holds, and -0.0 is stored as +0.0.
-        ASSERT_NE(normalized->columns, nullptr);
+        ASSERT_NE(normalized->Columns, nullptr);
         EXPECT_TRUE(normalized->rows.empty());
-        EXPECT_EQ(normalized->RowCount(), rows.size());
+        EXPECT_EQ(normalized->GetRowCount(), rows.size());
         const auto expectedBatch = MakeRecordBatch(AllTypes, fromRows->rows);
         ASSERT_TRUE(expectedBatch);
-        EXPECT_TRUE(normalized->columns->Equals(**expectedBatch));
-        EXPECT_TRUE(normalized->columns->ValidateFull().ok());
-        const auto& floats = static_cast<const arrow::DoubleArray&>(*normalized->columns->column(4));
+        EXPECT_TRUE(normalized->Columns->Equals(**expectedBatch));
+        EXPECT_TRUE(normalized->Columns->ValidateFull().ok());
+        const auto& floats = static_cast<const arrow::DoubleArray&>(*normalized->Columns->column(4));
         for (int64_t row = 0; row < floats.length(); ++row) {
             if (floats.IsValid(row) && floats.Value(row) == 0) {
                 EXPECT_FALSE(std::signbit(floats.Value(row))) << row;
             }
         }
-        EXPECT_EQ(EstimateRecordBatchBytes(AllTypes, *normalized->columns),
+        EXPECT_EQ(EstimateRecordBatchBytes(AllTypes, *normalized->Columns),
             EstimateRecordBatchBytes(AllTypes, fromRows->rows));
     }
 }
