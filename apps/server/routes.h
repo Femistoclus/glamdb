@@ -25,7 +25,8 @@ private:
     NTransport::TResponse RoutePrepared(const NTransport::TRequest& request,
         const std::string& path,
         const std::map<std::string, std::string>& query,
-        const NTransport::TJson& body) const;
+        const NTransport::TJson& body,
+        const NTransport::TJsonRows* rows = nullptr) const;
     NTransport::TResponse StaticFile(const std::string& path) const;
     std::shared_ptr<ResourceOwner> Resources_;
     std::shared_ptr<TScans> Scans_;
