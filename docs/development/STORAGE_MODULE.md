@@ -181,8 +181,13 @@ through history. Unreferenced staging files remain charged to physical capacity.
 The latest list is bounded by target-sized bins and fewer than 100 small
 manifests under the finite metadata profile. For the default capacity workload,
 the current membership fits one target bin, so the latest list cycles from
-one through 99 manifests; beyond roughly 20,000 one-row files per collection
-(two-column schema) frozen bins accumulate, one per bin. With every snapshot retained, merging every K appends
+one through 99 manifests. Beyond about 22,000 one-row files per collection
+(two-column schema; 6.4 MiB decoded per merged manifest) frozen merged
+manifests accumulate in the list: measured 64 current manifests at 40,000
+appends, against the previous hard failure at 29,502. The next binding budget
+is then the configured one, for example the recovery workspace envelope
+(snapshots + retained manifests + data files at most `max_recovery_workspace_bytes`
+/ 8 KiB, about 32,500 one-row appends at 512 MiB). With every snapshot retained, merging every K appends
 retains O(N²/K) file descriptors in merged manifests in this single-bin regime,
 while retained manifest-list entries become O(KN). Root JSON still rewrites
 retained history; snapshot expiration and #168 remain separate work. See

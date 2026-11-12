@@ -9,7 +9,9 @@
 //   Opens the existing store in this (fresh) process and prints the open time.
 //   `full` requests the full verification path instead of the checkpoint.
 
+#include "core/backend/local_storage_backend.h"
 #include "core/engine/engine_factory.h"
+#include "core/storage/base_state.h"
 #include "storage/engine.h"
 #include "storage/resources.h"
 
@@ -98,7 +100,9 @@ Limits BenchLimits()
     limits.history.max_manifest_list_bytes = 64LL << 30;
     limits.history.max_footer_bytes = 4LL << 30;
     limits.history.max_commit_bytes = 128LL << 20;
-    limits.history.max_recovery_workspace_bytes = 512LL << 20;
+    // Recovery admits Snapshots + Manifests + DataFiles <= workspace / 8 KiB;
+    // with about one retained manifest per append 512 MiB ends near 32,500.
+    limits.history.max_recovery_workspace_bytes = 1LL << 30;
     return limits;
 }
 
@@ -144,14 +148,42 @@ std::filesystem::path CurrentRoot(const std::filesystem::path& root)
     return newest;
 }
 
+// The production backend, as OpenExisting creates it, kept for inspection.
+std::shared_ptr<detail::TLocalStorageBackend> Backend;
+
 std::shared_ptr<Engine> OpenStore(const std::filesystem::path& root, bool full, double& ms)
 {
     OpenStoreRequest request{root.string(), StoreID, "local-delete-extra-v1", BenchLimits(), BenchResources()};
     request.verify_full = full;
     const auto started = TClock::now();
-    auto engine = Take(OpenExisting(request));
+    auto engine = Take(detail::EngineFactory::OpenWith(request,
+        [&](const std::filesystem::path& path,
+            const StoreInfo& info) -> Result<std::shared_ptr<detail::StorageBackend>> {
+            detail::TLocalStorageOptions options;
+            options.Resources = request.resources;
+            options.ApplyHistoryLimits(request.limits.history);
+            auto backend = detail::TLocalStorageBackend::Open(path, info, std::move(options));
+            if (!backend) {
+                return std::unexpected(backend.error());
+            }
+            Backend = *backend;
+            return std::shared_ptr<detail::StorageBackend>(Backend);
+        }));
     ms = ElapsedMs(started);
     return engine;
+}
+
+// Current manifest count and the largest decoded manifest, from the verified
+// generation the open installed.
+std::pair<size_t, uint64_t> CurrentManifests(Engine& engine)
+{
+    const auto cursor = Take(engine.Scan({.collection_id = CollectionID, .limit = 0}));
+    const auto state = Take(Backend->VerifiedScanState(cursor->Info().identity));
+    uint64_t largest = 0;
+    for (const auto bytes : state->CurrentManifestDecodedBytes) {
+        largest = std::max(largest, bytes);
+    }
+    return {state->CurrentManifests.size(), largest};
 }
 
 int Append(const std::filesystem::path& root, int64_t hot, int64_t target)
@@ -213,10 +245,15 @@ int Open(const std::filesystem::path& root, bool full)
     double ms = 0;
     auto engine = OpenStore(root, full, ms);
     const auto status = Take(engine->GetSnapshotArchive(CollectionID));
+    const auto [manifests, largestDecoded] = CurrentManifests(*engine);
     Require(engine->Shutdown(std::chrono::seconds(60)).has_value(), "shutdown failed");
+    engine.reset();
+    Backend.reset();
     std::cout << TJson{{"command", "open"},
                      {"full", full},
                      {"open_ms", ms},
+                     {"current_manifests", manifests},
+                     {"largest_manifest_decoded_bytes", largestDecoded},
                      {"root_snapshots", status.root_snapshots},
                      {"archived_snapshots", status.archived_snapshots},
                      {"rss_peak_bytes", PeakRSS()}}
