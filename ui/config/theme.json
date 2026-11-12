@@ -2,7 +2,7 @@
   "version": 1,
   "brand": {
     "name": "GlamDB",
-    "wordmark": "assets/brand/wordmark.png",
+    "wordmark": "assets/brand/wordmark-transparent.png",
     "mark": "assets/brand/mark.png",
     "eyebrow": "THE DATA WORKBENCH",
     "tagline": "Your data. Your world."

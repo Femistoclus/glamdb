@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="ui/assets/brand/wordmark.png" alt="GlamDB" width="720">
+  <img src="ui/assets/brand/wordmark-transparent.png" alt="GlamDB" width="720">
 </p>
 
 # GlamDB
