@@ -285,6 +285,102 @@ TEST_F(CatalogTest, LargeOperationInventoryReopensAndRejectsLowerLimitsWithoutDr
     EXPECT_EQ(catalog->Operations().size(), 8193);
 }
 
+TEST_F(CatalogTest, OperationCapacityStaysExactAcrossFailuresRollbacksAndReopens)
+{
+    CreateCollection();
+    const std::string other = "00000000-0000-0000-0000-0000000000b2";
+    catalog->PublishCreate(
+        {other, "other", "00000000-0000-0000-0000-0000000000b3", SchemaSpec{{{"n", FieldType::Int64, true}}}, 0, {}},
+        [](std::string_view) -> Status {
+            return {};
+        },
+        [&] {
+            return catalog->InsertTable("columnar", "other", Location("other"));
+        });
+    const auto path = temporary.path / "catalog.sqlite";
+    Limits limits;
+    limits.max_operations = 4;
+    catalog.reset();
+    catalog = DurableSqliteCatalogStore::Open(path, info, limits);
+    const auto id = [](int index) {
+        return "00000000-0000-4000-8000-00000000000" + std::to_string(index);
+    };
+    const auto bind = [&](const std::string& collection, int index) {
+        BoundOperation bound{collection,
+            id(index),
+            std::string(64, 'a'),
+            1,
+            catalog->Base(collection),
+            test::attempt_id};
+        catalog->BindOperation(bound);
+        return bound;
+    };
+    const auto refusal = [&](const std::string& collection, int index) -> std::string {
+        try {
+            bind(collection, index);
+            return "BOUND";
+        } catch (const Failure& error) {
+            return error.detail.code;
+        }
+    };
+    const auto first = Bind();
+    const auto failed = bind(other, 2);
+    // A failed bound operation keeps its permanent slot.
+    catalog->RecordFailure(failed,
+        {failed.operation_id,
+            CommitDisposition::DefinitelyNotCommitted,
+            CommitPhase::Data,
+            std::nullopt,
+            ErrorDetail{"IO_ERROR", "disk full", RetryHint::NewOperationId},
+            std::nullopt});
+    // Rolled-back transactions consume nothing.
+    EXPECT_EQ(refusal(other, 2), "ALREADY_EXISTS");
+    EXPECT_THROW(catalog->PublishAppend(
+                     first,
+                     Receipt(),
+                     [](std::string_view) -> Status {
+                         return {};
+                     },
+                     []() -> iceberg::Status {
+                         return iceberg::IOError("abort publication");
+                     }),
+        Failure);
+    bind(other, 3);
+    bind(std::string(collection_id), 4);
+    EXPECT_EQ(refusal(other, 5), "RESOURCE_EXHAUSTED");
+    EXPECT_FALSE(catalog->FindOperation(other, id(5)));
+    catalog->Reopen();
+    EXPECT_EQ(refusal(std::string(collection_id), 5), "RESOURCE_EXHAUSTED");
+    // Reopen exactly at the limit, then below and above it.
+    catalog.reset();
+    ASSERT_NO_THROW(catalog = DurableSqliteCatalogStore::Open(path, info, limits));
+    EXPECT_EQ(catalog->Operations().size(), 4U);
+    EXPECT_EQ(refusal(other, 5), "RESOURCE_EXHAUSTED");
+    catalog.reset();
+    limits.max_operations = 3;
+    try {
+        catalog = DurableSqliteCatalogStore::Open(path, info, limits);
+        FAIL() << "lower operation budget accepted";
+    } catch (const Failure& error) {
+        EXPECT_EQ(error.detail.code, "CONFIG_TOO_SMALL");
+    }
+    limits.max_operations = 6;
+    catalog = DurableSqliteCatalogStore::Open(path, info, limits);
+    bind(other, 5);
+    catalog.reset();
+    // Rows written by another connection while the catalog is closed count on open.
+    Database raw;
+    raw.Open(path, SQLITE_OPEN_READWRITE, {});
+    raw.Execute("INSERT INTO operations SELECT collection_id,?,payload_hash,hash_version,state,base_identity,"
+                "attempt_id,receipt_version,outcome_blob FROM operations WHERE operation_id=?",
+        {id(6), id(5)});
+    raw.Close();
+    catalog = DurableSqliteCatalogStore::Open(path, info, limits);
+    EXPECT_EQ(refusal(std::string(collection_id), 7), "RESOURCE_EXHAUSTED");
+    EXPECT_EQ(catalog->Operations().size(), 6U);
+    catalog->ValidateInventory();
+}
+
 TEST_F(CatalogTest, IncompatibleVersionOrMissingSchemaNeverReinitializes)
 {
     catalog.reset();

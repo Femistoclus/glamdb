@@ -72,6 +72,67 @@ TEST_F(CoordinatorFaultTest, LostOuterCommitResultBlocksWritersAndFenceFailureKe
     EXPECT_EQ(backend->prepares, 1);
 }
 
+TEST(CoordinatorCapacityFaultTest, LostCommitResultsKeepTheOperationCountExact)
+{
+    test::JournalFaultVfs vfs;
+    test::TempDir temporary;
+    const auto root = temporary.path / "store";
+    auto backend = std::make_shared<test::FakeStorage>(root);
+    Limits limits;
+    limits.max_operations = 3;
+    auto created = detail::EngineFactory::Create({test::store_id, root.string(), "local-delete-extra-v1", limits},
+        backend,
+        vfs.Name());
+    ASSERT_TRUE(created);
+    auto engine = std::move(*created);
+    ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", SchemaSpec{{{"n", FieldType::Int64, true}}}})
+                  .disposition,
+        CommitDisposition::Committed);
+    const auto id = [](int index) {
+        return "00000000-0000-4000-8000-00000000000" + std::to_string(index);
+    };
+    const auto append = [&](int index) {
+        return engine->AppendDurable({test::collection_id, id(index), {}, {test::Batch()}});
+    };
+    const auto disposition = [&](int index) {
+        const auto found = engine->FindAppendOutcome(test::collection_id, id(index));
+        return found && found->has_value() ? std::optional(found->value().disposition) : std::nullopt;
+    };
+    ASSERT_EQ(append(1).disposition, CommitDisposition::Committed);
+    vfs.Arm(1, true); // the binding commits; its result is lost
+    ASSERT_EQ(append(2).disposition, CommitDisposition::CommitUnknown);
+    ASSERT_TRUE(engine->Reconcile());
+    EXPECT_EQ(disposition(2), CommitDisposition::DefinitelyNotCommitted);
+    vfs.Arm(1, false); // the binding rolls back; its result is lost
+    ASSERT_EQ(append(3).disposition, CommitDisposition::CommitUnknown);
+    ASSERT_TRUE(engine->Reconcile());
+    EXPECT_EQ(disposition(3), std::nullopt);
+    vfs.Arm(2, true); // the publication commits; its result is lost
+    ASSERT_EQ(append(4).disposition, CommitDisposition::CommitUnknown);
+    ASSERT_TRUE(engine->Reconcile());
+    EXPECT_EQ(disposition(4), CommitDisposition::Committed);
+    vfs.Disarm();
+    // Operations 1, 2 and 4 hold the three permanent slots.
+    const auto refused = append(5);
+    EXPECT_EQ(refused.disposition, CommitDisposition::DefinitelyNotCommitted);
+    EXPECT_EQ(test::Present(refused.error).code, "RESOURCE_EXHAUSTED");
+    EXPECT_EQ(disposition(5), std::nullopt);
+    ASSERT_TRUE(engine->Shutdown(std::chrono::seconds(5)));
+    engine.reset();
+    auto reopened =
+        detail::EngineFactory::Open({root.string(), test::store_id, "local-delete-extra-v1", limits}, backend);
+    ASSERT_TRUE(reopened) << reopened.error().code;
+    EXPECT_EQ(test::Present((*reopened)->AppendDurable({test::collection_id, id(5), {}, {test::Batch()}}).error).code,
+        "RESOURCE_EXHAUSTED");
+    ASSERT_TRUE((*reopened)->Shutdown(std::chrono::seconds(5)));
+    reopened->reset();
+    limits.max_operations = 2;
+    const auto smaller =
+        detail::EngineFactory::Open({root.string(), test::store_id, "local-delete-extra-v1", limits}, backend);
+    ASSERT_FALSE(smaller);
+    EXPECT_EQ(smaller.error().code, "CONFIG_TOO_SMALL");
+}
+
 TEST_F(CoordinatorFaultTest, OutcomeLookupDoesNotWaitForAnotherPublication)
 {
     const auto first = engine->AppendDurable(Request());

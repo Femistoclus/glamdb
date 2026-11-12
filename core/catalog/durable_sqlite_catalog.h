@@ -139,6 +139,7 @@ private:
     void ValidateHeader();
     void Transaction(const std::function<void()>& body);
     void CheckCapacity(bool operation);
+    int64_t OperationCount();
     void CheckFreeBytes();
     bool HasWriteSettings();
     void EnsureWriteSettings();
@@ -164,6 +165,10 @@ private:
     bool transaction_ = false;
     bool rollback_only_ = false;
     bool uncertain_ = false;
+    // Exact row count of `operations`. The store has one owning process, so a
+    // count derived on this connection stays exact while committed bindings
+    // increment it; it is empty whenever that cannot be proven.
+    std::optional<int64_t> operation_count_;
 };
 
 } // namespace glamdb::detail
