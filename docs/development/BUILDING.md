@@ -216,6 +216,10 @@ storage and `BUILD_TESTING`, builds all native test targets, and runs CTest with
 label/name filters. Installed-consumer tests remain included because the CI
 toolchain propagates instrumentation to consumer builds too.
 
+Every profile installs the local Python SDK and workload package because database
+drop tests exercise `bench tpch clean`. Optional load-generation dependencies and
+the acceptance browser checks remain specific to the normal profile.
+
 The normal job additionally runs three named contours from `scripts/ci-native.sh`:
 `vertical` (`ctest -L vertical`, the public API over the real storage backend),
 `nostorage` (a separate `GLAMDB_BUILD_STORAGE=OFF`, `GLAMDB_IO_ONLY=OFF` build and

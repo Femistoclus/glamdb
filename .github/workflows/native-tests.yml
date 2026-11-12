@@ -57,12 +57,11 @@ jobs:
           python -m venv .venv
           .venv/bin/python -m pip install --disable-pip-version-check \
             --require-hashes --only-binary=:all: --no-deps -r requirements-native-ci.txt
-          .venv/bin/python -m pip install --no-deps --no-build-isolation -e sdk/python
-          .venv/bin/python -c 'import glamdb_sdk, httpx, pyarrow, jsonschema'
+          .venv/bin/python -m pip install --no-deps --no-build-isolation -e sdk/python -e tools/workload
+          .venv/bin/python -c 'import glamdb_sdk, glamdb_workload.tpch, httpx, pyarrow, jsonschema'
           if [[ "$PROFILE" == normal ]]; then
             .venv/bin/python -m pip install --disable-pip-version-check \
               --require-hashes --only-binary=:all: --no-deps -r tools/workload/requirements.txt
-            .venv/bin/python -m pip install --no-deps --no-build-isolation -e tools/workload
             .venv/bin/python -m pip install --disable-pip-version-check \
               --require-hashes --only-binary=:all: --no-deps -r tools/acceptance/requirements.txt
           fi

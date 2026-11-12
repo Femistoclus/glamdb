@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -99,7 +100,22 @@ class NativeAcceptanceRunner(unittest.TestCase):
         result = self.run_script('ci-native.sh', 'asan', 'test')
         self.assertEqual(result.returncode, 23, result.stdout + result.stderr)
         self.assertEqual(len(self.records()), 1)
-        self.assertIn('import glamdb_sdk, httpx, pyarrow, jsonschema', self.records()[0]['args'])
+        self.assertIn('import glamdb_sdk, glamdb_workload.tpch, httpx, pyarrow, jsonschema', self.records()[0]['args'])
+
+    def test_missing_workload_dependency_fails_before_ctest(self):
+        modules = self.root / 'modules'
+        modules.mkdir()
+        for name in ('glamdb_sdk', 'httpx', 'pyarrow', 'jsonschema'):
+            (modules / (name + '.py')).touch()
+        python = self.root / 'bin/python'
+        python.write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable) + ' -S "$@"\n')
+        python.chmod(0o755)
+        self.env.update(GLAMDB_NATIVE_PYTHON=str(python), PYTHONPATH=str(modules))
+        self.fake('ctest')
+        result = self.run_script('ci-native.sh', 'ubsan', 'test')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("No module named 'glamdb_workload'", result.stdout + result.stderr)
+        self.assertFalse(self.log.exists(), 'CTest must not start without the cleanup dependency')
 
     def test_msan_external_client_does_not_inherit_sanitized_toolchain(self):
         self.fake('cmake')
