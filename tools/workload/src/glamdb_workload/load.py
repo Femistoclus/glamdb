@@ -7,7 +7,49 @@ monkey.patch_all()
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
+import time
+
+
+def spawn_workers(config, run):
+    """Start `processes` fresh worker interpreters for a local master.
+
+    Fresh interpreters rather than Locust's fork-based --processes: forked
+    children are not safe with macOS system frameworks (the proxy lookup in
+    HTTPX crashes after fork). Each worker joins through the ordinary
+    distributed path and owns its journal and worker report.
+    """
+    workers = []
+    for index in range(config.get("processes") or 0):
+        worker = dict(config, master=False, worker=True, processes=None)
+        path = run / ("launch-process-" + str(index) + ".json")
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(worker), encoding="utf-8")
+        temporary.replace(path)
+        workers.append(
+            subprocess.Popen(
+                [sys.executable, "-m", "glamdb_workload.load", str(path)],
+                stdin=subprocess.DEVNULL,
+            )
+        )
+    return workers
+
+
+def reap_workers(workers, grace):
+    """Workers quit after the master's final report; never leave orphans."""
+    until = time.monotonic() + grace
+    for process in workers:
+        try:
+            process.wait(max(0.0, until - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            process.terminate()
+    for process in workers:
+        try:
+            process.wait(5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
 
 
 def main():
@@ -67,7 +109,11 @@ def main():
     sys.argv = options
     from locust.main import main as locust_main
 
-    locust_main()
+    workers = spawn_workers(config, run) if not config.get("worker") else []
+    try:
+        locust_main()
+    finally:
+        reap_workers(workers, config["stop_timeout"] + 5)
 
 
 if __name__ == "__main__":
