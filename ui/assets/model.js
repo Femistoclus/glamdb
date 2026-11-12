@@ -269,6 +269,224 @@ export function validateQueryCapabilities(capabilities, body) {
     visit(body.predicate);
 }
 
+// Parquet write settings choose the value compression of data files written by
+// later appends. They are unrelated to HTTP Content-Encoding.
+export const PARQUET_CODECS = ['uncompressed', 'snappy', 'gzip', 'lz4_raw', 'zstd'];
+const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const isInt32 = (value) => Number.isInteger(value) && value >= -(2 ** 31) && value < 2 ** 31;
+// Settings reported by a server may carry newer options this workbench does
+// not know: unset (null) ones are ignored, set ones cannot be represented.
+function settingsObject(value, keys, label, reported = false) {
+    if (!isObject(value))
+        throw new Error(`${label} must be an object with only ${keys.join(', ')}`);
+    const unknown = Object.keys(value).filter((key) => !keys.includes(key));
+    if (unknown.length && !reported)
+        throw new Error(`${label} must be an object with only ${keys.join(', ')}`);
+    if (unknown.some((key) => value[key] !== null))
+        throw new Error(
+            `${label} sets options this workbench does not support: ${unknown.join(', ')}`,
+        );
+    return value;
+}
+function canonicalCompression(value, label, reported = false) {
+    if (value === null || value === undefined) return null;
+    settingsObject(value, ['codec', 'level'], label, reported);
+    if (!PARQUET_CODECS.includes(value.codec))
+        throw new Error(`${label} codec must be one of ${PARQUET_CODECS.join(', ')}`);
+    const level = value.level ?? null;
+    if (level !== null && !isInt32(level))
+        throw new Error(`${label} level must be an integer or null`);
+    return { codec: value.codec, level };
+}
+// Same canonical form as the server and Python SDK: columns in schema order,
+// explicit null level (codec default) and null compression when unset.
+// `reported` accepts server-reported settings with unknown unset options.
+export function canonicalWriteSettings(value, schema = null, { reported = false } = {}) {
+    const settings =
+        value == null ? {} : settingsObject(value, ['parquet'], 'Write settings', reported);
+    const parquet =
+        settings.parquet == null
+            ? {}
+            : settingsObject(
+                  settings.parquet,
+                  ['compression', 'columns'],
+                  'Parquet settings',
+                  reported,
+              );
+    const compression = canonicalCompression(parquet.compression, 'Parquet compression', reported);
+    const columns = parquet.columns ?? [];
+    if (!Array.isArray(columns) || columns.length > 64)
+        throw new Error('Parquet column settings must be an array of at most 64 entries');
+    const order = schema ? schema.fields.map((field) => field.name) : null;
+    const seen = new Map();
+    for (const item of columns) {
+        settingsObject(item, ['field', 'compression'], 'Parquet column setting', reported);
+        const field = item.field;
+        if (typeof field !== 'string' || !field)
+            throw new Error('Parquet column setting requires a field name');
+        if (order && !order.includes(field))
+            throw new Error(`Parquet column setting names an unknown column ${field}`);
+        if (seen.has(field)) throw new Error(`Parquet column setting repeats ${field}`);
+        const columnCompression = canonicalCompression(
+            item.compression,
+            `Parquet compression of ${field}`,
+            reported,
+        );
+        if (!columnCompression)
+            throw new Error(`Parquet column setting for ${field} must choose a codec`);
+        seen.set(field, { field, compression: columnCompression });
+    }
+    const ordered = [...seen.values()];
+    if (order) ordered.sort((a, b) => order.indexOf(a.field) - order.indexOf(b.field));
+    return { parquet: { compression, columns: ordered } };
+}
+// Compares settings in canonical form; either side may be server-reported.
+export const sameWriteSettings = (left, right, schema = null) =>
+    JSON.stringify(canonicalWriteSettings(left, schema, { reported: true })) ===
+    JSON.stringify(canonicalWriteSettings(right, schema, { reported: true }));
+export function writeSettingsVersion(value) {
+    if (
+        typeof value !== 'string' ||
+        !/^(?:0|[1-9]\d{0,18})$/.test(value) ||
+        BigInt(value) >= 1n << 63n
+    )
+        throw new Error('Write settings version must be a non-negative decimal string');
+    return value;
+}
+// Only a server advertising the feature and a valid codec list enables the
+// controls; the mock and the public demo never send write settings.
+export function parquetCapabilities(capabilities) {
+    const parquet = capabilities?.parquet;
+    if (capabilities?.features?.write_settings !== true || !isObject(parquet)) return null;
+    if (!Array.isArray(parquet.codecs)) return null;
+    const codecs = [];
+    for (const item of parquet.codecs) {
+        if (!isObject(item) || !PARQUET_CODECS.includes(item.codec)) continue;
+        const level = item.level;
+        if (level === null) codecs.push({ codec: item.codec, level: null });
+        else if (
+            isObject(level) &&
+            [level.min, level.max, level.default].every(isInt32) &&
+            level.min <= level.default &&
+            level.default <= level.max
+        )
+            codecs.push({
+                codec: item.codec,
+                level: { min: level.min, max: level.max, default: level.default },
+            });
+    }
+    if (!codecs.length) return null;
+    let defaultCompression = null;
+    try {
+        defaultCompression = canonicalCompression(parquet.default_compression, 'Default');
+    } catch {
+        /* An unknown default is shown as the server default without a codec name. */
+    }
+    return { default_compression: defaultCompression, codecs };
+}
+const codecLevels = (parquet, codec) =>
+    parquet.codecs.find((item) => item.codec === codec)?.level ?? null;
+function chosenCompression(parquet, choice, label) {
+    const codec = choice?.codec ?? '';
+    const text = String(choice?.level ?? '').trim();
+    if (!codec) {
+        if (text) throw new Error(`${label}: choose a codec before its level`);
+        return null;
+    }
+    if (!parquet.codecs.some((item) => item.codec === codec))
+        throw new Error(`${label}: ${codec} is not available on this server`);
+    if (!text) return { codec, level: null };
+    const range = codecLevels(parquet, codec);
+    if (!range) throw new Error(`${label}: ${codec} has no compression level`);
+    if (!/^-?\d+$/.test(text) || Number(text) < range.min || Number(text) > range.max)
+        throw new Error(`${label}: ${codec} level must be ${range.min}–${range.max}`);
+    return { codec, level: Number(text) };
+}
+// Build wire settings from form choices ({codec, level} strings, '' = unset).
+// Returns null when nothing is chosen, so create can omit write_settings.
+export function writeSettingsFromChoices(parquet, collectionChoice, columnChoices = []) {
+    const compression = chosenCompression(parquet, collectionChoice, 'Parquet compression');
+    const columns = [];
+    for (const choice of columnChoices) {
+        const chosen = chosenCompression(parquet, choice, `Parquet compression of ${choice.field}`);
+        if (chosen) columns.push({ field: choice.field, compression: chosen });
+    }
+    return compression || columns.length ? { parquet: { compression, columns } } : null;
+}
+export function describeCompression(compression, parquet = null) {
+    if (!compression) {
+        const fallback = parquet?.default_compression;
+        return fallback
+            ? `Server default (${describeCompression(fallback, parquet)})`
+            : 'Server default';
+    }
+    if (compression.level !== null) return `${compression.codec} · level ${compression.level}`;
+    const range = parquet ? codecLevels(parquet, compression.codec) : null;
+    return range ? `${compression.codec} · default level ${range.default}` : compression.codec;
+}
+// Write settings are part of a collection definition. Creation stores
+// non-default settings as version "1"; defaults store nothing (version "0");
+// every update adds one. A create response is authoritative: the server
+// compared the settings the collection was created with. A resolved (GET)
+// collection only shows current settings, which prove the creation settings
+// only while none were ever stored; otherwise the create stays unresolved and
+// only repeating the original request can confirm it.
+export function verifyCreatedCollection(created, body, { authoritative = true } = {}) {
+    if (
+        created?.collection_id !== body.collection_id ||
+        created.name !== body.name ||
+        !Array.isArray(created.schema?.fields) ||
+        schemaSignature(created.schema) !== schemaSignature(body.schema)
+    )
+        throw new Error(
+            'Resolved collection identity or schema differs from the original create request. Keep its UUID for recovery.',
+        );
+    const reported =
+        Object.hasOwn(created, 'write_settings') ||
+        Object.hasOwn(created, 'write_settings_version');
+    if (!reported) {
+        if (body.write_settings !== undefined)
+            throw new Error(
+                'The server did not report the requested Parquet write settings. Keep its UUID for recovery.',
+            );
+        return created;
+    }
+    let matches;
+    let version = 0n;
+    try {
+        version = BigInt(writeSettingsVersion(created.write_settings_version));
+        const actual = JSON.stringify(
+            canonicalWriteSettings(created.write_settings, body.schema, { reported: true }),
+        );
+        const expected = JSON.stringify(
+            canonicalWriteSettings(body.write_settings ?? null, body.schema),
+        );
+        const createdVersion = expected === JSON.stringify(canonicalWriteSettings(null)) ? 0n : 1n;
+        matches =
+            version >= createdVersion &&
+            (version === 0n || !authoritative || version > createdVersion || actual === expected) &&
+            (version !== 0n || actual === expected);
+    } catch {
+        matches = false;
+    }
+    if (!matches)
+        throw new Error(
+            'Resolved collection Parquet write settings differ from the original create request. Keep its UUID for recovery.',
+        );
+    if (!authoritative && version !== 0n)
+        throw new Error(
+            'Current Parquet write settings cannot prove the settings this collection was created with. Retry the same create request to confirm it.',
+        );
+    return created;
+}
+// The frozen create identity: name, schema and optional write settings.
+export const creationFingerprint = (body) =>
+    JSON.stringify({
+        name: body.name,
+        schema: body.schema,
+        ...(body.write_settings === undefined ? {} : { write_settings: body.write_settings }),
+    });
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TYPES = new Set(['string', 'int64', 'float64', 'bool', 'timestamp_us_utc']);
 function requirePending(condition, message = 'Invalid pending request file') {
@@ -319,6 +537,16 @@ export function schemaSignature(schema) {
         })),
     );
 }
+// The workbench sends only canonical settings; a retry must send exactly them.
+function pendingWriteSettings(body) {
+    let canonical;
+    try {
+        canonical = canonicalWriteSettings(body.write_settings, body.schema);
+    } catch {
+        requirePending(false);
+    }
+    requirePending(JSON.stringify(canonical) === JSON.stringify(body.write_settings));
+}
 function pendingScope(scope) {
     pendingObject(scope, ['server_url', 'database_id', 'store_id', 'backend', 'mock']);
     const url = new URL(scope.server_url);
@@ -351,13 +579,14 @@ function validatePending(value) {
         requirePending(
             !Object.hasOwn(request, 'operation_id') && !Object.hasOwn(request, 'schema'),
         );
-        pendingObject(body, ['collection_id', 'name', 'schema']);
+        pendingObject(body, ['collection_id', 'name', 'schema', 'write_settings']);
         requirePending(
             body.collection_id === request.collection_id &&
                 typeof body.name === 'string' &&
                 /^[a-z][a-z0-9_]{0,62}$/.test(body.name),
         );
         pendingSchema(body.schema);
+        if (Object.hasOwn(body, 'write_settings')) pendingWriteSettings(body);
     } else {
         requirePending(typeof request.operation_id === 'string' && UUID.test(request.operation_id));
         pendingSchema(request.schema);
@@ -407,10 +636,7 @@ export function importPending(value, currentScope) {
     const request = validated.request,
         body = structuredClone(request.body);
     if (request.kind === 'create')
-        return {
-            kind: 'create',
-            draft: { body, fingerprint: JSON.stringify({ name: body.name, schema: body.schema }) },
-        };
+        return { kind: 'create', draft: { body, fingerprint: creationFingerprint(body) } };
     return {
         kind: 'append',
         draft: {

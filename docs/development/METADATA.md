@@ -54,7 +54,9 @@ Only the header, trailer and footer are read; data pages are not decoded.
 
 Each row group reports its ordinal, rows, summed compressed column bytes,
 uncompressed bytes and column chunks. Columns include field ID, values, optional
-null count/bounds, compression, page offsets and index presence. Column bounds
+null count/bounds, compression (the codec the footer records, e.g. `zstd`,
+`lz4_raw`; independent of the collection's current write settings), page
+offsets and index presence. Column bounds
 retain Parquet plain encoding, distinct from Iceberg manifest bounds. Missing
 statistics stay null; an all-null column need not have bounds. Index presence
 does not imply scan pruning. These are stored metadata observations, not a

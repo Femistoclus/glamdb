@@ -10,6 +10,98 @@ from glamdb_sdk import Client, IntegrityError, ProtocolError
 CID = '11111111-2222-4333-8444-555555555555'
 
 
+def test_first_arrow_page_must_match_opened_snapshot_and_cancel_on_mismatch():
+    cancelled = []
+    responses = []
+    def handle(request):
+        if request.url.path.endswith('/open'):
+            return httpx.Response(200, json={'cursor': 'first', 'snapshot_id': '2'})
+        if request.url.path.endswith('/cancel'):
+            cancelled.append(json.loads(request.content)['cursor'])
+            return httpx.Response(200, json={})
+        response = arrow_response('next')
+        responses.append(response)
+        return response
+    with Client('http://example.test', 'secret', transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(ProtocolError, match='snapshot'):
+            client.scan_batches(CID)
+        assert all(response.is_closed for response in responses)
+    assert cancelled == ['next']
+
+
+def test_paged_consumer_error_survives_transport_close_failure():
+    cancelled = []
+    class CloseFailure(httpx.ByteStream):
+        def close(self):
+            raise RuntimeError('transport close failed')
+    def handle(request):
+        if request.url.path.endswith('/open'):
+            return httpx.Response(200, json={'cursor': 'first'})
+        if request.url.path.endswith('/cancel'):
+            cancelled.append(json.loads(request.content)['cursor'])
+            return httpx.Response(200, json={})
+        response = arrow_response('next')
+        response.stream = CloseFailure(b''.join(response.stream))
+        return response
+    with Client('http://example.test', 'secret', transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(ValueError, match='consumer failed'):
+            with client.scan_batches(CID) as stream:
+                retained = next(stream)
+                raise ValueError('consumer failed')
+        assert stream.closed and stream.integrity == 'not_complete'
+        assert retained.to_pylist() == [{'key': 'a'}]
+    assert cancelled == ['next']
+
+
+def test_client_context_preserves_consumer_error_while_closing_active_stream():
+    class CloseFailure(httpx.ByteStream):
+        def close(self):
+            raise RuntimeError('transport close failed')
+    def handle(request):
+        if request.url.path.endswith('/open'):
+            return httpx.Response(404, json={'error': {'code': 'ROUTE_NOT_FOUND', 'message': 'legacy'}})
+        response = arrow_response(None)
+        response.stream = CloseFailure(b''.join(response.stream))
+        return response
+    with pytest.raises(ValueError, match='consumer failed'):
+        with Client('http://example.test', 'secret', transport=httpx.MockTransport(handle)) as client:
+            stream = client.scan_batches(CID)
+            retained = next(stream)
+            raise ValueError('consumer failed')
+    assert stream.closed and stream.integrity == 'not_complete'
+    assert retained.to_pylist() == [{'key': 'a'}]
+
+
+def test_changed_later_page_preserves_view_error_when_transport_close_fails():
+    cancelled = []
+    bodies = []
+    class CloseFailure(httpx.ByteStream):
+        def close(self):
+            raise RuntimeError('transport close failed')
+    def handle(request):
+        if request.url.path.endswith('/open'):
+            return httpx.Response(200, json={'cursor': 'first'})
+        if request.url.path.endswith('/cancel'):
+            cancelled.append(json.loads(request.content)['cursor'])
+            return httpx.Response(200, json={})
+        response = arrow_response('next' if not bodies else None)
+        if bodies:
+            response.headers['x-glamdb-snapshot-id'] = '2'
+            response.stream = CloseFailure(b''.join(response.stream))
+        bodies.append(response)
+        return response
+    with Client('http://example.test', 'secret', transport=httpx.MockTransport(handle)) as client:
+        stream = client.scan_batches(CID)
+        retained = next(stream)
+        for _ in range(2):
+            with pytest.raises(ProtocolError, match='view changed'):
+                next(stream)
+        assert stream.closed and stream.integrity == 'not_complete'
+        assert all(body.is_closed for body in bodies)
+    assert cancelled == ['next']
+    assert retained.to_pylist() == [{'key': 'a'}]
+
+
 def arrow_response(cursor, valid=True):
     sink = pa.BufferOutputStream()
     schema = pa.schema([pa.field('key', pa.string(), nullable=False)])

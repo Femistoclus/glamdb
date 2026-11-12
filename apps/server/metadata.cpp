@@ -2,6 +2,7 @@
 #include "apps/server/scans.h"
 
 #include "apps/transport/outcome_json.h"
+#include "core/api/write_settings.h"
 #include "core/scan/predicate.h"
 
 #include <openssl/rand.h>
@@ -85,16 +86,48 @@ std::string Token()
 EngineCapabilities InstalledCapabilities()
 {
 #if GLAMDB_HTTP_STORAGE
-    return {BackendKind::LocalStorage, true, true, true, false, false, false};
+    return {.backend = BackendKind::LocalStorage,
+        .append = true,
+        .scan = true,
+        .metadata = true,
+        .write_settings = true,
+        .parquet_codecs = detail::ParquetCodecCapabilities()};
 #else
     return {};
 #endif
 }
 
+namespace {
+TJson CompressionJson(const ParquetCompression& compression)
+{
+    return {{"codec", detail::CodecName(compression.codec)},
+        {"level", compression.level ? TJson(*compression.level) : TJson(nullptr)}};
+}
+
+// Parquet value compression of data files, not HTTP content coding.
+TJson ParquetJson(const EngineCapabilities& capabilities)
+{
+    if (!capabilities.write_settings) {
+        return nullptr;
+    }
+    TJson codecs = TJson::array();
+    for (const auto& codec : capabilities.parquet_codecs) {
+        TJson level = nullptr;
+        if (codec.min_level && codec.max_level && codec.default_level) {
+            level = {{"min", *codec.min_level}, {"max", *codec.max_level}, {"default", *codec.default_level}};
+        }
+        codecs.push_back({{"codec", detail::CodecName(codec.codec)}, {"level", std::move(level)}});
+    }
+    return {{"default_compression", CompressionJson(capabilities.default_parquet_compression)},
+        {"codecs", std::move(codecs)}};
+}
+} // namespace
+
 TJson CapabilitiesJson(const EngineCapabilities& capabilities,
     const std::optional<StoreHealth>& health,
     bool databaseManagement,
-    const std::string& storeID)
+    const std::string& storeID,
+    const TScanLimits& scans)
 {
     const bool metadata = capabilities.metadata;
     const std::array backends{"unavailable", "custom", "local"};
@@ -122,7 +155,9 @@ TJson CapabilitiesJson(const EngineCapabilities& capabilities,
                 {"explain", metadata},
                 {"metadata_pagination", metadata},
                 {"pagination", false},
-                {"zero_column_projection", true}}},
+                {"zero_column_projection", true},
+                {"write_settings", capabilities.write_settings}}},
+        {"parquet", ParquetJson(capabilities)},
         {"predicate_ops",
             {"true", "eq", "ne", "lt", "le", "gt", "ge", "in", "is_null", "is_not_null", "and", "or", "not"}},
         {"limits",
@@ -130,11 +165,15 @@ TJson CapabilitiesJson(const EngineCapabilities& capabilities,
                 {"response_bytes", MaxResponseBytes},
                 {"append_rows", 10000},
                 {"scan_page_rows", 10000},
-                {"scan_sessions", TScans::SessionLimit},
-                {"scan_sessions_per_database", TScans::DatabaseSessionLimit},
-                {"scan_lifetime_seconds", TScans::LifetimeSeconds},
-                {"scan_replay_bytes", TScans::ReplayBytes},
-                {"scan_idle_seconds", TScans::IdleSeconds},
+                {"scan_sessions", scans.Live},
+                {"scan_sessions_per_database", scans.LivePerDatabase},
+                {"scan_completed_sessions", scans.Completed},
+                {"scan_completed_sessions_per_database", scans.CompletedPerDatabase},
+                {"scan_lifetime_seconds", scans.Lifetime.count() / 1000},
+                {"scan_replay_bytes", scans.ReplayBytes},
+                {"scan_replay_bytes_per_database", scans.ReplayBytesPerDatabase},
+                {"scan_idle_seconds", scans.Idle.count() / 1000},
+                {"scan_completed_ttl_seconds", scans.CompletedTtl.count() / 1000},
                 {"metadata_page_size", 1000},
                 {"metadata_sessions", MaxSessions},
                 {"metadata_sessions_per_database", MaxDatabaseSessions},
@@ -152,7 +191,7 @@ TJson CapabilitiesJson(const EngineCapabilities& capabilities,
     return value;
 }
 
-TJson ExplainJson(const Engine& engine, const std::string& collection, const TJson& body)
+TJson ExplainJson(const Engine& engine, const std::string& collection, const TJson& body, const TScanLimits& scans)
 {
     const auto info = Unwrap(engine.GetCollection(collection));
     const auto explanation = Unwrap(engine.ExplainScan(ParseScan(collection, info.schema, body)));
@@ -163,7 +202,7 @@ TJson ExplainJson(const Engine& engine, const std::string& collection, const TJs
         output.push_back(field.at("name"));
     }
     auto capabilities =
-        CapabilitiesJson(engine.GetCapabilities(), engine.GetHealth(), false, engine.GetStoreInfo().store_id);
+        CapabilitiesJson(engine.GetCapabilities(), engine.GetHealth(), false, engine.GetStoreInfo().store_id, scans);
     value.update({{"schema", schema},
         {"read_columns", explanation.read_fields},
         {"output_columns", output},

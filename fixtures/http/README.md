@@ -3,6 +3,14 @@
 `v0.json` inventories routes; `v0.schema.json` defines native request and
 response shapes. `health-states.json` pins readiness responses.
 
+Native capabilities optionally include `scan_sessions`, `shared_resources` and
+`http_activity`: effective limits remain in `limits`, while these objects
+separate live/completed sessions, reservation usage, bounded rejection counters
+and listener queues. Embedded explain capabilities may omit observations. Scan
+admission errors extend `errorDetail` with a bounded `reason` and
+`retry_after_ms`; the native policy test validates configured observations and
+quota refusals against this schema. See [scan session policy](../../docs/development/SCAN_SESSIONS.md).
+
 `outcomes-v0.json` supplies literal expectations shared by native C++, the
 Python SDK, the disposable mock and the browser API tests. It covers committed
 append, pre-binding rejection, registered failure, unknown publication, blocked

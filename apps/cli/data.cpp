@@ -58,7 +58,8 @@ std::vector<CLI::App*> AddDataCommands(CLI::App& app, TDataCommand& data)
              "operation",
              "snapshots",
              "files",
-             "file"})
+             "file",
+             "write-settings"})
     {
         auto* command = app.add_subcommand(name, "Operate on collection data through the native API");
         commands.push_back(command);
@@ -75,6 +76,18 @@ std::vector<CLI::App*> AddDataCommands(CLI::App& app, TDataCommand& data)
         }
         if (action == "create-collection") {
             command->add_option("--schema", data.SchemaFile, "Schema JSON file, or - for stdin")->required();
+            command->add_option("--write-settings",
+                data.WriteSettingsFile,
+                "Parquet write settings JSON file (part of the definition), or - for stdin");
+        }
+        if (action == "write-settings") {
+            command->add_option("--expected-version", data.ExpectedVersion, "Current write_settings_version")
+                ->required();
+            command
+                ->add_option("--settings",
+                    data.WriteSettingsFile,
+                    "Parquet write settings JSON file for later appends, or - for stdin")
+                ->required();
         }
         if (action == "append" || action == "scan") {
             auto* body = command->add_option("--body", data.BodyFile, "Native JSON request file, or - for stdin");
@@ -141,8 +154,10 @@ TRequest BuildDataRequest(const TDataCommand& data)
         request.Method = "POST";
         // Preserve the schema bytes for the shared strict native JSON decoder,
         // including duplicate-key rejection, rather than normalizing a DOM here.
+        Require(data.SchemaFile != "-" || data.WriteSettingsFile != "-", "only one input can be read from stdin");
         request.Body = "{\"collection_id\":" + TJson(data.CollectionID).dump() +
-            ",\"name\":" + TJson(data.Name).dump() + ",\"schema\":" + ReadDataFile(data.SchemaFile) + "}";
+            ",\"name\":" + TJson(data.Name).dump() + ",\"schema\":" + ReadDataFile(data.SchemaFile) +
+            (data.WriteSettingsFile.empty() ? "" : ",\"write_settings\":" + ReadDataFile(data.WriteSettingsFile)) + "}";
     } else if (data.Command == "collections") {
         request.Url += "?page_size=1000";
     } else if (data.Command == "resolve-collection") {
@@ -155,7 +170,11 @@ TRequest BuildDataRequest(const TDataCommand& data)
             request.Url +=
                 '/' + (data.Command == "file" ? "files/" + EncodeUrlComponent(data.FileID) : std::string(data.Command));
         }
-        if (data.Command == "append" || data.Command == "scan") {
+        if (data.Command == "write-settings") {
+            request.Method = "POST";
+            request.Body = "{\"expected_version\":" + TJson(data.ExpectedVersion).dump() +
+                ",\"write_settings\":" + ReadDataFile(data.WriteSettingsFile) + "}";
+        } else if (data.Command == "append" || data.Command == "scan") {
             request.Method = "POST";
             request.Body = data.BodyFile.empty() ? "{}" : ReadDataFile(data.BodyFile);
         } else if (data.Command == "snapshots" || data.Command == "files" || data.Command == "file") {

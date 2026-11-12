@@ -19,9 +19,16 @@
 namespace glamdb::NServer {
 using namespace NTransport;
 namespace {
-constexpr size_t MaxSessions = TScans::SessionLimit;
-constexpr std::ptrdiff_t MaxDatabaseSessions = TScans::DatabaseSessionLimit;
-constexpr size_t MaxReplayBytes = TScans::ReplayBytes;
+constexpr uint64_t ReplayMemoryBytes = 2 * MaxResponseBytes + (64ULL << 10);
+constexpr std::array RejectionNames{"global_live_limit",
+    "database_live_limit",
+    "global_replay_limit",
+    "database_replay_limit",
+    "shared_data_memory",
+    "shared_control_memory",
+    "shared_planning_memory",
+    "shared_decode_memory",
+    "session_busy"};
 constexpr size_t PageRows = 10000;
 constexpr size_t PageBytes = size_t{4} * 1024 * 1024;
 int64_t Now()
@@ -59,12 +66,52 @@ int64_t IpcSize(const arrow::RecordBatch& batch)
 }
 } // namespace
 
+TScanAdmissionFailure::TScanAdmissionFailure(EScanRejection reason)
+    : TFailure({"RESOURCE_EXHAUSTED",
+          std::string("scan admission refused: ") + RejectionNames.at(static_cast<size_t>(reason)) +
+              "; cancel unused cursors, wait for expiry or increase the shared profile",
+          RetryHint::SameIdAfterReconcile})
+    , Reason(reason)
+{ }
+TResponse ScanAdmissionResponse(const TScanAdmissionFailure& failure)
+{
+    auto body = EncodeError(failure.Detail);
+    body["error"]["reason"] = RejectionNames.at(static_cast<size_t>(failure.Reason));
+    body["error"]["retry_after_ms"] = 1000;
+    return {429, body.dump(), "application/json", {{"Retry-After", "1"}}};
+}
+void ValidateScanLimits(const TScanLimits& limits, const ResourceLimits* resources)
+{
+    Require(limits.Live > 0 && limits.Live <= 4096 && limits.LivePerDatabase > 0 &&
+            limits.LivePerDatabase <= limits.Live,
+        "scan live limits must be 1..4096 with per-database <= global");
+    Require(limits.Completed <= 4096 && limits.CompletedPerDatabase <= limits.Completed,
+        "scan completed limits must be 0..4096 with per-database <= global");
+    Require(limits.ReplayBytes >= MaxResponseBytes && limits.ReplayBytes <= (1ULL << 40) &&
+            limits.ReplayBytesPerDatabase >= MaxResponseBytes && limits.ReplayBytesPerDatabase <= limits.ReplayBytes,
+        "scan replay limits must be 16 MiB..1 TiB with per-database <= global");
+    Require(limits.Idle.count() > 0 && limits.Lifetime.count() >= 0 && limits.CompletedTtl.count() > 0 &&
+            limits.Idle <= std::chrono::hours(24) && limits.Lifetime <= std::chrono::hours(24 * 365) &&
+            limits.CompletedTtl <= std::chrono::hours(24),
+        "scan idle/completed TTL must be positive and <= 24h; lifetime must be 0..365d");
+    if (resources) {
+        const auto readers =
+            std::min<uint64_t>(limits.LivePerDatabase, limits.ReplayBytesPerDatabase / MaxResponseBytes);
+        const auto& memory = resources->memory_bytes;
+        Require(readers * ReplayMemoryBytes + (320ULL << 20) <= memory[0] &&
+                readers * (272ULL << 20) + (768ULL << 20) <= memory[1] && readers * (32ULL << 10) <= memory[2],
+            "scan per-database profile exceeds shared data, metadata or control memory; lower quotas or increase "
+            "resources");
+    }
+}
+
 struct TScans::TImpl
 {
     struct TSession
     {
         std::shared_ptr<ResourceOwner> Resources;
         std::shared_ptr<ResourceReservation> DescriptorMemory;
+        std::shared_ptr<ResourceReservation> ReplayMemory;
         std::mutex Mutex;
         std::string Database, Collection, NextToken, ReplayToken;
         bool Arrow = false, Ended = false;
@@ -74,10 +121,12 @@ struct TScans::TImpl
         // LLVM 18 supports the C++23 shared_ptr atomic free functions.
         std::shared_ptr<ScanCursor> Cursor;
         std::deque<std::shared_ptr<arrow::RecordBatch>> Pending;
+        std::deque<std::shared_ptr<arrow::RecordBatch>>* Rollback = nullptr;
         ScanInfo Info;
         TJson Schema;
         TResponse Replay;
         size_t ChargedBytes = 0;
+        std::atomic<size_t> BodyBytes{0};
         ~TSession()
         {
             if (const auto cursor = std::atomic_load(&Cursor)) {
@@ -86,38 +135,58 @@ struct TScans::TImpl
         }
     };
     using TPtr = std::shared_ptr<TSession>;
+    // Keep every batch fetched from core until page advancement commits. A
+    // retryable decoder refusal can then restore the whole unconsumed page.
+    struct TPageTransaction
+    {
+        TSession& Session;
+        std::deque<std::shared_ptr<arrow::RecordBatch>> Saved;
+        bool Committed = false;
+        explicit TPageTransaction(TSession& session)
+            : Session(session)
+            , Saved(session.Pending)
+        {
+            Session.Rollback = &Saved;
+        }
+        ~TPageTransaction()
+        {
+            Session.Rollback = nullptr;
+            if (!Committed) {
+                Session.Pending.swap(Saved);
+            }
+        }
+    };
     // Registry protection never covers planning, cursor I/O, encoding, hashing,
     // response copying or waiting for a session mutex.
     std::mutex Mutex;
     std::condition_variable Wake;
     bool Stopping = false, Accepting = true;
-    size_t ReplayBytes = 0;
     std::vector<TPtr> Sessions;
     std::unordered_map<std::string, TPtr> Tokens;
-    const std::chrono::milliseconds IdleTimeout, Lifetime;
+    const TScanLimits Limits;
+    const std::shared_ptr<ResourceOwner> Resources;
+    std::array<uint64_t, static_cast<size_t>(EScanRejection::Count)> Rejections{};
+    uint64_t CompletedEvictions = 0, Expirations = 0, Cancellations = 0;
     std::thread Reaper;
 
-    struct TExpiryPolicy
-    {
-        std::chrono::milliseconds Idle;
-        std::chrono::milliseconds Lifetime;
-    };
     struct TLookup
     {
         const std::string& Database;
         const std::string& Collection;
         const std::string& Token;
     };
-    explicit TImpl(const TExpiryPolicy& policy)
-        : IdleTimeout(policy.Idle)
-        , Lifetime(policy.Lifetime)
+    explicit TImpl(TScanLimits limits, std::shared_ptr<ResourceOwner> resources)
+        : Limits(limits)
+        , Resources(std::move(resources))
         , Reaper([this]() noexcept {
             for (;;) {
                 try {
                     std::unique_lock lock(Mutex);
-                    if (Wake.wait_for(lock, std::min(IdleTimeout, std::chrono::milliseconds(1000)), [this] {
-                            return Stopping;
-                        }))
+                    if (Wake.wait_for(lock,
+                            std::min({Limits.Idle, Limits.CompletedTtl, std::chrono::milliseconds(1000)}),
+                            [this] {
+                                return Stopping;
+                            }))
                     {
                         return;
                     }
@@ -145,8 +214,9 @@ struct TScans::TImpl
     bool Expired(const TSession& session) const
     {
         const auto now = Now();
-        return (Lifetime.count() > 0 && now - session.Created >= Lifetime.count()) ||
-            (!session.Busy.load() && now - session.Touched.load() >= IdleTimeout.count());
+        const auto idle = session.Complete.load() ? Limits.CompletedTtl : Limits.Idle;
+        return (Limits.Lifetime.count() > 0 && now - session.Created >= Limits.Lifetime.count()) ||
+            (!session.Busy.load() && now - session.Touched.load() >= idle.count());
     }
     void CheckActive(const TSession& session) const
     {
@@ -158,6 +228,8 @@ struct TScans::TImpl
         std::erase_if(Tokens, [&](const auto& item) {
             return item.second == session;
         });
+        session->ChargedBytes = 0;
+        std::erase(Sessions, session);
     }
     // Caller owns the session mutex. Keep a shared reference until after the
     // registry lock is released, so buffer/cursor destruction cannot hold it.
@@ -169,27 +241,32 @@ struct TScans::TImpl
         }
         session->Pending.clear();
         session->Replay = {};
+        session->BodyBytes = 0;
+        session->Info = {};
+        session->Schema = {};
+        session->ReplayMemory.reset();
         std::lock_guard lock(Mutex);
-        ReplayBytes -= session->ChargedBytes;
-        session->ChargedBytes = 0;
         MarkLocked(session);
-        std::erase(Sessions, session);
     }
     void Sweep()
     {
-        std::array<TPtr, MaxSessions> expired;
-        size_t count = 0;
+        std::vector<TPtr> expired;
         {
             std::lock_guard lock(Mutex);
             for (const auto& session : Sessions) {
                 if (session->Cancelled.load() || Expired(*session)) {
-                    MarkLocked(session);
-                    expired[count++] = session;
+                    expired.push_back(session);
                 }
             }
+            for (const auto& session : expired) {
+                ++Expirations;
+                MarkLocked(session);
+            }
         }
-        for (size_t index = 0; index < count; ++index) {
-            const auto& session = expired[index];
+        for (const auto& session : expired) {
+            if (const auto cursor = std::atomic_load(&session->Cursor)) {
+                cursor->Cancel();
+            }
             std::unique_lock lock(session->Mutex, std::try_to_lock);
             if (lock.owns_lock()) {
                 Release(session);
@@ -203,12 +280,17 @@ struct TScans::TImpl
             std::lock_guard lock(Mutex);
             for (const auto& session : Sessions) {
                 if (!database || session->Database == *database) {
-                    MarkLocked(session);
                     removed.push_back(session);
                 }
             }
+            for (const auto& session : removed) {
+                MarkLocked(session);
+            }
         }
         for (const auto& session : removed) {
+            if (const auto cursor = std::atomic_load(&session->Cursor)) {
+                cursor->Cancel();
+            }
             std::lock_guard lock(session->Mutex);
             Release(session);
         }
@@ -224,68 +306,179 @@ struct TScans::TImpl
             "NOT_FOUND");
         return found->second;
     }
-    void EvictCompleted(const std::string* database, const TPtr& except = {})
+    struct TOccupancy
     {
-        std::vector<TPtr> candidates;
+        size_t Live = 0, Completed = 0, Executing = 0, Reserved = 0, Body = 0;
+        TJson Encode() const
+        {
+            return {{"live_cursors", Live},
+                {"completed_replays", Completed},
+                {"executing_calls", Executing},
+                {"replay_reserved_bytes", Reserved},
+                {"replay_body_bytes", Body}};
+        }
+    };
+    TOccupancy CountLocked(const std::string* database = nullptr) const
+    {
+        TOccupancy count;
+        for (const auto& session : Sessions) {
+            if (!database || session->Database == *database) {
+                if (session->Complete.load()) {
+                    ++count.Completed;
+                } else {
+                    ++count.Live;
+                }
+                count.Executing += session->Busy.load() ? 1 : 0;
+                count.Reserved += session->ChargedBytes;
+                count.Body += session->BodyBytes.load();
+            }
+        }
+        return count;
+    }
+    [[noreturn]] void RefuseLocked(EScanRejection reason)
+    {
+        ++Rejections.at(static_cast<size_t>(reason));
+        throw TScanAdmissionFailure(reason);
+    }
+    [[noreturn]] void Refuse(EScanRejection reason)
+    {
+        std::lock_guard lock(Mutex);
+        RefuseLocked(reason);
+    }
+    std::shared_ptr<ResourceReservation> Reserve(const std::shared_ptr<ResourceOwner>& resources,
+        ResourceClass resource,
+        uint64_t bytes,
+        EScanRejection reason,
+        bool reclaim = false)
+    {
+        for (;;) {
+            auto reservation = resources->Reserve(resource, bytes);
+            if (reservation) {
+                return std::move(*reservation);
+            }
+            if (reclaim && EvictCompleted(nullptr)) {
+                continue;
+            }
+            Refuse(reason);
+        }
+    }
+    // Remove only the oldest completed entry in the pressured scope. Never
+    // evict a live cursor. Destruction and cancellation stay outside the lock.
+    bool EvictCompleted(const std::string* database, const TPtr& except = {})
+    {
+        TPtr candidate;
         {
             std::lock_guard lock(Mutex);
             for (const auto& session : Sessions) {
-                if (session != except && session->Complete.load() && (!database || session->Database == *database)) {
-                    candidates.push_back(session);
+                if (session != except && session->Complete.load() && !session->Busy.load() &&
+                    (!database || session->Database == *database) &&
+                    (!candidate || session->Touched.load() < candidate->Touched.load()))
+                {
+                    candidate = session;
                 }
             }
-        }
-        for (const auto& session : candidates) {
-            std::unique_lock lock(session->Mutex, std::try_to_lock);
-            if (lock.owns_lock()) {
-                Release(session);
+            if (!candidate) {
+                return false;
             }
+            ++CompletedEvictions;
+            MarkLocked(candidate);
         }
+        std::unique_lock lock(candidate->Mutex, std::try_to_lock);
+        if (lock.owns_lock()) {
+            Release(candidate);
+        }
+        return true;
     }
     void Register(const TPtr& session)
     {
         Sweep();
-        bool localFull = false, globalFull = false;
-        {
-            std::lock_guard lock(Mutex);
-            localFull = std::count_if(Sessions.begin(), Sessions.end(), [&](const auto& item) {
-                return item->Database == session->Database;
-            }) >= MaxDatabaseSessions;
-            globalFull = Sessions.size() >= MaxSessions;
+        for (;;) {
+            std::optional<EScanRejection> reason;
+            {
+                std::lock_guard lock(Mutex);
+                Require(Accepting, "server is stopping", "CANCELLED");
+                const auto global = CountLocked();
+                const auto local = CountLocked(&session->Database);
+                if (global.Live >= Limits.Live) {
+                    RefuseLocked(EScanRejection::GlobalLive);
+                }
+                if (local.Live >= Limits.LivePerDatabase) {
+                    RefuseLocked(EScanRejection::DatabaseLive);
+                }
+                if (MaxResponseBytes > Limits.ReplayBytesPerDatabase - local.Reserved) {
+                    reason = EScanRejection::DatabaseReplay;
+                } else if (MaxResponseBytes > Limits.ReplayBytes - global.Reserved) {
+                    reason = EScanRejection::GlobalReplay;
+                } else {
+                    auto memory = session->Resources->Reserve(ResourceClass::Data, ReplayMemoryBytes);
+                    if (memory) {
+                        session->ReplayMemory = std::move(*memory);
+                        // All potentially allocating registry mutations precede
+                        // the nonthrowing logical charge; failure is rolled back.
+                        Sessions.push_back(session);
+                        try {
+                            Tokens.emplace(session->NextToken, session);
+                        } catch (...) {
+                            Sessions.pop_back();
+                            throw;
+                        }
+                        session->ChargedBytes = MaxResponseBytes;
+                        return;
+                    }
+                    reason = EScanRejection::SharedData;
+                }
+            }
+            if (!EvictCompleted(*reason == EScanRejection::DatabaseReplay ? &session->Database : nullptr)) {
+                Refuse(*reason);
+            }
         }
-        if (globalFull) {
-            EvictCompleted(nullptr);
-        } else if (localFull) {
-            EvictCompleted(&session->Database);
-        }
-        std::lock_guard lock(Mutex);
-        Require(Accepting, "server is stopping", "CANCELLED");
-        const auto localCount = std::count_if(Sessions.begin(), Sessions.end(), [&](const auto& item) {
-            return item->Database == session->Database;
-        });
-        Require(Sessions.size() < MaxSessions && localCount < MaxDatabaseSessions,
-            "too many scan sessions; cancel unused cursors or retry after expiry",
-            "RESOURCE_EXHAUSTED");
-        Require(MaxResponseBytes <= MaxReplayBytes - ReplayBytes,
-            "scan replay reservation is full",
-            "RESOURCE_EXHAUSTED");
-        // Reserve the hard page bound before planning or consuming any rows.
-        // Every admitted cursor can retain its largest legal replay page.
-        ReplayBytes += MaxResponseBytes;
-        session->ChargedBytes = MaxResponseBytes;
-        Sessions.push_back(session);
-        Tokens.emplace(session->NextToken, session);
     }
-    bool Peek(TSession& session)
+    void RetainCompleted(const TPtr& session)
+    {
+        for (;;) {
+            bool localFull, globalFull;
+            {
+                std::lock_guard lock(Mutex);
+                globalFull = CountLocked().Completed > Limits.Completed;
+                localFull = CountLocked(&session->Database).Completed > Limits.CompletedPerDatabase;
+            }
+            if (!localFull && !globalFull) {
+                return;
+            }
+            if (!EvictCompleted(localFull ? &session->Database : nullptr, session)) {
+                {
+                    std::lock_guard lock(Mutex);
+                    ++CompletedEvictions;
+                }
+                Release(session); // A zero retention limit explicitly disables replay.
+                return;
+            }
+        }
+    }
+    bool Peek(TSession& session, bool allowPartial = false)
     {
         CheckActive(session);
         while (session.Pending.empty() && !session.Ended) {
             auto result = std::atomic_load(&session.Cursor)->Next();
             CheckActive(session);
+            if (!result && result.error().code == "RESOURCE_EXHAUSTED" &&
+                result.error().retry_hint == RetryHint::SameIdAfterReconcile)
+            {
+                // Commit a nonempty page before retaining another decoder
+                // output. Otherwise rollback can preserve its own admission
+                // pressure indefinitely when core returns many tiny batches.
+                if (allowPartial) {
+                    return false;
+                }
+                Refuse(EScanRejection::SharedDecode);
+            }
             auto batch = Unwrap(std::move(result));
             if (!batch) {
                 session.Ended = true;
             } else if (batch->num_rows() != 0) {
+                if (session.Rollback) {
+                    session.Rollback->push_back(batch);
+                }
                 session.Pending.push_back(std::move(batch));
             }
         }
@@ -313,7 +506,7 @@ struct TScans::TImpl
         std::string rows = "[";
         const auto overhead = Envelope(session, std::string(32, '0'), PageRows).dump().size() + 9;
         Require(overhead < MaxResponseBytes, "scan schema exceeds response byte limit");
-        while (count < PageRows && rows.size() < PageBytes && Peek(session)) {
+        while (count < PageRows && rows.size() < PageBytes && Peek(session, count != 0)) {
             const auto take = AppendRowsJson(*session.Pending.front(),
                 rows,
                 {.MaxRows = PageRows - count, .TargetBytes = PageBytes, .HardBytes = MaxResponseBytes - overhead});
@@ -330,7 +523,7 @@ struct TScans::TImpl
     {
         std::vector<std::shared_ptr<arrow::RecordBatch>> pieces, groups;
         size_t bytes = 0;
-        while (count < PageRows && bytes < PageBytes && Peek(session)) {
+        while (count < PageRows && bytes < PageBytes && Peek(session, count != 0)) {
             const auto& pending = session.Pending.front();
             int64_t take = std::min(pending->num_rows(), static_cast<int64_t>(PageRows - count));
             auto slice = pending->Slice(0, take);
@@ -400,10 +593,7 @@ struct TScans::TImpl
             batch,
             session.Info.selector_resolved);
     }
-    TResponse Page(const TPtr& session,
-        const std::string& token,
-        const std::shared_ptr<ResourceReservation>& outgoing,
-        const std::shared_ptr<ResourceReservation>& replay)
+    TResponse Page(const TPtr& session, const std::string& token, const std::shared_ptr<ResourceReservation>& outgoing)
     {
         CheckActive(*session);
         Require(token == session->ReplayToken || token == session->NextToken,
@@ -415,9 +605,10 @@ struct TScans::TImpl
             CheckActive(*session);
             return response; // Replay does not extend idle or absolute lifetime.
         }
+        TPageTransaction transaction(*session);
         size_t count = 0;
         auto response = session->Arrow ? ArrowPage(*session, count) : TResponse{200, JsonRows(*session, count)};
-        const auto next = Peek(*session) ? Token() : std::string{};
+        const auto next = (Peek(*session, count != 0) || !session->Ended) ? Token() : std::string{};
         if (session->Arrow) {
             if (!next.empty()) {
                 response.Headers["X-GlamDB-Next-Cursor"] = next;
@@ -433,7 +624,8 @@ struct TScans::TImpl
         Require(response.Body.size() <= MaxResponseBytes, "scan response exceeds response byte limit");
         response.ResourceLease = outgoing;
         session->Replay = response;
-        session->Replay.ResourceLease = replay;
+        session->Replay.ResourceLease = session->ReplayMemory;
+        session->BodyBytes = response.Body.size();
         CheckActive(*session);
         session->ReplayToken = token;
         session->NextToken = next;
@@ -443,6 +635,8 @@ struct TScans::TImpl
                 cursor->Cancel();
             }
             session->Complete = true;
+            // Replays use the encoded schema, not the cursor's charged schema.
+            session->Info.output_schema.reset();
         }
         {
             std::lock_guard lock(Mutex);
@@ -455,15 +649,53 @@ struct TScans::TImpl
                 Tokens.emplace(next, session);
             }
         }
+        transaction.Committed = true;
+        if (next.empty()) {
+            RetainCompleted(session);
+        }
         return response;
     }
 };
-TScans::TScans(std::chrono::milliseconds idle, std::chrono::milliseconds lifetime)
+TScans::TScans(TScanLimits limits, std::shared_ptr<ResourceOwner> resources)
 {
-    Require(idle.count() > 0 && lifetime.count() >= 0, "idle timeout must be positive; lifetime must be nonnegative");
-    Impl_ = std::make_unique<TImpl>(TImpl::TExpiryPolicy{.Idle = idle, .Lifetime = lifetime});
+    ValidateScanLimits(limits, resources ? &resources->GetLimits() : nullptr);
+    Impl_ = std::make_unique<TImpl>(limits, std::move(resources));
 }
+TScans::TScans(std::chrono::milliseconds idle, std::chrono::milliseconds lifetime)
+    : TScans(TScanLimits{.Idle = idle, .Lifetime = lifetime, .CompletedTtl = idle})
+{ }
 TScans::~TScans() = default;
+const TScanLimits& TScans::GetLimits() const
+{
+    return Impl_->Limits;
+}
+TJson TScans::GetStatistics(const std::string& database) const
+{
+    TImpl::TOccupancy global, local;
+    decltype(Impl_->Rejections) rejections;
+    uint64_t evictions, expirations, cancellations;
+    {
+        std::lock_guard lock(Impl_->Mutex);
+        global = Impl_->CountLocked();
+        local = Impl_->CountLocked(&database);
+        rejections = Impl_->Rejections;
+        evictions = Impl_->CompletedEvictions;
+        expirations = Impl_->Expirations;
+        cancellations = Impl_->Cancellations;
+    }
+    TJson value{{"global", global.Encode()},
+        {"completed_evictions", evictions},
+        {"expirations", expirations},
+        {"cancellations", cancellations},
+        {"completed_eviction_policy", "oldest_completed_first"}};
+    if (!database.empty()) {
+        value["database"] = local.Encode();
+    }
+    for (size_t index = 0; index < rejections.size(); ++index) {
+        value["rejections"][RejectionNames[index]] = rejections[index];
+    }
+    return value;
+}
 TResponse TScans::Open(const std::shared_ptr<Engine>& engine,
     const std::string& database,
     const std::string& collection,
@@ -481,14 +713,23 @@ TResponse TScans::Open(const std::shared_ptr<Engine>& engine,
     } else {
         session = std::make_shared<TImpl::TSession>();
         session->Resources = engine->GetResourceOwner();
-        session->DescriptorMemory = Unwrap(session->Resources->Reserve(ResourceClass::Control, 16ULL << 10));
+        Require(!Impl_->Resources || session->Resources == Impl_->Resources,
+            "scan engine must share the service resource owner");
+        session->DescriptorMemory = Impl_->Reserve(session->Resources,
+            ResourceClass::Control,
+            16ULL << 10,
+            EScanRejection::SharedControl,
+            true);
         session->Database = database;
         session->Collection = collection;
         session->Arrow = arrow;
         session->NextToken = Token();
         token = session->NextToken;
     }
-    std::lock_guard lock(session->Mutex);
+    std::unique_lock lock(session->Mutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        Impl_->Refuse(EScanRejection::SessionBusy);
+    }
     // A representation mismatch does not invalidate the owner's valid cursor.
     Require(session->Arrow == arrow, "cursor representation cannot change");
     Require(token == session->NextToken || token == session->ReplayToken,
@@ -511,17 +752,26 @@ TResponse TScans::Open(const std::shared_ptr<Engine>& engine,
     } activity{*session};
     // Reserve all new copies before consuming the cursor. A parent refusal
     // preserves an existing cursor and its previous replay.
-    auto work = Unwrap(session->Resources->Reserve(ResourceClass::Data, 128ULL << 20));
-    auto outgoing = Unwrap(session->Resources->Reserve(ResourceClass::Data, 2 * MaxResponseBytes + (64ULL << 10)));
-    std::shared_ptr<ResourceReservation> replay;
-    if (!openOnly && token != session->ReplayToken) {
-        replay = Unwrap(session->Resources->Reserve(ResourceClass::Data, 2 * MaxResponseBytes + (64ULL << 10)));
-    }
+    auto work = token == session->ReplayToken ? nullptr
+                                              : Impl_->Reserve(session->Resources,
+                                                    ResourceClass::Data,
+                                                    128ULL << 20,
+                                                    EScanRejection::SharedData,
+                                                    !body.contains("cursor"));
+    auto outgoing = Impl_->Reserve(session->Resources,
+        ResourceClass::Data,
+        ReplayMemoryBytes,
+        EScanRejection::SharedData,
+        !body.contains("cursor"));
     try {
         if (!body.contains("cursor")) {
             Impl_->Register(session);
             const auto info = Unwrap(engine->GetCollection(collection));
-            const auto cursor = Unwrap(engine->Scan(ParseScan(collection, info.schema, body)));
+            auto result = engine->Scan(ParseScan(collection, info.schema, body));
+            if (!result && result.error().code == "RESOURCE_EXHAUSTED") {
+                Impl_->Refuse(EScanRejection::SharedPlanning);
+            }
+            const auto cursor = Unwrap(std::move(result));
             std::atomic_store(&session->Cursor, cursor);
             // Stop may have run while planning, before the cursor was published.
             if (session->Cancelled.load()) {
@@ -545,9 +795,17 @@ TResponse TScans::Open(const std::shared_ptr<Engine>& engine,
                     {"snapshot_id", Snapshot(session->Info)},
                     {"schema", session->Schema},
                     {"identity", EncodeIdentity(session->Info.identity)}}
-                    .dump()};
+                    .dump(),
+                "application/json",
+                {},
+                outgoing};
         }
-        return Impl_->Page(session, token, outgoing, replay);
+        return Impl_->Page(session, token, outgoing);
+    } catch (const TScanAdmissionFailure&) {
+        if (!body.contains("cursor") || session->Cancelled.load() || Impl_->Expired(*session)) {
+            Impl_->Release(session);
+        }
+        throw;
     } catch (...) {
         Impl_->Release(session);
         throw;
@@ -561,7 +819,11 @@ TResponse TScans::Cancel(const std::string& database, const std::string& collect
     {
         std::lock_guard lock(Impl_->Mutex);
         Impl_->CheckActive(*session);
+        ++Impl_->Cancellations;
         Impl_->MarkLocked(session);
+    }
+    if (const auto cursor = std::atomic_load(&session->Cursor)) {
+        cursor->Cancel();
     }
     std::unique_lock lock(session->Mutex, std::try_to_lock);
     if (lock.owns_lock()) {
@@ -571,19 +833,20 @@ TResponse TScans::Cancel(const std::string& database, const std::string& collect
 }
 void TScans::Stop()
 {
-    std::array<TImpl::TPtr, MaxSessions> sessions;
-    size_t count = 0;
+    std::vector<TImpl::TPtr> sessions;
     {
         std::lock_guard lock(Impl_->Mutex);
         Impl_->Accepting = false;
-        for (const auto& session : Impl_->Sessions) {
-            Impl_->MarkLocked(session);
-            sessions[count++] = session;
+        sessions.swap(Impl_->Sessions);
+        Impl_->Tokens.clear();
+        for (const auto& session : sessions) {
+            session->Cancelled = true;
+            session->ChargedBytes = 0;
         }
     }
     // Cursor cancellation is thread-safe; destruction stays outside registry locks.
-    for (size_t index = 0; index < count; ++index) {
-        if (const auto cursor = std::atomic_load(&sessions[index]->Cursor)) {
+    for (const auto& session : sessions) {
+        if (const auto cursor = std::atomic_load(&session->Cursor)) {
             cursor->Cancel();
         }
     }

@@ -48,7 +48,22 @@ isolation after their pinned build dependencies are present.
   request assembled by the read controls. Arrow export retains the exact result
   snapshot; key lookup is a filter scan.
 - **Schema:** fixed types, field IDs and nullability. There is no schema editor
-  after collection creation.
+  after collection creation. When the server advertises `features.write_settings`
+  and a `parquet` capability object, **Parquet write settings** shows the
+  collection's canonical settings and version: the collection default and
+  per-column overrides of the **Parquet value compression** used for data files
+  written by later appends (not HTTP compression; existing files keep their
+  codecs). **Save write settings** sends a compare-and-set with the shown version;
+  if another client changed them first (409 `WRITE_SETTINGS_CONFLICT`) the panel
+  reloads the current version and asks you to review it. After an unknown
+  outcome, saving the same settings again is safe. **New collection** offers the
+  same Parquet compression choice (codec plus an optional level whose range comes
+  from capabilities) and a per-column override in each column row; with no choice
+  it sends no `write_settings`. Created/resolved collections are verified against
+  the requested canonical settings while `write_settings_version` is still the
+  creation version (`"0"` without settings, `"1"` with them); later updates
+  leave only identity and schema comparable. The explicit mock and the public
+  demo do not advertise write settings and never show these controls.
 - **Snapshots:** explore retained historical views or the initial empty view.
   Selecting a view clears the previous result; results identify their own fixed
   snapshot. Snapshot IDs are opaque, not row counts. Without the metadata
@@ -56,7 +71,8 @@ isolation after their pinned build dependencies are present.
   explicitly labelled as incomplete history.
 - **Storage:** list committed files belonging to the selected snapshot. Native
   file details verify Parquet footer metadata and summarize row counts, file/footer
-  bytes, row groups, field IDs, types, bounds and reported bound precision. Complete JSON
+  bytes, row groups, field IDs, types, bounds, reported bound precision and the
+  Parquet codec each column chunk was written with. Complete JSON
   remains available in a collapsed section; wide tables scroll within the dialog.
   The explicit mock and browser demo show synthetic descriptors; they write no
   physical files. Unknown byte and I/O measurements remain unknown.
@@ -107,15 +123,15 @@ remain. Reads from the previous connection are cancelled or ignored, including
 file details and pending Arrow exports. Browser session operation history is also
 ephemeral. Use **Pending requests** to export an unresolved append or creation
 before reload or disconnect. The JSON file contains the original collection and
-operation UUIDs, schema, rows and optional snapshot precondition, without the
-access token. Disconnect with unresolved requests offers export before explicit
-**Disconnect and clear**. After reconnecting, select the same database, open
+operation UUIDs, schema, rows, optional snapshot precondition and a creation's
+optional canonical Parquet write settings, without the access token. Disconnect
+with unresolved requests offers export before explicit **Disconnect and clear**. After reconnecting, select the same database, open
 **Pending requests**, choose **Recovery JSON file** and **Import pending request**.
 Import validates the server/database/backend/store binding and collection schema,
 then restores the frozen request. It never submits a write or generates a new
 UUID. Choose **Check outcome** or **Retry same operation** explicitly; an imported
-creation keeps its original UUID, name and schema. The SDK likewise requires
-caller-supplied IDs. Recovery files contain user row data and remain caller-owned;
+creation keeps its original UUID, name, schema and write settings. The SDK
+likewise requires caller-supplied IDs. Recovery files contain user row data and remain caller-owned;
 no recovery state or credentials are written to browser storage. Export and import
 share a separate 32 MiB UTF-8 recovery-file limit, including the complete JSON
 envelope, schema, server/database scope and formatting. This limit is independent
@@ -192,7 +208,10 @@ and Node API tests need localhost sockets; Node tests use real gzip/Brotli HTTP
 responses, decoded-byte limits, truncated bodies and cancelled Arrow requests.
 Browser regressions include reconnecting with a different token/collection,
 late file/create/export responses, token-free pending export/import after reload,
-exact retry bodies and non-2xx create outcomes. New recovery scenarios use their
+exact retry bodies and non-2xx create outcomes. `write-settings.spec.mjs` checks
+that the mock hides Parquet compression controls, then intercepts capabilities
+and collection responses to exercise canonical create settings, a compare-and-set
+save and a version conflict; native Parquet behavior needs the native profile. New recovery scenarios use their
 own disposable mock child so they do not consume another suite's collection
 budget. The browser server is a disposable child on port 8766, with a separate copied theme. Override
 it using `GLAMDB_E2E_PORT`. Open the HTML report with:

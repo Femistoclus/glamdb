@@ -41,7 +41,8 @@ inline TErrorPolicy ErrorPolicy(std::string_view code)
         return {409, OperatorAction};
     }
     if (code == "DATABASE_REQUIRED" || code == "ALREADY_EXISTS" || code == "OPERATION_CONFLICT" ||
-        code == "SCHEMA_MISMATCH" || code == "STALE_BASE")
+        code == "SCHEMA_MISMATCH" || code == "STALE_BASE" || code == "WRITE_SETTINGS_MISMATCH" ||
+        code == "WRITE_SETTINGS_CONFLICT")
     {
         return {409, FixInput};
     }

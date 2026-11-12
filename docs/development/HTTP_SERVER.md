@@ -170,6 +170,7 @@ separate, broader development profile.
 | `GET /collections/{id}` | `GetCollection` | Identity and current schema |
 | `GET /collections/{id}/schema` | `GetCollection` / `Schema` | Stable field IDs |
 | `POST /collections/{id}/append` | `AppendDurable` | Synchronous native receipt |
+| `POST /collections/{id}/write-settings` | `UpdateWriteSettings` | Compare-and-set of Parquet settings for later appends |
 | `GET /collections/{id}/operations/{op}` | `FindAppendOutcome` | Original result or authoritative absence |
 | `POST /collections/{id}/scan/open` | `Scan` | Resolve a fixed view and return a cursor without consuming rows |
 | `POST /collections/{id}/scan` | `Scan` / `ScanCursor::Next` | First page or cursor continuation, JSON or Arrow IPC |
@@ -260,6 +261,30 @@ Types: `string`, `bool`, `int64`, `float64`, `timestamp_us_utc`. Core assigns ID
 non-nullable string; its values are not unique.
 Schema evolution, SQL, upsert and delete are unsupported.
 
+Create also accepts optional `write_settings`, part of the collection definition
+(a repeated creation with different settings returns 409 `WRITE_SETTINGS_MISMATCH`):
+`{parquet:{compression?:{codec,level?}|null,columns?:[{field,compression?}]}}`.
+They choose the **Parquet value compression** of data files written by later
+appends; HTTP bodies stay uncompressed (`Content-Encoding` other than `identity`
+is still rejected). Codecs are `uncompressed`, `snappy`, `gzip`, `lz4_raw` and
+`zstd`; `parquet.codecs` in capabilities lists those of the running build with
+their level ranges (`null` for codecs without levels) and default levels, and
+`parquet.default_compression` is used when nothing is configured. A column entry
+overrides the collection default for that field; a level is never inherited
+from another codec. Unknown fields, codecs, duplicate columns, empty column
+entries, levels outside the range or for codecs without levels are rejected
+before anything is bound. Collections return the canonical (schema-ordered)
+`write_settings` and `write_settings_version` (decimal string; `"0"` = never set).
+
+`POST /collections/{id}/write-settings` takes
+`{expected_version:"N",write_settings:{...}}` and returns the collection. It
+applies only when `N` is the current version and yields `N+1`; repeating an
+applied request (same settings, current version `N+1`) succeeds unchanged, so a
+lost response can be retried. Otherwise 409 `WRITE_SETTINGS_CONFLICT`. It waits
+for the single writer: an append already bound keeps the settings it read, and
+existing files keep the codecs recorded in their footers (`compression` in file
+details). Settings are never part of an append's operation identity.
+
 Append: `{operation_id,rows:[{field:value,...}],expected_snapshot?}`. Omitted
 precondition means any snapshot; null means no snapshot; a decimal string means
 an exact snapshot. Missing nullable row values become null. Int64 and snapshot
@@ -312,17 +337,20 @@ a cursor cannot be replayed: opening again creates a new scan. The SDK's scan en
 `POST .../scan/cancel {"cursor":"TOKEN"}` accepts either the next or most recently
 consumed cursor and returns `{"cancelled":true}`. Tokens are scoped to database,
 collection and representation; stale or missing tokens return 404, never restart
-queries. Each database has eight sessions within a server limit of 64. Idle sessions expire
-after 60 seconds (checked every second); replay does not refresh that deadline.
-Active production scans have no absolute lifetime limit. Admission reserves the
-16 MiB hard response bound for each session within a shared 1 GiB replay budget,
-before planning or consuming rows. This logical reservation covers retained
-serialized bodies, not pending Arrow buffers, outgoing copies or total memory.
-Shared process-memory refusal happens before page consumption and preserves an
-existing cursor and its last replay.
-Completed replay caches may be evicted to admit new scans. A failed page invalidates its session. Close, reconciliation
-and shutdown release sessions after admitted calls drain. Cancellation releases
-between page calls; it does not interrupt an active filesystem read.
+queries. Defaults allow eight live cursors per database and 64 globally, with
+separate completed replay retention, a 60-second idle/retention timeout and no
+absolute lifetime. Startup options configure these limits and global/per-database
+replay bytes. Admission reserves the 16 MiB hard response maximum in the replay
+quota and `32 MiB + 64 KiB` data memory from the shared process parent before
+planning. Page assembly and outgoing copies have separate shared reservations.
+Admission refusal preserves an existing cursor and its previous replay;
+reason-specific 429 responses include `Retry-After: 1`.
+Completed entries use observable oldest-first eviction; live cursors are never
+evicted for another database. Close, reconciliation and shutdown cancel retained
+sessions; reservations outlive active reads and outgoing copies as needed.
+Cancellation does not wait for an active filesystem read. See
+[scan session policy](SCAN_SESSIONS.md) for every option, effective-limit and
+occupancy observations, EOF/replay/TTL semantics and the sufficient 32-reader profile.
 
 Create/append results use the existing native serializer. Append preserves
 `committed`, `definitely_not_committed` and `commit_unknown`, phase, original ID,
@@ -585,8 +613,9 @@ five-second closed-loop phase. Every successful query checked row values and cou
 The 64-client phase exceeds the eight-cursor database quota; neither phase had
 `SERVER_BUSY` refusals. Concurrent builds/analyzers and the shared Python process
 limit timing interpretation. This is concurrency evidence, not a capacity or
-before/after performance claim. Configurable cursor quotas and aggregate process
-memory admission remain separate work.
+before/after performance claim. These measurements precede the
+[configurable, shared-resource-backed policy](SCAN_SESSIONS.md); the new native
+regression records its own occupancy, latency and memory observations separately.
 
 ## Metadata selectors and cursors
 

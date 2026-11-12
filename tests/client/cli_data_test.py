@@ -160,6 +160,32 @@ class NativeCommands(unittest.TestCase):
         server.terminate()
         self.assertEqual(server.wait(timeout=15), 0)
 
+    def test_write_settings_local_and_remote(self):
+        schema = self.body_file("schema.json", SCHEMA)
+        settings = {"parquet": {"compression": {"codec": "zstd", "level": 3},
+                                "columns": [{"field": "text", "compression": {"codec": "uncompressed"}}]}}
+        created = self.run_command(ADMIN, "create-collection", *self.local, "--collection-id", COLLECTION,
+                                   "--name", "events", "--schema", schema,
+                                   "--write-settings", self.body_file("settings.json", settings))
+        self.assertEqual(created["write_settings_version"], "1")
+        self.assertEqual(created["write_settings"]["parquet"]["compression"], {"codec": "zstd", "level": 3})
+        common = ["--collection-id", COLLECTION]
+        update = self.body_file("update.json", {"parquet": {"compression": {"codec": "snappy"}}})
+        updated = self.run_command(ADMIN, "write-settings", *self.local, *common,
+                                   "--expected-version", "1", "--settings", update)
+        self.assertEqual(updated["write_settings_version"], "2")
+        # A stale expected version is a conflict, not an update.
+        self.run_command(ADMIN, "write-settings", *self.local, *common,
+                         "--expected-version", "1", "--settings", self.body_file("other.json", {}), code=1)
+        server, url = self.start_server()
+        self.assertEqual(self.run_command(CLI, "collection", "--url", url, *common), updated)
+        remote = self.run_command(CLI, "write-settings", "--url", url, *common, "--expected-version", "2",
+                                  "--settings", "-", body=json.dumps({"parquet": None}))
+        self.assertEqual(remote["write_settings_version"], "3")
+        self.assertIsNone(remote["write_settings"]["parquet"]["compression"])
+        server.terminate()
+        self.assertEqual(server.wait(timeout=15), 0)
+
     def test_offline_stdout_failure_preserves_committed_operation(self):
         self.create_collection()
         body = self.body_file("append.json", {"operation_id": OPERATION, "rows": ROWS})

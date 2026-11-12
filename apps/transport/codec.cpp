@@ -1,6 +1,7 @@
 #include "apps/transport/codec.h"
 #include "apps/transport/json_reader.h"
 #include "core/api/canonical.h"
+#include "core/api/write_settings.h"
 #include "core/scan/predicate.h"
 
 #include <array>
@@ -666,6 +667,53 @@ SchemaSpec ParseSchema(const TJson& value)
         result.fields.push_back({field.at("name").get<std::string>(),
             static_cast<FieldType>(1 + typeIt - TypeNames.begin()),
             field.value("nullable", false)});
+    }
+    return result;
+}
+
+namespace {
+ParquetCompression ParseCompression(const TJson& value)
+{
+    CheckKeys(value, {"codec", "level"});
+    Require(value.contains("codec") && value["codec"].is_string(), "Parquet compression requires a codec name");
+    const auto codec = detail::ParseCodecName(value["codec"].get<std::string>());
+    Require(codec.has_value(), "unknown Parquet compression codec");
+    ParquetCompression result{*codec, std::nullopt};
+    if (value.contains("level") && !value["level"].is_null()) {
+        const auto& level = value["level"];
+        Require(level.is_number_integer() && level.get<int64_t>() >= std::numeric_limits<int32_t>::min() &&
+                level.get<int64_t>() <= std::numeric_limits<int32_t>::max(),
+            "Parquet compression level must be an integer");
+        result.level = static_cast<int32_t>(level.get<int64_t>());
+    }
+    return result;
+}
+} // namespace
+
+WriteSettings ParseWriteSettings(const TJson& value)
+{
+    CheckKeys(value, {"parquet"});
+    WriteSettings result;
+    if (!value.contains("parquet") || value["parquet"].is_null()) {
+        return result;
+    }
+    const auto& parquet = value["parquet"];
+    CheckKeys(parquet, {"compression", "columns"});
+    if (parquet.contains("compression") && !parquet["compression"].is_null()) {
+        result.compression = ParseCompression(parquet["compression"]);
+    }
+    if (parquet.contains("columns") && !parquet["columns"].is_null()) {
+        const auto& columns = parquet["columns"];
+        Require(columns.is_array() && columns.size() <= 64, "write settings columns require an array of 0..64 items");
+        for (const auto& column : columns) {
+            CheckKeys(column, {"field", "compression"});
+            Require(column.contains("field") && column["field"].is_string(), "column write settings require a field");
+            ColumnWriteSettings item{column["field"].get<std::string>(), std::nullopt};
+            if (column.contains("compression") && !column["compression"].is_null()) {
+                item.compression = ParseCompression(column["compression"]);
+            }
+            result.columns.push_back(std::move(item));
+        }
     }
     return result;
 }

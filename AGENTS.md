@@ -50,9 +50,15 @@ are implemented. They can use the native Asio HTTP server over the public Engine
 `--data-dir` starts with no databases; authenticated API/UI operations create,
 list, open, close and reconcile databases. A separate SQLite service registry
 stores identities, persisted engine limits and open intent; collection/data writes remain in core.
-Scans use bounded fixed-view pages with per-database quotas, finite replay retention,
-idle expiry and explicit cancellation. Each admitted cursor reserves its maximum
-replay page before consuming rows. Separate HTTP reader, publisher, lifecycle and
+Scans use bounded fixed-view pages with validated configurable global/per-database
+live, completed replay, byte and lifetime limits. Each admitted cursor reserves
+its maximum replay page in both the local quota and shared process memory before
+planning. Capabilities expose effective limits, separate HTTP/session occupancy,
+shared current/peak memory and bounded refusal/eviction counters. Completed replay
+eviction is oldest-first; live cursors are never evicted. See
+[scan session policy](docs/development/SCAN_SESSIONS.md) for startup options, the
+32-reader profile and `glamdb.scan_policy` real native validation.
+Separate HTTP reader, publisher, lifecycle and
 control pools use bounded fair per-database queues with deadlines and cancellation.
 Outcome lookups refuse tentative catalog reads without waiting on publication.
 HTTP body admission reserves four of sixteen readers from ordinary uploads for
@@ -98,6 +104,15 @@ local disk. A store has one owning process and one serialized writer; reads may
 run concurrently. Collections are fixed-schema, unpartitioned Iceberg v2 tables.
 Append preserves every input row, including duplicate keys. It provides neither
 key uniqueness nor replacement semantics.
+
+Collections carry Parquet write settings (collection-default compression codec
+and level, per-column overrides) that apply to data files of later appends.
+They live in the SQLite catalog (version 2, created lazily by the first stored
+settings), change by compare-and-set under the writer and are checked against
+every written footer; see [the coordinator guide](docs/development/COORDINATOR.md#collection-write-settings).
+The SDK (`create_collection(write_settings=...)`, `update_write_settings`) and the
+workbench (creation controls, Schema panel) expose them only when capabilities
+advertise `features.write_settings`; the mock and static demo do not.
 
 Key-value upserts and deletes are a subsequent extension using copy-on-write
 and an explicit KV collection mode. Native capabilities, receipt-backed snapshot
@@ -272,6 +287,12 @@ The check script also packages/serves the public demo under /glamdb/ and verifie
 requests, token prompt, cross-visitor state or credential files are introduced.
 See [validation](docs/development/WORKBENCH_VALIDATION.md) for exact evidence and
 limits. Keep secrets in environment or process memory; never browser storage.
+Arrow downloads require the preview's fixed snapshot, MIME, identity encoding,
+length, checksum and complete modern IPC framing before saving. The SDK checks
+the first page against requested/opened snapshots and preserves consumer/decode
+errors through owner cleanup; returned batches retain their buffers. See
+[client conformance](docs/development/CLIENT_CONFORMANCE.md) for separate native
+and mock export/ownership tests and the browser framing validator's scope.
 Mock faults require explicit development configuration. Do not give the mock a
 production store path. Every production write must eventually use the C++ core.
 

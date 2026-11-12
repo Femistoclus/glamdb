@@ -45,10 +45,12 @@ dependencies. `GLAMDB_E2E_PORT`, `GLAMDB_STATIC_PORT`, `GLAMDB_BROWSER_PATH` and
 | SDK authentication and capabilities | Expected backend identity and rejected credentials. |
 | SDK create and exact resolution | Original UUID/name/schema; case-sensitive names. |
 | SDK JSON and Arrow | Duplicate rows, NULL, int64 beyond 2^53, years 0001/9999, fixed snapshots, zero-column projection, verified checksums and early close. |
+| SDK Arrow integrity and ownership | Empty schema/EOS, a scan opened before another append, corrupt checksums/lengths, missing EOS, truncation, extra bytes, bad schema and wrong/missing snapshot headers. Early close, consumer/client errors and simultaneous later-page view/close errors release owners; returned batches remain readable. |
 | SDK operations | Retry A after B returns the original receipt; failed preconditions stay terminal; changed payload conflicts; a dropped real response retains the original request. |
 | SDK metadata | History/file pages retain their selected view across writes; file details and explain select the same snapshot. |
 | SDK TLS and quickstart | Trusted CA succeeds, system/wrong CA fails without fabricating an outcome; the runnable example verifies its stream. |
 | Browser | Create, append duplicates and precise integers, render hostile text safely, select history, filter and download Arrow. |
+| Browser exports | Empty schema, append between preview and download, and damaged real checksum/EOS/snapshot responses that never start a download. A healthy retry succeeds. |
 
 Assertions preserve documented representation differences: native metadata counts
 are decimal strings, while mock counts can be integers; native authentication
@@ -57,6 +59,24 @@ operation-conflict codes also differ. Native metadata selects the snapshot in a
 top-level `snapshot_id`; the mock includes it in `identity`. Foreign native
 metadata cursors return `NOT_FOUND`, while the mock reports `CURSOR_MISMATCH`.
 These differences do not weaken row, snapshot, receipt or backend checks.
+The later-page view/close fault requires native cursor sessions and is explicitly
+skipped in the legacy single-response mock profile.
+
+`tests/integration/helpers/arrow_transport.py` wraps the real HTTP transport;
+only deliberate fault cases alter native/mock response bytes or headers. Owner
+tests require more than 10,000 rows, assert native cancellation acknowledgements
+and check retained data after closing the HTTP pool. Unit doubles cover exact
+header/framing boundaries and close failures separately.
+
+Browser downloads require Arrow MIME, identity content encoding, the preview's
+fixed snapshot, exact length and SHA256, followed by modern IPC V4/V5 framing
+with a schema message and explicit EOS at HTTP EOF. The bounded validator walks
+Message metadata and body lengths, including table bounds, so a batch body that
+resembles EOS cannot hide a missing framing marker. It verifies the transport
+envelope; logical Arrow schema/value decoding remains the native/PyArrow
+encoder's contract and is checked by PyArrow in SDK and browser integration.
+It does not implement a second Arrow decoder. Multi-page browser exports remain
+an explicit error directing the user to reduce the limit or use the SDK.
 
 Native runs create fresh managed databases over real sockets. SDK scenarios stop
 their process before using the independent inspector from `tools/acceptance`.

@@ -4,6 +4,7 @@
 #include "core/api/binary.h"
 #include "core/api/canonical.h"
 #include "core/api/codec.h"
+#include "core/api/write_settings.h"
 #include "core/engine/engine_factory.h"
 #include "core/engine/metadata_pages.h"
 #include "core/engine/storage_mapping.h"
@@ -22,6 +23,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <new>
@@ -277,6 +279,22 @@ struct Engine::Impl
                 RetryHint::OperatorAction});
         }
         return {};
+    }
+
+    // Non-default settings need a backend that applies them with a codec of
+    // this build; defaults never depend on the backend.
+    void CheckSettingsSupported(const WriteSettings& settings) const
+    {
+        if (IsDefault(settings)) {
+            return;
+        }
+        const auto capabilities = backend ? backend->GetCapabilities() : EngineCapabilities{};
+        Require(capabilities.write_settings,
+            "DEPENDENCY_UNAVAILABLE",
+            "the storage backend does not support write settings");
+        if (const auto supported = CheckWriteSettingsSupported(settings, capabilities.parquet_codecs); !supported) {
+            throw Failure(supported.error());
+        }
     }
 
     void CheckHealthy(uint64_t expected_generation) const
@@ -1084,6 +1102,7 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
             "INVALID_ARGUMENT",
             "invalid collection ID or exact name");
         const auto schema_hash = Take(SchemaFingerprint(request.schema));
+        const auto settings = Take(CanonicalWriteSettings(request.schema, request.write_settings));
         context = CreateRecoveryContext{impl->info.store_id,
             request.collection_id,
             request.exact_name,
@@ -1131,6 +1150,9 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
                 Require(collection.schema == request.schema,
                     "SCHEMA_MISMATCH",
                     "fixed schema differs from original creation");
+                Require(impl->catalog->CreatedWriteSettings(collection.collection_id) == settings,
+                    "WRITE_SETTINGS_MISMATCH",
+                    "write settings differ from original creation");
                 context = CreateRecoveryContext{impl->info.store_id,
                     collection.collection_id,
                     collection.name,
@@ -1153,6 +1175,7 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
         if (const auto health = impl->BackendWriteHealth(); !health) {
             throw Failure(health.error());
         }
+        impl->CheckSettingsSupported(settings);
         const auto attempt = NewUuid();
         context = CreateRecoveryContext{impl->info.store_id,
             request.collection_id,
@@ -1163,13 +1186,15 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
             std::nullopt,
             false};
         impl->ReserveAttempt();
-        auto staged = Take(impl->backend->PrepareCreate(impl->info, request, attempt));
+        auto canonical = request;
+        canonical.write_settings = settings;
+        auto staged = Take(impl->backend->PrepareCreate(impl->info, canonical, attempt));
         Require(staged != nullptr, "IO_ERROR", "producer returned no staged collection");
         auto info = staged->Info();
         Require(info.collection_id == request.collection_id && info.name == request.exact_name &&
-                info.schema == request.schema,
+                info.schema == request.schema && info.write_settings == settings && info.write_settings_version == 0,
             "IO_ERROR",
-            "producer changed collection identity or schema");
+            "producer changed collection identity, schema or write settings");
         context->candidate_table_uuid = info.table_uuid;
         {
             std::lock_guard state_lock(impl->state_mutex);
@@ -1243,6 +1268,73 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
             std::nullopt,
             ExceptionError(error),
             std::nullopt};
+    }
+}
+
+Result<CollectionInfo> Engine::UpdateWriteSettings(const UpdateWriteSettingsRequest& request)
+{
+    const auto impl = impl_;
+    // Appends hold the writer from binding through publication, so a bound
+    // append keeps the settings it read and the next one sees the new ones.
+    std::unique_lock writer_lock(impl->writer, std::defer_lock);
+    try {
+        Require(ValidUuid(request.collection_id), "INVALID_ARGUMENT", "collection ID must be a canonical UUID");
+        // The next version must be representable: expected + 1 never overflows.
+        if (request.expected_version < 0 || request.expected_version == std::numeric_limits<int64_t>::max()) {
+            throw Failure(
+                {"INVALID_ARGUMENT", "expected write settings version must be in 0..2^63-2", RetryHint::FixInput});
+        }
+        // A cache miss cannot prove absence while another writer may publish.
+        const auto collection = impl->ReadCollection([&](const auto& item) {
+            return item.collection_id == request.collection_id;
+        });
+        const auto settings = Take(CanonicalWriteSettings(collection.schema, request.write_settings));
+        if (!writer_lock.try_lock_for(impl->limits.writer_wait)) {
+            throw Failure({"RESOURCE_EXHAUSTED",
+                "writer busy; write settings were not changed",
+                RetryHint::SameIdAfterReconcile});
+        }
+        uint64_t expected_generation = 0;
+        {
+            std::lock_guard state_lock(impl->state_mutex);
+            impl->CheckReady();
+            expected_generation = impl->health_generation;
+        }
+        // Resetting to defaults is always possible; anything else must be
+        // applicable by this build before it can bind later appends.
+        impl->CheckSettingsSupported(settings);
+        {
+            std::lock_guard state_lock(impl->state_mutex);
+            impl->CheckHealthy(expected_generation);
+        }
+        CollectionInfo updated;
+        try {
+            updated = impl->catalog->UpdateWriteSettings(request.collection_id, request.expected_version, settings);
+        } catch (const Failure& error) {
+            if (!error.uncertain) {
+                throw;
+            }
+            // COMMIT may or may not have persisted. After reconciliation the
+            // same request either applies or is recognized as applied.
+            if (impl->backend) {
+                impl->backend->InvalidateCache();
+            }
+            {
+                std::lock_guard state_lock(impl->state_mutex);
+                impl->ready = false;
+                ++impl->health_generation;
+            }
+            return std::unexpected(ErrorDetail{"RECOVERY_REQUIRED",
+                "write settings outcome is unknown; reconcile, then repeat the same request",
+                RetryHint::SameIdAfterReconcile});
+        }
+        impl->RefreshCache();
+        return updated;
+    } catch (const Failure& error) {
+        impl->CloseOnCorruption(error.detail);
+        return std::unexpected(error.detail);
+    } catch (const std::exception& error) {
+        return std::unexpected(ExceptionError(error));
     }
 }
 
@@ -1414,6 +1506,8 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         auto input = Take(NormalizeBatches(collection.schema, request.collection_id, request.batches, reservation));
         Require(input.payload_hash == payload_hash, "INVALID_ARGUMENT", "Arrow input changed during append");
         const auto base = impl->catalog->Base(request.collection_id);
+        // The store may have been opened by a build without a stored codec.
+        impl->CheckSettingsSupported(collection.write_settings);
         if (impl->backend) {
             const auto admissible = impl->backend->CheckAppendAdmissible(impl->info, collection, base, input);
             if (!admissible) {

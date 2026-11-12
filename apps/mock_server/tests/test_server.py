@@ -457,3 +457,20 @@ def test_bearer_token_does_not_let_the_caller_forge_cursor_membership(client):
     response = client.get("/collections", params={"page_size": 1, "cursor": (forged + b"." + signature).decode()})
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "INVALID_ARGUMENT"
+
+
+def test_mock_neither_advertises_nor_accepts_parquet_write_settings(client):
+    # Clients enable Parquet compression controls only for an explicit native
+    # capability; the mock must reject settings rather than silently ignore them.
+    capabilities = client.get("/capabilities").json()
+    assert "parquet" not in capabilities and "write_settings" not in capabilities.get("features", {})
+    settings = {"parquet": {"compression": {"codec": "zstd", "level": 3}, "columns": []}}
+    response = client.post("/collections", json={"collection_id": CID, "name": "exact Name", "schema": SCHEMA,
+                                                 "write_settings": settings})
+    assert response.status_code == 422 and response.json()["error"]["code"] == "INVALID_ARGUMENT"
+    assert client.get(f"/collections/{CID}").status_code == 404
+    info = create(client)
+    assert "write_settings" not in info and "write_settings_version" not in info
+    update = client.post(f"/collections/{CID}/write-settings",
+                         json={"expected_version": "0", "write_settings": settings})
+    assert update.status_code == 404
