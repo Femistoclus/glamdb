@@ -252,6 +252,11 @@ the full SQLite/power-loss qualification gate.
 
 ## Remaining engine integration
 
+For organization sign-in and exclusive database ownership, see the
+[organization deployment](ORGANIZATIONS.md). That gateway supplies
+upstream credentials and routes only authorized database IDs; actual reads and
+writes still belong to the database backend.
+
 The [native HTTP server](HTTP_SERVER.md) is the adapter over the single C++
 write authority; keep preserving caller identities, precise scalar encoding,
 immutable receipts, all three outcomes, fixed-view cursors and context-managed

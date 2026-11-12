@@ -89,6 +89,7 @@ glamdb/
 | `tests/` | Component/storage pipeline tests, catalog/coordinator tests, process recovery, VFS faults, installed consumers, tooling, and independent client/verification suites. |
 | `fixtures/` | Shared deterministic test inputs and expected outputs. |
 | `apps/mock_server/` | Disposable in-memory adapter with real HTTP/Arrow and runtime config. |
+| `apps/workbench_access/` | Organization authorization catalog, local operator CLI, HTTPS authentication and database routing. |
 | `tools/verification/` | Literal canonical vectors, SQL 3VL oracle and receipt/fault-evidence tools. |
 | `probes/` | Standalone installed-dependency consumer and libc++ sanitizer compatibility reproducer. |
 | `benchmarks/` | Performance and capacity measurements. |

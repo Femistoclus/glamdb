@@ -98,6 +98,23 @@ The same UI can publish as a static browser-only demo on GitHub Pages. It has
 no API token or shared backend: tab-local rows/operations disappear on reload.
 JSON export is available there; network SDK and Arrow IPC remain connected-server
 features. Do not present BrowserDemoAPI as the public HTTP or durable core API.
+The organization gateway (`apps/workbench_access/`) uses Keycloak accounts and
+organizations, OAuth2 Proxy browser sessions in a private ephemeral Valkey store,
+Authlib/joserfc token verification
+with live introspection, and the official Cerbos SDK with YAML policies. SQLite
+stores database ownership, transactional audit, idempotent lifecycle receipts and
+unresolved backend write admissions; it stores no passwords or password hashes.
+Every list and direct database route uses current server-owned policy attributes.
+A strict transfer closes admission, waits for requests and streams, and requires
+terminal authoritative backend write outcomes before moving ownership. Unknown
+writes survive restart and keep transfer closed. Cross-service identity failures
+leave explicit pending receipts; emergency disables supersede older pending grants.
+See [ORGANIZATIONS.md](docs/development/ORGANIZATIONS.md) and the detailed
+[operator guide](docs/development/SSO_OPERATIONS.md) for setup, native account
+management, migration, recovery and secret rotation. The former Basic and static
+group modes have been removed. Production deployment of the gateway with the
+native HTTP transport remains unqualified; explicit mock-backend tests do not
+qualify that identity integration or durability.
 
 The first milestone is an embedded, synchronous, durable **append store** on
 local disk. A store has one owning process and one serialized writer; reads may
@@ -236,6 +253,7 @@ Preserve these boundaries when adding or changing engine behavior:
 | `tests/` | Native unit/recovery/SqlCatalog/VFS/consumer suites, `vertical/` public-API storage tests, `mock/` in-memory scan tests, verification and actual SDK HTTP/HTTPS tests. |
 | `tests/stress/` | Explicit manual native capacity campaigns; excluded from default pytest/CTest and CI. |
 | `apps/mock_server/` | Disposable Python mock, real HTTP/Arrow, no warehouse/catalog access. |
+| `apps/workbench_access/` | OIDC/Cerbos gateway, ownership/audit catalog, lifecycle CLI and offline migration. |
 | `fixtures/`, `tools/verification/` | Literal canonical/metadata inputs, independent row oracle and evidence helpers. |
 | `sdk/python/`, `ui/` | Standalone Python HTTP SDK; HTML/CSS/ES-module pink workbench and browser/unit tests. |
 | `tools/workload/` | Mimesis datasets, SDK/Locust workloads, per-worker SQLite outcome journals and full verification. |
@@ -316,6 +334,23 @@ the first page against requested/opened snapshots and preserves consumer/decode
 errors through owner cleanup; returned batches retain their buffers. See
 [client conformance](docs/development/CLIENT_CONFORMANCE.md) for separate native
 and mock export/ownership tests and the browser framing validator's scope.
+The standard Python suite includes OIDC claim/CSRF/policy-route/admission,
+workflow/retry/migration and disconnect regressions with explicit test doubles.
+Real identity infrastructure tests are opt-in and require a disposable provisioned
+Keycloak/OAuth2 Proxy/Cerbos deployment. They must not silently create accounts on
+an unknown host. Full system verification targets a configured real GlamDB server
+by default; mock backends require explicit selection and cannot certify native
+integration. See [current validation](docs/development/ORGANIZATIONS_VALIDATION.md).
+Initialize ownership state with `python3 -m apps.workbench_access.admin --catalog
+/outside/runtime/resources.sqlite init`; start the private adapter with
+`python3 -m apps.workbench_access --config /outside/runtime/gateway.json
+--operator-socket /outside/runtime/operator.sock`. Only Caddy public HTTPS is exposed;
+identity administration, the operator socket, backends, PDP and metrics stay private.
+Keep catalog and credential files owned by the service user, mode0600, outside UI.
+Do not edit a live catalog or remove its owner lease to bypass the owning process.
+Operational events use the optional stderr logging adapter when installed; runtime
+journals own rotation. They never replace transactional ownership audit. Optional
+metrics are unavailable when the metrics component is absent, rather than fabricated.
 Mock faults require explicit development configuration. Do not give the mock a
 production store path. Every production write must eventually use the C++ core.
 

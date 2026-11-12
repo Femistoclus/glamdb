@@ -1,0 +1,13 @@
+**
+!apps/
+!apps/workbench_access/
+!apps/workbench_access/*.py
+!apps/workbench_access/requirements.txt
+!tools/
+!tools/verification/
+!tools/verification/README.md
+!tools/logging/
+!tools/logging/*.py
+!tools/monitoring/
+!tools/monitoring/application_metrics.py
+!tools/monitoring/logging_metrics.py

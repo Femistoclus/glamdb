@@ -8,7 +8,7 @@ fi
 
 "${GLAMDB_PYTHON:-python3.13}" -m venv .venv
 .venv/bin/python -m pip install --disable-pip-version-check \
-  --require-hashes --only-binary=:all: --no-deps -r tools/workload/requirements.txt
+  --require-hashes --only-binary=:all: --no-deps -r tools/workload/requirements.txt -r apps/workbench_access/requirements.txt
 if [[ -f tools/monitoring/requirements.txt ]]; then
   .venv/bin/python -m pip install --disable-pip-version-check \
     --require-hashes --only-binary=:all: --no-deps -r tools/monitoring/requirements.txt

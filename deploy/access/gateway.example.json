@@ -1,0 +1,26 @@
+{
+  "version": 3,
+  "sso": {
+    "issuer": "https://login.example.com/realms/glamdb",
+    "client_id": "glamdb-gateway",
+    "client_secret_file": "/run/secrets/glamdb/gateway.secret",
+    "audience": "glamdb-api",
+    "backchannel": "https://keycloak-admin:18080/realms/glamdb",
+    "ca_file": "/etc/glamdb/pki/caddy-root.crt",
+    "token_max_seconds": 90,
+    "timeout_seconds": 2,
+    "directory_client_id": "glamdb-control",
+    "directory_secret_file": "/run/secrets/glamdb/control.secret"
+  },
+  "catalog": "/state/resources.sqlite",
+  "csrf_secret_file": "/run/secrets/glamdb/csrf.secret",
+  "site": "/srv/glamdb/ui",
+  "theme": "/srv/glamdb/ui/theme.json",
+  "public_origin": "https://workbench.example.com",
+  "cerbos_target": "cerbos:3593",
+  "cerbos_plaintext": true,
+  "max_inflight": 32,
+  "max_body_bytes": 4194304,
+  "drain_timeout_seconds": 30,
+  "backend_timeout_seconds": 30
+}

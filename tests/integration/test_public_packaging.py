@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/build-public-demo.py"
@@ -42,3 +43,46 @@ def test_packager_refuses_existing_unmarked_directory_and_source_root():
         assert (path / "keep.txt").read_text() == "keep me"
     result = subprocess.run([sys.executable, str(SCRIPT), "--output", str(ROOT)], capture_output=True)
     assert result.returncode != 0
+
+
+def test_gateway_package_uses_connected_ui_without_sample_data():
+    parent = ROOT / "artifacts"
+    parent.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="gateway-package-", dir=parent) as temporary:
+        output = Path(temporary) / "site"
+        subprocess.run([sys.executable, str(SCRIPT), "--mode", "gateway", "--output", str(output)],
+                       check=True, capture_output=True)
+        html = (output / "index.html").read_text()
+        assert 'data-access-gateway="true"' in html
+        assert 'data-public-demo="true"' not in html
+        assert not (output / "config/demo-data.json").exists()
+        assert (output / "assets/access.js").is_file()
+
+
+@pytest.mark.parametrize("kind", ["asset", "theme"])
+def test_packager_rejects_asset_symlinks_before_replacing_the_old_package(tmp_path, kind):
+    source = tmp_path / "source"
+    (source / "scripts").mkdir(parents=True)
+    (source / "scripts/build-public-demo.py").write_bytes(SCRIPT.read_bytes())
+    (source / "ui/assets").mkdir(parents=True)
+    secret = tmp_path / "outside-ui-credentials"
+    secret.write_text("disposable-confidential-test-payload")
+    if kind == "asset":
+        (source / "ui/assets/innocent.png").symlink_to(secret)
+    (source / "ui/config").mkdir()
+    for name in ("theme.json", "demo-data.json"):
+        (source / "ui/config" / name).write_text("{}")
+    if kind == "theme":
+        (source / "ui/config/theme.json").unlink()
+        (source / "ui/config/theme.json").symlink_to(secret)
+    (source / "ui/index.html").write_text('<html lang="en"><title>test</title></html>')
+    output = source / "artifacts/site"
+    output.mkdir(parents=True)
+    (output / ".glamdb-public-demo").write_text("public-demo-v1\n")
+    (output / "keep.txt").write_text("previous package")
+    result = subprocess.run([sys.executable, str(source / "scripts/build-public-demo.py"),
+                             "--output", str(output)], capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "symlink" in result.stderr.lower()
+    assert (output / "keep.txt").read_text() == "previous package"
+    assert not (output / "assets/innocent.png").exists()
