@@ -131,6 +131,12 @@ explicit bulk I/O attempts, result receipt version 2, conservative device reserv
 and measured limits. Keep unmarked ordinary one-file guards strict and change
 publication/recovery bounds together. No bulk HTTP upload endpoint is provided.
 
+Native append preparation retains one schema mapping per traversal and reuses
+inspected string sizes for its owned columns. Full validation remains per batch,
+and fresh post-admission inspection plus the owned-hash comparison remain before
+binding. See [append preparation](docs/development/APPEND_PREPARATION.md) for
+fragmented-input measurements, rejection scratch and remaining admission limits.
+
 The first milestone is an embedded, synchronous, durable **append store** on
 local disk. A store has one owning process and one serialized writer; reads may
 run concurrently. Collections are fixed-schema, unpartitioned Iceberg v2 tables.

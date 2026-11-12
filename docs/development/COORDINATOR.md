@@ -54,6 +54,12 @@ Its result receipt version 2 extends counts without changing old receipts.
   NULL, duplicate rows remain, float negative zero normalizes, nonfinite floats
   fail, and timestamps are UTC microseconds in years 0001 through 9999. SHA-256
   hashes use versioned canonical bytes, independent of batch chunking.
+  Each traversal retains only one immutable Arrow schema mapping; every actual
+  batch is still fully validated. The owned copy reuses that inspection's
+  per-column string sizes. Unknown/oversized names and incompatible actual type
+  parameters reject before Arrow can allocate their fingerprints/diagnostics.
+  See [append preparation](APPEND_PREPARATION.md) for measurements and the
+  remaining preparation-admission boundary.
   Native decimal128(p,s) and date32 preserve exact coefficients, immutable
   parameters and Gregorian days; extended schemas use canonical schema version 2
   without changing scalar-only hashes or existing receipts. See

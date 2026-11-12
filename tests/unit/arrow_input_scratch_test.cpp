@@ -97,6 +97,9 @@ void* operator new[](std::size_t size, std::align_val_t alignment, const std::no
 }
 void operator delete(void* pointer) noexcept
 {
+    // The analyzer marks delete arguments freed before entering this counting
+    // replacement. Only ReleaseCounted actually frees the malloc-backed block.
+    // NOLINTNEXTLINE(clang-analyzer-cplusplus.NewDelete)
     ReleaseCounted(pointer);
 }
 void operator delete[](void* pointer) noexcept
@@ -154,7 +157,7 @@ constexpr int Fields = 64;
 // its fingerprint and encoding, field mappings, one batch's column views,
 // per-field owned-column state and Arrow array/batch objects. It is covered
 // by the reservation's 64 KiB constant; the bound leaves the same again.
-constexpr int64_t SchemaScratchBytes = 64 * 1024;
+constexpr int64_t SchemaScratchBytes = 64LL * 1024;
 
 // Peak C++ heap growth above the live bytes at the start of `work`.
 template <typename TWork>
@@ -237,8 +240,8 @@ void ExpectBounded(const TPreparationMemory& many, const TPreparationMemory& sin
         static_cast<long long>(single.NormalizeHeap));
     EXPECT_EQ(many.Reservation, single.Reservation);
     // C++ scratch does not depend on how the same rows are split into batches.
-    EXPECT_LE(many.FingerprintHeap, single.FingerprintHeap + 16 * 1024);
-    EXPECT_LE(many.NormalizeHeap, single.NormalizeHeap + 16 * 1024);
+    EXPECT_LE(many.FingerprintHeap, single.FingerprintHeap + 16LL * 1024);
+    EXPECT_LE(many.NormalizeHeap, single.NormalizeHeap + 16LL * 1024);
     // Everything normalization allocates fits the admitted reservation.
     EXPECT_LE(many.NormalizeHeap + many.NormalizeArrow, static_cast<int64_t>(many.Reservation) + SchemaScratchBytes);
     EXPECT_LE(many.FingerprintHeap, SchemaScratchBytes);
@@ -246,19 +249,97 @@ void ExpectBounded(const TPreparationMemory& many, const TPreparationMemory& sin
 
 TEST(ArrowInputScratch, EmptyHeavyBatchesKeepScratchBounded)
 {
-    std::vector<std::shared_ptr<arrow::RecordBatch>> many(9999, NoColumns(0));
+    std::vector<std::shared_ptr<arrow::RecordBatch>> many;
+    many.reserve(10000);
+    // Distinct schemas ensure a cache cannot retain one mapping per schema.
+    for (int index = 0; index < 9999; ++index) {
+        many.push_back(NoColumns(0));
+    }
     many.push_back(NoColumns(1));
     ExpectBounded(Measure(many), Measure({NoColumns(1)}));
 }
 
+// Caller-owned schema names are outside the decoded-value budget. Rejecting an
+// unknown field must not copy or retain arbitrarily large names in core scratch.
+TEST(ArrowInputScratch, RejectedFieldNamesKeepScratchBounded)
+{
+    const SchemaSpec schema{{{"n", FieldType::Int64, true}}};
+    arrow::Int64Builder builder;
+    EXPECT_TRUE(builder.Append(1).ok());
+    const auto array = builder.Finish().ValueOrDie();
+    for (const size_t length : {128ULL * 1024, 8ULL * 1024 * 1024}) {
+        SCOPED_TRACE(length);
+        const auto batch =
+            arrow::RecordBatch::Make(arrow::schema({arrow::field(std::string(length, 'x'), arrow::int64())}),
+                1,
+                {array});
+        const std::vector<std::shared_ptr<arrow::RecordBatch>> batches{batch};
+        const auto fingerprintHeap = MeasureHeapPeak([&] {
+            const auto result = FingerprintInput(schema, CollectionID, batches);
+            EXPECT_FALSE(result);
+            if (!result) {
+                EXPECT_EQ(result.error().code, "INVALID_ARGUMENT");
+                EXPECT_EQ(result.error().retry_hint, RetryHint::FixInput);
+            }
+        });
+        const auto normalizedHeap = MeasureHeapPeak([&] {
+            const auto result = NormalizeBatches(schema, CollectionID, batches);
+            EXPECT_FALSE(result);
+            if (!result) {
+                EXPECT_EQ(result.error().code, "INVALID_ARGUMENT");
+                EXPECT_EQ(result.error().retry_hint, RetryHint::FixInput);
+            }
+        });
+        std::printf("rejected_name_bytes=%zu fingerprint_heap=%lld normalize_heap=%lld\n",
+            length,
+            static_cast<long long>(fingerprintHeap),
+            static_cast<long long>(normalizedHeap));
+        EXPECT_LE(fingerprintHeap, SchemaScratchBytes);
+        EXPECT_LE(normalizedHeap, SchemaScratchBytes);
+    }
+}
+
+// Arrow's full type comparison/diagnostic can materialize the entire timezone
+// of an incompatible actual array, even when the batch schema itself is valid.
+TEST(ArrowInputScratch, RejectedArrayTypeParametersKeepScratchBounded)
+{
+    const SchemaSpec schema{{{"at", FieldType::TimestampUsUtc, true}}};
+    arrow::Int64Builder builder;
+    EXPECT_TRUE(builder.Append(1).ok());
+    auto data = builder.Finish().ValueOrDie()->data()->Copy();
+    data->type = arrow::timestamp(arrow::TimeUnit::MICRO, std::string(8ULL * 1024 * 1024, 'X'));
+    const auto batch =
+        arrow::RecordBatch::Make(arrow::schema({arrow::field("at", arrow::timestamp(arrow::TimeUnit::MICRO, "UTC"))}),
+            1,
+            std::vector<std::shared_ptr<arrow::ArrayData>>{std::move(data)});
+    const std::vector<std::shared_ptr<arrow::RecordBatch>> batches{batch};
+    const auto fingerprintHeap = MeasureHeapPeak([&] {
+        const auto result = FingerprintInput(schema, CollectionID, batches);
+        EXPECT_FALSE(result);
+        if (!result) {
+            EXPECT_EQ(result.error().code, "INVALID_ARGUMENT");
+            EXPECT_EQ(result.error().retry_hint, RetryHint::FixInput);
+        }
+    });
+    const auto normalizedHeap = MeasureHeapPeak([&] {
+        const auto result = NormalizeBatches(schema, CollectionID, batches);
+        EXPECT_FALSE(result);
+        if (!result) {
+            EXPECT_EQ(result.error().code, "INVALID_ARGUMENT");
+            EXPECT_EQ(result.error().retry_hint, RetryHint::FixInput);
+        }
+    });
+    std::printf("rejected_timezone fingerprint_heap=%lld normalize_heap=%lld\n",
+        static_cast<long long>(fingerprintHeap),
+        static_cast<long long>(normalizedHeap));
+    EXPECT_LE(fingerprintHeap, SchemaScratchBytes);
+    EXPECT_LE(normalizedHeap, SchemaScratchBytes);
+}
+
 TEST(ArrowInputScratch, SingleRowBatchesKeepScratchBounded)
 {
-    std::vector<std::shared_ptr<arrow::RecordBatch>> many;
-    many.reserve(10000);
-    for (int64_t index = 0; index < 10000; ++index) {
-        many.push_back(OneRow(index));
-    }
-    // The same rows as one batch.
+    // Build the values once, then slice. Constructing 640,000 separate builders
+    // measures caller setup rather than preparation and exceeds sanitizer timeouts.
     std::vector<std::shared_ptr<arrow::Array>> columns;
     for (int field = 0; field < Fields; ++field) {
         arrow::Int64Builder builder;
@@ -269,7 +350,12 @@ TEST(ArrowInputScratch, SingleRowBatchesKeepScratchBounded)
         EXPECT_TRUE(builder.Finish(&array).ok());
         columns.push_back(std::move(array));
     }
-    const auto single = arrow::RecordBatch::Make(many.front()->schema(), 10000, std::move(columns));
+    const auto single = arrow::RecordBatch::Make(OneRow(0)->schema(), 10000, std::move(columns));
+    std::vector<std::shared_ptr<arrow::RecordBatch>> many;
+    many.reserve(10000);
+    for (int64_t index = 0; index < 10000; ++index) {
+        many.push_back(single->Slice(index, 1));
+    }
     ExpectBounded(Measure(many), Measure({single}));
 }
 

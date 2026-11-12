@@ -78,6 +78,68 @@ TEST(ArrowInput, InputValidationErrorsSuggestFixingTheInput)
     }
 }
 
+TEST(ArrowInput, SharedSchemaStillValidatesEveryBatch)
+{
+    const SchemaSpec schema{{{"n", FieldType::Int64, true}}};
+    const auto first = Integers({1});
+    arrow::BooleanBuilder builder;
+    ASSERT_TRUE(builder.Append(true).ok());
+    const auto wrongType = arrow::RecordBatch::Make(first->schema(), 1, {builder.Finish().ValueOrDie()});
+    const auto wrongLength = arrow::RecordBatch::Make(first->schema(), 1, Integers({1, 2})->columns());
+    for (const auto& batches : std::vector<std::vector<std::shared_ptr<arrow::RecordBatch>>>{{first, wrongType},
+             {first, wrongLength},
+             {first, Integers({2}), wrongLength}})
+    {
+        const auto fingerprinted = FingerprintInput(schema, "00112233-4455-6677-8899-aabbccddeeff", batches);
+        ASSERT_FALSE(fingerprinted);
+        EXPECT_EQ(fingerprinted.error().code, "INVALID_ARGUMENT");
+        const auto normalized = NormalizeBatches(schema, "00112233-4455-6677-8899-aabbccddeeff", batches);
+        ASSERT_FALSE(normalized);
+        EXPECT_EQ(normalized.error().code, "INVALID_ARGUMENT");
+    }
+}
+
+TEST(ArrowInput, AlternatingSchemasPreserveFieldOrderAndOmittedNulls)
+{
+    const SchemaSpec schema{{{"n", FieldType::Int64, true}, {"flag", FieldType::Bool, true}}};
+    arrow::BooleanBuilder builder;
+    ASSERT_TRUE(builder.Append(true).ok());
+    const auto flag = builder.Finish().ValueOrDie();
+    const auto first = Integers({1});
+    const auto reordered = arrow::RecordBatch::Make(
+        arrow::schema({arrow::field("flag", arrow::boolean()), arrow::field("n", arrow::int64())}),
+        1,
+        {flag, Integers({2})->column(0)});
+    const auto last = arrow::RecordBatch::Make(first->schema(), 1, Integers({3})->columns());
+    const std::vector<std::shared_ptr<arrow::RecordBatch>> batches{first, first->Slice(0, 0), reordered, last, first};
+    const auto input = NormalizeBatches(schema, "00112233-4455-6677-8899-aabbccddeeff", batches);
+    ASSERT_TRUE(input);
+    const auto expected = NormalizeRows(schema,
+        "00112233-4455-6677-8899-aabbccddeeff",
+        {{int64_t{1}, std::monostate{}},
+            {int64_t{2}, true},
+            {int64_t{3}, std::monostate{}},
+            {int64_t{1}, std::monostate{}}});
+    ASSERT_TRUE(expected);
+    const auto fingerprinted = FingerprintInput(schema, "00112233-4455-6677-8899-aabbccddeeff", batches);
+    ASSERT_TRUE(fingerprinted);
+    EXPECT_EQ(fingerprinted->PayloadHash, expected->payload_hash);
+    EXPECT_EQ(input->payload_hash, expected->payload_hash);
+    ASSERT_NE(input->Columns, nullptr);
+    const auto& values = static_cast<const arrow::Int64Array&>(*input->Columns->column(0));
+    const auto& flags = static_cast<const arrow::BooleanArray&>(*input->Columns->column(1));
+    ASSERT_EQ(values.length(), 4);
+    EXPECT_EQ(values.Value(0), 1);
+    EXPECT_EQ(values.Value(1), 2);
+    EXPECT_EQ(values.Value(2), 3);
+    EXPECT_EQ(values.Value(3), 1);
+    EXPECT_TRUE(flags.IsNull(0));
+    EXPECT_FALSE(flags.IsNull(1));
+    EXPECT_TRUE(flags.Value(1));
+    EXPECT_TRUE(flags.IsNull(2));
+    EXPECT_TRUE(flags.IsNull(3));
+}
+
 // Canonical limits count NULL as one validity byte, independently of the
 // writer's fixed slots. Exact row and batch boundaries must agree in the
 // streaming fingerprint, reservation inspector and owned normalization.

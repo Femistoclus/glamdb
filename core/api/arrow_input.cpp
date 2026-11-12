@@ -18,16 +18,45 @@
 namespace glamdb::detail {
 namespace {
 
-// `validated`: Inspect already ran ValidateFull on this batch in the same call.
-std::vector<int> MapFields(const SchemaSpec& schema, const arrow::RecordBatch& batch, bool validated = false)
+bool MatchesType(const FieldSpec& field, const arrow::DataType& type)
 {
-    Require(batch.num_columns() <= static_cast<int>(schema.fields.size()) && (validated || batch.ValidateFull().ok()),
-        "INVALID_ARGUMENT",
-        "invalid Arrow batch");
-    std::unordered_map<std::string, int> names;
-    for (int i = 0; i < batch.num_columns(); ++i) {
-        const auto& name = batch.schema()->field(i)->name();
-        Require(names.emplace(name, i).second &&
+    switch (field.type) {
+        case FieldType::String:
+            return type.id() == arrow::Type::STRING;
+        case FieldType::Bool:
+            return type.id() == arrow::Type::BOOL;
+        case FieldType::Int64:
+            return type.id() == arrow::Type::INT64;
+        case FieldType::Float64:
+            return type.id() == arrow::Type::DOUBLE;
+        case FieldType::TimestampUsUtc:
+            if (type.id() == arrow::Type::TIMESTAMP) {
+                const auto& timestamp = static_cast<const arrow::TimestampType&>(type);
+                return timestamp.unit() == arrow::TimeUnit::MICRO && timestamp.timezone() == "UTC";
+            }
+            return false;
+        case FieldType::Decimal:
+            if (type.id() == arrow::Type::DECIMAL128) {
+                const auto& decimal = static_cast<const arrow::Decimal128Type&>(type);
+                return decimal.precision() == field.precision && decimal.scale() == field.scale;
+            }
+            return false;
+        case FieldType::Date:
+            return type.id() == arrow::Type::DATE32;
+    }
+    return false;
+}
+
+// Resolve only immutable schema information. Array validation remains per batch.
+std::vector<int> MapFields(const SchemaSpec& schema, const arrow::Schema& input)
+{
+    Require(input.num_fields() <= static_cast<int>(schema.fields.size()), "INVALID_ARGUMENT", "invalid Arrow batch");
+    std::unordered_map<std::string_view, int> names;
+    for (int i = 0; i < input.num_fields(); ++i) {
+        const auto& name = input.field(i)->name();
+        // Fixed-schema names are at most 128 bytes. Do not copy or hash an
+        // unbounded caller name before rejecting it as unknown.
+        Require(name.size() <= 128 && names.emplace(name, i).second &&
                 std::ranges::any_of(schema.fields,
                     [&](const auto& field) {
                         return field.name == name;
@@ -43,41 +72,58 @@ std::vector<int> MapFields(const SchemaSpec& schema, const arrow::RecordBatch& b
             columns.push_back(-1);
             continue;
         }
-        const auto& type = batch.column(found->second)->type();
-        bool matches = false;
-        switch (field.type) {
-            case FieldType::String:
-                matches = type->id() == arrow::Type::STRING;
-                break;
-            case FieldType::Bool:
-                matches = type->id() == arrow::Type::BOOL;
-                break;
-            case FieldType::Int64:
-                matches = type->id() == arrow::Type::INT64;
-                break;
-            case FieldType::Float64:
-                matches = type->id() == arrow::Type::DOUBLE;
-                break;
-            case FieldType::TimestampUsUtc:
-                if (type->id() == arrow::Type::TIMESTAMP) {
-                    const auto& timestamp = static_cast<const arrow::TimestampType&>(*type);
-                    matches = timestamp.unit() == arrow::TimeUnit::MICRO && timestamp.timezone() == "UTC";
-                }
-                break;
-            case FieldType::Decimal:
-                if (type->id() == arrow::Type::DECIMAL128) {
-                    const auto& decimal = static_cast<const arrow::Decimal128Type&>(*type);
-                    matches = decimal.precision() == field.precision && decimal.scale() == field.scale;
-                }
-                break;
-            case FieldType::Date:
-                matches = type->id() == arrow::Type::DATE32;
-                break;
-        }
-        Require(matches, "INVALID_ARGUMENT", "Arrow field type does not match fixed schema");
+        Require(MatchesType(field, *input.field(found->second)->type()),
+            "INVALID_ARGUMENT",
+            "Arrow field type does not match fixed schema");
         columns.push_back(found->second);
     }
     return columns;
+}
+
+// One entry, not one entry per distinct batch schema: scratch stays O(fields)
+// even when every batch has its own schema. Caller schemas are immutable for
+// the synchronous call, and the second inspection creates a fresh mapping.
+class TFieldMapping
+{
+public:
+    explicit TFieldMapping(const SchemaSpec& schema)
+        : Schema_(schema)
+    { }
+
+    const std::vector<int>& Get(const arrow::RecordBatch& batch)
+    {
+        if (Input_ != batch.schema()) {
+            Columns_ = MapFields(Schema_, *batch.schema());
+            Input_ = batch.schema();
+        }
+        return Columns_;
+    }
+
+private:
+    const SchemaSpec& Schema_;
+    std::shared_ptr<arrow::Schema> Input_;
+    std::vector<int> Columns_;
+};
+
+void ValidateBatch(const SchemaSpec& schema, const arrow::RecordBatch& batch, const std::vector<int>& fields)
+{
+    // RecordBatch::num_columns() comes from its schema, not its ArrayData
+    // vector. Check the actual data before Arrow indexes or validates it.
+    Require(batch.column_data().size() == static_cast<size_t>(batch.num_columns()),
+        "INVALID_ARGUMENT",
+        "invalid Arrow batch");
+    for (size_t field = 0; field < fields.size(); ++field) {
+        if (fields[field] < 0) {
+            continue;
+        }
+        const auto& data = batch.column_data(fields[field]);
+        // Do not use DataType::Equals here: Arrow fingerprints timestamp
+        // timezones and can allocate an unbounded diagnostic before refusing.
+        Require(data != nullptr && data->type != nullptr && MatchesType(schema.fields[field], *data->type),
+            "INVALID_ARGUMENT",
+            "invalid Arrow batch");
+    }
+    Require(batch.ValidateFull().ok(), "INVALID_ARGUMENT", "invalid Arrow batch");
 }
 
 struct Shape
@@ -85,6 +131,7 @@ struct Shape
     size_t rows = 0;
     size_t decoded_bytes = 0;
     size_t null_slot_bytes = 0;
+    std::vector<int64_t> StringBytes;
 };
 
 // Typed view of one schema field in one batch, resolved once per batch so
@@ -176,17 +223,21 @@ Shape Inspect(const SchemaSpec& schema, const std::vector<std::shared_ptr<arrow:
         throw Failure(fingerprint.error());
     }
     Require(!batches.empty() && batches.size() <= 10000, "INVALID_ARGUMENT", "append requires bounded Arrow batches");
-    Shape shape;
+    Shape shape{.StringBytes = std::vector<int64_t>(schema.fields.size())};
+    TFieldMapping mapping(schema);
     for (const auto& batch : batches) {
         Require(batch != nullptr && batch->num_rows() >= 0 && batch->num_rows() <= 10000 &&
                 shape.rows + static_cast<size_t>(batch->num_rows()) <= 10000,
             "INVALID_ARGUMENT",
             "append requires at most 10000 rows");
         shape.rows += static_cast<size_t>(batch->num_rows());
-        const auto columns = ResolveColumns(schema, *batch, MapFields(schema, *batch));
+        const auto& fields = mapping.Get(*batch);
+        ValidateBatch(schema, *batch, fields);
+        const auto columns = ResolveColumns(schema, *batch, fields);
         for (int64_t row = 0; row < batch->num_rows(); ++row) {
             size_t bytes = schema.fields.size();
-            for (const auto& column : columns) {
+            for (size_t field = 0; field < columns.size(); ++field) {
+                const auto& column = columns[field];
                 if (column.IsNull(row)) {
                     Require(column.Nullable, "INVALID_ARGUMENT", "NULL in required Arrow field");
                     shape.null_slot_bytes += column.Type == FieldType::Decimal               ? 16
@@ -201,6 +252,7 @@ Shape Inspect(const SchemaSpec& schema, const std::vector<std::shared_ptr<arrow:
                         "INVALID_ARGUMENT",
                         "oversized Arrow string");
                     bytes += 4 + static_cast<size_t>(length);
+                    shape.StringBytes[field] += length;
                 } else {
                     bytes += column.Type == FieldType::Decimal ? 16
                         : column.Type == FieldType::Date       ? 4
@@ -393,28 +445,14 @@ void CopyRows(TOwnedColumn& owned, const TColumnView& column, FieldType type, in
 // bounds; it only fails the hash comparison afterwards.
 std::shared_ptr<arrow::RecordBatch> OwnBatches(const SchemaSpec& schema,
     const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-    int64_t rows,
+    const Shape& shape,
     arrow::MemoryPool* pool)
 {
+    const auto rows = static_cast<int64_t>(shape.rows);
     std::vector<TOwnedColumn> owned(schema.fields.size());
-    for (const auto& batch : batches) {
-        const auto columns = ResolveColumns(schema, *batch, MapFields(schema, *batch, true));
-        for (size_t field = 0; field < columns.size(); ++field) {
-            if (columns[field].Type != FieldType::String) {
-                continue;
-            }
-            for (int64_t row = 0; row < batch->num_rows(); ++row) {
-                if (!columns[field].IsNull(row)) {
-                    owned[field].DataBytes += columns[field].GetLength(row);
-                }
-            }
-            if (owned[field].DataBytes < 0 || owned[field].DataBytes > 16LL * 1024 * 1024) {
-                throw TInputChanged{};
-            }
-        }
-    }
     for (size_t field = 0; field < owned.size(); ++field) {
         auto& column = owned[field];
+        column.DataBytes = shape.StringBytes[field];
         column.Validity = Allocate(arrow::bit_util::BytesForBits(rows), pool);
         switch (schema.fields[field].type) {
             case FieldType::String:
@@ -438,8 +476,9 @@ std::shared_ptr<arrow::RecordBatch> OwnBatches(const SchemaSpec& schema,
         }
     }
     int64_t first = 0;
+    TFieldMapping mapping(schema);
     for (const auto& batch : batches) {
-        const auto columns = ResolveColumns(schema, *batch, MapFields(schema, *batch, true));
+        const auto columns = ResolveColumns(schema, *batch, mapping.Get(*batch));
         for (size_t field = 0; field < columns.size(); ++field) {
             CopyRows(owned[field], columns[field], schema.fields[field].type, first, batch->num_rows());
         }
@@ -488,8 +527,9 @@ std::string Fingerprint(const SchemaSpec& schema,
     }
     TCanonicalHasher hash;
     hash.AddBytes(*header);
+    TFieldMapping mapping(schema);
     for (const auto& batch : batches) {
-        HashRows(hash, ResolveColumns(schema, *batch, MapFields(schema, *batch, true)), batch->num_rows());
+        HashRows(hash, ResolveColumns(schema, *batch, mapping.Get(*batch)), batch->num_rows());
     }
     return hash.ComputeDigest();
 }
@@ -562,8 +602,9 @@ Result<size_t> UpdateFingerprintBatches(const SchemaSpec& schema,
                 }
             }
         }
+        TFieldMapping mapping(schema);
         for (const auto& batch : batches) {
-            HashRows(hash, ResolveColumns(schema, *batch, MapFields(schema, *batch, true)), batch->num_rows());
+            HashRows(hash, ResolveColumns(schema, *batch, mapping.Get(*batch)), batch->num_rows());
         }
         return shape.decoded_bytes;
     } catch (const Failure& error) {
@@ -592,7 +633,7 @@ Result<NormalizedInput> NormalizeBatches(const SchemaSpec& schema,
         // caller's buffers again.
         const auto rows = static_cast<int64_t>(shape.rows);
         NormalizedInput result;
-        result.Columns = OwnBatches(schema, batches, rows, pool);
+        result.Columns = OwnBatches(schema, batches, shape, pool);
         std::vector<int> identity(schema.fields.size());
         for (size_t field = 0; field < identity.size(); ++field) {
             identity[field] = static_cast<int>(field);

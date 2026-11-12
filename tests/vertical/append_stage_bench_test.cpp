@@ -4,6 +4,8 @@
 // comma-separated list of <fields>x<rows> (default: 2, 16 and 64 fields with
 // 1000 and 10000 rows); GLAMDB_APPEND_STAGE_DIR names an existing parent
 // directory for the disposable stores (default: a temporary directory).
+// GLAMDB_APPEND_STAGE_BATCH_ROWS splits each input into slices of at most that
+// many rows, sharing the original immutable schema (default: one batch).
 //
 // Input-side stages (one inspection, fingerprint, normalization, writer batch:
 // MakeRecordBatch from owned rows or CopyRecordBatch of owned columns) are
@@ -23,6 +25,7 @@
 #include <cstdlib>
 #include <format>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -34,6 +37,12 @@ namespace {
 using namespace std::chrono_literals;
 using namespace glamdb::vertical;
 using Clock = std::chrono::steady_clock;
+
+struct TShape
+{
+    std::size_t Fields = 0;
+    std::size_t Rows = 0;
+};
 
 std::size_t EnvCount(const char* name, std::size_t fallback)
 {
@@ -91,8 +100,9 @@ SchemaSpec MakeSchema(std::size_t fields)
     return schema;
 }
 
-std::shared_ptr<arrow::RecordBatch> MakeBatch(const SchemaSpec& schema, std::size_t rows, std::size_t seed)
+std::shared_ptr<arrow::RecordBatch> MakeBatch(const SchemaSpec& schema, const TShape& shape, std::size_t seed)
 {
+    const auto rows = shape.Rows;
     std::vector<std::shared_ptr<arrow::Array>> columns;
     for (std::size_t field = 0; field < schema.fields.size(); ++field) {
         const auto type = detail::MakeArrowType(schema.fields[field]);
@@ -282,12 +292,6 @@ std::shared_ptr<THookBackend>& Hooks()
     return slot;
 }
 
-struct TShape
-{
-    std::size_t Fields = 0;
-    std::size_t Rows = 0;
-};
-
 std::vector<TShape> Shapes()
 {
     const char* value = std::getenv("GLAMDB_APPEND_STAGE_SHAPES");
@@ -300,6 +304,11 @@ std::vector<TShape> Shapes()
         const auto item = text.substr(position, end - position);
         const auto x = item.find('x');
         shapes.push_back({std::stoul(item.substr(0, x)), std::stoul(item.substr(x + 1))});
+        if (shapes.back().Fields == 0 || shapes.back().Fields > 64 || shapes.back().Rows == 0 ||
+            shapes.back().Rows > 10000)
+        {
+            throw std::invalid_argument("append benchmark requires 1..64 fields and 1..10000 rows");
+        }
         position = end + 1;
     }
     return shapes;
@@ -314,7 +323,7 @@ TEST(AppendStageBench, NativeAppendStagesByShape)
     test::TempDir temporary;
     const char* parent = std::getenv("GLAMDB_APPEND_STAGE_DIR");
     const auto parentPath = parent && *parent ? std::filesystem::path(parent) : temporary.path;
-    std::printf("fields,rows,decoded_mib,inspect_ms,fingerprint_ms,normalize_ms,owned_rows_ms,extract_ms,"
+    std::printf("fields,rows,batches,decoded_mib,inspect_ms,fingerprint_ms,normalize_ms,owned_rows_ms,extract_ms,"
                 "make_batch_ms,append_ms,admissible_ms,prepare_ms,publish_ms,verify_ms,other_ms,input_share_pct,"
                 "rows_per_s,peak_rss_kb\n");
     for (const auto& shape : Shapes()) {
@@ -322,7 +331,15 @@ TEST(AppendStageBench, NativeAppendStagesByShape)
         // Distinct content per append, so every append binds a new operation.
         std::vector<std::vector<std::shared_ptr<arrow::RecordBatch>>> inputs;
         for (std::size_t index = 0; index < appends + 2; ++index) {
-            inputs.push_back({MakeBatch(schema, shape.Rows, index)});
+            const auto batch = MakeBatch(schema, shape, index);
+            const auto batchRows =
+                std::clamp(EnvCount("GLAMDB_APPEND_STAGE_BATCH_ROWS", shape.Rows), std::size_t{1}, shape.Rows);
+            std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+            for (std::size_t first = 0; first < shape.Rows; first += batchRows) {
+                batches.push_back(batch->Slice(static_cast<int64_t>(first),
+                    static_cast<int64_t>(std::min(batchRows, shape.Rows - first))));
+            }
+            inputs.push_back(std::move(batches));
         }
 
         // Input-side stages on the measured inputs, outside the engine.
@@ -395,9 +412,10 @@ TEST(AppendStageBench, NativeAppendStagesByShape)
         // Admission builds the writer batch; the input side runs before it.
         // The real backend verifies closure inside Publish, so publish includes verify.
         const auto other = append - inputSide - admissible - prepare - publish;
-        std::printf("%zu,%zu,%.2f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f,%.0f,%ld\n",
+        std::printf("%zu,%zu,%zu,%.2f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f,%.0f,%ld\n",
             shape.Fields,
             shape.Rows,
+            inputs.front().size(),
             static_cast<double>(decoded) / (1024.0 * 1024.0),
             Median(inspect),
             Median(fingerprint),
@@ -479,7 +497,7 @@ TEST(AppendStageBench, OwnedInputBytesByShape)
                 "columns_owned_kib,columns_writer_kib\n");
     for (const auto& shape : Shapes()) {
         const auto schema = MakeSchema(shape.Fields);
-        const std::vector<std::shared_ptr<arrow::RecordBatch>> batches{MakeBatch(schema, shape.Rows, 0)};
+        const std::vector<std::shared_ptr<arrow::RecordBatch>> batches{MakeBatch(schema, shape, 0)};
         arrow::ProxyMemoryPool ownedPool(arrow::default_memory_pool());
         const auto columns = detail::NormalizeBatches(schema, test::collection_id, batches, std::nullopt, &ownedPool);
         ASSERT_TRUE(columns && columns->Columns);
@@ -530,7 +548,7 @@ TEST(AppendStageBench, AppendPeakRssGrowth)
     const auto schema = MakeSchema(shape.Fields);
     std::vector<std::shared_ptr<arrow::RecordBatch>> inputs;
     for (std::size_t index = 0; index < 5; ++index) {
-        inputs.push_back(MakeBatch(schema, shape.Rows, index));
+        inputs.push_back(MakeBatch(schema, shape, index));
     }
     test::TempDir temporary;
     const auto root = temporary.path / "store";
