@@ -20,6 +20,8 @@ HEALTH = {
     'storage_failure_latched': False, 'durability_qualified': False, **MOCK,
 }
 CAPABILITIES = {
+    "collection_modes": ["append"],
+    "features": {"key_value": False, "upsert": False, "delete": False, "lookup": False, "compact": False, "bulk_upsert": False, "migration": False},
     'health': HEALTH,
     "scan_pagination": False,
     **MOCK, "mode": "append", "key_unique": False, "cow": False,

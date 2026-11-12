@@ -362,7 +362,7 @@ TResponse TRoutes::Route(const TRequest& request) const
         Require(query.empty(), "POST query parameters are unsupported");
         // Append rows go straight from the parser's compact form to Arrow
         // builders once the collection schema is known; no DOM is built for them.
-        if (path.ends_with("/append")) {
+        if (path.ends_with("/append") || path.ends_with("/upsert")) {
             body = ParseJson(request.Body, rows);
         } else {
             body = ParseJson(request.Body);
@@ -503,14 +503,14 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
     }
     if (request.Method == "POST" && path == "/collections") {
         CheckKeys(body, {"collection_id", "name", "schema", "mode", "write_settings"});
-        Require(body.value("mode", "append") == "append",
-            "only append collections are supported",
-            "UNSUPPORTED_OPERATION");
+        const auto mode = body.value("mode", "append");
+        Require(mode == "append" || mode == "kv", "mode must be append or kv", "UNSUPPORTED_OPERATION");
         return OutcomeResponse(
             json_adapter::ToJson(Engine_->CreateCollection({body.at("collection_id").get<std::string>(),
                 body.at("name").get<std::string>(),
                 ParseSchema(body.at("schema")),
-                body.contains("write_settings") ? ParseWriteSettings(body["write_settings"]) : WriteSettings{}})));
+                body.contains("write_settings") ? ParseWriteSettings(body["write_settings"]) : WriteSettings{},
+                mode == "kv" ? CollectionMode::KeyValue : CollectionMode::Append})));
     }
     const auto parts = Split(path);
     Require(parts.size() >= 2 && parts[0] == "collections", "route not found", "ROUTE_NOT_FOUND");
@@ -541,7 +541,7 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
         return JsonResponse(Collection(Unwrap(Engine_->UpdateWriteSettings(
             {id, ParseInt64(body["expected_version"]), ParseWriteSettings(body["write_settings"])}))));
     }
-    if (request.Method == "POST" && parts.size() == 3 && action == "append") {
+    if (request.Method == "POST" && parts.size() == 3 && (action == "append" || action == "upsert")) {
         Require(query.empty(), "unknown query parameter");
         CheckKeys(body, {"operation_id", "rows", "expected_snapshot"});
         AppendRequest append;
@@ -554,9 +554,87 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
         }
         const auto schema = Unwrap(Engine_->SchemaForAppend(id));
         const auto& rowsJson = body.at("rows");
-        append.batches.push_back(
-            rows != nullptr && rows->Present ? ParseRows(schema, *rows) : ParseRows(schema, rowsJson));
-        return OutcomeResponse(json_adapter::ToJson(Engine_->AppendDurable(append)));
+        const bool emptyUpsert = action == "upsert" &&
+            (rows != nullptr && rows->Present ? !rows->Nodes.empty() &&
+                        rows->Nodes.front().Kind == TJsonRows::EKind::Array && rows->Nodes.front().Size == 0
+                                              : rowsJson.is_array() && rowsJson.empty());
+        if (!emptyUpsert) {
+            append.batches.push_back(
+                rows != nullptr && rows->Present ? ParseRows(schema, *rows) : ParseRows(schema, rowsJson));
+        }
+        return OutcomeResponse(
+            json_adapter::ToJson(action == "upsert" ? Engine_->UpsertDurable(append) : Engine_->AppendDurable(append)));
+    }
+    if (request.Method == "POST" && parts.size() == 3 && (action == "delete" || action == "compact")) {
+        Require(query.empty(), "unknown query parameter");
+        const auto operation = body.at("operation_id").get<std::string>();
+        SnapshotPrecondition expected;
+        if (body.contains("expected_snapshot")) {
+            expected = body["expected_snapshot"].is_null()
+                ? SnapshotPrecondition{SnapshotPreconditionKind::NoSnapshot, 0}
+                : SnapshotPrecondition{SnapshotPreconditionKind::Equals, ParseInt64(body["expected_snapshot"])};
+        }
+        if (action == "delete") {
+            CheckKeys(body, {"operation_id", "keys", "expected_snapshot"});
+            Require(body.at("keys").is_array() && body["keys"].size() <= 10000, "delete requires at most 10000 keys");
+            DeleteRequest mutation;
+            mutation.collection_id = id;
+            mutation.operation_id = operation;
+            mutation.expected_snapshot = expected;
+            for (const auto& key : body["keys"]) {
+                Require(key.is_string(), "keys must be strings");
+                mutation.keys.push_back(key.get<std::string>());
+            }
+            return OutcomeResponse(json_adapter::ToJson(Engine_->DeleteDurable(mutation)));
+        }
+        CheckKeys(body, {"operation_id", "expected_snapshot", "max_files", "target_file_bytes"});
+        CompactionRequest mutation;
+        mutation.collection_id = id;
+        mutation.operation_id = operation;
+        mutation.expected_snapshot = expected;
+        if (body.contains("max_files")) {
+            mutation.max_files = ParseInt64(body["max_files"]);
+        }
+        if (body.contains("target_file_bytes")) {
+            mutation.target_file_bytes = ParseInt64(body["target_file_bytes"]);
+        }
+        return OutcomeResponse(json_adapter::ToJson(Engine_->CompactDurable(mutation)));
+    }
+    if (request.Method == "POST" && parts.size() == 3 && action == "lookup") {
+        Require(query.empty(), "unknown query parameter");
+        CheckKeys(body, {"keys", "snapshot_id"});
+        Require(body.at("keys").is_array() && body["keys"].size() <= 4096, "lookup requires at most 4096 keys");
+        const auto info = Unwrap(Engine_->GetCollection(id));
+        LookupRequest lookup;
+        lookup.collection_id = id;
+        if (body.contains("snapshot_id")) {
+            lookup.snapshot = body["snapshot_id"].is_null() ? SnapshotSelector::InitialEmpty()
+                                                            : SnapshotSelector::Id(ParseInt64(body["snapshot_id"]));
+        }
+        for (const auto& key : body["keys"]) {
+            Require(key.is_string(), "keys must be strings");
+            lookup.keys.push_back(key.get<std::string>());
+        }
+        const auto found = Unwrap(Engine_->Lookup(lookup));
+        auto values = TJson::array();
+        for (const auto& row : found.rows) {
+            if (!row) {
+                values.push_back(nullptr);
+                continue;
+            }
+            auto value = TJson::object();
+            Require(row->size() == info.schema.fields.size(), "lookup row schema mismatch", "CORRUPTION");
+            for (size_t index = 0; index < row->size(); ++index) {
+                value[info.schema.fields[index].name] = EncodeCell((*row)[index]);
+            }
+            values.push_back(std::move(value));
+        }
+        return JsonResponse({{"collection_id", id},
+            {"snapshot_id", Snapshot(found.snapshot)},
+            {"schema", Collection(info).at("schema")},
+            {"rows", std::move(values)},
+            {"backend", "local"},
+            {"mock", false}});
     }
     if (request.Method == "GET" && parts.size() == 3 && action == "stats") {
         return JsonResponse(StatisticsJson(*Engine_, id, query));

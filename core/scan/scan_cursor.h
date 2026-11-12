@@ -51,6 +51,8 @@ struct TScanContext
     std::function<void(const ErrorDetail&)> OnError;
     std::shared_ptr<const NGlamDB::NStorage::TBaseState> VerifiedState{};
     int64_t RootBytes = HistoryLimits{}.max_root_file_bytes;
+    // Internal migration source order: oldest append files first, preserving rows.
+    bool ChronologicalFiles = false;
 };
 
 Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanRequest& request);

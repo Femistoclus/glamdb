@@ -38,6 +38,10 @@ ROUTES = (
     ("POST", rf"/collections/{UUID}/explain", Route("metadata", "scan")),
     ("POST", rf"/collections/{UUID}/write-settings", Route("write", "collection")),
     ("POST", rf"/collections/{UUID}/append", Route("write", "append", "append")),
+    ("POST", rf"/collections/{UUID}/upsert", Route("write", "append", "append")),
+    ("POST", rf"/collections/{UUID}/delete", Route("write", "append", "append")),
+    ("POST", rf"/collections/{UUID}/compact", Route("write", "append", "append")),
+    ("POST", rf"/collections/{UUID}/lookup", Route("read", "scan")),
     (
         "GET",
         rf"/collections/{UUID}/operations/{UUID}",

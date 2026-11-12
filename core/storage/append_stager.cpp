@@ -4,6 +4,7 @@
 #include "core/io/io_attempt.h"
 #include "core/storage/iceberg_error_boundary.h"
 #include "core/storage/metadata_validation.h"
+#include "core/storage/table_profile.h"
 
 #include <iceberg/manifest/manifest_entry.h>
 #include <iceberg/partition_spec.h>
@@ -12,6 +13,8 @@
 #include <iceberg/table_metadata.h>
 #include <iceberg/transaction.h>
 #include <iceberg/update/merge_append.h>
+#include <iceberg/update/overwrite_files.h>
+#include <iceberg/update/rewrite_files.h>
 #include <iceberg/util/macros.h>
 
 #include <set>
@@ -89,7 +92,9 @@ iceberg::Result<TStagedAppend> StageFiles(std::shared_ptr<iceberg::Table> table,
     bool bulk)
 {
     auto result = CatchIcebergExceptions([&]() -> iceberg::Result<TStagedAppend> {
-        if (!table || !attempt || dataFiles.empty() || dataFiles.size() > (bulk ? 256U : 1U)) {
+        if (!table || !attempt || IsKVMetadata(*table->metadata()) || dataFiles.empty() ||
+            dataFiles.size() > (bulk ? 256U : 1U))
+        {
             return iceberg::InvalidArgument("Append requires a table, bounded data files and active attempt");
         }
         const auto marker = summary.find("glamdb.bulk-version");
@@ -147,6 +152,85 @@ iceberg::Result<TStagedAppend> StageBulkAppend(std::shared_ptr<iceberg::Table> t
     const std::shared_ptr<NIO::TIOAttempt>& attempt)
 {
     return StageFiles(std::move(table), dataFiles, summary, attempt, true);
+}
+
+iceberg::Result<TStagedAppend> StageKVOverwrite(std::shared_ptr<iceberg::Table> table,
+    const std::vector<std::shared_ptr<iceberg::DataFile>>& addedFiles,
+    const std::vector<std::shared_ptr<iceberg::DataFile>>& removedFiles,
+    const std::unordered_map<std::string, std::string>& summary,
+    const std::shared_ptr<NIO::TIOAttempt>& attempt,
+    bool compact)
+{
+    auto result = CatchIcebergExceptions([&]() -> iceberg::Result<TStagedAppend> {
+        const auto version = summary.find("glamdb.kv-version");
+        const auto kind = summary.find("glamdb.kv-kind");
+        if (!table || !attempt || !IsKVMetadata(*table->metadata()) || (addedFiles.empty() && removedFiles.empty()) ||
+            addedFiles.size() > 256 || removedFiles.size() > 256 || version == summary.end() ||
+            version->second != "1" || kind == summary.end() ||
+            (compact ? kind->second != "compact" : kind->second != "upsert" && kind->second != "delete") ||
+            summary.contains("glamdb.bulk-version"))
+        {
+            return iceberg::InvalidArgument("Invalid KV overwrite context or snapshot profile.");
+        }
+        std::set<std::string> paths;
+        for (const auto& file : addedFiles) {
+            if (!file || file->record_count > 100000 || file->file_size_in_bytes > (32LL << 20) ||
+                !paths.insert(file->file_path).second)
+            {
+                return iceberg::InvalidArgument("Invalid KV added files.");
+            }
+            ICEBERG_RETURN_UNEXPECTED(CheckData(*table, *file, *attempt));
+        }
+        for (const auto& file : removedFiles) {
+            if (!file || file->content != iceberg::DataFile::Content::kData || !paths.insert(file->file_path).second) {
+                return iceberg::InvalidArgument("Invalid KV removed files.");
+            }
+        }
+        RegisterStorageFormats();
+        ICEBERG_ASSIGN_OR_RAISE(auto transaction, iceberg::Transaction::Make(table, iceberg::TransactionKind::kUpdate));
+        iceberg::Status committed;
+        if (compact) {
+            ICEBERG_ASSIGN_OR_RAISE(auto rewrite, transaction->NewRewriteFiles());
+            for (const auto& file : removedFiles) {
+                rewrite->DeleteDataFile(file);
+            }
+            for (const auto& file : addedFiles) {
+                rewrite->AddDataFile(file);
+            }
+            for (const auto& [key, value] : summary) {
+                rewrite->Set(key, value);
+            }
+            committed = rewrite->Commit();
+        } else {
+            ICEBERG_ASSIGN_OR_RAISE(auto overwrite, transaction->NewOverwrite());
+            for (const auto& file : removedFiles) {
+                overwrite->DeleteFile(file);
+            }
+            for (const auto& file : addedFiles) {
+                overwrite->AddFile(file);
+            }
+            for (const auto& [key, value] : summary) {
+                overwrite->Set(key, value);
+            }
+            if (!removedFiles.empty()) {
+                overwrite->ValidateFromSnapshot(table->metadata()->current_snapshot_id);
+                overwrite->ValidateNoConflictingDeletes();
+            }
+            committed = overwrite->Commit();
+        }
+        if (const auto error = attempt->FirstError()) {
+            return iceberg::IOError("KV staging failed: {}.", error.message());
+        }
+        ICEBERG_RETURN_UNEXPECTED(committed);
+        return CollectStage(std::move(transaction), *attempt);
+    });
+    if (!result && attempt) {
+        attempt->FailFile({},
+            std::make_error_code(result.error().kind == iceberg::ErrorKind::kInvalidArgument
+                    ? std::errc::invalid_argument
+                    : std::errc::io_error));
+    }
+    return result;
 }
 
 }

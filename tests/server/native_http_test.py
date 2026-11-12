@@ -428,7 +428,7 @@ class NativeHTTP(unittest.TestCase):
                        [{'name': 'key', 'type': 'string', 'nullable': 'false'}],
                        [{'name': 'key', 'type': 'string'}] * 2,
                        [{'name': 'key', 'type': 'string'}, {'name': 'я' * 65, 'type': 'string'}],
-                       [{'name': 'key', 'type': 'string'}] + [{'name': f'n{i}', 'type': 'int64'} for i in range(64)]):
+                       [{'name': 'key', 'type': 'string'}] + [{'name': f'n{i}', 'type': 'int64'} for i in range(128)]):
             with self.subTest(fields=fields):
                 self.api('/collections', dict(base, schema={'fields': fields}), status=400)
         self.assertEqual(self.api('/collections')['items'], [])

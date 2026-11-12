@@ -55,7 +55,9 @@ ELogOperation ClassifyOperation(const TRequest& request) noexcept
             if (suffix.find("/operations/") != std::string::npos) {
                 return ELogOperation::Operation;
             }
-            if (suffix.ends_with("/append") || suffix.ends_with("/bulk-append")) {
+            if (suffix.ends_with("/append") || suffix.ends_with("/bulk-append") || suffix.ends_with("/upsert") ||
+                suffix.ends_with("/delete") || suffix.ends_with("/compact"))
+            {
                 return ELogOperation::Append;
             }
             if (suffix.ends_with("/scan/open")) {
@@ -697,8 +699,8 @@ private:
             (path == "/databases" || (path.starts_with("/databases/") && split == std::string::npos) ||
                 !suffix.starts_with("/collections") || suffix.find("/operations/") != std::string::npos ||
                 suffix.ends_with("/scan/cancel"));
-        const bool writer =
-            Request_.Method == "POST" && suffix.find("/scan") == std::string::npos && !suffix.ends_with("/explain");
+        const bool writer = Request_.Method == "POST" && suffix.find("/scan") == std::string::npos &&
+            !suffix.ends_with("/explain") && !suffix.ends_with("/lookup");
         auto& queue = lifecycle ? State_.Lifecycle
             : control           ? State_.Control
             : writer            ? State_.Writers

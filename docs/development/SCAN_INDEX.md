@@ -15,9 +15,11 @@ for lookup. Scanning reverses the selected prefix to visit newer appends first.
 Manifest merging preserves the original descriptors and snapshot boundaries;
 only ADDED entries extend the index. Initial-empty views select zero files.
 
-This works only for the current append-only, unpartitioned, fixed-schema
-profile. Deletes, branches, compaction, snapshot expiration and schema evolution
-need a different representation and validation contract.
+The prefix representation applies only to append mode. Explicit KV mode uses
+a separately verified half-open lifetime interval for every retained file,
+indexed by snapshot sequence; see [KV mode](KV_MODE.md). Deletes and compaction
+preserve historical membership without copying one file set per snapshot.
+Branches, snapshot expiration and schema evolution remain unsupported.
 
 ## Verification and lifetime
 

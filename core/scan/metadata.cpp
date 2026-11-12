@@ -63,7 +63,9 @@ SnapshotHistory ReadHistory(const TScanContext& context, std::span<const AppendR
     const auto root = Take(ReadScanRoot(context.FileIO, context.Base, context.Cache.get(), context.RootBytes));
     std::map<int64_t, const AppendResult*> bySnapshot;
     for (const auto& receipt : receipts) {
-        if (receipt.collection_id == context.Collection.collection_id) {
+        if (receipt.collection_id == context.Collection.collection_id &&
+            !(receipt.receipt_version == 3 && !receipt.snapshot_created))
+        {
             Require(bySnapshot.emplace(receipt.snapshot_id, &receipt).second,
                 "CORRUPTION",
                 "multiple receipts identify one snapshot");
@@ -102,17 +104,30 @@ SnapshotHistory ReadHistory(const TScanContext& context, std::span<const AppendR
         const auto hash = snapshot->summary.find("glamdb.content-hash");
         const auto metric_matches = [&](const std::string& key, int64_t value) {
             const auto field = snapshot->summary.find(key);
-            return field != snapshot->summary.end() && field->second == std::to_string(value);
+            return field == snapshot->summary.end() ? receipt.receipt_version == 3 && value == 0
+                                                    : field->second == std::to_string(value);
         };
         using Fields = iceberg::SnapshotSummaryFields;
         Require(receipt.parent_snapshot_id == snapshot->parent_snapshot_id &&
                 receipt.snapshot_created_at_us == ms * 1000 && operation != snapshot->summary.end() &&
                 operation->second == receipt.operation_id && hash != snapshot->summary.end() &&
-                hash->second == receipt.payload_hash && metric_matches(Fields::kAddedRecords, receipt.rows_appended) &&
+                hash->second == receipt.payload_hash &&
+                metric_matches(Fields::kAddedRecords,
+                    receipt.receipt_version == 3 ? receipt.rows_written : receipt.rows_appended) &&
                 metric_matches(Fields::kAddedDataFiles, receipt.data_files_added) &&
                 metric_matches(Fields::kAddedFileSize, receipt.compressed_data_bytes_added),
             "CORRUPTION",
             "retained snapshot differs from its committed receipt");
+        Require((context.Collection.mode == CollectionMode::KeyValue) == (receipt.receipt_version == 3),
+            "CORRUPTION",
+            "snapshot receipt has the wrong collection mode");
+        if (receipt.receipt_version == 3) {
+            Require(metric_matches(Fields::kDeletedRecords, receipt.rows_removed) &&
+                    metric_matches(Fields::kDeletedDataFiles, receipt.data_files_removed) &&
+                    metric_matches(Fields::kRemovedFileSize, receipt.compressed_data_bytes_removed),
+                "CORRUPTION",
+                "KV removal counters differ from the committed receipt");
+        }
         history.snapshots.push_back({snapshot->snapshot_id, snapshot->parent_snapshot_id, ms * 1000, receipt});
         previous = snapshot->snapshot_id;
         sequence = snapshot->sequence_number;

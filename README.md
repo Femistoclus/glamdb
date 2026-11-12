@@ -12,8 +12,8 @@ the HTTP server, browser workbench, command-line client, and Python SDK.
 <sub>GlamDB is a software project developed for a hackathon at ITMO University
 and is not intended for production use.</sub>
 
-**GlamDB is in early development.** The current engine is an append-only store
-for local disk, with one owning process, one serialized writer per store, and
+**GlamDB is in early development.** The engine supports append and explicit key-value collections
+on local disk, with one owning process, one serialized writer per store, and
 concurrent snapshot readers. Power-loss durability qualification is still pending.
 
 ## Features
@@ -22,7 +22,9 @@ concurrent snapshot readers. Power-loss durability qualification is still pendin
   UTC microsecond timestamps, exact decimal128 amounts and calendar dates,
   and nullable fields. See [scalar types and compatibility](docs/development/SCALAR_TYPES.md).
   Appends preserve every row,
-  including duplicate keys.
+  including duplicate keys. Explicit [KV collections](docs/development/KV_MODE.md)
+  provide full-row upserts, safe keyed deletes, fixed-snapshot batched lookups,
+  bounded streaming bulk upsert and locality-preserving compaction.
 - **Snapshot reads.** Query the latest committed view or a retained historical
   snapshot. Select columns, limit results, and combine comparisons, membership,
   and NULL predicates with AND, OR, and NOT; scans prune candidate files and
@@ -39,10 +41,12 @@ concurrent snapshot readers. Power-loss durability qualification is still pendin
   as JSON or Arrow IPC with fixed-snapshot pagination.
 
 Queries use a typed predicate API; there is no SQL query interface. Collections
-are currently unpartitioned and append-only. Upsert, delete, schema evolution,
-compaction, object storage, and replication are not available. The embedded C++
-API supports [explicit snapshot retention maintenance](docs/development/SNAPSHOT_RETENTION.md);
-history is retained forever unless a caller opts in.
+are unpartitioned with immutable append or KV mode. Schema evolution,
+general garbage collection, object storage and replication remain outside the
+supported profile. The embedded C++ API supports
+[explicit snapshot retention maintenance](docs/development/SNAPSHOT_RETENTION.md)
+for append collections; history is retained forever unless a caller opts in.
+KV collections preserve all history and refuse snapshot expiration.
 
 ### In development
 
@@ -61,8 +65,6 @@ a replayable source produces multiple files with one atomic snapshot and receipt
 Native uploads stream bounded batches through an anonymous disk spool. UI import and 1 TiB qualification remain future work.
 
 ### Planned
-- An explicit key-value mode with copy-on-write upserts, deletes, and batched
-  point lookups ([#101](https://github.com/glamourdb/glamdb/issues/101)).
 - Configurable Parquet compression, encodings, and dictionary policies
   ([#97](https://github.com/glamourdb/glamdb/issues/97),
   [#98](https://github.com/glamourdb/glamdb/issues/98)).

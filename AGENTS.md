@@ -172,8 +172,14 @@ The SDK (`create_collection(write_settings=...)`, `update_write_settings`) and t
 workbench (creation controls, Schema panel) expose them only when capabilities
 advertise `features.write_settings`; the mock and static demo do not.
 
-Key-value upserts and deletes are a subsequent extension using copy-on-write
-and an explicit KV collection mode. Native capabilities, receipt-backed snapshot
+[Explicit KV mode](docs/development/KV_MODE.md) adds full-row COW upsert/delete,
+durable no-op receipts, fixed-view batched lookup, bounded bulk upsert, explicit
+append migration and contiguous small-file compaction. Collection mode and table
+marker must agree. Version-3 receipts and interval membership are mode-dispatched;
+never relax legacy append validation/hashes/receipt bytes. No-op COMMIT uncertainty
+uses the same recovery fence despite having no candidate root. Retained physical
+usage never shrinks on deletion/compaction. The measured layout decision and
+component-versus-native evidence are linked from that guide. Native capabilities, receipt-backed snapshot
 history, selected-view statistics, snapshot-bound file/row-group details,
 fixed-view collection/history/file pages, explain and cursor profiles use the public
 facade; see [the metadata guide](docs/development/METADATA.md). HTTP/SDK/UI metadata,
@@ -192,7 +198,10 @@ Already planned cursors keep their fixed data view; new expired reads/preconditi
 report `SNAPSHOT_EXPIRED`. Default history remains unchanged. Retention preserves
 configured history budgets and pages expiration inventories beyond 8192 entries;
 transport maintenance endpoints are not provided.
-Compaction, general garbage collection, asynchronous admission, replication,
+KV collections refuse snapshot expiration and preserve all retained file intervals
+and no-op bound roots. Their first creation introduces catalog version 4 while
+existing version-3 append retention stores remain compatible.
+General garbage collection, asynchronous admission, replication,
 multiple writers, and schema evolution are outside the initial append scope. Consult
 [docs/ROADMAP.md](docs/ROADMAP.md) when assessing feature scope; its current
 status table separates implemented code from executed evidence per gate and

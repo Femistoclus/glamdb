@@ -272,6 +272,21 @@ available; offline bulk upload is unsupported. The generic buffered `request`
 command keeps its 16 MiB limit. See the [bulk contract](../../docs/development/BULK_INGESTION.md#native-http-sdk-and-cli)
 for per-record limits, deadlines and interrupted-upload behavior. UI import and
 the organization gateway upload adapter remain outside this native route.
+
+## KV collection commands
+
+`create-collection --mode kv` creates an immutable key-value collection; omission
+keeps append mode. The named network commands `upsert`, `delete`, `compact`, and
+`lookup` each take `--collection-id UUID --body FILE` and optional
+`--database-id UUID`. Bodies match the native HTTP contract: upsert uses
+`{operation_id,rows}`, delete `{operation_id,keys}`, compact
+`{operation_id,max_files?,target_file_bytes?}`, and lookup `{keys,snapshot_id?}`.
+Mutations may include `expected_snapshot`. Preserve the exact body and operation
+ID after an uncertain result; the CLI never retries automatically. Operation
+lookup reads all receipt versions, including durable KV no-ops. Bulk upsert and
+migration remain native C++ facade operations. See the
+[KV HTTP contract](../../docs/development/HTTP_SERVER.md#explicit-kv-routes-and-receipts).
+
 ## TPC-H workloads
 
 ```sh

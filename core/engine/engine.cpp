@@ -5,11 +5,13 @@
 #include "core/api/bulk_input.h"
 #include "core/api/canonical.h"
 #include "core/api/codec.h"
+#include "core/api/kv_input.h"
 #include "core/api/write_settings.h"
 #include "core/engine/engine_factory.h"
 #include "core/engine/metadata_pages.h"
 #include "core/engine/storage_mapping.h"
 #include "core/engine/store_lease.h"
+#include "core/scan/read_budget.h"
 #include "core/telemetry/metrics.h"
 
 #if GLAMDB_HAS_STORAGE
@@ -36,7 +38,7 @@
 #include <utility>
 #include <vector>
 
-#include <arrow/type.h>
+#include <arrow/api.h>
 
 namespace glamdb {
 namespace {
@@ -268,7 +270,7 @@ struct Engine::Impl
             32)));
     }
 
-    void ReserveAttempt(bool bulk = false)
+    void ReserveAttempt(bool bulk = false, bool kv = false)
     {
         std::vector<std::shared_ptr<ResourceReservation>> reserved;
         reserved.push_back(Take(resources->Reserve(ResourceClass::Control, ControlMemoryBytes)));
@@ -277,8 +279,8 @@ struct Engine::Impl
         reserved.push_back(
             Take(resources->Reserve(ResourceClass::Metadata, MetadataWorkForRoot(limits.history.max_root_file_bytes))));
         reserved.push_back(Take(resources->ReserveDevice(lease->Root().string(),
-            bulk ? BulkAppendLimits::AttemptDiskBytes : AttemptDiskBytes,
-            bulk ? BulkAppendLimits::AttemptInodes : 64)));
+            kv ? (12ULL << 30) : (bulk ? BulkAppendLimits::AttemptDiskBytes : AttemptDiskBytes),
+            (bulk || kv) ? BulkAppendLimits::AttemptInodes : 64)));
         attempt_resources = std::move(reserved);
     }
 
@@ -639,6 +641,13 @@ struct Engine::Impl
             return;
         }
         for (const auto& collection : catalog->Collections()) {
+            if (collection.mode == CollectionMode::KeyValue) {
+                Require(catalog->ExpiredSnapshots(collection.collection_id).empty() &&
+                        catalog->PendingMetadataCount(collection.collection_id) == 0,
+                    "CORRUPTION",
+                    "KV collections cannot have expiration or cleanup records");
+                continue;
+            }
             const auto prefix = "store://" + info.store_id + "/warehouse/" + collection.collection_id + "/";
             {
                 std::lock_guard lock(state_mutex);
@@ -1208,6 +1217,15 @@ Result<SchemaSpec> Engine::SchemaForAppend(std::string_view id) const
 
 CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
 {
+    return CreateCollectionImpl(request, {});
+}
+
+CreateOutcome Engine::CreateCollectionImpl(const CreateCollectionRequest& request,
+    // Catalog ownership is a SHA-256 digest paired with its reserved operation UUID.
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+    std::string_view migrationIdentity,
+    std::string_view migrationOperation)
+{
     NGlamDB::NTelemetry::TOperationScope<CreateOutcome> metrics(NGlamDB::NTelemetry::EOperation::CreateCollection);
     const auto impl = impl_;
     std::unique_lock writer_lock(impl->writer, std::defer_lock);
@@ -1220,6 +1238,17 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
                 ValidUtf8(request.exact_name) && request.exact_name.find('\0') == std::string::npos,
             "INVALID_ARGUMENT",
             "invalid collection ID or exact name");
+        Require(request.mode == CollectionMode::Append || request.mode == CollectionMode::KeyValue,
+            "INVALID_ARGUMENT",
+            "invalid collection mode");
+        if (request.mode == CollectionMode::KeyValue) {
+            Require(std::ranges::any_of(request.schema.fields,
+                        [](const auto& field) {
+                            return field.name == "key" && field.type == FieldType::String && !field.nullable;
+                        }),
+                "INVALID_ARGUMENT",
+                "KV collections require a non-null string key field");
+        }
         const auto schema_hash = Take(SchemaFingerprint(request.schema));
         const auto settings = Take(CanonicalWriteSettings(request.schema, request.write_settings));
         context = CreateRecoveryContext{impl->info.store_id,
@@ -1266,6 +1295,12 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
                 Require(collection.collection_id == request.collection_id && collection.name == request.exact_name,
                     "ALREADY_EXISTS",
                     "collection ID or name belongs to another definition");
+                if (!migrationIdentity.empty()) {
+                    Require(impl->catalog->MigrationIdentity(collection.collection_id) == migrationIdentity,
+                        "COLLECTION_EXISTS",
+                        "migration target belongs to a different creation or source");
+                }
+                Require(collection.mode == request.mode, "COLLECTION_MODE_MISMATCH", "collection mode is immutable");
                 Require(collection.schema == request.schema,
                     "SCHEMA_MISMATCH",
                     "fixed schema differs from original creation");
@@ -1313,7 +1348,8 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
         Require(staged != nullptr, "IO_ERROR", "producer returned no staged collection");
         auto info = staged->Info();
         Require(info.collection_id == request.collection_id && info.name == request.exact_name &&
-                info.schema == request.schema && info.write_settings == settings && info.write_settings_version == 0,
+                info.schema == request.schema && info.write_settings == settings && info.write_settings_version == 0 &&
+                info.mode == request.mode,
             "IO_ERROR",
             "producer changed collection identity, schema or write settings");
         context->candidate_table_uuid = info.table_uuid;
@@ -1342,7 +1378,9 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
             },
             [&] {
                 return staged->Publish(*impl->catalog);
-            });
+            },
+            migrationIdentity,
+            migrationOperation);
         committed = true;
         if (gate.owns_lock()) {
             if (context->candidate_metadata_location) {
@@ -1400,7 +1438,9 @@ Result<SnapshotRetentionPolicy> Engine::GetSnapshotRetention(std::string_view id
 #if GLAMDB_HAS_STORAGE
         std::lock_guard lock(impl_->state_mutex);
         impl_->CheckReady();
-        (void)impl_->CachedCollection(id);
+        Require(impl_->CachedCollection(id).mode == CollectionMode::Append,
+            "COLLECTION_MODE_MISMATCH",
+            "snapshot retention requires append mode");
         const auto found = std::ranges::find_if(impl_->confirmed_views, [&](const auto& view) {
             return view.info.collection_id == id;
         });
@@ -1447,6 +1487,9 @@ Result<SnapshotExpirationResult> Engine::ExpireSnapshots(const SnapshotExpiratio
         }
         Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "snapshot maintenance is not installed");
         const auto collection = impl->catalog->Collection(request.collection_id);
+        Require(collection.mode == CollectionMode::Append,
+            "COLLECTION_MODE_MISMATCH",
+            "snapshot expiration requires append mode");
         base = impl->catalog->Base(request.collection_id);
         impl->ReserveAttempt();
         auto staged = Take(impl->backend->PrepareExpiration(impl->info, collection, *base, request.policy));
@@ -1573,6 +1616,171 @@ Result<CollectionInfo> Engine::UpdateWriteSettings(const UpdateWriteSettingsRequ
     }
 }
 
+std::optional<MigrationOutcome> detail::BlockedMigration(const std::shared_ptr<Engine::Impl>& impl,
+    const MigrationRequest& request)
+{
+    std::lock_guard lock(impl->state_mutex);
+    if (impl->ready && !impl->closed && !impl->closing.load()) {
+        return std::nullopt;
+    }
+    MigrationOutcome outcome;
+    const auto pending = impl->unresolved_create;
+    if (pending && pending->recovery &&
+        (pending->recovery->collection_id == request.target.collection_id ||
+            pending->recovery->exact_name == request.target.exact_name))
+    {
+        const CreateRecoveryContext context{impl->info.store_id,
+            request.target.collection_id,
+            request.target.exact_name,
+            Take(SchemaFingerprint(request.target.schema)),
+            NewUuid(),
+            std::nullopt,
+            std::nullopt,
+            false};
+        const auto blocked = impl->BlockedCreate(context);
+        if (!blocked) {
+            throw Failure({"INTERNAL", "migration lost its creation barrier", RetryHint::OperatorAction});
+        }
+        outcome.creation = *blocked;
+        return outcome;
+    }
+    const auto target = std::ranges::find_if(impl->confirmed_views, [&](const auto& view) {
+        return view.info.collection_id == request.target.collection_id;
+    });
+    if (target != impl->confirmed_views.end()) {
+        Require(target->info.name == request.target.exact_name && target->info.schema == request.target.schema &&
+                target->info.mode == CollectionMode::KeyValue,
+            "SCHEMA_MISMATCH",
+            "migration target differs from its confirmed definition");
+        outcome.creation = {CommitDisposition::Committed,
+            CommitPhase::Complete,
+            target->info,
+            std::nullopt,
+            std::nullopt};
+        const AppendRequest mutation{request.target.collection_id, request.operation_id, {}, {}};
+        const auto blocked = impl->BlockedAppend(mutation);
+        if (!blocked) {
+            throw Failure({"INTERNAL", "migration lost its recovery barrier", RetryHint::OperatorAction});
+        }
+        auto error = blocked->first_error;
+        error.retry_hint = RetryHint::SameIdAfterReconcile;
+        if (ValidDigest(blocked->payload_hash)) {
+            outcome.mutation = AppendOutcome{request.operation_id,
+                CommitDisposition::CommitUnknown,
+                CommitPhase::Reconciling,
+                std::nullopt,
+                std::move(error),
+                blocked};
+        } else {
+            outcome.resolution_error = std::move(error);
+        }
+        return outcome;
+    }
+    const CreateRecoveryContext context{impl->info.store_id,
+        request.target.collection_id,
+        request.target.exact_name,
+        Take(SchemaFingerprint(request.target.schema)),
+        NewUuid(),
+        std::nullopt,
+        std::nullopt,
+        false};
+    const auto blocked = impl->BlockedCreate(context);
+    if (!blocked) {
+        throw Failure({"INTERNAL", "migration lost its creation barrier", RetryHint::OperatorAction});
+    }
+    outcome.creation = *blocked;
+    return outcome;
+}
+
+std::optional<MigrationOutcome> detail::ReplayMigration(const std::shared_ptr<Engine::Impl>& impl,
+    const MigrationRequest& request,
+    std::string_view identity)
+{
+    std::optional<std::pair<CollectionInfo, std::optional<OperationRecord>>> replay;
+    try {
+        replay = impl->catalog->TryMigrationReplay(request.target.collection_id, request.operation_id, identity);
+    } catch (const Failure& failure) {
+        impl->CloseOnCorruption(failure.detail);
+        if (failure.detail.code == "OPERATION_IN_PROGRESS") {
+            std::lock_guard lock(impl->state_mutex);
+            const auto target = std::ranges::find_if(impl->confirmed_views, [&](const auto& view) {
+                return view.info.collection_id == request.target.collection_id;
+            });
+            MigrationOutcome outcome;
+            if (target != impl->confirmed_views.end()) {
+                Require(target->info.name == request.target.exact_name &&
+                        target->info.schema == request.target.schema && target->info.mode == CollectionMode::KeyValue,
+                    "SCHEMA_MISMATCH",
+                    "migration target differs from its confirmed definition");
+                outcome.creation = {CommitDisposition::Committed,
+                    CommitPhase::Complete,
+                    target->info,
+                    std::nullopt,
+                    std::nullopt};
+                if (impl->recovery && impl->recovery->collection_id == request.target.collection_id &&
+                    impl->recovery->operation_id == request.operation_id)
+                {
+                    outcome.mutation = UnresolvedAppend(*impl->recovery, impl->recovery->payload_hash);
+                } else if (impl->active && impl->active->collection_id == request.target.collection_id &&
+                    impl->active->operation_id == request.operation_id)
+                {
+                    outcome.mutation =
+                        UnresolvedAppend(Context(*impl->active, failure.detail, false), impl->active->payload_hash);
+                } else {
+                    outcome.resolution_error = failure.detail;
+                    outcome.resolution_error->retry_hint = RetryHint::SameIdAfterReconcile;
+                }
+            } else {
+                CreateRecoveryContext context{impl->info.store_id,
+                    request.target.collection_id,
+                    request.target.exact_name,
+                    Take(SchemaFingerprint(request.target.schema)),
+                    NewUuid(),
+                    std::nullopt,
+                    std::nullopt,
+                    false};
+                outcome.creation = {CommitDisposition::CommitUnknown,
+                    CommitPhase::Reconciling,
+                    std::nullopt,
+                    failure.detail,
+                    std::move(context)};
+            }
+            return outcome;
+        }
+        throw;
+    }
+    if (auto blocked = BlockedMigration(impl, request)) {
+        return blocked;
+    }
+    if (!replay) {
+        return std::nullopt;
+    }
+    MigrationOutcome outcome;
+    outcome.creation = {CommitDisposition::Committed,
+        CommitPhase::Complete,
+        std::move(replay->first),
+        std::nullopt,
+        std::nullopt};
+    if (!replay->second) {
+        return outcome;
+    }
+    const auto& record = *replay->second;
+    if (record.outcome) {
+        outcome.mutation = *record.outcome;
+    } else {
+        const ErrorDetail error{"OPERATION_IN_PROGRESS",
+            "migration population is still executing",
+            RetryHint::SameIdAfterReconcile};
+        outcome.mutation = AppendOutcome{request.operation_id,
+            CommitDisposition::CommitUnknown,
+            CommitPhase::Reconciling,
+            std::nullopt,
+            error,
+            Context(record.binding, error, false)};
+    }
+    return outcome;
+}
+
 AppendOutcome Engine::AppendDurable(const AppendRequest& request)
 {
     return AppendDurableImpl(request, nullptr);
@@ -1583,7 +1791,105 @@ AppendOutcome Engine::BulkAppendDurable(const BulkAppendRequest& request)
     return AppendDurableImpl({request.collection_id, request.operation_id, request.expected_snapshot, {}}, &request);
 }
 
-AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const BulkAppendRequest* bulk)
+AppendOutcome Engine::UpsertDurable(const AppendRequest& request)
+{
+    const TKvInput input;
+    return AppendDurableImpl(request, nullptr, &input);
+}
+
+AppendOutcome Engine::BulkUpsertDurable(const BulkAppendRequest& request)
+{
+    TKvInput input;
+    input.Cancellation = request.cancellation;
+    input.Timeout = request.timeout;
+    return AppendDurableImpl({request.collection_id, request.operation_id, request.expected_snapshot, {}},
+        &request,
+        &input);
+}
+
+AppendOutcome Engine::DeleteDurable(const DeleteRequest& request)
+{
+    try {
+        Require(request.keys.size() <= 10000, "INPUT_TOO_LARGE", "delete accepts at most 10000 keys");
+        Require(ValidUuid(request.collection_id) && ValidUuid(request.operation_id) &&
+                request.expected_snapshot.kind <= SnapshotPreconditionKind::Equals && request.timeout.count() > 0 &&
+                request.timeout <= std::chrono::minutes(10),
+            "INVALID_ARGUMENT",
+            "invalid delete identity, precondition or timeout");
+        for (const auto& key : request.keys) {
+            Require(key.size() <= 1024 && ValidUtf8(key), "INVALID_ARGUMENT", "invalid delete key");
+        }
+        // Bound the temporary Arrow copy before building it. Terminal retries
+        // still resolve from their allocation-free canonical key fingerprint.
+        auto temporary = impl_->resources->Reserve(ResourceClass::Data, 32ULL << 20);
+        if (!temporary) {
+            CollectionInfo collection;
+            {
+                std::lock_guard lock(impl_->state_mutex);
+                collection = impl_->CachedCollection(request.collection_id);
+            }
+            Require(collection.mode == CollectionMode::KeyValue, "COLLECTION_MODE_MISMATCH", "delete requires KV mode");
+            TKvInput input;
+            input.Kind = MutationKind::Delete;
+            std::string sourceHash = Sha256("empty");
+            if (!request.keys.empty()) {
+                const SchemaSpec keySchema{{{"key", FieldType::String, false}}};
+                TCanonicalHasher hash;
+                hash.AddBytes(Take(EncodeAppendHeader(keySchema, request.collection_id, request.keys.size())));
+                for (const auto& key : request.keys) {
+                    hash.AddNumber<uint8_t>(1);
+                    hash.AddText(key);
+                }
+                sourceHash = hash.ComputeDigest();
+            }
+            return impl_->ResolveUnadmitted(
+                {request.collection_id, request.operation_id, request.expected_snapshot, {}},
+                Take(KvPayloadHash(collection.schema, sourceHash, input)),
+                temporary.error());
+        }
+        std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+        if (!request.keys.empty()) {
+            arrow::StringBuilder builder;
+            for (const auto& key : request.keys) {
+                Require(key.size() <= 1024 && ValidUtf8(key), "INVALID_ARGUMENT", "invalid delete key");
+                const auto appended = builder.Append(key);
+                Require(appended.ok(), "RESOURCE_EXHAUSTED", "cannot allocate delete keys");
+            }
+            const auto keys = builder.Finish();
+            Require(keys.ok(), "RESOURCE_EXHAUSTED", "cannot allocate delete keys");
+            batches.push_back(arrow::RecordBatch::Make(arrow::schema({arrow::field("key", arrow::utf8(), false)}),
+                static_cast<int64_t>(request.keys.size()),
+                {*keys}));
+        }
+        TKvInput input;
+        input.Kind = MutationKind::Delete;
+        input.Cancellation = request.cancellation;
+        input.Timeout = request.timeout;
+        return AppendDurableImpl(
+            {request.collection_id, request.operation_id, request.expected_snapshot, std::move(batches)},
+            nullptr,
+            &input);
+    } catch (const Failure& error) {
+        return Rejected(request.operation_id, CommitPhase::Validation, error.detail);
+    } catch (const std::exception& error) {
+        return Rejected(request.operation_id, CommitPhase::Validation, ExceptionError(error));
+    }
+}
+
+AppendOutcome Engine::CompactDurable(const CompactionRequest& request)
+{
+    TKvInput input;
+    input.Kind = MutationKind::Compact;
+    input.MaxFiles = request.max_files;
+    input.TargetFileBytes = request.target_file_bytes;
+    input.Cancellation = request.cancellation;
+    input.Timeout = request.timeout;
+    return AppendDurableImpl({request.collection_id, request.operation_id, request.expected_snapshot, {}},
+        nullptr,
+        &input);
+}
+
+AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const BulkAppendRequest* bulk, const TKvInput* kv)
 {
     NGlamDB::NTelemetry::TOperationScope<AppendOutcome> metrics(NGlamDB::NTelemetry::EOperation::Append);
     const auto impl = impl_;
@@ -1625,6 +1931,23 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
             unresolved = impl->BlockedAppend(request);
             collection = impl->CachedCollection(request.collection_id);
         }
+        Require(kv ? collection.mode == CollectionMode::KeyValue : collection.mode == CollectionMode::Append,
+            "COLLECTION_MODE_MISMATCH",
+            kv ? "mutation requires KV mode" : "raw append requires append mode");
+        SchemaSpec inputSchema = collection.schema;
+        if (kv) {
+            Require(kv->Kind >= MutationKind::Upsert && kv->Kind <= MutationKind::Compact &&
+                    kv->Duplicates >= DuplicatePolicy::Reject && kv->Duplicates <= DuplicatePolicy::LastWins &&
+                    kv->MaxFiles >= 1 && kv->MaxFiles <= 256 && kv->TargetFileBytes >= 1024 &&
+                    kv->TargetFileBytes <= (16LL << 20) && kv->Timeout.count() > 0 &&
+                    kv->Timeout <= std::chrono::minutes(10),
+                "INVALID_ARGUMENT",
+                "invalid bounded KV operation options");
+            deadline = started + kv->Timeout;
+            if (kv->Kind == MutationKind::Delete) {
+                inputSchema.fields = {{"key", FieldType::String, false}};
+            }
+        }
         if (bulk) {
             Require(bulk->source != nullptr && bulk->rows > 0 && bulk->rows <= BulkAppendLimits::MaxRows &&
                     bulk->timeout.count() > 0 && bulk->timeout <= std::chrono::minutes(10),
@@ -1633,11 +1956,19 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
             deadline = started + bulk->timeout;
         }
         TFingerprintedInput fingerprinted;
+        const bool emptyKV = kv && !bulk && request.batches.empty();
         if (bulk) {
-            fingerprinted.PayloadHash = Take(FingerprintBulkSource(collection.schema, *bulk, deadline));
+            fingerprinted.PayloadHash = Take(FingerprintBulkSource(inputSchema, *bulk, deadline));
             fingerprinted.Reservation = static_cast<size_t>(BulkAppendLimits::MemoryBytes);
+        } else if (emptyKV) {
+            fingerprinted.PayloadHash = Sha256("empty");
+            fingerprinted.Reservation = 0;
         } else {
-            fingerprinted = Take(FingerprintInput(collection.schema, request.collection_id, request.batches));
+            fingerprinted = Take(FingerprintInput(inputSchema, request.collection_id, request.batches));
+        }
+        const auto sourceHash = fingerprinted.PayloadHash;
+        if (kv) {
+            fingerprinted.PayloadHash = Take(KvPayloadHash(collection.schema, sourceHash, *kv));
         }
         const auto& payload_hash = fingerprinted.PayloadHash;
         if (unresolved) {
@@ -1766,23 +2097,32 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
             admission.bytes = reservation;
         }
         admission.shared_input = Take(impl->resources->Reserve(ResourceClass::Data, reservation));
-        impl->ReserveAttempt(bulk != nullptr);
+        impl->ReserveAttempt(bulk != nullptr, kv != nullptr);
         NormalizedInput input;
         if (bulk) {
-            input.payload_hash = payload_hash;
-            input.bulk =
-                Take(PrepareBulkInput(collection.schema, *bulk, payload_hash, deadline, [impl, expected_generation] {
-                    return impl->PublicationHealth(expected_generation);
-                }));
+            input.payload_hash = sourceHash;
+            input.bulk = Take(PrepareBulkInput(inputSchema, *bulk, sourceHash, deadline, [impl, expected_generation] {
+                return impl->PublicationHealth(expected_generation);
+            }));
+        } else if (emptyKV) {
+            input.payload_hash = sourceHash;
         } else {
-            input = Take(NormalizeBatches(collection.schema, request.collection_id, request.batches, reservation));
+            input = Take(NormalizeBatches(inputSchema, request.collection_id, request.batches, reservation));
         }
-        Require(input.payload_hash == payload_hash, "INVALID_ARGUMENT", "Arrow input changed during append");
+        Require(input.payload_hash == (kv ? sourceHash : payload_hash),
+            "INVALID_ARGUMENT",
+            "Arrow input changed during append");
+        input.payload_hash = payload_hash;
+        if (kv) {
+            input.kv = std::make_shared<TKvInput>(*kv);
+            input.kv->InputRows = bulk ? bulk->rows : static_cast<int64_t>(input.GetRowCount());
+        }
         const auto base = impl->catalog->Base(request.collection_id);
         // The store may have been opened by a build without a stored codec.
         impl->CheckSettingsSupported(collection.write_settings);
         const auto cancelled = [&] {
-            return impl->closing.load() || (bulk && bulk->cancellation && bulk->cancellation->load());
+            return impl->closing.load() || (bulk && bulk->cancellation && bulk->cancellation->load()) ||
+                (kv && kv->Cancellation && kv->Cancellation->load());
         };
         if (impl->backend) {
             const auto admissible =
@@ -1806,7 +2146,7 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
         phase = CommitPhase::Binding;
         metrics.EnterPhase(CommitPhase::Binding);
         try {
-            impl->catalog->BindOperation(*binding);
+            impl->catalog->BindOperation(*binding, kv ? kv->MigrationOwner : std::string_view{});
         } catch (const Failure& error) {
             if (error.uncertain) {
                 context.first_error = error.detail;
@@ -1848,7 +2188,10 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
             std::nullopt,
             std::nullopt};
         Require(ValidateOutcome(committed).has_value() &&
-                receipt.rows_appended == (input.bulk ? input.bulk->Rows : static_cast<int64_t>(input.GetRowCount())),
+                (kv ? receipt.receipt_version == 3 && receipt.mutation_kind == kv->Kind &&
+                            receipt.input_rows == input.kv->InputRows && receipt.snapshot_created != staged->IsNoOp()
+                    : receipt.rows_appended ==
+                            (input.bulk ? input.bulk->Rows : static_cast<int64_t>(input.GetRowCount()))),
             "IO_ERROR",
             "producer returned an invalid receipt or row count");
         {
@@ -1862,39 +2205,53 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
         metrics.EnterPhase(CommitPhase::CatalogTransaction);
         publication_started = true;
         context.publication_started = true;
-        context.candidate_snapshot_id = receipt.snapshot_id;
+        if (receipt.snapshot_created) {
+            context.candidate_snapshot_id = receipt.snapshot_id;
+        }
         // Held from the final health check through the outer COMMIT or
         // rollback; see Impl::commit_gate.
         std::unique_lock gate(impl->commit_gate, std::defer_lock);
-        impl->catalog->PublishAppend(
-            *binding,
-            receipt,
-            [&](std::string_view location) -> Status {
+        const auto verify = [&](std::string_view location) -> Status {
+            if (!staged->IsNoOp()) {
                 context.candidate_metadata_location = std::string(location);
-                if (bulk && bulk->cancellation && bulk->cancellation->load()) {
-                    return std::unexpected(
-                        ErrorDetail{"CANCELLED", "bulk append was cancelled", RetryHint::NewOperationId});
-                }
-                auto verified = staged->VerifyClosure(location);
-                if (!verified) {
-                    return verified;
-                }
-                if (!gate.owns_lock()) {
-                    gate.lock();
-                }
-                if (bulk && bulk->cancellation && bulk->cancellation->load()) {
-                    return std::unexpected(
-                        ErrorDetail{"CANCELLED", "bulk append was cancelled", RetryHint::NewOperationId});
-                }
-                if (bulk && std::chrono::steady_clock::now() >= deadline) {
-                    return std::unexpected(
-                        ErrorDetail{"DEADLINE_EXCEEDED", "bulk append deadline expired", RetryHint::NewOperationId});
-                }
-                return impl->PublicationHealth(expected_generation);
-            },
-            [&] {
+            }
+            if (kv && kv->Cancellation && kv->Cancellation->load()) {
+                return std::unexpected(
+                    ErrorDetail{"CANCELLED", "KV operation was cancelled", RetryHint::NewOperationId});
+            }
+            if (bulk && bulk->cancellation && bulk->cancellation->load()) {
+                return std::unexpected(
+                    ErrorDetail{"CANCELLED", "bulk append was cancelled", RetryHint::NewOperationId});
+            }
+            auto verified = staged->VerifyClosure(location);
+            if (!verified) {
+                return verified;
+            }
+            if (!gate.owns_lock()) {
+                gate.lock();
+            }
+            if (bulk && bulk->cancellation && bulk->cancellation->load()) {
+                return std::unexpected(
+                    ErrorDetail{"CANCELLED", "bulk append was cancelled", RetryHint::NewOperationId});
+            }
+            if (bulk && std::chrono::steady_clock::now() >= deadline) {
+                return std::unexpected(
+                    ErrorDetail{"DEADLINE_EXCEEDED", "bulk append deadline expired", RetryHint::NewOperationId});
+            }
+            if (kv && ((kv->Cancellation && kv->Cancellation->load()) || std::chrono::steady_clock::now() >= deadline))
+            {
+                return std::unexpected(
+                    ErrorDetail{"CANCELLED", "KV operation interrupted before publication", RetryHint::NewOperationId});
+            }
+            return impl->PublicationHealth(expected_generation);
+        };
+        if (staged->IsNoOp()) {
+            impl->catalog->PublishNoOp(*binding, receipt, verify);
+        } else {
+            impl->catalog->PublishAppend(*binding, receipt, verify, [&] {
                 return staged->Publish(*impl->catalog);
             });
+        }
         // Count a confirmed new publication once. Receipt replay paths never
         // reach this boundary; a lost/unknown COMMIT response is not counted.
         NGlamDB::NTelemetry::RecordPublished(static_cast<std::uint64_t>(receipt.rows_appended),
@@ -2054,11 +2411,12 @@ Result<SnapshotHistory> Engine::ListSnapshots(std::string_view id) const
                 [&](const auto& record) {
                     if (record.state == OperationState::Committed && record.outcome && record.outcome->result) {
                         const auto& receipt = *record.outcome->result;
-                        if (!context.VerifiedState || !context.VerifiedState->ScanIndex ||
-                            std::ranges::binary_search(context.VerifiedState->ScanIndex->Snapshots,
-                                receipt.snapshot_id,
-                                {},
-                                &NGlamDB::NStorage::TSnapshotBoundary::SnapshotID))
+                        if ((receipt.receipt_version != 3 || receipt.snapshot_created) &&
+                            (!context.VerifiedState || !context.VerifiedState->ScanIndex ||
+                                std::ranges::binary_search(context.VerifiedState->ScanIndex->Snapshots,
+                                    receipt.snapshot_id,
+                                    {},
+                                    &NGlamDB::NStorage::TSnapshotBoundary::SnapshotID)))
                         {
                             receipts.push_back(receipt);
                         }
@@ -2146,6 +2504,12 @@ Result<ScanExplanation> Engine::ExplainScan(const ScanRequest& request) const
 
 Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) const
 {
+    return ScanImpl(request, nullptr);
+}
+
+Result<std::shared_ptr<ScanCursor>>
+Engine::ScanImpl(const ScanRequest& request, std::shared_ptr<TReadBudget> budget, bool chronologicalFiles) const
+{
     NGlamDB::NTelemetry::TReadOperationScope metrics(NGlamDB::NTelemetry::EReadOperation::ScanOpen);
     const auto impl = impl_;
     // The root this scan resolved; held until planning has read it, so a
@@ -2180,7 +2544,11 @@ Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) con
         CheckExpiredSnapshot(context, request.selector);
         const auto capabilities = impl->backend->GetCapabilities();
         context.Resources = impl->resources;
+        context.ChronologicalFiles = chronologicalFiles;
         context.FileIO = Take(impl->backend->ReadOnlyFileIO());
+        if (budget) {
+            context.FileIO = BudgetReadOnlyFileIO(std::move(context.FileIO), std::move(budget));
+        }
         context.Cache = impl->backend->ReadMetadataCache();
         context.EnableFilePruning = capabilities.file_pruning;
         context.EnableRowGroupPruning = capabilities.row_group_pruning;
@@ -2198,6 +2566,8 @@ Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) con
         }
         return metrics.Finish(std::move(cursor));
 #else
+        (void)budget;
+        (void)chronologicalFiles;
         throw Failure({"DEPENDENCY_UNAVAILABLE", "storage scanner is not built", RetryHint::OperatorAction});
 #endif
     } catch (const Failure& error) {

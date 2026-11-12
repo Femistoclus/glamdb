@@ -452,6 +452,16 @@ export class BrowserDemoAPI {
             return {
                 ...mock,
                 browser_demo: true,
+                collection_modes: ['append'],
+                features: {
+                    key_value: false,
+                    upsert: false,
+                    delete: false,
+                    lookup: false,
+                    compact: false,
+                    bulk_upsert: false,
+                    migration: false,
+                },
                 arrow_ipc: false,
                 mode: 'append',
                 key_unique: false,
@@ -575,6 +585,16 @@ export class BrowserDemoAPI {
                     rows_considered: rows.length,
                     compressed_bytes_read: null,
                     browser_demo: true,
+                    collection_modes: ['append'],
+                    features: {
+                        key_value: false,
+                        upsert: false,
+                        delete: false,
+                        lookup: false,
+                        compact: false,
+                        bulk_upsert: false,
+                        migration: false,
+                    },
                 },
                 ...mock,
             };

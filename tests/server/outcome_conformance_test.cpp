@@ -244,3 +244,67 @@ TEST(OutcomeConformance, IncompleteNativeRecoveryCannotBeSerialized)
 
 } // namespace
 } // namespace glamdb::NTransport
+
+namespace glamdb::NTransport {
+TEST(OutcomeConformance, KVVersionThreeLiteralWireValuesAndDurableRoundTrip)
+{
+    std::ifstream input(
+        std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "fixtures/http/kv-v3.json");
+    const auto fixture = TJson::parse(input);
+    for (const auto& example : fixture.at("cases")) {
+        const std::string name = example.at("name");
+        SCOPED_TRACE(name);
+        AppendResult result;
+        result.collection_id = fixture.at("collection_id");
+        result.operation_id = example.at("body").at("operation_id");
+        result.payload_hash = example.at("response").at("result").at("payload_hash");
+        result.receipt_version = 3;
+        result.mutation_kind = example.at("kind") == "upsert" ? MutationKind::Upsert
+            : example.at("kind") == "delete"                  ? MutationKind::Delete
+                                                              : MutationKind::Compact;
+        result.durability_profile = "local-delete-extra-v1";
+        const bool noOp = name.find("noop") != std::string::npos;
+        result.snapshot_created = !noOp;
+        result.snapshot_id = name == "delete_all" || name == "delete_missing_noop" ? 9007199254740995LL
+            : noOp                                                                 ? 0
+                                                                                   : 9007199254740993LL;
+        if (name == "delete_all") {
+            result.parent_snapshot_id = 9007199254740993LL;
+        }
+        if (name == "delete_missing_noop") {
+            result.parent_snapshot_id = 9007199254740995LL;
+        }
+        result.snapshot_created_at_us = noOp ? 0 : 1767225600123000LL;
+        result.input_rows = name == "delete_missing_noop"                                          ? 2
+            : result.mutation_kind == MutationKind::Compact || name == "delete_empty_initial_noop" ? 0
+                                                                                                   : 3;
+        result.rows_affected = !noOp && result.mutation_kind != MutationKind::Compact ? 1 : 0;
+        if (!noOp && name != "delete_all") {
+            result.data_files_added = 1;
+            result.compressed_data_bytes_added = 123;
+            result.rows_written = name == "compact_four_to_one" ? 4 : 1;
+        }
+        if (name == "delete_all" || name == "compact_four_to_one") {
+            result.rows_removed = name == "delete_all" ? 1 : 4;
+            result.data_files_removed = name == "delete_all" ? 1 : 4;
+            result.compressed_data_bytes_removed = name == "delete_all" ? 123 : 492;
+        }
+        const AppendOutcome outcome{result.operation_id,
+            CommitDisposition::Committed,
+            CommitPhase::Complete,
+            result,
+            std::nullopt,
+            std::nullopt};
+        const auto response = json_adapter::ToJson(outcome);
+        ASSERT_TRUE(response) << response.error().message;
+        EXPECT_EQ(response->status, example.at("status"));
+        EXPECT_EQ(TJson::parse(response->body), example.at("response"));
+        const auto encoded = detail::EncodeOutcome(outcome);
+        ASSERT_TRUE(encoded);
+        const auto recovered = detail::DecodeOutcome(*encoded);
+        ASSERT_TRUE(recovered);
+        EXPECT_EQ(*recovered, outcome);
+        EXPECT_EQ(json_adapter::ToJson(*recovered)->body, response->body);
+    }
+}
+} // namespace glamdb::NTransport

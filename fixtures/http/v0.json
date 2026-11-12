@@ -473,6 +473,113 @@
     },
     {
       "method": "POST",
+      "path": "/databases/{database_id}/collections",
+      "core": "Engine::CreateCollection",
+      "status": 200,
+      "response_fields": {
+        "collection_id": "string",
+        "schema": "object",
+        "current_snapshot_id": "null|string"
+      },
+      "request": {
+        "collection_id": "00000000-0000-0000-0000-000000000103",
+        "name": "contract_kv",
+        "schema": {
+          "fields": [
+            {
+              "name": "key",
+              "type": "string",
+              "nullable": false
+            }
+          ]
+        },
+        "mode": "kv"
+      },
+      "response_schema": "createOutcome",
+      "request_schema": "create"
+    },
+    {
+      "method": "POST",
+      "status": 200,
+      "response_fields": {
+        "outcome": "string",
+        "result": "object"
+      },
+      "response_schema": "appendOutcome",
+      "path": "/databases/{database_id}/collections/{kv_collection_id}/upsert",
+      "core": "Engine::UpsertDurable",
+      "request": {
+        "operation_id": "00000000-0000-0000-0000-000000000104",
+        "rows": [
+          {
+            "key": "fixture"
+          },
+          {
+            "key": "fixture"
+          }
+        ]
+      },
+      "request_schema": "upsert"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections/{kv_collection_id}/lookup",
+      "core": "Engine::Lookup",
+      "status": 200,
+      "request": {
+        "keys": [
+          "fixture",
+          "missing",
+          "fixture"
+        ]
+      },
+      "request_schema": "lookup",
+      "response_fields": {
+        "collection_id": "string",
+        "snapshot_id": "string",
+        "schema": "object",
+        "rows": "array"
+      },
+      "response_schema": "lookupResult"
+    },
+    {
+      "method": "POST",
+      "status": 200,
+      "response_fields": {
+        "outcome": "string",
+        "result": "object"
+      },
+      "response_schema": "appendOutcome",
+      "path": "/databases/{database_id}/collections/{kv_collection_id}/delete",
+      "core": "Engine::DeleteDurable",
+      "request": {
+        "operation_id": "00000000-0000-0000-0000-000000000105",
+        "keys": [
+          "missing",
+          "missing"
+        ]
+      },
+      "request_schema": "delete"
+    },
+    {
+      "method": "POST",
+      "status": 200,
+      "response_fields": {
+        "outcome": "string",
+        "result": "object"
+      },
+      "response_schema": "appendOutcome",
+      "path": "/databases/{database_id}/collections/{kv_collection_id}/compact",
+      "core": "Engine::CompactDurable",
+      "request": {
+        "operation_id": "00000000-0000-0000-0000-000000000106",
+        "max_files": "4",
+        "target_file_bytes": "1024"
+      },
+      "request_schema": "compact"
+    },
+    {
+      "method": "POST",
       "path": "/databases/{database_id}/reconcile",
       "core": "Engine::Reconcile",
       "status": 200,
@@ -529,5 +636,6 @@
       },
       "response_schema": "databaseDropped"
     }
-  ]
+  ],
+  "kv_collection_id": "00000000-0000-0000-0000-000000000103"
 }

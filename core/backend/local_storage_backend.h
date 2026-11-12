@@ -164,6 +164,9 @@ private:
     std::mutex Mutex_;
     std::map<std::string, TCollectionState, std::less<>> Collections_;
     bool VerifiedGeneration_ = false;
+    // No-op receipts retain their exact historical metadata base permanently.
+    // Reservations cover the bounded path set; files count in warehouse usage.
+    std::map<std::string, std::shared_ptr<ResourceReservation>, std::less<>> NoOpRoots_;
     // Preserve admitted root capacity while invalidating uncertain metadata.
     // Recovery can rebuild the selected root even when ordinary memory is full.
     std::map<std::string, std::shared_ptr<ResourceReservation>, std::less<>> CacheMemory_;
@@ -181,6 +184,11 @@ private:
         std::shared_ptr<NGlamDB::NStorage::TDurableLocalFileIO> fileIO,
         std::shared_ptr<TSnapshotMetadataCache> readCache);
 
+    Result<std::unique_ptr<StagedAppend>> PrepareKvAppend(const BoundOperation& binding,
+        const CollectionInfo& collection,
+        const NormalizedInput& input,
+        std::chrono::steady_clock::time_point deadline);
+    void PinNoOpRoot(std::string_view location);
     void CheckStore(const StoreInfo& store) const;
     // Root identity, warehouse limit and free-space reserve before a write.
     // `remember` keeps the warehouse bound for the same append's PrepareAppend;

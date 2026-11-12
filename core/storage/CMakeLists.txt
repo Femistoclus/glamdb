@@ -5,7 +5,8 @@ find_package(SQLite3 CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
 
 add_library(glamdb_storage STATIC
-    table_profile.cpp metadata_validation.cpp snapshot_retention.cpp capacity.cpp format_verifier.cpp base_state.cpp
+    table_profile.cpp metadata_validation.cpp snapshot_retention.cpp capacity.cpp format_verifier.cpp
+    base_state.cpp kv_state.cpp
     publication_guard.cpp durable_local_file_io.cpp append_stager.cpp
     data_file_writer.cpp
     format_registry.cpp recovery_visited.cpp

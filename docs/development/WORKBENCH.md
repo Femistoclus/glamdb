@@ -109,8 +109,9 @@ only SQL TRUE survives a predicate. The browser defaults to a 1,000-row preview 
 displays 100 rows per page. Connected previews can request up to 10,000 rows,
 within the backend page bound and configured editor ceiling; the static demo
 retains its 1,000-row maximum. Append batches are capped at 10,000 rows plus
-decoded/body byte limits. This is append v0, without upsert, delete, compaction,
-jobs, S3, uniqueness or durable mock outcomes.
+decoded/body byte limits. Append collections preserve duplicates; KV collections
+expose capability-gated upsert, delete and compaction with one full row per key.
+Asynchronous jobs, S3 and durable mock outcomes remain unavailable.
 
 The field editor accepts up to 100 rows; the optional JSON batch editor accepts
 up to 10,000, within server byte limits. Unknown writes freeze both editors
@@ -290,3 +291,28 @@ See the [architecture](../ARCHITECTURE.md), [roadmap](../ROADMAP.md) and
 boundaries of the current client/mock implementation.
 
 See [interaction checks and comparisons](WORKBENCH_UX.md) and the [installed shared-store acceptance recipe](NATIVE_ACCEPTANCE.md) for actual native evidence.
+
+## KV collection controls
+
+When native capabilities advertise KV, creation includes an immutable **Collection
+mode** choice. KV requires a nonnullable string `key` at any column position.
+The schema-driven write panel and Batch editor use **Upsert rows** for KV:
+last input occurrence wins and every input replaces the full row, with omitted
+nullable values becoming NULL. Append collections retain duplicate-preserving
+writes. The footer and Schema panel explain the selected collection's mode.
+
+KV adds **Lookup keys**, **Delete keys**, and **Compact files** controls only for
+advertised operations. Lookup uses the selected view and displays ordered hits,
+repeated keys and explicit misses. Delete and compact reuse the existing
+permanent operation/recovery flow. Pending request exports include the mutation
+action and original body; import validates the server/database/store, schema,
+and collection mode before allowing an explicit same-ID retry. Import itself
+never writes. Uncertain requests stay frozen until a terminal outcome is known.
+
+Version-3 receipts display their mutation kind and distinguish **No new snapshot**
+from a publication. No-op receipts remain available in Operations by ID and do
+not add snapshot-history rows. Native snapshot history displays rows written and
+removed, including value-preserving compaction, rather than treating mutations
+as appended rows. Mock and public demo modes do not expose these KV controls.
+Bulk upsert and append-to-KV migration are native C++ operations only; there are
+no corresponding HTTP/workbench controls.

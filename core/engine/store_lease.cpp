@@ -49,6 +49,17 @@ void CleanupRecoveryWorkspaces(const std::filesystem::path& root)
     constexpr std::string_view prefix = ".recovery-";
     for (const auto& entry : std::filesystem::directory_iterator(root)) {
         const auto name = entry.path().filename().string();
+        constexpr std::string_view kvPrefix = ".glamdb-kv-";
+        constexpr std::string_view kvSuffix = ".sqlite";
+        const bool kvWorkspace = name.size() == kvPrefix.size() + 32 + kvSuffix.size() && name.starts_with(kvPrefix) &&
+            name.ends_with(kvSuffix) &&
+            std::ranges::all_of(std::string_view(name).substr(kvPrefix.size(), 32), [](char value) {
+                return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
+            });
+        if (kvWorkspace && std::filesystem::is_regular_file(entry.symlink_status())) {
+            std::filesystem::remove(entry.path());
+            continue;
+        }
         if (name.size() != prefix.size() + 6 || !name.starts_with(prefix)) {
             continue;
         }
