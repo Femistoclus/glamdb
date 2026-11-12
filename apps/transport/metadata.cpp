@@ -4,6 +4,7 @@
 
 #include <arrow/util/utf8.h>
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
@@ -270,18 +271,28 @@ TJson StatisticsJson(const Engine& engine,
     }
     const auto statistics = Unwrap(engine.GetStatistics(collection, MetadataSelector(query)));
     const auto history = Unwrap(engine.ListSnapshots(collection));
-    // Appends may advance the second call's root; count only the history prefix
-    // belonging to the first call's confirmed root. Snapshot expiration is absent.
-    const auto head = statistics.identity.current_snapshot_id;
-    const auto count = HistorySize(history, head ? SnapshotSelector::Id(*head) : SnapshotSelector::InitialEmpty());
+    // Maintenance can remove a prefix even while retaining the old head. Only
+    // the same complete root identity can provide this statistics view's count.
     auto result = Statistics(statistics);
-    result["retained_snapshots"] = std::to_string(count);
+    result["retained_snapshots"] =
+        history.identity == statistics.identity ? TJson(std::to_string(history.snapshots.size())) : TJson(nullptr);
     return result;
 }
 
 TJson SnapshotsJson(const Engine& engine, const std::string& collection, SnapshotSelector selector)
 {
     const auto history = Unwrap(engine.ListSnapshots(collection));
+    if (selector.kind == SnapshotSelectorKind::Id && std::ranges::none_of(history.snapshots, [&](const auto& snapshot) {
+            return snapshot.snapshot_id == selector.snapshot_id;
+        }))
+    {
+        // Distinguish expired IDs only after loading the fixed history; a
+        // precheck could race expiration. Preserve the legacy unknown-ID code.
+        const auto selected = engine.GetStatistics(collection, selector);
+        if (!selected && selected.error().code != "NOT_FOUND") {
+            throw TFailure(selected.error());
+        }
+    }
     const auto size = HistorySize(history, selector);
     const auto selected =
         size ? SnapshotSelector::Id(history.snapshots[size - 1].snapshot_id) : SnapshotSelector::InitialEmpty();

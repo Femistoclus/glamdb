@@ -225,7 +225,8 @@ protected:
         const std::string& retainedDataPath = {},
         int bulkFiles = 0,
         bool duplicateBulkFile = false,
-        const std::function<void(std::vector<iceberg::ManifestEntry>&)>& rewriteEntries = {})
+        const std::function<void(std::vector<iceberg::ManifestEntry>&)>& rewriteEntries = {},
+        std::optional<int64_t> forcedSnapshotID = std::nullopt)
     {
         Scope_.reset();
         const auto attemptID = std::string("33333333-3333-7333-8333-33333333333") + std::to_string(index + 3);
@@ -282,7 +283,7 @@ protected:
         if (rewriteEntries) {
             stagedMetadata = std::make_shared<iceberg::TableMetadata>(*base->Metadata);
             auto snapshot = std::make_shared<iceberg::Snapshot>();
-            snapshot->snapshot_id = 1690000 + index;
+            snapshot->snapshot_id = forcedSnapshotID.value_or(1690000 + index);
             snapshot->parent_snapshot_id = base->Metadata->current_snapshot_id;
             snapshot->sequence_number = ++stagedMetadata->last_sequence_number;
             stagedMetadata->last_updated_ms += std::chrono::milliseconds(1);
@@ -399,6 +400,42 @@ protected:
         }
         TStoragePublicationGuard guard(std::move(context));
         ICEBERG_RETURN_UNEXPECTED(guard.BeforePointerChange(change));
+        return guard.GetCandidate();
+    }
+
+    iceberg::Result<std::shared_ptr<const TBaseState>> RetainLatest(const std::shared_ptr<const TBaseState>& base,
+        const TStorageLimits& limits = {})
+    {
+        Scope_.reset();
+        constexpr auto attemptID = "33333333-3333-7333-8333-333333333338";
+        auto attempt =
+            NIO::TIOAttempt::Make({StoreID, CollectionID, attemptID, NIO::EAttemptKind::Maintenance, std::nullopt},
+                Dirs_->Latch());
+        if (!attempt) {
+            return iceberg::IOError(attempt.Error().message());
+        }
+        Attempt_ = std::move(attempt).Value();
+        ICEBERG_ASSIGN_OR_RAISE(auto scope, IO_->BindAttempt(Attempt_));
+        auto metadata = *base->Metadata;
+        const auto prefix = metadata.snapshots.size() - 1;
+        ICEBERG_ASSIGN_OR_RAISE(auto expired, ExpiredSequence(metadata));
+        if (prefix != 0) {
+            expired = metadata.snapshots[prefix - 1]->sequence_number;
+        }
+        metadata.snapshots.erase(metadata.snapshots.begin(), metadata.snapshots.end() - 1);
+        metadata.snapshot_log.erase(metadata.snapshot_log.begin(), metadata.snapshot_log.end() - 1);
+        ICEBERG_RETURN_UNEXPECTED(WriteRetentionPolicy(metadata, {1}, expired));
+        const auto location = Location_ + "/metadata/00008-" + attemptID + ".metadata.json";
+        ICEBERG_RETURN_UNEXPECTED(iceberg::TableMetadataUtil::Write(*IO_, location, metadata));
+        auto context = Context();
+        context.Base = base;
+        context.StoreUsage = base->Usage;
+        context.RetentionPolicy = TRetentionPolicy{1};
+        context.ExpirationPrefix = prefix;
+        context.Limits = limits;
+        TStoragePublicationGuard guard(std::move(context));
+        ICEBERG_RETURN_UNEXPECTED(guard.BeforePointerChange(
+            {EPointerOp::UpdateLocation, "test", "events", base->MetadataLocation, location}));
         return guard.GetCandidate();
     }
 
@@ -637,6 +674,70 @@ TEST_F(TPublicationGuardTest, MergedClosurePreservesMembershipAndIdenticalRecove
     ExpectFreshProcess(Root_, (*second)->MetadataLocation);
 }
 
+TEST_F(TPublicationGuardTest, ExpiredMergedCheckpointPreservesBulkFilesAndExactRecoveryUsage)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto first = Append(1, create.GetCandidate(), 3, {}, {}, 2);
+    ASSERT_TRUE(first) << first.error().message;
+    const auto second = Append(2, *first, 2, {}, {}, 0, false, [](auto&) {
+    });
+    ASSERT_TRUE(second) << second.error().message;
+    const auto retained = RetainLatest(*second);
+    ASSERT_TRUE(retained) << retained.error().message;
+    EXPECT_EQ((*retained)->Usage.Manifests, 1U);
+    EXPECT_EQ((*retained)->Usage.DataFiles, 3U);
+    const auto expired = (*first)->Metadata->snapshots;
+    auto recovery = VerifyReachable(IO_, (*retained)->MetadataLocation, StoreID, CollectionID, {}, {}, expired);
+    ASSERT_TRUE(recovery) << recovery.error().message;
+    EXPECT_EQ(recovery->Usage, (*retained)->Usage);
+    EXPECT_EQ(recovery->ScanIndex->Files, (*retained)->ScanIndex->Files);
+    EXPECT_EQ(recovery->RetainedManifestPaths, (*retained)->RetainedManifestPaths);
+    auto tight = TStorageLimits{};
+    tight.CommitBytes = static_cast<std::uint64_t>((*retained)->CurrentManifests.front().manifest_length);
+    EXPECT_FALSE(VerifyReachable(IO_, (*retained)->MetadataLocation, StoreID, CollectionID, tight, {}, expired));
+    const auto table = NIO::TStoreUri::ParseTable(Location_, StoreID);
+    ASSERT_TRUE(table);
+    const auto list = NIO::TStoreUri::Parse(expired.front()->manifest_list, StoreID);
+    ASSERT_TRUE(list);
+    EXPECT_FALSE(Dirs_->RemoveExpiredMetadata(list.Value()));
+    for (const auto& manifest : (*first)->CurrentManifests) {
+        const auto uri = NIO::TStoreUri::Parse(manifest.manifest_path, StoreID);
+        ASSERT_TRUE(uri);
+        EXPECT_FALSE(Dirs_->RemoveExpiredMetadata(uri.Value()));
+    }
+    recovery = VerifyReachable(IO_, (*retained)->MetadataLocation, StoreID, CollectionID, {}, {}, expired);
+    ASSERT_TRUE(recovery) << recovery.error().message;
+    EXPECT_EQ(recovery->Usage, (*retained)->Usage);
+}
+
+TEST_F(TPublicationGuardTest, AppendCannotReuseAnExpiredSnapshotIdentity)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto first = Append(1, create.GetCandidate(), 3);
+    ASSERT_TRUE(first) << first.error().message;
+    const auto second = Append(2, *first, 2);
+    ASSERT_TRUE(second) << second.error().message;
+    const auto retained = RetainLatest(*second);
+    ASSERT_TRUE(retained) << retained.error().message;
+    const auto reused = Append(
+        3,
+        *retained,
+        1,
+        {},
+        {},
+        0,
+        false,
+        [](auto&) {
+        },
+        (*first)->Metadata->current_snapshot_id);
+    ASSERT_FALSE(reused);
+    EXPECT_EQ(reused.error().message, "Append reuses an expired snapshot identity.");
+}
+
 class TMergedClosureCorruptionTest
     : public TPublicationGuardTest
     , public ::testing::WithParamInterface<int>
@@ -689,6 +790,69 @@ TEST_P(TMergedClosureCorruptionTest, RejectsChangesToExistingEntries)
     EXPECT_TRUE(VerifyReachable(*readOnly, (*first)->MetadataLocation, StoreID, CollectionID));
 }
 
+TEST_P(TMergedClosureCorruptionTest, ExpiredCheckpointRejectsChangedOriginalFileProvenance)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto first = Append(1, create.GetCandidate(), 3);
+    ASSERT_TRUE(first) << first.error().message;
+    std::string invalidRoot;
+    const auto second = Append(
+        2,
+        *first,
+        2,
+        [&](auto*, const TPointerChange* change) {
+            invalidRoot = change->NewLocation;
+        },
+        {},
+        0,
+        false,
+        [](auto& entries) {
+            const auto existing =
+                std::ranges::find(entries, iceberg::ManifestStatus::kExisting, &iceberg::ManifestEntry::status);
+            ASSERT_NE(existing, entries.end());
+            switch (GetParam()) {
+                case 0:
+                    entries.erase(existing);
+                    break;
+                case 1:
+                    entries.push_back(*existing);
+                    break;
+                case 2:
+                    existing->snapshot_id = 123;
+                    break;
+                case 3:
+                    existing->file_sequence_number = 123;
+                    break;
+                case 4:
+                    existing->data_file = std::make_shared<iceberg::DataFile>(*existing->data_file);
+                    ++existing->data_file->record_count;
+                    break;
+                case 5:
+                    existing->status = iceberg::ManifestStatus::kDeleted;
+                    break;
+                case 6:
+                    existing->data_file = std::make_shared<iceberg::DataFile>(*existing->data_file);
+                    existing->data_file->value_counts[123] = 3;
+                    break;
+                default:
+                    FAIL() << "Invalid checkpoint corruption mode";
+            }
+        });
+    EXPECT_FALSE(second);
+    ASSERT_FALSE(invalidRoot.empty());
+    auto metadata = ReadTableMetadata(*IO_, invalidRoot);
+    ASSERT_TRUE(metadata) << metadata.error().message;
+    (*metadata)->snapshots.erase((*metadata)->snapshots.begin());
+    (*metadata)->snapshot_log.erase((*metadata)->snapshot_log.begin());
+    ASSERT_TRUE(WriteRetentionPolicy(**metadata, {1}, 1));
+    const auto location = WriteRecoveryRoot(**metadata);
+    ASSERT_TRUE(location) << location.error().message;
+    const auto expired = (*first)->Metadata->snapshots;
+    EXPECT_FALSE(VerifyReachable(IO_, *location, StoreID, CollectionID, {}, {}, expired));
+}
+
 INSTANTIATE_TEST_SUITE_P(Membership, TMergedClosureCorruptionTest, ::testing::Range(0, 7));
 
 class TMergedClosureLimitTest
@@ -737,6 +901,33 @@ TEST_P(TMergedClosureLimitTest, CountsRewriteInputsAtTheExactCommitByteBoundary)
 }
 
 INSTANTIATE_TEST_SUITE_P(Bytes, TMergedClosureLimitTest, ::testing::Bool());
+
+TEST_P(TMergedClosureLimitTest, PolicyOnlyMaintenanceRespectsTheLatestAppendCommitBytes)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto first = Append(1, create.GetCandidate(), 3);
+    ASSERT_TRUE(first) << first.error().message;
+    const auto& usage = (*first)->Usage;
+    TStorageLimits limits;
+    // With one unmerged append these are exactly its root, list and manifest.
+    limits.CommitBytes = usage.RootBytes + usage.ManifestListBytes + usage.ManifestBytes;
+    if (GetParam()) {
+        limits.CommitBytes += 512;
+    }
+    const auto maintained = RetainLatest(*first, limits);
+    if (GetParam()) {
+        ASSERT_TRUE(maintained) << maintained.error().message;
+        const auto recovered = VerifyReachable(IO_, (*maintained)->MetadataLocation, StoreID, CollectionID, limits);
+        ASSERT_TRUE(recovered) << recovered.error().message;
+        EXPECT_EQ(recovered->Usage, (*maintained)->Usage);
+    } else {
+        ASSERT_FALSE(maintained);
+        EXPECT_TRUE(maintained.error().message.starts_with("CAPACITY:"));
+        EXPECT_TRUE(VerifyReachable(IO_, (*first)->MetadataLocation, StoreID, CollectionID, limits));
+    }
+}
 
 TEST_F(TPublicationGuardTest, OrdinaryMergePreservesEveryFileOfAnEarlierBulkAppend)
 {

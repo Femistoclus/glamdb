@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/storage/base_state.h"
+#include "core/storage/snapshot_retention.h"
 #include "core/storage/table_profile.h"
 
 #include <optional>
@@ -60,6 +61,10 @@ struct TPublicationContext
     // structural equality and byte-identical reserialization.
     std::optional<TStagedRoot> StagedRoot{};
     bool VerifyStagedRoot = false;
+    std::optional<TRetentionPolicy> RetentionPolicy{};
+    std::size_t ExpirationPrefix = 0;
+    // Per-collection list validation remains independent of aggregate admission.
+    std::optional<TStorageLimits> StoreLimits{};
 };
 
 class TStoragePublicationGuard final : public IPublicationGuard

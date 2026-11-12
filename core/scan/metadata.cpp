@@ -4,6 +4,7 @@
 #include "core/api/canonical.h"
 #include "core/scan/predicate.h"
 #include "core/scan/scan_planner.h"
+#include "core/storage/snapshot_retention.h"
 
 #include <iceberg/snapshot.h>
 #include <iceberg/table_metadata.h>
@@ -77,7 +78,15 @@ SnapshotHistory ReadHistory(const TScanContext& context, std::span<const AppendR
         return snapshot->sequence_number;
     });
     std::optional<int64_t> previous;
-    int64_t sequence = 0;
+    const auto expired = NGlamDB::NStorage::ExpiredSequence(*root);
+    Require(expired.has_value(), "CORRUPTION", "invalid expiration watermark");
+    int64_t sequence = *expired;
+    if (sequence != 0) {
+        Require(!snapshots.empty() && snapshots.front()->sequence_number == sequence + 1,
+            "CORRUPTION",
+            "retained history differs from expiration watermark");
+        previous = snapshots.front()->parent_snapshot_id;
+    }
     for (const auto& snapshot : snapshots) {
         Require(snapshot->parent_snapshot_id == previous && snapshot->sequence_number > sequence,
             "CORRUPTION",

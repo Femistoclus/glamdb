@@ -40,7 +40,9 @@ concurrent snapshot readers. Power-loss durability qualification is still pendin
 
 Queries use a typed predicate API; there is no SQL query interface. Collections
 are currently unpartitioned and append-only. Upsert, delete, schema evolution,
-compaction, snapshot expiration, object storage, and replication are not available.
+compaction, object storage, and replication are not available. The embedded C++
+API supports [explicit snapshot retention maintenance](docs/development/SNAPSHOT_RETENTION.md);
+history is retained forever unless a caller opts in.
 
 ### In development
 

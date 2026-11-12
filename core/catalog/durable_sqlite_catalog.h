@@ -5,6 +5,7 @@
 
 #include <functional>
 #include <mutex>
+#include <span>
 
 #include <iceberg/catalog/sql/catalog_store.h>
 
@@ -42,6 +43,13 @@ struct CatalogProfile
     int64_t mmap_size = 0;
 };
 
+struct ExpiredSnapshotRecord
+{
+    int64_t snapshot_id;
+    int64_t sequence_number;
+    std::string operation_id;
+};
+
 // Every call, including the entire outer publication, owns this same recursive
 // serialization lock. The callback must be synchronous and use this instance.
 class DurableSqliteCatalogStore final : public iceberg::sql::CatalogStore
@@ -76,6 +84,16 @@ public:
     // Compare-and-set of canonical settings; see UpdateWriteSettingsRequest.
     CollectionInfo UpdateWriteSettings(std::string_view id, int64_t expected_version, WriteSettings settings);
     void PublishAppend(const BoundOperation& binding, const AppendResult& result, const Guard& guard, const Body& body);
+    void PublishExpiration(const BaseIdentity& base,
+        std::span<const ExpiredSnapshotRecord> expired,
+        std::span<const std::string> garbage,
+        const Guard& guard,
+        const Body& body);
+    std::vector<ExpiredSnapshotRecord> ExpiredSnapshots(std::string_view collection_id);
+    bool IsExpiredSnapshot(std::string_view collection_id, int64_t snapshot_id);
+    int64_t PendingMetadataCount(std::string_view id);
+    std::vector<std::string> PendingMetadata(std::string_view collection_id);
+    void AcknowledgeMetadata(std::string_view collection_id, std::span<const std::string> paths);
     void DurabilityFence();
     int64_t FenceValue();
     void ValidateInventory();
@@ -124,6 +142,7 @@ private:
     void CheckFreeBytes();
     bool HasWriteSettings();
     void EnsureWriteSettings();
+    void EnsureRetention();
     void CheckBinding(const BoundOperation& binding);
     void Complete(const BoundOperation& binding, const AppendOutcome& outcome);
     struct PointerTarget

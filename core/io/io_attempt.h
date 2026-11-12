@@ -12,7 +12,7 @@
 
 namespace NGlamDB::NIO {
 
-enum class EAttemptKind : std::uint8_t { CreateCollection, Append };
+enum class EAttemptKind : std::uint8_t { CreateCollection, Append, Maintenance };
 enum class EFileState : std::uint8_t { Open, Synced, Closed, DirSynced, Failed };
 
 struct TAttemptSpec

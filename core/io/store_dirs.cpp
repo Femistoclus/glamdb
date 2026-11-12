@@ -179,6 +179,29 @@ std::error_code TStoreDirs::RemoveMetadataFile(const TStoreUri& location) const
     return Fs_->Unlink(directories.Value().Metadata, location.Leaf());
 }
 
+std::error_code TStoreDirs::RemoveExpiredMetadata(const TStoreUri& location) const
+{
+    if (location.Kind() != EFileKind::ManifestList && location.Kind() != EFileKind::Manifest) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+    if (const auto error = CheckIdentity()) {
+        return error;
+    }
+    const auto directories = Collection(location.CollectionId(), false);
+    if (!directories) {
+        return directories.Error();
+    }
+    const auto removed = Fs_->Unlink(directories.Value().Metadata, location.Leaf());
+    if (removed && removed != std::errc::no_such_file_or_directory) {
+        Latch_->Observe(removed);
+        return removed;
+    }
+    // Even a retry after an interrupted unlink must fence directory persistence.
+    const auto synced = Fs_->SyncDir(directories.Value().Metadata);
+    Latch_->Observe(synced);
+    return synced;
+}
+
 std::error_code TStoreDirs::CheckIdentity() const
 {
     // Evidence that the path no longer names this store blocks writes until

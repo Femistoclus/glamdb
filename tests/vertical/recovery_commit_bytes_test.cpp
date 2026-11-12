@@ -3,6 +3,7 @@
 // accepted reopens under the same limits. Only the current commit is charged
 // for the final root; older commits never wrote it.
 
+#include "tests/support/checked.h"
 #include "tests/vertical/vertical_support.h"
 
 #include <algorithm>
@@ -127,6 +128,71 @@ TEST(BackendRecoveryLimitsTest, ReopenAcceptsHistoryPublishedUnderTheSameCommitB
     ASSERT_TRUE(collection);
     EXPECT_TRUE(collection->current_snapshot_id.has_value());
     EXPECT_TRUE(engine->Shutdown(1000ms));
+}
+
+TEST(BackendRecoveryLimitsTest, RetentionPolicyCannotExceedRecoverableCommitBytes)
+{
+    for (const bool expiredCheckpoint : {false, true}) {
+        SCOPED_TRACE(expiredCheckpoint);
+        test::TempDir temporary;
+        const auto root = temporary.path / "store";
+        const auto metadata = root / "warehouse" / test::collection_id / "metadata";
+        std::optional<AppendResult> receipt;
+        {
+            auto created = CreateStore({test::store_id, root.string()});
+            ASSERT_TRUE(created) << created.error().message;
+            auto engine = std::move(*created);
+            ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", Schema}).disposition,
+                CommitDisposition::Committed);
+            const auto append = engine->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
+            ASSERT_TRUE(append.result);
+            receipt = append.result;
+            if (expiredCheckpoint) {
+                const auto second =
+                    engine->AppendDurable({test::collection_id, SecondOperation, {}, {Batch(SecondRows)}});
+                ASSERT_TRUE(second.result);
+                const auto expiration = engine->ExpireSnapshots({test::collection_id, SnapshotRetentionPolicy{1}});
+                ASSERT_TRUE(expiration) << expiration.error().message;
+                ASSERT_EQ(expiration->snapshots_expired, 1);
+            }
+            ASSERT_TRUE(engine->Shutdown(1000ms));
+        }
+        const auto currentRoot = OnlyFileWithPrefix(metadata, expiredCheckpoint ? "00003-" : "00001-");
+        ASSERT_FALSE(currentRoot.empty());
+        const auto lists = ManifestListLeaves(ReadBytes(currentRoot));
+        ASSERT_EQ(lists.size(), 1U);
+        const auto commitBytes = std::filesystem::file_size(currentRoot) +
+            std::filesystem::file_size(metadata / lists.front()) +
+            std::filesystem::file_size(metadata / ManifestOf(lists.front()));
+        OpenStoreRequest request{root.string(), test::store_id};
+        request.limits.history.max_commit_bytes = static_cast<int64_t>(commitBytes);
+        {
+            auto opened = OpenExisting(request);
+            ASSERT_TRUE(opened) << opened.error().message;
+            auto engine = std::move(*opened);
+            // No snapshots expire: policy properties alone grow the root past the
+            // exact budget for the current append or retained checkpoint.
+            const SnapshotRetentionPolicy changedPolicy{1, expiredCheckpoint ? 24h : 0h};
+            const auto maintenance = engine->ExpireSnapshots({test::collection_id, changedPolicy});
+            EXPECT_FALSE(maintenance);
+            if (!maintenance) {
+                EXPECT_EQ(maintenance.error().code, "RESOURCE_EXHAUSTED");
+            }
+            const auto policy = engine->GetSnapshotRetention(test::collection_id);
+            ASSERT_TRUE(policy);
+            EXPECT_EQ(*policy, expiredCheckpoint ? SnapshotRetentionPolicy{1} : SnapshotRetentionPolicy{});
+            const auto reconciled = engine->Reconcile();
+            EXPECT_TRUE(reconciled) << reconciled.error().message;
+            ASSERT_TRUE(engine->Shutdown(1000ms));
+        }
+        const auto reopened = OpenExisting(request);
+        ASSERT_TRUE(reopened) << reopened.error().message;
+        const auto original = (*reopened)->FindAppendOutcome(test::collection_id, FirstOperation);
+        ASSERT_TRUE(original);
+        ASSERT_TRUE(original->has_value());
+        EXPECT_EQ(test::Present(*original).result, receipt);
+        EXPECT_TRUE((*reopened)->Shutdown(1000ms));
+    }
 }
 
 } // namespace

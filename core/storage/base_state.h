@@ -7,12 +7,14 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
 namespace iceberg {
 class FileIO;
 struct TableMetadata;
+struct Snapshot;
 }
 
 namespace NGlamDB::NIO {
@@ -28,6 +30,12 @@ struct TBaseState
     std::vector<iceberg::ManifestFile> CurrentManifests;
     TStorageUsage Usage;
     std::shared_ptr<const TScanMembership> ScanIndex{};
+    std::vector<std::int64_t> ExpiredSnapshotIDs{};
+    // Sorted union across every retained snapshot, including merged-out inputs.
+    std::vector<std::string> RetainedManifestPaths{};
+    // The latest verified append's list and manifest inputs/outputs, excluding
+    // the root. Maintenance preserves this conservative recovery byte charge.
+    std::uint64_t CurrentCommitMetadataBytes = 0;
 };
 
 iceberg::Result<TBaseState> CheckAppendClosure(const std::shared_ptr<iceberg::FileIO>& fileIO,
@@ -53,6 +61,7 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
     const std::string& storeID,
     const std::string& collectionID,
     const TStorageLimits& limits = {},
-    const std::string& workspaceDirectory = {});
+    const std::string& workspaceDirectory = {},
+    std::span<const std::shared_ptr<iceberg::Snapshot>> expired = {});
 
 }

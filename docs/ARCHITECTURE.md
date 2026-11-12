@@ -35,8 +35,10 @@ the store, writes are serialized, and independent cursors can read concurrently.
 Upsert, delete and compaction belong to the later explicit KV mode.
 The [bounded bulk append extension](development/BULK_INGESTION.md) adds replayable
 streaming ingestion to append collections before KV, with one atomic publication. Initial append has no payload journal, asynchronous queue, automatic file
-deletion, snapshot expiration, or rollback to an older snapshot. Other later
-features and their prerequisites are listed in the roadmap.
+deletion or rollback to an older snapshot. The explicit
+[snapshot retention extension](development/SNAPSHOT_RETENTION.md) can expire
+an opted-in collection's oldest snapshot metadata in a separate publication.
+Other later features and their prerequisites are listed in the roadmap.
 
 ## Store identity and file ownership
 
@@ -54,17 +56,22 @@ the original volume. Validate the identity and path components, keep access
 inside the owned root, and reject path traversal and symlink escapes.
 
 New data and metadata use unique names and exclusive creation. A published file
-is immutable; overwrite is disabled. The only file the engine removes is a
-metadata root superseded by a confirmed append: the current root carries the
-whole retained history, so recovery and scans never read an older root, and a
-scan that already resolved the old root keeps it until its planning finishes.
-Other automatic cleanup, including orphan removal, is outside the initial
-engine. While the store is open, warehouse mutations belong exclusively to the
-engine. Linux incremental physical-capacity admission detects ordinary notified
-local mutations but does not promise detection of arbitrary external mmap, alias
-or mount changes; [the inventory contract](development/WAREHOUSE_INVENTORY.md)
-defines strict full-traversal mode and safe fallback. Store ownership spans creation, recovery, writes, cursors, retained
-buffers, and maintenance, including concurrent opens in the same process.
+is immutable; overwrite is disabled. The engine removes a metadata root
+superseded by a confirmed publication: the current root carries the whole
+retained history, so recovery and scans never read an older root, and a scan that
+already resolved the old root keeps it until its planning finishes.
+Explicit retention also removes expired manifest lists and manifests whose last
+retained snapshot reference has disappeared. A durable cleanup queue waits for
+publication and all collection metadata planners. Current manifests and Parquet
+files remain referenced. Other cleanup, including
+orphan removal, is outside the initial engine. While the store is open, warehouse
+mutations belong exclusively to the engine. Linux incremental physical-capacity
+admission detects ordinary notified local mutations but does not promise
+detection of arbitrary external mmap, alias or mount changes;
+[the inventory contract](development/WAREHOUSE_INVENTORY.md) defines strict
+full-traversal mode and safe fallback. Store ownership spans creation, recovery,
+writes, cursors, retained buffers, and maintenance, including concurrent opens
+in the same process.
 
 ## Durable publication
 
@@ -202,8 +209,10 @@ append needs at least 65,536 operations, exceeding the candidate history cap.
 A sufficient explicit history profile is required beyond the default horizon.
 The bounded bulk append extension amortizes publication over multiple files;
 its finite development profile and measured limits are documented separately.
-Larger bulk/compaction qualification remains future work. Initial history
-and receipts do not expire, and orphan files count toward physical capacity.
+Larger bulk/compaction qualification remains future work. History never expires
+by default; explicit retention maintenance changes that contract for opted-in
+collections. Receipts never expire, and orphan files count toward physical
+capacity.
 Reject new work before publication when a bound is reached while retaining old
 reads and retries. A published state must reopen with the same limits.
 

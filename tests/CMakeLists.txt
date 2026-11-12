@@ -70,7 +70,7 @@ if(NOT GLAMDB_IO_ONLY)
         file(GLOB_RECURSE vertical_test_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/vertical/*.cpp")
         add_executable(glamdb_vertical ${vertical_test_sources} support/fault_fs.cpp support/journal_fault_vfs.cpp)
         target_include_directories(glamdb_vertical PRIVATE "${PROJECT_SOURCE_DIR}")
-        target_link_libraries(glamdb_vertical PRIVATE glamdb::core glamdb_storage glamdb_build_options
+        target_link_libraries(glamdb_vertical PRIVATE glamdb::core glamdb_storage glamdb_transport glamdb_build_options
             GTest::gtest_main SQLite::SQLite3)
         # Release builds skip the staged-root round-trip parse by default; the
         # public-API storage tests always verify it.

@@ -4,6 +4,7 @@
 
 #include "tests/vertical/vertical_support.h"
 
+#include "apps/transport/metadata.h"
 #include "core/io/local_fs.h"
 
 #include <chrono>
@@ -449,6 +450,100 @@ TEST_F(SupersededRootTest, ReleasedRootIsNotRemovedDuringACapacityWalk)
     EXPECT_FALSE(std::filesystem::exists(resolved.front()));
     EXPECT_EQ(Read(), Expected({&FirstRows, &SecondRows, &FirstRows}));
 }
+
+TEST_F(SupersededRootTest, ExpirationWaitsForPlannersOfEveryOlderRoot)
+{
+    const auto first = Commit(FirstOperation, FirstRows);
+    std::promise<std::thread::id> readerID;
+    std::promise<void> armed;
+    auto reader = std::async(std::launch::async, [&] {
+        readerID.set_value(std::this_thread::get_id());
+        armed.get_future().wait();
+        return Engine_->GetStatistics(test::collection_id);
+    });
+    Gate_->Arm(readerID.get_future().get());
+    armed.set_value();
+    const bool entered = Gate_->WaitEntered(10s);
+    if (!entered) {
+        Gate_->Release();
+    }
+    ASSERT_TRUE(entered);
+    Commit(SecondOperation, SecondRows);
+    const auto maintenance = Engine_->ExpireSnapshots({test::collection_id, SnapshotRetentionPolicy{1}});
+    Gate_->Release();
+    const auto statistics = reader.get();
+    ASSERT_TRUE(maintenance) << maintenance.error().message;
+    EXPECT_EQ(maintenance->cleanup_pending, 1);
+    ASSERT_TRUE(statistics) << statistics.error().message;
+    EXPECT_EQ(statistics->rows.value, 3);
+    const auto finished = Engine_->ExpireSnapshots({test::collection_id});
+    ASSERT_TRUE(finished);
+    EXPECT_EQ(finished->cleanup_pending, 0);
+    const auto expired = Engine_->GetStatistics(test::collection_id, SnapshotSelector::Id(first.snapshot_id));
+    ASSERT_FALSE(expired);
+    EXPECT_EQ(expired.error().code, "SNAPSHOT_EXPIRED");
+    EXPECT_EQ(Read(), Expected({&FirstRows, &SecondRows}));
+}
+
+TEST_F(SupersededRootTest, SnapshotHistoryAdapterDistinguishesExpiredSelectors)
+{
+    const auto first = Commit(FirstOperation, FirstRows);
+    const auto second = Commit(SecondOperation, SecondRows);
+    ASSERT_TRUE(Engine_->ExpireSnapshots({test::collection_id, SnapshotRetentionPolicy{1}}));
+    try {
+        (void)NTransport::SnapshotsJson(*Engine_, test::collection_id, SnapshotSelector::Id(first.snapshot_id));
+        FAIL() << "expired history selector succeeded";
+    } catch (const NTransport::TFailure& failure) {
+        EXPECT_EQ(failure.Detail.code, "SNAPSHOT_EXPIRED");
+        EXPECT_EQ(NTransport::ErrorStatus(failure.Detail), 410);
+    }
+    try {
+        (void)NTransport::SnapshotsJson(*Engine_, test::collection_id, SnapshotSelector::Id(-42));
+        FAIL() << "unknown history selector succeeded";
+    } catch (const NTransport::TFailure& failure) {
+        EXPECT_EQ(failure.Detail.code, "SNAPSHOT_NOT_FOUND");
+    }
+    const auto retained =
+        NTransport::SnapshotsJson(*Engine_, test::collection_id, SnapshotSelector::Id(second.snapshot_id));
+    EXPECT_EQ(retained.at("items").size(), 1U);
+}
+
+class RetentionStatisticsRaceTest
+    : public SupersededRootTest
+    , public testing::WithParamInterface<int64_t>
+{ };
+
+TEST_P(RetentionStatisticsRaceTest, CountNeverComesFromADifferentRoot)
+{
+    Commit(FirstOperation, FirstRows);
+    const auto second = Commit(SecondOperation, SecondRows);
+    std::promise<std::thread::id> readerID;
+    std::promise<void> armed;
+    auto reader = std::async(std::launch::async, [&] {
+        readerID.set_value(std::this_thread::get_id());
+        armed.get_future().wait();
+        return NTransport::StatisticsJson(*Engine_, test::collection_id, {});
+    });
+    Gate_->Arm(readerID.get_future().get());
+    armed.set_value();
+    const bool entered = Gate_->WaitEntered(10s);
+    if (!entered) {
+        Gate_->Release();
+    }
+    ASSERT_TRUE(entered);
+    Commit(ThirdOperation, FirstRows);
+    const auto expired = Engine_->ExpireSnapshots({test::collection_id, SnapshotRetentionPolicy{GetParam()}});
+    Gate_->Release();
+    ASSERT_TRUE(expired) << expired.error().message;
+    const auto statistics = reader.get();
+    EXPECT_EQ(statistics.at("rows"), "5");
+    EXPECT_EQ(statistics.at("snapshot_id"), std::to_string(second.snapshot_id));
+    EXPECT_TRUE(statistics.at("retained_snapshots").is_null());
+    EXPECT_EQ(NTransport::StatisticsJson(*Engine_, test::collection_id, {}).at("retained_snapshots"),
+        std::to_string(GetParam()));
+}
+
+INSTANTIATE_TEST_SUITE_P(KeepLast, RetentionStatisticsRaceTest, testing::Values(1, 2));
 
 } // namespace
 } // namespace glamdb

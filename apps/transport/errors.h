@@ -46,6 +46,9 @@ inline TErrorPolicy ErrorPolicy(std::string_view code)
     {
         return {409, FixInput};
     }
+    if (code == "SNAPSHOT_EXPIRED") {
+        return {410, FixInput};
+    }
     if (code == "PRECONDITION_FAILED") {
         return {412, FixInput};
     }

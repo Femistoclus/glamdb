@@ -180,9 +180,18 @@ storage remains a later extension. Collection limits default to eight and accept
 1–64 with additional shared catalog/control/recovery reservations. See
 [collection profiles](docs/development/COLLECTION_PROFILES.md) for configuration,
 complete inventory, fresh-process validation and measured profile limits.
-Compaction, snapshot expiration,
-garbage collection, asynchronous admission, replication, multiple writers, and
-schema evolution are outside the initial append scope. Consult
+Explicit C++ snapshot retention maintenance is available through
+`Engine::ExpireSnapshots`; see [snapshot retention](docs/development/SNAPSHOT_RETENTION.md).
+It lazily introduces catalog version 3, preserves all receipts and current data,
+and resumes bounded metadata cleanup after recovery. Cleanup reclaims manifest
+lists and merged inputs only after their last retained reference disappears;
+checkpoint recovery verifies original file provenance and receipt totals.
+Already planned cursors keep their fixed data view; new expired reads/preconditions
+report `SNAPSHOT_EXPIRED`. Default history remains unchanged. Retention preserves
+configured history budgets and pages expiration inventories beyond 8192 entries;
+transport maintenance endpoints are not provided.
+Compaction, general garbage collection, asynchronous admission, replication,
+multiple writers, and schema evolution are outside the initial append scope. Consult
 [docs/ROADMAP.md](docs/ROADMAP.md) when assessing feature scope; its current
 status table separates implemented code from executed evidence per gate and
 keeps G4 power-loss qualification **NOT RUN**. Update that table when a change
@@ -287,10 +296,13 @@ Preserve these boundaries when adding or changing engine behavior:
   Warehouse orphan files consume capacity; their automatic cleanup is
   outside the initial scope. Interrupted recovery scratch files are reclaimed
   only after exclusive ownership and identity validation, before device admission.
-  The warehouse exception is a metadata root superseded
-  by a confirmed append (the current root retains the whole history); it is
-  removed once no scan is still resolving it. Detected corruption closes readiness; leave SQLite
-  journal recovery to SQLite rather than deleting or truncating its journal.
+  A metadata root superseded by a confirmed publication is removed once no
+  scan is still resolving it. Explicit opt-in retention also reclaims expired
+  manifest lists through its durable cleanup queue after collection planners
+  release; see [snapshot retention](docs/development/SNAPSHOT_RETENTION.md).
+  Current manifests, Parquet data and receipts remain retained. Detected
+  corruption closes readiness; leave SQLite journal recovery to SQLite rather
+  than deleting or truncating its journal.
 
 ## Repository navigation
 

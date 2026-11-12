@@ -32,6 +32,7 @@ struct TBaseState;
 
 namespace iceberg {
 class Catalog;
+struct Snapshot;
 } // namespace iceberg
 
 namespace glamdb {
@@ -112,6 +113,11 @@ public:
         const CollectionInfo& collection,
         const NormalizedInput& input,
         std::chrono::steady_clock::time_point deadline) override;
+    Result<std::unique_ptr<StagedExpiration>> PrepareExpiration(const StoreInfo& store,
+        const CollectionInfo& collection,
+        const BaseIdentity& base,
+        const std::optional<SnapshotRetentionPolicy>& policy) override;
+    Status RemoveExpiredMetadata(std::string_view collectionID, std::string_view path) override;
     void PublicationFinished(std::string_view collectionID,
         std::string_view metadataLocation,
         CommitDisposition result) override;
@@ -190,7 +196,8 @@ private:
     std::shared_ptr<const NGlamDB::NStorage::TBaseState> ResolveBase(const BaseIdentity& base);
     std::shared_ptr<ResourceReservation>
     ReserveRootMemory(std::string_view collectionID, uint64_t bytes, bool reuse, uint64_t indexBytes = 0);
-    std::shared_ptr<const NGlamDB::NStorage::TBaseState> VerifyCollection(const BaseIdentity& base);
+    std::shared_ptr<const NGlamDB::NStorage::TBaseState> VerifyCollection(const BaseIdentity& base,
+        std::span<const std::shared_ptr<iceberg::Snapshot>> expired = {});
 };
 
 } // namespace glamdb::detail

@@ -1,5 +1,6 @@
 #include "core/storage/table_profile.h"
 #include "core/storage/iceberg_error_boundary.h"
+#include "core/storage/snapshot_retention.h"
 
 #include <arrow/util/utf8.h>
 #include <iceberg/schema.h>
@@ -142,7 +143,9 @@ iceberg::Status CheckTableProfile(const TTableProfile& profile)
             spec.Fields.push_back(std::move(specField));
         }
         ICEBERG_ASSIGN_OR_RAISE(auto expected, MakeTableProfile(spec));
-        if (*profile.Schema != *expected.Schema || profile.Properties != expected.Properties) {
+        auto properties = profile.Properties;
+        ICEBERG_RETURN_UNEXPECTED(StripRetentionProperties(properties));
+        if (*profile.Schema != *expected.Schema || properties != expected.Properties) {
             return iceberg::ValidationFailed("Table profile differs from the fixed schema and properties.");
         }
         return {};

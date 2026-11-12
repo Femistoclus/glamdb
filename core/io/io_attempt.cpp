@@ -93,10 +93,11 @@ TIOAttempt::Make(TAttemptSpec spec, std::shared_ptr<TWriteLatch> latch, TAttempt
 {
     if (!latch || !IsCanonicalUuid(spec.StoreId) || !IsCanonicalUuid(spec.CollectionId) ||
         !IsAttemptId(spec.AttemptId) ||
-        (spec.Kind != EAttemptKind::Append && spec.Kind != EAttemptKind::CreateCollection) ||
+        (spec.Kind != EAttemptKind::Append && spec.Kind != EAttemptKind::CreateCollection &&
+            spec.Kind != EAttemptKind::Maintenance) ||
         (spec.Kind == EAttemptKind::Append && (!spec.OperationId || !IsCanonicalUuid(*spec.OperationId))) ||
-        (spec.Kind == EAttemptKind::CreateCollection && spec.OperationId) || limits.DataFiles == 0 ||
-        limits.DataFiles > 256 || (spec.Kind == EAttemptKind::CreateCollection && limits.DataFiles != 1))
+        (spec.Kind != EAttemptKind::Append && spec.OperationId) || limits.DataFiles == 0 || limits.DataFiles > 256 ||
+        (spec.Kind == EAttemptKind::CreateCollection && limits.DataFiles != 1))
     {
         return std::errc::invalid_argument;
     }
@@ -189,7 +190,7 @@ TResult<EFileKind> TIOAttempt::RegisterFile(std::string_view path)
     }
     const auto kind = uri.Value().Kind();
     if (uri.Value().CollectionId() != Spec_.CollectionId ||
-        (Spec_.Kind == EAttemptKind::CreateCollection && kind != EFileKind::Metadata) ||
+        (Spec_.Kind != EAttemptKind::Append && kind != EFileKind::Metadata) ||
         (kind == EFileKind::Data && !DeclaredData_.contains(path)))
     {
         return FailLocked(path, std::make_error_code(std::errc::invalid_argument));

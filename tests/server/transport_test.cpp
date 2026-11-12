@@ -46,6 +46,7 @@ TEST(Transport, EveryCoreErrorHasAnExplicitStatusAndRetryPolicy)
         {"NOT_FOUND", 404, FixInput},
         {"OPERATION_CONFLICT", 409, FixInput},
         {"OPERATION_IN_PROGRESS", 503, SameIdAfterReconcile},
+        {"SNAPSHOT_EXPIRED", 410, FixInput},
         {"PRECONDITION_FAILED", 412, FixInput},
         {"RECOVERY_REQUIRED", 503, SameIdAfterReconcile},
         {"RESOURCE_EXHAUSTED", 429, SameIdAfterReconcile},

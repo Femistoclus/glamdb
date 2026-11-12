@@ -6,6 +6,7 @@
 #include "core/storage/iceberg_error_boundary.h"
 #include "core/storage/metadata_validation.h"
 #include "core/storage/recovery_visited.h"
+#include "core/storage/snapshot_retention.h"
 #include "core/storage/table_profile.h"
 
 #include <iceberg/constants.h>
@@ -46,6 +47,7 @@ struct TManifestChanges
 {
     std::vector<const iceberg::ManifestFile*> Added;
     std::vector<const iceberg::ManifestFile*> Removed;
+    std::uint64_t MetadataBytes = 0;
 };
 
 iceberg::Result<TManifestChanges> CheckManifestChanges(const std::vector<iceberg::ManifestFile>& previous,
@@ -99,6 +101,7 @@ iceberg::Result<TManifestChanges> CheckManifestChanges(const std::vector<iceberg
             bytes += static_cast<std::uint64_t>(manifest->manifest_length);
         }
     }
+    changes.MetadataBytes = bytes - rootBytes;
     return changes;
 }
 
@@ -259,6 +262,41 @@ iceberg::Result<TRewrittenEntries> ReadRewrittenEntries(const std::shared_ptr<ic
     return rewritten;
 }
 
+iceberg::Result<TStorageUsage> CheckAppendData(const std::shared_ptr<iceberg::FileIO>& fileIO,
+    const iceberg::DataFile& file,
+    const iceberg::Schema& schema,
+    const NIO::TStoreUri& table,
+    const std::shared_ptr<NIO::TIOAttempt>& attempt,
+    TRecoveryVisited* visited,
+    bool bulk,
+    TAppendCounts& counts)
+{
+    const auto maxFiles = bulk ? BulkFiles : 1;
+    const auto maxFileRows = bulk ? BulkFileRows : 10000;
+    if (file.record_count <= 0 || static_cast<std::uint64_t>(file.record_count) > maxFileRows ||
+        file.file_size_in_bytes <= 0 || static_cast<std::uint64_t>(file.file_size_in_bytes) > DataFileBytes ||
+        counts.Files >= maxFiles ||
+        static_cast<std::uint64_t>(file.record_count) > maxFiles * maxFileRows - counts.Rows ||
+        static_cast<std::uint64_t>(file.file_size_in_bytes) > maxFiles * DataFileBytes - counts.Bytes)
+    {
+        return iceberg::ValidationFailed("CAPACITY: Append data files exceed their profile.");
+    }
+    if (!counts.Paths.insert(file.file_path).second) {
+        return iceberg::ValidationFailed("Append reuses a retained data file.");
+    }
+    if (visited) {
+        ICEBERG_ASSIGN_OR_RAISE(auto inserted, visited->Insert(NIO::EFileKind::Data, file.file_path));
+        if (!inserted) {
+            return iceberg::ValidationFailed("Append reuses a retained data file.");
+        }
+    }
+    ICEBERG_ASSIGN_OR_RAISE(auto footerBytes, CheckData(fileIO, file, schema, table, attempt));
+    ++counts.Files;
+    counts.Rows += static_cast<std::uint64_t>(file.record_count);
+    counts.Bytes += static_cast<std::uint64_t>(file.file_size_in_bytes);
+    return TStorageUsage{.DataFiles = 1, .FooterBytes = footerBytes};
+}
+
 iceberg::Result<TStorageUsage> CheckManifest(const std::shared_ptr<iceberg::FileIO>& fileIO,
     const iceberg::ManifestFile& manifest,
     const iceberg::Snapshot& snapshot,
@@ -330,34 +368,13 @@ iceberg::Result<TStorageUsage> CheckManifest(const std::shared_ptr<iceberg::File
             return iceberg::ValidationFailed("Manifest counters or entry inheritance differ.");
         }
         const auto& file = *entry.data_file;
-        const auto maxFiles = bulk ? BulkFiles : 1;
-        const auto maxFileRows = bulk ? BulkFileRows : 10000;
-        if (file.record_count <= 0 || static_cast<std::uint64_t>(file.record_count) > maxFileRows ||
-            file.file_size_in_bytes <= 0 || static_cast<std::uint64_t>(file.file_size_in_bytes) > DataFileBytes ||
-            counts.Files >= maxFiles ||
-            static_cast<std::uint64_t>(file.record_count) > maxFiles * maxFileRows - counts.Rows ||
-            static_cast<std::uint64_t>(file.file_size_in_bytes) > maxFiles * DataFileBytes - counts.Bytes)
-        {
-            return iceberg::ValidationFailed("CAPACITY: Append data files exceed their profile.");
-        }
-        if (!counts.Paths.insert(file.file_path).second) {
-            return iceberg::ValidationFailed("Append reuses a retained data file.");
-        }
-        if (visited) {
-            ICEBERG_ASSIGN_OR_RAISE(auto inserted, visited->Insert(NIO::EFileKind::Data, file.file_path));
-            if (!inserted) {
-                return iceberg::ValidationFailed("Append reuses a retained data file.");
-            }
-        }
-        ICEBERG_ASSIGN_OR_RAISE(auto footerBytes, CheckData(fileIO, file, *schema, table, attempt));
-        const auto total = ReplaceUsage(delta, {.Next = {.DataFiles = 1, .FooterBytes = footerBytes}});
+        ICEBERG_ASSIGN_OR_RAISE(auto fileUsage,
+            CheckAppendData(fileIO, file, *schema, table, attempt, visited, bulk, counts));
+        const auto total = ReplaceUsage(delta, {.Next = fileUsage});
         if (!total) {
             return iceberg::ValidationFailed("Manifest usage overflows.");
         }
         delta = total.Value();
-        ++counts.Files;
-        counts.Rows += static_cast<std::uint64_t>(file.record_count);
-        counts.Bytes += static_cast<std::uint64_t>(file.file_size_in_bytes);
         manifestRows += static_cast<std::uint64_t>(file.record_count);
         ++addedFiles;
         if (scanIndex) {
@@ -411,6 +428,177 @@ iceberg::Result<TBaseState> ReadRecoveryRoot(const std::shared_ptr<iceberg::File
         return iceberg::ValidationFailed("Recovery metadata exceeds storage capacity.");
     }
     return state;
+}
+
+// The oldest retained snapshot is a complete checkpoint. Rewritten manifests
+// carry original file provenance even after older lists/manifests are reclaimed.
+iceberg::Status SeedRetainedHistory(const std::shared_ptr<iceberg::FileIO>& fileIO,
+    TBaseState& state,
+    std::span<const std::shared_ptr<iceberg::Snapshot>> expired,
+    const TStorageLimits& limits,
+    TRecoveryVisited& visited,
+    TScanMembership& scanIndex,
+    const std::string& storeID)
+{
+    RegisterStorageFormats();
+    const auto& metadata = *state.Metadata;
+    const auto first = metadata.snapshots.front();
+    if (!first || first->sequence_number != static_cast<std::int64_t>(expired.size() + 1)) {
+        return iceberg::ValidationFailed("Invalid retained checkpoint sequence.");
+    }
+    auto history = std::vector<std::shared_ptr<iceberg::Snapshot>>(expired.begin(), expired.end());
+    history.push_back(first);
+    std::optional<std::int64_t> parent;
+    std::set<std::int64_t> ids;
+    for (std::size_t i = 0; i < history.size(); ++i) {
+        const auto& snapshot = history[i];
+        if (!snapshot || snapshot->sequence_number != static_cast<std::int64_t>(i + 1) ||
+            snapshot->parent_snapshot_id != parent || !ids.insert(snapshot->snapshot_id).second ||
+            (snapshot->summary.contains("glamdb.bulk-version") && snapshot->summary.at("glamdb.bulk-version") != "1"))
+        {
+            return iceberg::ValidationFailed("Invalid retained checkpoint ancestry.");
+        }
+        parent = snapshot->snapshot_id;
+    }
+    const auto table = NIO::TStoreUri::ParseTable(metadata.location, storeID);
+    if (!table) {
+        return iceberg::ValidationFailed("Invalid retention table location.");
+    }
+    ICEBERG_RETURN_UNEXPECTED(CheckPath(first->manifest_list, table.Value(), NIO::EFileKind::ManifestList));
+    ICEBERG_ASSIGN_OR_RAISE(auto inserted, visited.Insert(NIO::EFileKind::ManifestList, first->manifest_list));
+    if (!inserted) {
+        return iceberg::ValidationFailed("Repeated retained checkpoint list.");
+    }
+    ICEBERG_ASSIGN_OR_RAISE(auto listBytes,
+        CheckAvro(*fileIO,
+            first->manifest_list,
+            -1,
+            NIO::EFileKind::ManifestList,
+            limits.ManifestListBytes,
+            limits.Store.Manifests,
+            {}));
+    ICEBERG_ASSIGN_OR_RAISE(auto list, iceberg::ManifestListReader::Make(first->manifest_list, fileIO));
+    ICEBERG_ASSIGN_OR_RAISE(auto manifests, list->Files());
+    if (manifests.empty() || manifests.size() > limits.Store.Manifests) {
+        return iceberg::ValidationFailed("Invalid retained checkpoint manifest count.");
+    }
+    ICEBERG_ASSIGN_OR_RAISE(auto schema, metadata.Schema());
+    ICEBERG_ASSIGN_OR_RAISE(auto spec, metadata.PartitionSpec());
+    std::vector<TAppendCounts> counts(history.size());
+    std::vector<std::vector<TScanDataFile>> groups(history.size());
+    std::vector<std::uint64_t> manifestCounts(history.size(), 0), manifestBytes(history.size(), 0);
+    std::set<std::string> paths;
+    TStorageUsage delta{.ManifestListBytes = listBytes};
+    for (const auto& manifest : manifests) {
+        const auto sequence = manifest.sequence_number;
+        if (sequence <= 0 || sequence > first->sequence_number || manifest.content != iceberg::ManifestContent::kData ||
+            manifest.partition_spec_id != metadata.default_spec_id ||
+            manifest.added_snapshot_id != history[static_cast<std::size_t>(sequence - 1)]->snapshot_id ||
+            manifest.min_sequence_number <= 0 || manifest.min_sequence_number > sequence ||
+            !manifest.partitions.empty() || !manifest.key_metadata.empty() || manifest.first_row_id ||
+            !paths.insert(manifest.manifest_path).second)
+        {
+            return iceberg::ValidationFailed("Invalid retained checkpoint manifest.");
+        }
+        ICEBERG_RETURN_UNEXPECTED(CheckPath(manifest.manifest_path, table.Value(), NIO::EFileKind::Manifest));
+        ICEBERG_ASSIGN_OR_RAISE(auto bytes,
+            CheckAvro(*fileIO,
+                manifest.manifest_path,
+                manifest.manifest_length,
+                NIO::EFileKind::Manifest,
+                limits.ManifestBytes,
+                limits.Store.DataFiles,
+                {}));
+        const auto writer = static_cast<std::size_t>(sequence - 1);
+        if (++manifestCounts[writer] > limits.NewManifests || bytes > limits.CommitBytes - manifestBytes[writer]) {
+            return iceberg::ValidationFailed("CAPACITY: Retained checkpoint manifest output exceeds its commit.");
+        }
+        manifestBytes[writer] += bytes;
+        delta.Manifests += 1;
+        delta.ManifestBytes += bytes;
+        ICEBERG_ASSIGN_OR_RAISE(auto reader, iceberg::ManifestReader::Make(manifest, fileIO, schema, spec));
+        ICEBERG_ASSIGN_OR_RAISE(auto entries, reader->Entries());
+        if (entries.empty() || entries.size() > limits.Store.DataFiles || manifest.deleted_files_count != 0 ||
+            manifest.deleted_rows_count != 0)
+        {
+            return iceberg::ValidationFailed("Invalid retained checkpoint entries.");
+        }
+        std::int64_t addedRows = 0, existingRows = 0;
+        std::int32_t addedFiles = 0, existingFiles = 0;
+        auto minimum = sequence;
+        for (const auto& entry : entries) {
+            if (!entry.data_file || !entry.sequence_number || *entry.sequence_number <= 0 ||
+                *entry.sequence_number > sequence || entry.file_sequence_number != entry.sequence_number ||
+                entry.snapshot_id != history[static_cast<std::size_t>(*entry.sequence_number - 1)]->snapshot_id ||
+                (entry.status != iceberg::ManifestStatus::kAdded &&
+                    entry.status != iceberg::ManifestStatus::kExisting) ||
+                (entry.status == iceberg::ManifestStatus::kAdded ? *entry.sequence_number != sequence
+                                                                 : *entry.sequence_number >= sequence))
+            {
+                return iceberg::ValidationFailed("Invalid retained checkpoint file provenance.");
+            }
+            const auto origin = static_cast<std::size_t>(*entry.sequence_number - 1);
+            const auto bulk = history[origin]->summary.contains("glamdb.bulk-version");
+            ICEBERG_ASSIGN_OR_RAISE(auto usage,
+                CheckAppendData(fileIO, *entry.data_file, *schema, table.Value(), {}, &visited, bulk, counts[origin]));
+            const auto total = ReplaceUsage(delta, {.Next = usage});
+            if (!total || CheckStorageCapacity(total.Value(), limits)) {
+                return iceberg::ValidationFailed("CAPACITY: Retained checkpoint exceeds storage capacity.");
+            }
+            delta = total.Value();
+            const auto rows = entry.data_file->record_count;
+            auto& rowCount = entry.status == iceberg::ManifestStatus::kAdded ? addedRows : existingRows;
+            if (rows > std::numeric_limits<std::int64_t>::max() - rowCount) {
+                return iceberg::ValidationFailed("Retained checkpoint row count overflows.");
+            }
+            rowCount += rows;
+            (entry.status == iceberg::ManifestStatus::kAdded ? addedFiles : existingFiles) += 1;
+            minimum = std::min(minimum, *entry.sequence_number);
+            const auto& file = entry.data_file;
+            groups[origin].push_back({file->file_path, file->file_size_in_bytes, file->record_count, file});
+        }
+        if (manifest.added_files_count != addedFiles || manifest.existing_files_count != existingFiles ||
+            manifest.added_rows_count != addedRows || manifest.existing_rows_count != existingRows ||
+            manifest.min_sequence_number != minimum)
+        {
+            return iceberg::ValidationFailed("Retained checkpoint manifest counters differ.");
+        }
+    }
+    const auto outputs = manifestBytes.back();
+    const auto rootBytes = metadata.snapshots.size() == 1 ? state.Usage.RootBytes : 0;
+    if (outputs > limits.CommitBytes || listBytes > limits.CommitBytes - outputs ||
+        rootBytes > limits.CommitBytes - outputs - listBytes)
+    {
+        return iceberg::ValidationFailed("CAPACITY: Retained checkpoint exceeds commit verification bytes.");
+    }
+    state.CurrentCommitMetadataBytes = outputs + listBytes;
+    using Fields = iceberg::SnapshotSummaryFields;
+    for (std::size_t i = 0; i < history.size(); ++i) {
+        const auto& summary = history[i]->summary;
+        if (counts[i].Files == 0 || summary.at(Fields::kAddedRecords) != std::to_string(counts[i].Rows) ||
+            summary.at(Fields::kAddedDataFiles) != std::to_string(counts[i].Files) ||
+            summary.at(Fields::kAddedFileSize) != std::to_string(counts[i].Bytes))
+        {
+            return iceberg::ValidationFailed("Retained checkpoint differs from its original receipts.");
+        }
+        for (auto& file : groups[i]) {
+            scanIndex.Files.push_back(std::move(file));
+        }
+    }
+    const auto usage = ReplaceUsage(state.Usage, {.Next = delta});
+    if (!usage || CheckStorageCapacity(usage.Value(), limits)) {
+        return iceberg::ValidationFailed("CAPACITY: Retained checkpoint exceeds storage capacity.");
+    }
+    state.Usage = usage.Value();
+    state.RetainedManifestPaths.assign(paths.begin(), paths.end());
+    state.CurrentManifests = std::move(manifests);
+    state.ExpiredSnapshotIDs.reserve(expired.size());
+    for (const auto& snapshot : expired) {
+        state.ExpiredSnapshotIDs.push_back(snapshot->snapshot_id);
+    }
+    std::ranges::sort(state.ExpiredSnapshotIDs);
+    scanIndex.Snapshots.push_back({first->snapshot_id, scanIndex.Files.size()});
+    return {};
 }
 
 // The root without history: the profile every retained transition starts from.
@@ -533,6 +721,11 @@ iceberg::Result<TBaseState> CheckAppendClosureImpl(const std::shared_ptr<iceberg
             return iceberg::ValidationFailed("CAPACITY: Append exceeds storage capacity.");
         }
         candidate.Usage = usage.Value();
+        candidate.CurrentCommitMetadataBytes = changes.MetadataBytes;
+        for (const auto* manifest : changes.Added) {
+            candidate.RetainedManifestPaths.push_back(manifest->manifest_path);
+        }
+        std::ranges::sort(candidate.RetainedManifestPaths);
         candidate.CurrentManifests = std::move(manifests);
         ICEBERG_RETURN_UNEXPECTED(MarkVerified(attempt, snapshot->manifest_list));
         if (scanIndex) {
@@ -635,21 +828,51 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
     const std::string& rootLocation,
     const std::string& storeID,
     const std::string& collectionID,
-    const TStorageLimits& limits,
-    const std::string& workspaceDirectory)
+    const TStorageLimits& configuredLimits,
+    const std::string& workspaceDirectory,
+    std::span<const std::shared_ptr<iceberg::Snapshot>> expired)
 {
     return CatchIcebergExceptions([&]() -> iceberg::Result<TBaseState> {
-        ICEBERG_ASSIGN_OR_RAISE(auto state, ReadRecoveryRoot(fileIO, rootLocation, storeID, collectionID, limits));
+        ICEBERG_ASSIGN_OR_RAISE(auto state,
+            ReadRecoveryRoot(fileIO, rootLocation, storeID, collectionID, configuredLimits));
         const auto original = state.Metadata;
+        const auto& limits = configuredLimits;
         ICEBERG_ASSIGN_OR_RAISE(auto view, EmptyHistoryView(*original));
         ICEBERG_ASSIGN_OR_RAISE(auto visited,
             TRecoveryVisited::Make(limits.RecoveryWorkspaceBytes, workspaceDirectory));
         auto scanIndex = std::make_shared<TScanMembership>();
         scanIndex->Files.reserve(original->snapshots.size());
         scanIndex->Snapshots.reserve(original->snapshots.size());
+        ICEBERG_ASSIGN_OR_RAISE(auto expiredSequence, ExpiredSequence(*original));
+        if (expiredSequence != static_cast<std::int64_t>(expired.size()) ||
+            (!expired.empty() && original->snapshots.empty()))
+        {
+            return iceberg::ValidationFailed("Expiration ledger differs from the retained root.");
+        }
+        std::size_t firstIndex = 0;
+        if (!expired.empty()) {
+            ICEBERG_RETURN_UNEXPECTED(
+                SeedRetainedHistory(fileIO, state, expired, limits, *visited, *scanIndex, storeID));
+            const auto& parent = expired.back();
+            view->snapshots.push_back(parent);
+            view->snapshot_log.push_back({parent->timestamp_ms, parent->snapshot_id});
+            view->current_snapshot_id = parent->snapshot_id;
+            view->last_sequence_number = parent->sequence_number;
+            view->refs["main"] = std::make_shared<iceberg::SnapshotRef>(
+                iceberg::SnapshotRef{.snapshot_id = parent->snapshot_id, .retention = iceberg::SnapshotRef::Branch{}});
+            auto next = AppendToView(*view, original->snapshots.front(), original->snapshot_log.front());
+            ICEBERG_RETURN_UNEXPECTED(CheckAppendMetadata(*view, *next, {}));
+            next->snapshots.erase(next->snapshots.begin());
+            next->snapshot_log.erase(next->snapshot_log.begin());
+            view = std::move(next);
+            firstIndex = 1;
+        }
         std::unordered_set<std::int64_t> snapshotIDs;
         snapshotIDs.reserve(original->snapshots.size());
-        for (std::size_t index = 0; index < original->snapshots.size(); ++index) {
+        if (firstIndex != 0) {
+            snapshotIDs.insert(original->snapshots.front()->snapshot_id);
+        }
+        for (std::size_t index = firstIndex; index < original->snapshots.size(); ++index) {
             const auto& snapshot = original->snapshots[index];
             if (!snapshot || !snapshotIDs.insert(snapshot->snapshot_id).second) {
                 return iceberg::ValidationFailed("Invalid retained snapshot history.");

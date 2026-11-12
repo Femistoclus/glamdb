@@ -66,13 +66,18 @@ It does not enumerate history, read warehouse files or reconcile automatically.
 Uncertain binding/publication still invalidates the verified generation and keeps
 the recovery barrier until authoritative reconciliation and its durability fence.
 Failed bindings count permanently toward the operation budget and retain their
-original terminal failure. No receipt, snapshot or operation ID expires.
+original terminal failure. Receipts and operation IDs never expire. Snapshots
+remain retained by default; the separate explicit [retention API](SNAPSHOT_RETENTION.md)
+can expire an opted-in oldest prefix without changing configured budgets.
 
 Root cache reservations remain `32 * serialized_root_bytes + 4 MiB`. Temporary
 metadata work reserves at least 768 MiB and grows to `48 * max_root_file_bytes`
 above the default 16 MiB root allowance. The default shared owner retains its
 finite class/device limits. These are conservative admission envelopes; measured
-RSS and upstream/STL/JSON allocator behavior are separate evidence.
+RSS and upstream/STL/JSON allocator behavior are separate evidence. The explicit
+[snapshot retention extension](SNAPSHOT_RETENTION.md) also reserves success-history
+memory from the lesser of operation and data-file budgets, because expired
+ancestry can grow while the retained root stays small.
 
 The per-store read metadata cache keeps its separate 32 MiB reservation and
 entry limits. An entry larger than its cache budget is read without caching;

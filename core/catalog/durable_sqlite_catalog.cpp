@@ -23,6 +23,15 @@ constexpr std::string_view write_settings_table =
     "CHECK(length(created_blob)<=16384),current_blob BLOB NOT NULL CHECK(length(current_blob)<=16384))";
 constexpr std::string_view operation_columns = "collection_id,operation_id,payload_hash,hash_version,base_identity,"
                                                "attempt_id,state,receipt_version,outcome_blob";
+constexpr std::string_view expired_snapshots_table =
+    "CREATE TABLE expired_snapshots(collection_id TEXT NOT NULL REFERENCES collections(collection_id),"
+    "snapshot_id INTEGER NOT NULL,sequence_number INTEGER NOT NULL CHECK(sequence_number>=1),"
+    "operation_id TEXT NOT NULL,PRIMARY KEY(collection_id,snapshot_id),"
+    "UNIQUE(collection_id,sequence_number),UNIQUE(collection_id,operation_id),"
+    "FOREIGN KEY(collection_id,operation_id) REFERENCES operations(collection_id,operation_id))";
+constexpr std::string_view metadata_cleanup_table =
+    "CREATE TABLE metadata_cleanup(collection_id TEXT NOT NULL REFERENCES collections(collection_id),"
+    "path TEXT NOT NULL CHECK(length(path)<=2048),PRIMARY KEY(collection_id,path))";
 
 template <class T, class F>
 iceberg::Result<T> Bridge(F&& body, bool& rollback_only, std::optional<ErrorDetail>* first_error = nullptr)
@@ -132,7 +141,9 @@ void DurableSqliteCatalogStore::OpenConnection(bool create)
                 "UNSUPPORTED_STORE_VERSION",
                 "unexpected SQLite journal mode");
             const auto version = preflight.Integer("PRAGMA user_version");
-            Require(version == 1 || version == 2, "UNSUPPORTED_STORE_VERSION", "unknown catalog version");
+            Require(version == 1 || version == 2 || version == 3,
+                "UNSUPPORTED_STORE_VERSION",
+                "unknown catalog version");
             const auto rows = preflight.Query("SELECT store_id,format_major,profile_id FROM "
                                               "store_header WHERE singleton=1");
             Require(rows.size() == 1 && Required(rows[0], 0) == info_.store_id && Required(rows[0], 1) == "1" &&
@@ -226,13 +237,21 @@ void DurableSqliteCatalogStore::Configure()
 void DurableSqliteCatalogStore::ValidateHeader()
 {
     const auto version = database_.Integer("PRAGMA user_version");
-    Require((version == 1 || version == 2) && database_.Integer("PRAGMA application_id") == 1196179789,
+    Require((version == 1 || version == 2 || version == 3) && database_.Integer("PRAGMA application_id") == 1196179789,
         "UNSUPPORTED_STORE_VERSION",
         "unsupported catalog format");
     const auto tables = database_.Query("SELECT sql FROM sqlite_master WHERE name='collection_write_settings'");
     Require(version == 1 ? tables.empty() : tables.size() == 1 && tables[0][0] == std::string(write_settings_table),
         "CORRUPTION",
         "write settings table does not match the catalog version");
+    for (const auto& [name, definition] : {std::pair{"expired_snapshots", expired_snapshots_table},
+             std::pair{"metadata_cleanup", metadata_cleanup_table}})
+    {
+        const auto found = database_.Query("SELECT sql FROM sqlite_master WHERE name=?", {std::string(name)});
+        Require(version < 3 ? found.empty() : found.size() == 1 && found[0][0] == std::string(definition),
+            "CORRUPTION",
+            "retention tables do not match the catalog version");
+    }
     const auto rows = database_.Query("SELECT store_id,format_major,profile_id,durability_fence FROM "
                                       "store_header WHERE singleton=1");
     Require(rows.size() == 1 && database_.Integer("SELECT COUNT(*) FROM store_header") == 1,
@@ -370,7 +389,7 @@ CollectionInfo DurableSqliteCatalogStore::ReadCollection(const SqlRow& row)
 
 bool DurableSqliteCatalogStore::HasWriteSettings()
 {
-    return database_.Integer("PRAGMA user_version") == 2;
+    return database_.Integer("PRAGMA user_version") >= 2;
 }
 
 void DurableSqliteCatalogStore::EnsureWriteSettings()
@@ -805,6 +824,149 @@ void DurableSqliteCatalogStore::PublishAppend(const BoundOperation& binding,
             database_.Execute("UPDATE collections SET current_snapshot_id=? "
                               "WHERE collection_id=?",
                 {result.snapshot_id, binding.collection_id});
+        });
+        publication_ = nullptr;
+    } catch (...) {
+        publication_ = nullptr;
+        throw;
+    }
+}
+
+void DurableSqliteCatalogStore::EnsureRetention()
+{
+    Require(transaction_, "INTERNAL", "retention requires the outer transaction");
+    EnsureWriteSettings();
+    if (database_.Integer("PRAGMA user_version") < 3) {
+        database_.Execute(expired_snapshots_table);
+        database_.Execute(metadata_cleanup_table);
+        database_.Execute("PRAGMA user_version=3");
+    }
+}
+
+std::vector<ExpiredSnapshotRecord> DurableSqliteCatalogStore::ExpiredSnapshots(std::string_view id)
+{
+    std::lock_guard lock(mutex_);
+    Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
+    if (database_.Integer("PRAGMA user_version") < 3) {
+        return {};
+    }
+    const auto countRows =
+        database_.Query("SELECT COUNT(*) FROM expired_snapshots WHERE collection_id=?", {std::string(id)});
+    const auto count = ParseInteger(Required(countRows.at(0), 0));
+    Require(count >= 0 && count <= limits_.max_operations, "CONFIG_TOO_SMALL", "expired inventory exceeds capacity");
+    std::vector<ExpiredSnapshotRecord> result;
+    int64_t last = 0;
+    while (true) {
+        const auto rows =
+            database_.Query("SELECT snapshot_id,sequence_number,operation_id FROM expired_snapshots "
+                            "WHERE collection_id=? AND sequence_number>? ORDER BY sequence_number LIMIT 256",
+                {std::string(id), last});
+        if (rows.empty()) {
+            break;
+        }
+        for (const auto& row : rows) {
+            result.push_back({ParseInteger(Required(row, 0)), ParseInteger(Required(row, 1)), Required(row, 2)});
+        }
+        last = result.back().sequence_number;
+    }
+    Require(result.size() == static_cast<std::uint64_t>(count), "CORRUPTION", "expiration ledger is incomplete");
+    return result;
+}
+
+bool DurableSqliteCatalogStore::IsExpiredSnapshot(std::string_view id, int64_t snapshot)
+{
+    std::lock_guard lock(mutex_);
+    Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
+    return database_.Integer("PRAGMA user_version") >= 3 &&
+        !database_
+             .Query("SELECT 1 FROM expired_snapshots WHERE collection_id=? AND snapshot_id=?",
+                 {std::string(id), snapshot})
+             .empty();
+}
+
+int64_t DurableSqliteCatalogStore::PendingMetadataCount(std::string_view id)
+{
+    std::lock_guard lock(mutex_);
+    Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
+    if (database_.Integer("PRAGMA user_version") < 3) {
+        return 0;
+    }
+    const auto rows = database_.Query("SELECT COUNT(*) FROM metadata_cleanup WHERE collection_id=?", {std::string(id)});
+    const auto count = ParseInteger(Required(rows.at(0), 0));
+    Require(count >= 0 && count / 9 + (count % 9 != 0 ? 1 : 0) <= limits_.max_operations,
+        "CORRUPTION",
+        "cleanup inventory exceeds capacity");
+    return count;
+}
+
+std::vector<std::string> DurableSqliteCatalogStore::PendingMetadata(std::string_view id)
+{
+    std::lock_guard lock(mutex_);
+    Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
+    if (database_.Integer("PRAGMA user_version") < 3) {
+        return {};
+    }
+    const auto rows =
+        database_.Query("SELECT path FROM metadata_cleanup WHERE collection_id=? ORDER BY path LIMIT 8192",
+            {std::string(id)});
+    (void)PendingMetadataCount(id);
+    std::vector<std::string> result;
+    result.reserve(rows.size());
+    for (const auto& row : rows) {
+        result.push_back(Required(row, 0));
+    }
+    return result;
+}
+
+void DurableSqliteCatalogStore::AcknowledgeMetadata(std::string_view id, std::span<const std::string> paths)
+{
+    std::lock_guard lock(mutex_);
+    if (paths.empty()) {
+        return;
+    }
+    Transaction([&] {
+        for (const auto& path : paths) {
+            database_.Execute("DELETE FROM metadata_cleanup WHERE collection_id=? AND path=?", {std::string(id), path});
+        }
+    });
+}
+
+void DurableSqliteCatalogStore::PublishExpiration(const BaseIdentity& base,
+    std::span<const ExpiredSnapshotRecord> expired,
+    std::span<const std::string> garbage,
+    const Guard& guard,
+    const Body& body)
+{
+    std::lock_guard lock(mutex_);
+    Require(guard && body && publication_ == nullptr, "INVALID_ARGUMENT", "maintenance requires an owned publication");
+    const auto collection = Collection(base.collection_id);
+    Publication scope{false, collection.name, base, guard, {}, 0};
+    publication_ = &scope;
+    try {
+        Transaction([&] {
+            Require(Base(base.collection_id) == base, "STALE_BASE", "exact maintenance base changed");
+            CheckFreeBytes();
+            EnsureRetention();
+            const auto applied = body();
+            if (scope.first_error) {
+                throw Failure(*scope.first_error);
+            }
+            Require(applied.has_value() && scope.mutations == 1,
+                "IO_ERROR",
+                "maintenance did not publish one guarded root");
+            for (const auto& snapshot : expired) {
+                const auto operation = FindOperation(base.collection_id, snapshot.operation_id);
+                Require(operation && operation->state == OperationState::Committed && operation->outcome &&
+                        operation->outcome->result && operation->outcome->result->snapshot_id == snapshot.snapshot_id,
+                    "CORRUPTION",
+                    "expiration lacks its original committed receipt");
+                database_.Execute("INSERT INTO expired_snapshots VALUES(?,?,?,?)",
+                    {base.collection_id, snapshot.snapshot_id, snapshot.sequence_number, snapshot.operation_id});
+            }
+            for (const auto& path : garbage) {
+                ValidateLocation(path, info_);
+                database_.Execute("INSERT INTO metadata_cleanup VALUES(?,?)", {base.collection_id, path});
+            }
         });
         publication_ = nullptr;
     } catch (...) {

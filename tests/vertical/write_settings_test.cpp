@@ -2,6 +2,7 @@
 
 #include "core/api/write_settings.h"
 #include "core/catalog/sqlite.h"
+#include "tests/support/checked.h"
 
 #include <arrow/util/compression.h>
 #include <parquet/file_reader.h>
@@ -25,7 +26,7 @@ using namespace std::chrono_literals;
 WriteSettings Settings(std::optional<ParquetCompression> fallback, std::vector<ColumnWriteSettings> columns = {})
 {
     WriteSettings settings;
-    settings.compression = std::move(fallback);
+    settings.compression = fallback;
     settings.columns = std::move(columns);
     return settings;
 }
@@ -178,8 +179,8 @@ TEST_F(TWriteSettingsTest, DefaultsKeepCatalogVersionAndWriterDefaults)
     const auto created = Create({});
     ASSERT_EQ(created.disposition, CommitDisposition::Committed);
     ASSERT_TRUE(created.info);
-    EXPECT_EQ(created.info->write_settings, WriteSettings{});
-    EXPECT_EQ(created.info->write_settings_version, 0);
+    EXPECT_EQ(test::Present(created.info).write_settings, WriteSettings{});
+    EXPECT_EQ(test::Present(created.info).write_settings_version, 0);
     Append(FirstOperation, FirstRows);
     for (const auto& [column, codec] : FooterCodecs(Root_, FirstOperation)) {
         EXPECT_EQ(codec, "zstd") << column;
@@ -210,14 +211,14 @@ TEST_F(TWriteSettingsTest, CollectionDefaultAndColumnOverridesReachEveryFooter)
             {"at", ParquetCompression{ParquetCodec::Lz4Raw, 9}}});
     const auto created = Create(settings);
     ASSERT_EQ(created.disposition, CommitDisposition::Committed)
-        << (created.error ? created.error->message : std::string());
+        << (created.error ? test::Present(created.error).message : std::string());
     // Canonical form follows schema order.
     const auto expected = Settings(ParquetCompression{ParquetCodec::Gzip, 6},
         {{"key", ParquetCompression{ParquetCodec::Uncompressed, std::nullopt}},
             {"score", ParquetCompression{ParquetCodec::Snappy, std::nullopt}},
             {"at", ParquetCompression{ParquetCodec::Lz4Raw, 9}}});
-    EXPECT_EQ(created.info->write_settings, expected);
-    EXPECT_EQ(created.info->write_settings_version, 1);
+    EXPECT_EQ(test::Present(created.info).write_settings, expected);
+    EXPECT_EQ(test::Present(created.info).write_settings_version, 1);
     EXPECT_EQ(CatalogVersion(), 2);
 
     Append(FirstOperation, FirstRows);
@@ -321,14 +322,14 @@ TEST_F(TWriteSettingsTest, RepeatedCreateComparesCreationSettings)
     // with later changes.
     const auto repeated = Create(settings);
     ASSERT_EQ(repeated.disposition, CommitDisposition::Committed);
-    EXPECT_EQ(repeated.info->write_settings_version, 2);
+    EXPECT_EQ(test::Present(repeated.info).write_settings_version, 2);
     const auto different = Create(Settings(ParquetCompression{ParquetCodec::Zstd, 4}));
     EXPECT_EQ(different.disposition, CommitDisposition::DefinitelyNotCommitted);
     ASSERT_TRUE(different.error);
-    EXPECT_EQ(different.error->code, "WRITE_SETTINGS_MISMATCH");
+    EXPECT_EQ(test::Present(different.error).code, "WRITE_SETTINGS_MISMATCH");
     const auto defaults = Create({});
     ASSERT_TRUE(defaults.error);
-    EXPECT_EQ(defaults.error->code, "WRITE_SETTINGS_MISMATCH");
+    EXPECT_EQ(test::Present(defaults.error).code, "WRITE_SETTINGS_MISMATCH");
 }
 
 TEST_F(TWriteSettingsTest, InvalidSettingsAreRejectedBeforeAnythingIsBound)
@@ -339,6 +340,8 @@ TEST_F(TWriteSettingsTest, InvalidSettingsAreRejectedBeforeAnythingIsBound)
         {Settings(ParquetCompression{ParquetCodec::Gzip, 10}), "INVALID_ARGUMENT"},
         {Settings(ParquetCompression{ParquetCodec::Snappy, 1}), "INVALID_ARGUMENT"},
         {Settings(ParquetCompression{ParquetCodec::Uncompressed, 1}), "INVALID_ARGUMENT"},
+        // Deliberately invalid enum input exercises public validation.
+        // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
         {Settings(ParquetCompression{static_cast<ParquetCodec>(9), std::nullopt}), "INVALID_ARGUMENT"},
         {Settings(std::nullopt, {{"missing", ParquetCompression{}}}), "INVALID_ARGUMENT"},
         {Settings(std::nullopt, {{"key", ParquetCompression{}}, {"key", ParquetCompression{}}}), "INVALID_ARGUMENT"},
@@ -348,8 +351,8 @@ TEST_F(TWriteSettingsTest, InvalidSettingsAreRejectedBeforeAnythingIsBound)
         const auto created = Create(settings);
         EXPECT_EQ(created.disposition, CommitDisposition::DefinitelyNotCommitted);
         ASSERT_TRUE(created.error);
-        EXPECT_EQ(created.error->code, code);
-        EXPECT_EQ(created.error->retry_hint, RetryHint::FixInput);
+        EXPECT_EQ(test::Present(created.error).code, code);
+        EXPECT_EQ(test::Present(created.error).retry_hint, RetryHint::FixInput);
     }
     EXPECT_TRUE(Engine_->ListCollections()->empty());
     EXPECT_EQ(CatalogVersion(), 1);
@@ -462,6 +465,15 @@ TEST_F(TWriteSettingsTest, NewerCatalogVersionsFailClosed)
         database.Open(Root_ / "catalog.sqlite", SQLITE_OPEN_READWRITE, {});
         database.Execute("PRAGMA user_version=3");
     }
+    // Version 3 also requires the write-settings and retention tables.
+    opened = detail::EngineFactory::OpenWith({Root_.string(), test::store_id}, THookBackend::Factory(Backend_));
+    ASSERT_FALSE(opened);
+    EXPECT_EQ(opened.error().code, "CORRUPTION");
+    {
+        detail::Database database;
+        database.Open(Root_ / "catalog.sqlite", SQLITE_OPEN_READWRITE, {});
+        database.Execute("PRAGMA user_version=4");
+    }
     opened = detail::EngineFactory::OpenWith({Root_.string(), test::store_id}, THookBackend::Factory(Backend_));
     ASSERT_FALSE(opened);
     EXPECT_EQ(opened.error().code, "UNSUPPORTED_STORE_VERSION");
@@ -500,8 +512,8 @@ TEST_F(TWriteSettingsTest, ColumnEncodingsAndDictionaryPoliciesReachEveryFooter)
         {"at", ParquetCompression{ParquetCodec::Snappy, std::nullopt}, DictionaryPolicy::Disabled, std::nullopt}};
     const auto created = Create(settings);
     ASSERT_EQ(created.disposition, CommitDisposition::Committed)
-        << (created.error ? created.error->message : std::string());
-    EXPECT_EQ(created.info->write_settings, settings);
+        << (created.error ? test::Present(created.error).message : std::string());
+    EXPECT_EQ(test::Present(created.info).write_settings, settings);
     Append(FirstOperation, FirstRows);
     Append(SecondOperation, SecondRows);
     const std::map<std::string, TChunkEncodings> expected{{"key", {false, {"DELTA_BYTE_ARRAY"}}},
@@ -536,6 +548,7 @@ TEST_F(TWriteSettingsTest, DictionaryOverflowFallsBackToPlainPages)
     ASSERT_EQ(Create(settings).disposition, CommitDisposition::Committed);
     // 3,000 distinct keys outgrow a 4 KiB dictionary; 3 values never do.
     std::vector<TInputRow> rows;
+    rows.reserve(3000);
     for (int index = 0; index < 3000; ++index) {
         rows.push_back({std::format("key-{:08}", index), index % 3, 0.5, index % 2 == 0, 10});
     }
@@ -596,6 +609,8 @@ TEST_F(TWriteSettingsTest, IncompatibleEncodingsAndConflictsAreRejected)
     WriteSettings large;
     large.dictionary_page_size_limit = (8 << 20) + 1;
     WriteSettings unknown;
+    // Deliberately invalid enum input exercises public validation.
+    // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
     unknown.dictionary = static_cast<DictionaryPolicy>(7);
     for (const auto& settings :
         std::vector<WriteSettings>{column("key", std::nullopt, ParquetEncoding::DeltaBinaryPacked),
@@ -607,6 +622,8 @@ TEST_F(TWriteSettingsTest, IncompatibleEncodingsAndConflictsAreRejected)
             column("flag", DictionaryPolicy::Enabled, std::nullopt),
             column("key", DictionaryPolicy::Enabled, ParquetEncoding::Plain),
             column("key", DictionaryPolicy::Auto, ParquetEncoding::DeltaByteArray),
+            // Deliberately invalid enum input exercises public validation.
+            // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
             column("key", std::nullopt, static_cast<ParquetEncoding>(9)),
             enabled,
             small,
@@ -616,7 +633,7 @@ TEST_F(TWriteSettingsTest, IncompatibleEncodingsAndConflictsAreRejected)
         const auto created = Create(settings);
         EXPECT_EQ(created.disposition, CommitDisposition::DefinitelyNotCommitted);
         ASSERT_TRUE(created.error);
-        EXPECT_EQ(created.error->code, "INVALID_ARGUMENT") << created.error->message;
+        EXPECT_EQ(test::Present(created.error).code, "INVALID_ARGUMENT") << test::Present(created.error).message;
     }
     // Bool columns accept Auto, plain or rle with any collection policy once
     // they state their own; an explicit encoding implies no dictionary.
