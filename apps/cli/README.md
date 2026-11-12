@@ -13,7 +13,9 @@ cmake -S apps/cli -B build/client -G Ninja -DCMAKE_CXX_COMPILER=clang++-18
 cmake --build build/client
 ```
 
-Set `GLAMDB_TOKEN` in the environment. Keep tokens out of command-line arguments.
+Set `GLAMDB_TOKEN` in the environment. Bearer tokens may contain up to 8192
+printable bytes, including organization-scoped OIDC JWTs; control characters
+are rejected before connecting. Keep tokens out of command-line arguments.
 Local HTTP accepts only hostnames whose resolved endpoints are all loopback addresses;
 remote servers require HTTPS. HTTPS verifies the certificate chain and hostname,
 sets SNI for DNS names (not IP literals), and uses system trust with an optional additional `--ca-file CA.pem`.

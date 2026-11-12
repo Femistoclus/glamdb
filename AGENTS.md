@@ -77,7 +77,9 @@ HTTP body admission reserves four of sixteen readers from ordinary uploads for
 authenticated database lifecycle and scan cancellation, including through a TLS
 proxy; public/static POSTs cannot spend that reserve. Excess bodies wait within
 the connection ceiling and their original read deadline.
-The network CLI also builds independently with OpenSSL; optional offline commands
+The network CLI also builds independently with OpenSSL; printable bearer tokens
+accept up to 8 KiB for organization-scoped OIDC JWTs, with control characters
+rejected before connecting. Optional offline commands
 are in `apps/admin` and never required for server initialization. Both expose
 named collection/schema, append, scan, operation, snapshot and file commands.
 The admin tool's `--url` mode calls HTTP without opening an engine; offline

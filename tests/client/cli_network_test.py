@@ -114,6 +114,29 @@ class Client(unittest.TestCase):
     def run_cli(self, *args, **kwargs):
         return subprocess.run([CLI, *args], env=ENV, capture_output=True, timeout=12, **kwargs)
 
+    def test_jwt_sized_bearer_tokens_are_sent_unchanged(self):
+        for size in (1481, 8192):
+            token = 'header.' + 'p' * (size - 11) + '.sig'
+            requests = []
+            with self.subTest(size=size), raw_server(
+                    b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}', requests=requests) as port:
+                result = subprocess.run([CLI, 'request', '--url', f'http://localhost:{port}/databases'],
+                    env=dict(ENV, GLAMDB_TOKEN=token), capture_output=True, timeout=12)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(requests), 1)
+            self.assertIn(('\r\nAuthorization: Bearer ' + token + '\r\n').encode(), requests[0])
+
+    def test_oversized_or_injected_bearer_is_rejected_before_connecting(self):
+        for token in ('p' * 8193, 'prefix\r\nX-Injected: value', 'prefix\nvalue'):
+            requests = []
+            with self.subTest(size=len(token)), raw_server(
+                    b'HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n', requests=requests) as port:
+                result = subprocess.run([CLI, 'request', '--url', f'http://localhost:{port}/databases'],
+                    env=dict(ENV, GLAMDB_TOKEN=token), capture_output=True, timeout=12)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(requests, [])
+            self.assertNotIn(token.encode(), result.stderr)
+
     def test_create_store_sends_opt_in_collection_limit(self):
         bodies = []
         def respond(path, body):
