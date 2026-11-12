@@ -269,9 +269,22 @@ export function validateQueryCapabilities(capabilities, body) {
     visit(body.predicate);
 }
 
-// Parquet write settings choose the value compression of data files written by
-// later appends. They are unrelated to HTTP Content-Encoding.
+// Parquet write settings choose how later appends write data files: value
+// compression, dictionary policy and value encodings. They are unrelated to
+// HTTP Content-Encoding.
 export const PARQUET_CODECS = ['uncompressed', 'snappy', 'gzip', 'lz4_raw', 'zstd'];
+export const DICTIONARY_POLICIES = ['auto', 'enabled', 'disabled'];
+export const PARQUET_ENCODINGS = [
+    'plain',
+    'delta_binary_packed',
+    'delta_length_byte_array',
+    'delta_byte_array',
+    'byte_stream_split',
+    'rle',
+];
+const FIELD_TYPES = ['string', 'bool', 'int64', 'float64', 'timestamp_us_utc'];
+const PARQUET_KEYS = ['compression', 'dictionary', 'dictionary_page_size_limit', 'columns'];
+const COLUMN_KEYS = ['field', 'compression', 'dictionary', 'encoding'];
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const isInt32 = (value) => Number.isInteger(value) && value >= -(2 ** 31) && value < 2 ** 31;
 // Settings reported by a server may carry newer options this workbench does
@@ -298,8 +311,23 @@ function canonicalCompression(value, label, reported = false) {
         throw new Error(`${label} level must be an integer or null`);
     return { codec: value.codec, level };
 }
-// Same canonical form as the server and Python SDK: columns in schema order,
-// explicit null level (codec default) and null compression when unset.
+function canonicalChoice(value, choices, label) {
+    if (value === null || value === undefined) return null;
+    if (!choices.includes(value)) throw new Error(`${label} must be one of ${choices.join(', ')}`);
+    return value;
+}
+// The wire form is an int64 decimal string; the server checks the range.
+function canonicalPageSizeLimit(value) {
+    if (value === null || value === undefined) return null;
+    const text = typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : value;
+    if (typeof text !== 'string' || !/^[1-9]\d{0,18}$/.test(text) || BigInt(text) >= 1n << 63n)
+        throw new Error('Dictionary page size limit must be a positive integer');
+    return text;
+}
+// Same canonical form as the server and Python SDK: every option key present
+// (null when unset), columns in schema order, explicit null level (codec
+// default) and a decimal-string page size limit. Types and conflicts are
+// checked by writeSettingsFromChoices and, authoritatively, by the server.
 // `reported` accepts server-reported settings with unknown unset options.
 export function canonicalWriteSettings(value, schema = null, { reported = false } = {}) {
     const settings =
@@ -307,38 +335,66 @@ export function canonicalWriteSettings(value, schema = null, { reported = false 
     const parquet =
         settings.parquet == null
             ? {}
-            : settingsObject(
-                  settings.parquet,
-                  ['compression', 'columns'],
-                  'Parquet settings',
-                  reported,
-              );
+            : settingsObject(settings.parquet, PARQUET_KEYS, 'Parquet settings', reported);
     const compression = canonicalCompression(parquet.compression, 'Parquet compression', reported);
+    const dictionary = canonicalChoice(
+        parquet.dictionary,
+        DICTIONARY_POLICIES,
+        'Dictionary policy',
+    );
+    const limit = canonicalPageSizeLimit(parquet.dictionary_page_size_limit);
     const columns = parquet.columns ?? [];
     if (!Array.isArray(columns) || columns.length > 64)
         throw new Error('Parquet column settings must be an array of at most 64 entries');
     const order = schema ? schema.fields.map((field) => field.name) : null;
     const seen = new Map();
     for (const item of columns) {
-        settingsObject(item, ['field', 'compression'], 'Parquet column setting', reported);
+        settingsObject(item, COLUMN_KEYS, 'Parquet column setting', reported);
         const field = item.field;
         if (typeof field !== 'string' || !field)
             throw new Error('Parquet column setting requires a field name');
         if (order && !order.includes(field))
             throw new Error(`Parquet column setting names an unknown column ${field}`);
         if (seen.has(field)) throw new Error(`Parquet column setting repeats ${field}`);
-        const columnCompression = canonicalCompression(
-            item.compression,
-            `Parquet compression of ${field}`,
-            reported,
-        );
-        if (!columnCompression)
-            throw new Error(`Parquet column setting for ${field} must choose a codec`);
-        seen.set(field, { field, compression: columnCompression });
+        const column = {
+            field,
+            compression: canonicalCompression(
+                item.compression,
+                `Parquet compression of ${field}`,
+                reported,
+            ),
+            dictionary: canonicalChoice(
+                item.dictionary,
+                DICTIONARY_POLICIES,
+                `Dictionary policy of ${field}`,
+            ),
+            encoding: canonicalChoice(item.encoding, PARQUET_ENCODINGS, `Encoding of ${field}`),
+        };
+        if (!column.compression && !column.dictionary && !column.encoding)
+            throw new Error(
+                `Parquet column setting for ${field} must set compression, dictionary or encoding`,
+            );
+        seen.set(field, column);
     }
     const ordered = [...seen.values()];
     if (order) ordered.sort((a, b) => order.indexOf(a.field) - order.indexOf(b.field));
-    return { parquet: { compression, columns: ordered } };
+    return {
+        parquet: {
+            compression,
+            dictionary,
+            dictionary_page_size_limit: limit,
+            columns: ordered,
+        },
+    };
+}
+const DEFAULT_SETTINGS = JSON.stringify(canonicalWriteSettings(null));
+// Request form of canonical settings: unset options are omitted, so settings
+// that use only compression stay acceptable to servers without encodings.
+export function wireWriteSettings(canonical) {
+    const set = (object) =>
+        Object.fromEntries(Object.entries(object).filter(([, value]) => value !== null));
+    const { columns, ...parquet } = canonical.parquet;
+    return { parquet: { ...set(parquet), columns: columns.map(set) } };
 }
 // Compares settings in canonical form; either side may be server-reported.
 export const sameWriteSettings = (left, right, schema = null) =>
@@ -353,8 +409,45 @@ export function writeSettingsVersion(value) {
         throw new Error('Write settings version must be a non-negative decimal string');
     return value;
 }
+function encodingCapabilities(list) {
+    if (!Array.isArray(list)) return [];
+    return list
+        .filter((item) => isObject(item) && PARQUET_ENCODINGS.includes(item.encoding))
+        .map((item) => ({
+            encoding: item.encoding,
+            types: Array.isArray(item.types)
+                ? item.types.filter((type) => FIELD_TYPES.includes(type))
+                : [],
+        }))
+        .filter((item) => item.types.length);
+}
+function dictionaryCapabilities(value) {
+    const limit = value?.page_size_limit;
+    if (
+        !isObject(value) ||
+        !Array.isArray(value.policies) ||
+        !Array.isArray(value.types) ||
+        !isObject(limit) ||
+        ![limit.min, limit.max, limit.default].every(Number.isSafeInteger) ||
+        !(limit.min > 0 && limit.min <= limit.default && limit.default <= limit.max)
+    )
+        return null;
+    const policies = value.policies.filter((policy) => DICTIONARY_POLICIES.includes(policy));
+    if (!policies.length) return null;
+    return {
+        policies,
+        default_policy: DICTIONARY_POLICIES.includes(value.default_policy)
+            ? value.default_policy
+            : null,
+        types: value.types.filter((type) => FIELD_TYPES.includes(type)),
+        fallback_encoding:
+            typeof value.fallback_encoding === 'string' ? value.fallback_encoding : null,
+        page_size_limit: { min: limit.min, max: limit.max, default: limit.default },
+    };
+}
 // Only a server advertising the feature and a valid codec list enables the
-// controls; the mock and the public demo never send write settings.
+// controls; the mock and the public demo never send write settings. Servers
+// without encodings or a dictionary capability get compression controls only.
 export function parquetCapabilities(capabilities) {
     const parquet = capabilities?.parquet;
     if (capabilities?.features?.write_settings !== true || !isObject(parquet)) return null;
@@ -382,10 +475,38 @@ export function parquetCapabilities(capabilities) {
     } catch {
         /* An unknown default is shown as the server default without a codec name. */
     }
-    return { default_compression: defaultCompression, codecs };
+    return {
+        default_compression: defaultCompression,
+        codecs,
+        encodings: encodingCapabilities(parquet.encodings),
+        dictionary: dictionaryCapabilities(parquet.dictionary),
+    };
 }
 const codecLevels = (parquet, codec) =>
     parquet.codecs.find((item) => item.codec === codec)?.level ?? null;
+// Choices a column of this type can use: encodings that accept the type and
+// dictionary policies (no "enabled" for types without dictionaries, e.g. bool).
+export function columnParquetOptions(parquet, type) {
+    const dictionary = parquet?.dictionary;
+    return {
+        encodings: (parquet?.encodings ?? [])
+            .filter((item) => item.types.includes(type))
+            .map((item) => item.encoding),
+        dictionaries: dictionary
+            ? dictionary.policies.filter(
+                  (policy) => policy !== 'enabled' || dictionary.types.includes(type),
+              )
+            : [],
+    };
+}
+// An explicit encoding turns the column's dictionary off: "enabled", or "auto"
+// on a type that has dictionaries, cannot accompany it, so choosing an
+// encoding clears such a policy (the column then has no dictionary).
+export function reconcileColumnDictionary(parquet, type, encoding, dictionary) {
+    if (!encoding) return dictionary;
+    const dictionaryType = parquet?.dictionary?.types.includes(type) ?? type !== 'bool';
+    return dictionary === 'enabled' || (dictionary === 'auto' && dictionaryType) ? '' : dictionary;
+}
 function chosenCompression(parquet, choice, label) {
     const codec = choice?.codec ?? '';
     const text = String(choice?.level ?? '').trim();
@@ -402,16 +523,75 @@ function chosenCompression(parquet, choice, label) {
         throw new Error(`${label}: ${codec} level must be ${range.min}–${range.max}`);
     return { codec, level: Number(text) };
 }
-// Build wire settings from form choices ({codec, level} strings, '' = unset).
-// Returns null when nothing is chosen, so create can omit write_settings.
+function chosenPageSizeLimit(parquet, value) {
+    const text = String(value ?? '').trim();
+    if (!text) return null;
+    const range = parquet.dictionary?.page_size_limit;
+    if (!range) throw new Error('This server does not accept a dictionary page size limit');
+    if (!/^\d+$/.test(text) || Number(text) < range.min || Number(text) > range.max)
+        throw new Error(`Dictionary page size limit must be ${range.min}–${range.max} bytes`);
+    return String(Number(text));
+}
+// Build wire settings from form choices (strings, '' = unset):
+// collection {codec, level, dictionary, pageSizeLimit} and per column
+// {field, type, codec, level, dictionary, encoding}. Checks field types and
+// dictionary/encoding conflicts against capabilities so the form can explain
+// them; the server remains authoritative. Returns null when nothing is chosen,
+// so create can omit write_settings.
 export function writeSettingsFromChoices(parquet, collectionChoice, columnChoices = []) {
     const compression = chosenCompression(parquet, collectionChoice, 'Parquet compression');
+    const policies = parquet.dictionary?.policies ?? [];
+    const dictionary = collectionChoice?.dictionary || null;
+    if (dictionary && !policies.includes(dictionary))
+        throw new Error(`Dictionary policy ${dictionary} is not available on this server`);
+    const limit = chosenPageSizeLimit(parquet, collectionChoice?.pageSizeLimit);
     const columns = [];
     for (const choice of columnChoices) {
-        const chosen = chosenCompression(parquet, choice, `Parquet compression of ${choice.field}`);
-        if (chosen) columns.push({ field: choice.field, compression: chosen });
+        const name = choice.field;
+        const column = {
+            field: name,
+            compression: chosenCompression(parquet, choice, `Parquet compression of ${name}`),
+            dictionary: choice.dictionary || null,
+            encoding: choice.encoding || null,
+        };
+        const options = columnParquetOptions(parquet, choice.type);
+        if (column.encoding && !options.encodings.includes(column.encoding))
+            throw new Error(
+                `Encoding ${column.encoding} does not accept ${choice.type} column ${name}`,
+            );
+        if (column.dictionary && !options.dictionaries.includes(column.dictionary))
+            throw new Error(
+                `Dictionary policy ${column.dictionary} is not available for ${choice.type} column ${name}`,
+            );
+        if (
+            column.encoding &&
+            reconcileColumnDictionary(parquet, choice.type, column.encoding, column.dictionary) !==
+                column.dictionary
+        )
+            throw new Error(
+                `${name}: an explicit encoding turns the dictionary off; choose disabled or the default dictionary`,
+            );
+        if (
+            dictionary === 'enabled' &&
+            !column.dictionary &&
+            !column.encoding &&
+            !(parquet.dictionary?.types ?? []).includes(choice.type)
+        )
+            throw new Error(
+                `An enabled collection dictionary needs a dictionary policy or encoding for ${choice.type} column ${name}`,
+            );
+        if (column.compression || column.dictionary || column.encoding) columns.push(column);
     }
-    return compression || columns.length ? { parquet: { compression, columns } } : null;
+    return compression || dictionary || limit || columns.length
+        ? {
+              parquet: {
+                  compression,
+                  dictionary,
+                  dictionary_page_size_limit: limit,
+                  columns,
+              },
+          }
+        : null;
 }
 export function describeCompression(compression, parquet = null) {
     if (!compression) {
@@ -423,6 +603,28 @@ export function describeCompression(compression, parquet = null) {
     if (compression.level !== null) return `${compression.codec} · level ${compression.level}`;
     const range = parquet ? codecLevels(parquet, compression.codec) : null;
     return range ? `${compression.codec} · default level ${range.default}` : compression.codec;
+}
+// What later appends write for one column, following the server's precedence:
+// column option, then collection default, then server default. An explicit
+// encoding turns the dictionary off; bool columns never use dictionaries.
+export function describeColumnEffect(type, column, settings, parquet = null) {
+    const own = column ?? {};
+    const compression = describeCompression(
+        own.compression ?? settings.parquet.compression,
+        parquet,
+    );
+    const policy =
+        own.dictionary ??
+        (own.encoding
+            ? 'disabled'
+            : (settings.parquet.dictionary ?? parquet?.dictionary?.default_policy ?? 'auto'));
+    const dictionaryType = parquet?.dictionary?.types.includes(type) ?? type !== 'bool';
+    const encoding = own.encoding ?? 'plain';
+    const values =
+        policy !== 'disabled' && dictionaryType
+            ? `dictionary, ${parquet?.dictionary?.fallback_encoding ?? 'plain'} fallback`
+            : encoding;
+    return `${compression} · ${values}`;
 }
 // Write settings are part of a collection definition. Creation stores
 // non-default settings as version "1"; defaults store nothing (version "0");
@@ -461,7 +663,7 @@ export function verifyCreatedCollection(created, body, { authoritative = true } 
         const expected = JSON.stringify(
             canonicalWriteSettings(body.write_settings ?? null, body.schema),
         );
-        const createdVersion = expected === JSON.stringify(canonicalWriteSettings(null)) ? 0n : 1n;
+        const createdVersion = expected === DEFAULT_SETTINGS ? 0n : 1n;
         matches =
             version >= createdVersion &&
             (version === 0n || !authoritative || version > createdVersion || actual === expected) &&
@@ -537,15 +739,15 @@ export function schemaSignature(schema) {
         })),
     );
 }
-// The workbench sends only canonical settings; a retry must send exactly them.
+// The workbench sends only the compact canonical form; a retry must send exactly it.
 function pendingWriteSettings(body) {
-    let canonical;
+    let wire;
     try {
-        canonical = canonicalWriteSettings(body.write_settings, body.schema);
+        wire = wireWriteSettings(canonicalWriteSettings(body.write_settings, body.schema));
     } catch {
         requirePending(false);
     }
-    requirePending(JSON.stringify(canonical) === JSON.stringify(body.write_settings));
+    requirePending(JSON.stringify(wire) === JSON.stringify(body.write_settings));
 }
 function pendingScope(scope) {
     pendingObject(scope, ['server_url', 'database_id', 'store_id', 'backend', 'mock']);

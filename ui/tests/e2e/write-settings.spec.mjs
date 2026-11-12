@@ -19,6 +19,25 @@ const PARQUET = {
         { codec: 'zstd', level: { min: 1, max: 22, default: 1 } },
     ],
 };
+// A server with dictionary and encoding options (#98) as well as codecs.
+const PARQUET_ENCODINGS = {
+    ...PARQUET,
+    encodings: [
+        { encoding: 'plain', types: ['string', 'bool', 'int64', 'float64', 'timestamp_us_utc'] },
+        { encoding: 'delta_binary_packed', types: ['int64', 'timestamp_us_utc'] },
+        { encoding: 'delta_length_byte_array', types: ['string'] },
+        { encoding: 'delta_byte_array', types: ['string'] },
+        { encoding: 'byte_stream_split', types: ['int64', 'float64', 'timestamp_us_utc'] },
+        { encoding: 'rle', types: ['bool'] },
+    ],
+    dictionary: {
+        policies: ['auto', 'enabled', 'disabled'],
+        default_policy: 'auto',
+        types: ['string', 'int64', 'float64', 'timestamp_us_utc'],
+        fallback_encoding: 'plain',
+        page_size_limit: { min: 4096, max: 8388608, default: 1048576 },
+    },
+};
 let server, origin, pageErrors, consoleErrors;
 test.beforeAll(async () => {
     const reservation = createServer();
@@ -80,31 +99,9 @@ async function nav(page, name) {
     await page.locator('nav').getByRole('button', { name, exact: true }).click();
 }
 
-test('mock capabilities hide Parquet controls and create sends no write settings', async ({
-    page,
-}) => {
-    let body;
-    await page.route('**/collections', async (route) => {
-        if (route.request().method() === 'POST') body = route.request().postDataJSON();
-        await route.continue();
-    });
-    await connect(page);
-    await page.getByRole('button', { name: 'New collection', exact: true }).first().click();
-    const dialog = page.getByRole('dialog');
-    await expect(dialog.locator('select[name="parquet-codec"]')).toHaveCount(0);
-    await expect(dialog.locator('[data-parquet-codec]')).toHaveCount(0);
-    await dialog.getByLabel('Collection name').fill(`plain_${Date.now()}`);
-    await dialog.getByRole('button', { name: 'Create collection', exact: true }).click();
-    await expect(dialog).not.toBeVisible();
-    expect(Object.keys(body)).toEqual(['collection_id', 'name', 'schema']);
-    await nav(page, 'Schema');
-    await expect(page.getByRole('table', { name: 'Collection schema' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Parquet write settings' })).toHaveCount(0);
-});
-
-test('advertised settings create canonically, save by compare-and-set and reload on conflict', async ({
-    page,
-}, info) => {
+// Intercepts capabilities and collection responses to emulate a native server
+// with write settings on top of the disposable mock.
+async function advertise(page, parquet) {
     const stored = { version: '0', settings: null };
     const posts = [];
     const withSettings = (collection) => ({
@@ -117,7 +114,7 @@ test('advertised settings create canonically, save by compare-and-set and reload
         const capabilities = await response.json();
         await route.fulfill({
             status: response.status(),
-            json: { ...capabilities, features: { write_settings: true }, parquet: PARQUET },
+            json: { ...capabilities, features: { write_settings: true }, parquet },
         });
     });
     await page.route('**/collections', async (route) => {
@@ -168,6 +165,36 @@ test('advertised settings create canonically, save by compare-and-set and reload
         await route.fulfill({ status: 200, json: withSettings(await response.json()) });
     });
 
+    return { stored, posts };
+}
+
+test('mock capabilities hide Parquet controls and create sends no write settings', async ({
+    page,
+}) => {
+    let body;
+    await page.route('**/collections', async (route) => {
+        if (route.request().method() === 'POST') body = route.request().postDataJSON();
+        await route.continue();
+    });
+    await connect(page);
+    await page.getByRole('button', { name: 'New collection', exact: true }).first().click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.locator('select[name="parquet-codec"]')).toHaveCount(0);
+    await expect(dialog.locator('[data-parquet-codec]')).toHaveCount(0);
+    await dialog.getByLabel('Collection name').fill(`plain_${Date.now()}`);
+    await dialog.getByRole('button', { name: 'Create collection', exact: true }).click();
+    await expect(dialog).not.toBeVisible();
+    expect(Object.keys(body)).toEqual(['collection_id', 'name', 'schema']);
+    await nav(page, 'Schema');
+    await expect(page.getByRole('table', { name: 'Collection schema' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Parquet write settings' })).toHaveCount(0);
+});
+
+test('advertised settings create canonically, save by compare-and-set and reload on conflict', async ({
+    page,
+}, info) => {
+    const { stored, posts } = await advertise(page, PARQUET);
+
     await connect(page);
     await page.getByRole('button', { name: 'New collection', exact: true }).first().click();
     const dialog = page.getByRole('dialog');
@@ -199,12 +226,12 @@ test('advertised settings create canonically, save by compare-and-set and reload
     const panel = page.locator('.write-settings-panel');
     await expect(panel.getByRole('heading', { name: 'Parquet write settings' })).toBeVisible();
     await expect(panel).toContainText('Version 1');
-    await expect(panel.getByLabel('Collection default')).toHaveValue('zstd');
+    await expect(panel.getByLabel('Collection compression')).toHaveValue('zstd');
     await expect(panel.getByLabel('Level', { exact: true })).toHaveValue('3');
     await expect(panel.getByLabel('Parquet compression for amount')).toHaveValue('uncompressed');
     await expect(panel.getByLabel('Parquet compression for key')).toHaveValue('');
 
-    await panel.getByLabel('Collection default').selectOption('gzip');
+    await panel.getByLabel('Collection compression').selectOption('gzip');
     await panel.getByLabel('Level', { exact: true }).fill('10');
     await panel.getByRole('button', { name: 'Save write settings' }).click();
     // Capability ranges reach the input, so the browser blocks the submission.
@@ -231,11 +258,109 @@ test('advertised settings create canonically, save by compare-and-set and reload
     // Another client changes the settings; this form still shows version 2.
     stored.version = '3';
     stored.settings = { parquet: { compression: null, columns: [] } };
-    await panel.getByLabel('Collection default').selectOption('snappy');
+    await panel.getByLabel('Collection compression').selectOption('snappy');
     await panel.getByRole('button', { name: 'Save write settings' }).click();
     await expect(panel.getByRole('alert')).toContainText('Reloaded version 3');
     await expect(panel).toContainText('Version 3');
-    await expect(panel.getByLabel('Collection default')).toHaveValue('');
+    await expect(panel.getByLabel('Collection compression')).toHaveValue('');
     expect(posts[2].expected_version).toBe('2');
     expect(stored.version).toBe('3');
+});
+
+test('dictionary and encoding choices follow column types and lock incompatible policies', async ({
+    page,
+}, info) => {
+    const { posts } = await advertise(page, PARQUET_ENCODINGS);
+    await connect(page);
+    await page.getByRole('button', { name: 'New collection', exact: true }).first().click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel('Collection name').fill(`encoded_${Date.now()}`);
+    await expect(dialog.locator('input[name="parquet-page-limit"]')).toHaveAttribute(
+        'max',
+        '8388608',
+    );
+    // amount (int64) offers only encodings that accept int64.
+    const amountEncoding = dialog.getByLabel('Encoding for column 3');
+    const amountDictionary = dialog.getByLabel('Dictionary policy for column 3');
+    expect(await amountEncoding.locator('option').allTextContents()).toEqual([
+        'Default encoding',
+        'plain',
+        'delta_binary_packed',
+        'byte_stream_split',
+    ]);
+    // Choosing an encoding locks the column dictionary and clears "enabled".
+    await amountDictionary.selectOption('enabled');
+    await amountEncoding.selectOption('delta_binary_packed');
+    await expect(amountDictionary).toBeDisabled();
+    await expect(amountDictionary).toHaveValue('');
+    await amountEncoding.selectOption('');
+    await expect(amountDictionary).toBeEnabled();
+    await amountEncoding.selectOption('delta_binary_packed');
+    // A bool column offers rle and no "enabled" dictionary.
+    await dialog.getByLabel('Column type 2').selectOption('bool');
+    expect(
+        await dialog.getByLabel('Encoding for column 2').locator('option').allTextContents(),
+    ).toEqual(['Default encoding', 'plain', 'rle']);
+    expect(
+        await dialog
+            .getByLabel('Dictionary policy for column 2')
+            .locator('option')
+            .allTextContents(),
+    ).toEqual(['Default dictionary', 'auto', 'disabled']);
+    await dialog.locator('select[name="parquet-dictionary"]').selectOption('enabled');
+    await dialog.locator('input[name="parquet-page-limit"]').fill('65536');
+    await dialog.getByRole('button', { name: 'Create collection', exact: true }).click();
+    await expect(dialog.getByRole('alert')).toContainText(
+        'needs a dictionary policy or encoding for bool column label',
+    );
+    expect(posts).toHaveLength(0);
+    await dialog.getByLabel('Encoding for column 2').selectOption('rle');
+    await page.screenshot({ path: info.outputPath('parquet-encodings-create-desktop.png') });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await dialog.getByLabel('Encoding for column 3').scrollIntoViewIfNeeded();
+    await expect(dialog.getByLabel('Encoding for column 3')).toBeInViewport();
+    await page.screenshot({ path: info.outputPath('parquet-encodings-create-mobile.png') });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await dialog.getByRole('button', { name: 'Create collection', exact: true }).click();
+    await expect(dialog).not.toBeVisible();
+    expect(posts[0].write_settings).toEqual({
+        parquet: {
+            dictionary: 'enabled',
+            dictionary_page_size_limit: '65536',
+            columns: [
+                { field: 'label', encoding: 'rle' },
+                { field: 'amount', encoding: 'delta_binary_packed' },
+            ],
+        },
+    });
+
+    await nav(page, 'Schema');
+    const panel = page.locator('.write-settings-panel');
+    await expect(panel).toContainText('Version 1');
+    await expect(panel.locator('select[name="parquet-dictionary"]')).toHaveValue('enabled');
+    await expect(panel.locator('input[name="parquet-page-limit"]')).toHaveValue('65536');
+    await expect(panel.getByLabel('Encoding for amount')).toHaveValue('delta_binary_packed');
+    await expect(panel.getByLabel('Dictionary policy for amount')).toBeDisabled();
+    await expect(panel.locator('tr', { hasText: 'key' }).first()).toContainText(
+        'dictionary, plain fallback',
+    );
+    await expect(panel.locator('tr', { hasText: 'amount' })).toContainText('delta_binary_packed');
+    await page.screenshot({ path: info.outputPath('parquet-encodings-panel.png'), fullPage: true });
+    await panel.getByLabel('Encoding for amount').selectOption('');
+    await panel.getByLabel('Dictionary policy for amount').selectOption('disabled');
+    await panel.getByRole('button', { name: 'Save write settings' }).click();
+    await expect(panel).toContainText('Version 2');
+    expect(posts[1]).toEqual({
+        expected_version: '1',
+        write_settings: {
+            parquet: {
+                dictionary: 'enabled',
+                dictionary_page_size_limit: '65536',
+                columns: [
+                    { field: 'label', encoding: 'rle' },
+                    { field: 'amount', dictionary: 'disabled' },
+                ],
+            },
+        },
+    });
 });

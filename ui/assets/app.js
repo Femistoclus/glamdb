@@ -29,6 +29,10 @@ import {
     describeCompression,
     verifyCreatedCollection,
     creationFingerprint,
+    columnParquetOptions,
+    reconcileColumnDictionary,
+    describeColumnEffect,
+    wireWriteSettings,
 } from './model.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -76,11 +80,19 @@ const number = (value) =>
 const fields = () => state.schema?.fields ?? [];
 const json = (value) => e(JSON.stringify(value, null, 2));
 const badge = (text, kind = '') => `<span class="pill ${kind}">${e(text)}</span>`;
-// Parquet value compression controls appear only when the server advertises them.
+// Parquet write settings controls appear only when the server advertises them.
 const parquetSettings = () => parquetCapabilities(state.capabilities);
 const defaultCodecLabel = (parquet) => describeCompression(null, parquet);
+const dictionaryLocked = 'An explicit encoding turns this column’s dictionary off';
 function codecOptions(parquet, selected, emptyLabel) {
-    return `<option value="" ${selected ? '' : 'selected'}>${e(emptyLabel)}</option>${parquet.codecs.map(({ codec }) => `<option value="${e(codec)}" ${selected === codec ? 'selected' : ''}>${e(codec)}</option>`).join('')}`;
+    return choiceOptions(
+        parquet.codecs.map(({ codec }) => codec),
+        selected,
+        emptyLabel,
+    );
+}
+function choiceOptions(values, selected, emptyLabel) {
+    return `<option value="" ${selected ? '' : 'selected'}>${e(emptyLabel)}</option>${values.map((value) => `<option value="${e(value)}" ${selected === value ? 'selected' : ''}>${e(value)}</option>`).join('')}`;
 }
 function levelAttributes(parquet, codec, level = null) {
     const range = parquet.codecs.find((item) => item.codec === codec)?.level;
@@ -88,28 +100,101 @@ function levelAttributes(parquet, codec, level = null) {
         ? `min="${range.min}" max="${range.max}" placeholder="default ${range.default}" title="Level ${range.min}–${range.max}; empty uses the codec default" value="${e(level ?? '')}"`
         : 'disabled placeholder="—" value=""';
 }
-function syncParquetLevel(select) {
-    const input = select.closest('[data-parquet-choice]')?.querySelector('[data-parquet-level]');
+// Collection codec/level plus, where the server supports them, the dictionary
+// policy and dictionary page size limit. `codecLabel` names the codec select.
+function collectionParquetControls(parquet, settings, codecLabel) {
+    const compression = settings?.compression ?? null;
+    const dictionary = parquet.dictionary;
+    return `<div class="parquet-choice-grid" data-parquet-choice data-parquet-default><div class="field-row"><label class="field">${e(codecLabel)}<select name="parquet-codec" data-parquet-codec>${codecOptions(parquet, compression?.codec, defaultCodecLabel(parquet))}</select></label><label class="field">Level<input name="parquet-level" type="number" step="1" inputmode="numeric" data-parquet-level ${levelAttributes(parquet, compression?.codec, compression?.level)}></label></div>${
+        dictionary
+            ? `<div class="field-row"><label class="field">Dictionary policy<select name="parquet-dictionary" data-parquet-dictionary>${choiceOptions(dictionary.policies, settings?.dictionary ?? '', `Server default (${dictionary.default_policy ?? 'auto'})`)}</select></label><label class="field">Dictionary page size limit (bytes)<input name="parquet-page-limit" type="number" step="1" inputmode="numeric" data-parquet-page-limit min="${dictionary.page_size_limit.min}" max="${dictionary.page_size_limit.max}" placeholder="default ${dictionary.page_size_limit.default}" title="${dictionary.page_size_limit.min}–${dictionary.page_size_limit.max} bytes; empty uses the server default" value="${e(settings?.dictionary_page_size_limit ?? '')}"></label></div>`
+            : ''
+    }</div>`;
+}
+// Per-column dictionary and encoding selects, filtered by the column type.
+// Choosing an encoding locks the dictionary select: the server turns that
+// column's dictionary off, so an incompatible policy is cleared.
+function columnDictionarySelect(parquet, type, column, label) {
+    if (!parquet.dictionary) return '';
+    const options = columnParquetOptions(parquet, type);
+    const encoding = options.encodings.includes(column.encoding) ? column.encoding : '';
+    const dictionary = reconcileColumnDictionary(
+        parquet,
+        type,
+        encoding,
+        options.dictionaries.includes(column.dictionary) ? column.dictionary : '',
+    );
+    return `<select data-parquet-dictionary aria-label="Dictionary policy for ${e(label)}" ${encoding ? `disabled title="${e(dictionaryLocked)}"` : ''}>${choiceOptions(options.dictionaries, dictionary, 'Default dictionary')}</select>`;
+}
+function columnEncodingSelect(parquet, type, column, label) {
+    if (!parquet.encodings.length) return '';
+    const options = columnParquetOptions(parquet, type);
+    const encoding = options.encodings.includes(column.encoding) ? column.encoding : '';
+    return `<select data-parquet-encoding aria-label="Encoding for ${e(label)}">${choiceOptions(options.encodings, encoding, 'Default encoding')}</select>`;
+}
+const columnType = (container) =>
+    container.querySelector('[name=field-type]')?.value ?? container.dataset.parquetType;
+function syncParquetChoice(container) {
     const parquet = parquetSettings();
-    if (!input || !parquet) return;
-    const range = parquet.codecs.find((item) => item.codec === select.value)?.level;
-    input.disabled = !range;
-    if (range) {
-        input.min = String(range.min);
-        input.max = String(range.max);
-        input.placeholder = `default ${range.default}`;
-        input.title = `Level ${range.min}–${range.max}; empty uses the codec default`;
-    } else {
-        input.value = '';
-        input.placeholder = '—';
-        input.removeAttribute('title');
+    if (!container || !parquet) return;
+    const codec = container.querySelector('[data-parquet-codec]');
+    const input = container.querySelector('[data-parquet-level]');
+    if (codec && input) {
+        const range = parquet.codecs.find((item) => item.codec === codec.value)?.level;
+        input.disabled = !range;
+        if (range) {
+            input.min = String(range.min);
+            input.max = String(range.max);
+            input.placeholder = `default ${range.default}`;
+            input.title = `Level ${range.min}–${range.max}; empty uses the codec default`;
+        } else {
+            input.value = '';
+            input.placeholder = '—';
+            input.removeAttribute('title');
+        }
     }
+    const encoding = container.querySelector('[data-parquet-encoding]');
+    const dictionary = container.querySelector('[data-parquet-dictionary]');
+    if (encoding && dictionary && !container.hasAttribute('data-parquet-default')) {
+        dictionary.value = reconcileColumnDictionary(
+            parquet,
+            columnType(container),
+            encoding.value,
+            dictionary.value,
+        );
+        dictionary.disabled = Boolean(encoding.value);
+        if (encoding.value) dictionary.title = dictionaryLocked;
+        else dictionary.removeAttribute('title');
+    }
+}
+// A changed column type changes the valid encodings and dictionary policies.
+function refreshColumnOptions(row) {
+    const parquet = parquetSettings();
+    if (!parquet) return;
+    const options = columnParquetOptions(parquet, columnType(row));
+    for (const [selector, values, label] of [
+        ['[data-parquet-encoding]', options.encodings, 'Default encoding'],
+        ['[data-parquet-dictionary]', options.dictionaries, 'Default dictionary'],
+    ]) {
+        const select = row.querySelector(selector);
+        if (select)
+            select.innerHTML = choiceOptions(
+                values,
+                values.includes(select.value) ? select.value : '',
+                label,
+            );
+    }
+    syncParquetChoice(row);
 }
 function readParquetChoice(container) {
     const level = container?.querySelector('[data-parquet-level]');
+    const value = (selector) => container?.querySelector(selector)?.value ?? '';
     return {
-        codec: container?.querySelector('[data-parquet-codec]')?.value ?? '',
+        codec: value('[data-parquet-codec]'),
         level: level && !level.disabled ? level.value : '',
+        dictionary: value('[data-parquet-dictionary]'),
+        encoding: value('[data-parquet-encoding]'),
+        pageSizeLimit: value('[data-parquet-page-limit]'),
     };
 }
 
@@ -598,18 +683,17 @@ function writeSettingsPanel() {
         // Saving would drop options this workbench cannot represent; show them read-only.
         return `<section class="panel write-settings-panel"><div class="panel-header"><h2>Parquet write settings</h2></div><div class="panel-body"><p class="notice">${e(error.message)}. Editing is disabled here; use a client that supports these settings.</p><pre class="json-block">${json(state.collection.write_settings ?? null)}</pre></div></section>`;
     }
-    const collection = current.parquet.compression;
-    const overrides = new Map(
-        current.parquet.columns.map((item) => [item.field, item.compression]),
-    );
-    return `<section class="panel write-settings-panel"><div class="panel-header"><div><h2>Parquet write settings</h2><p>Value compression of data files written by later appends. Existing files keep their codecs. This is not HTTP compression.</p></div>${badge(`Version ${version}`, 'pink')}</div><div class="panel-body"><form id="write-settings-form" data-collection="${e(state.collectionId)}" data-version="${e(version)}"><div class="field-row" data-parquet-choice data-parquet-default><label class="field">Collection default<select name="parquet-codec" data-parquet-codec>${codecOptions(parquet, collection?.codec, defaultCodecLabel(parquet))}</select></label><label class="field">Level<input name="parquet-level" type="number" step="1" inputmode="numeric" data-parquet-level ${levelAttributes(parquet, collection?.codec, collection?.level)}></label></div><div class="table-wrap"><table class="write-settings-table" aria-label="Parquet column overrides"><thead><tr><th>Column</th><th>Override</th><th>Level</th><th>In effect</th></tr></thead><tbody>${fields()
+    const overrides = new Map(current.parquet.columns.map((item) => [item.field, item]));
+    const dictionary = Boolean(parquet.dictionary),
+        encodings = parquet.encodings.length > 0;
+    return `<section class="panel write-settings-panel"><div class="panel-header"><div><h2>Parquet write settings</h2><p>Compression, dictionary and value encodings of data files written by later appends. Existing files keep theirs. This is not HTTP compression.</p></div>${badge(`Version ${version}`, 'pink')}</div><div class="panel-body"><form id="write-settings-form" data-collection="${e(state.collectionId)}" data-version="${e(version)}">${collectionParquetControls(parquet, current.parquet, 'Collection compression')}<div class="table-wrap"><table class="write-settings-table" aria-label="Parquet column overrides"><thead><tr><th>Column</th><th>Codec</th><th>Level</th>${dictionary ? '<th>Dictionary</th>' : ''}${encodings ? '<th>Encoding</th>' : ''}<th>In effect</th></tr></thead><tbody>${fields()
         .map((field) => {
-            const override = overrides.get(field.name);
-            return `<tr data-parquet-choice data-parquet-field="${e(field.name)}"><td><strong>${e(field.name)}</strong></td><td><select data-parquet-codec aria-label="Parquet compression for ${e(field.name)}">${codecOptions(parquet, override?.codec, 'Collection default')}</select></td><td><input type="number" step="1" inputmode="numeric" data-parquet-level aria-label="Parquet level for ${e(field.name)}" ${levelAttributes(parquet, override?.codec, override?.level)}></td><td>${e(describeCompression(override ?? collection, parquet))}</td></tr>`;
+            const override = overrides.get(field.name) ?? {};
+            return `<tr data-parquet-choice data-parquet-field="${e(field.name)}" data-parquet-type="${e(field.type)}"><td><strong>${e(field.name)}</strong><p class="small muted">${e(field.type)}</p></td><td><select data-parquet-codec aria-label="Parquet compression for ${e(field.name)}">${codecOptions(parquet, override.compression?.codec, 'Collection default')}</select></td><td><input type="number" step="1" inputmode="numeric" data-parquet-level aria-label="Parquet level for ${e(field.name)}" ${levelAttributes(parquet, override.compression?.codec, override.compression?.level)}></td>${dictionary ? `<td>${columnDictionarySelect(parquet, field.type, override, field.name)}</td>` : ''}${encodings ? `<td>${columnEncodingSelect(parquet, field.type, override, field.name)}</td>` : ''}<td>${e(describeColumnEffect(field.type, overrides.get(field.name), current, parquet))}</td></tr>`;
         })
         .join(
             '',
-        )}</tbody></table></div><p class="modal-error" id="write-settings-error" role="alert"></p><div class="button-row"><button class="button primary" type="submit">Save write settings</button></div><details class="raw-metadata"><summary class="small">Current canonical settings</summary><pre class="json-block">${json(current)}</pre></details></form></div></section>`;
+        )}</tbody></table></div><p class="small muted">An explicit encoding turns that column’s dictionary off. A dictionary larger than its page size limit falls back to ${e(parquet.dictionary?.fallback_encoding ?? 'plain')} pages.</p><p class="modal-error" id="write-settings-error" role="alert"></p><div class="button-row"><button class="button primary" type="submit">Save write settings</button></div><details class="raw-metadata"><summary class="small">Current canonical settings</summary><pre class="json-block">${json(current)}</pre></details></form></div></section>`;
 }
 function snapshotsView() {
     const observed = !supportsFeature(state.capabilities, 'snapshots');
@@ -947,10 +1031,11 @@ let creationFields = [];
 function renderCreationFields() {
     const parquet = parquetSettings();
     $('#schema-editor').innerHTML = creationFields
-        .map(
-            (field, i) =>
-                `<div class="schema-editor-row${parquet ? ' with-parquet' : ''}" ${parquet ? 'data-parquet-choice' : ''}><input name="field-name" value="${e(field.name)}" aria-label="Column name ${i + 1}" required><select name="field-type" aria-label="Column type ${i + 1}">${['string', 'int64', 'float64', 'bool', 'timestamp_us_utc'].map((type) => `<option ${field.type === type ? 'selected' : ''}>${type}</option>`).join('')}</select><label><input name="field-nullable" type="checkbox" ${field.nullable ? 'checked' : ''}>NULL</label>${parquet ? `<select name="field-codec" data-parquet-codec aria-label="Parquet compression for column ${i + 1}">${codecOptions(parquet, field.codec, 'Collection default')}</select><input name="field-level" type="number" step="1" inputmode="numeric" data-parquet-level aria-label="Parquet level for column ${i + 1}" ${levelAttributes(parquet, field.codec, field.level)}>` : ''}<button class="icon-button" type="button" data-action="remove-field" data-index="${i}" aria-label="Remove field ${i + 1}">${icon('close')}</button></div>`,
-        )
+        .map((field, i) => {
+            const label = `column ${i + 1}`;
+            const type = field.type ?? 'string';
+            return `<div class="schema-editor-row${parquet ? ' with-parquet' : ''}" ${parquet ? 'data-parquet-choice' : ''}><input name="field-name" value="${e(field.name)}" aria-label="Column name ${i + 1}" required><select name="field-type" aria-label="Column type ${i + 1}">${['string', 'int64', 'float64', 'bool', 'timestamp_us_utc'].map((option) => `<option ${type === option ? 'selected' : ''}>${option}</option>`).join('')}</select><label><input name="field-nullable" type="checkbox" ${field.nullable ? 'checked' : ''}>NULL</label>${parquet ? `<div class="column-parquet"><select name="field-codec" data-parquet-codec aria-label="Parquet compression for ${label}">${codecOptions(parquet, field.codec, 'Default codec')}</select><input name="field-level" type="number" step="1" inputmode="numeric" data-parquet-level aria-label="Parquet level for ${label}" ${levelAttributes(parquet, field.codec, field.level)}>${columnDictionarySelect(parquet, type, field, label)}${columnEncodingSelect(parquet, type, field, label)}</div>` : ''}<button class="icon-button" type="button" data-action="remove-field" data-index="${i}" aria-label="Remove field ${i + 1}">${icon('close')}</button></div>`;
+        })
         .join('');
 }
 function readCreationFields() {
@@ -961,7 +1046,7 @@ function readCreationFields() {
         ...readParquetChoice(row),
     }));
 }
-// Returns canonical settings, or null when no Parquet compression was chosen.
+// Returns canonical settings, or null when no Parquet option was chosen.
 function creationWriteSettings(form, rows, schema) {
     const parquet = parquetSettings(),
         choice = form.querySelector('[data-parquet-default]');
@@ -969,29 +1054,50 @@ function creationWriteSettings(form, rows, schema) {
     const settings = writeSettingsFromChoices(
         parquet,
         readParquetChoice(choice),
-        rows.map((row) => ({ field: row.name, codec: row.codec, level: row.level })),
+        rows.map((row) => ({
+            field: row.name,
+            type: row.type,
+            codec: row.codec,
+            level: row.level,
+            dictionary: row.dictionary,
+            encoding: row.encoding,
+        })),
     );
     return settings && canonicalWriteSettings(settings, schema);
 }
 function creationParquetControls(parquet, settings) {
-    const compression = settings?.parquet?.compression ?? null;
     if (!parquet)
         return settings
             ? `<p class="notice">Parquet write settings of this request: <code>${e(JSON.stringify(settings))}</code></p>`
             : '';
-    return `<div class="parquet-settings"><div class="field-row" data-parquet-choice data-parquet-default><label class="field">Parquet compression<select name="parquet-codec" data-parquet-codec>${codecOptions(parquet, compression?.codec, defaultCodecLabel(parquet))}</select></label><label class="field">Level<input name="parquet-level" type="number" step="1" inputmode="numeric" data-parquet-level ${levelAttributes(parquet, compression?.codec, compression?.level)}></label></div><small>Value compression of Parquet data files written by appends (not HTTP compression). Columns can override it below.</small></div>`;
+    const canonical = settings ? canonicalWriteSettings(settings).parquet : null;
+    const options = [
+        'codec',
+        parquet.dictionary && 'dictionary policy',
+        parquet.encodings.length && 'value encoding',
+    ].filter(Boolean);
+    const list =
+        options.length > 1
+            ? `${options.slice(0, -1).join(', ')} and ${options.at(-1)}`
+            : options[0];
+    return `<div class="parquet-settings">${collectionParquetControls(parquet, canonical, 'Parquet compression')}<small>Parquet data files written by appends (not HTTP compression). Each column below can override the ${e(list)}${parquet.encodings.length ? '; an explicit encoding turns that column’s dictionary off' : ''}.</small></div>`;
 }
 function openCreate() {
     const frozenSettings = state.creation?.body.write_settings;
     const overrides = new Map(
-        (frozenSettings?.parquet?.columns ?? []).map((item) => [item.field, item.compression]),
+        (frozenSettings?.parquet?.columns ?? []).map((item) => [item.field, item]),
     );
     creationFields = state.creation
-        ? structuredClone(state.creation.body.schema.fields).map((field) => ({
-              ...field,
-              codec: overrides.get(field.name)?.codec ?? '',
-              level: overrides.get(field.name)?.level ?? '',
-          }))
+        ? structuredClone(state.creation.body.schema.fields).map((field) => {
+              const own = overrides.get(field.name);
+              return {
+                  ...field,
+                  codec: own?.compression?.codec ?? '',
+                  level: own?.compression?.level ?? '',
+                  dictionary: own?.dictionary ?? '',
+                  encoding: own?.encoding ?? '',
+              };
+          })
         : [
               { name: 'key', type: 'string', nullable: false },
               { name: 'label', type: 'string', nullable: false },
@@ -1022,7 +1128,7 @@ function releaseCreationForm(form) {
         'select,input[type=checkbox],button[data-action="add-field"],button[data-action="remove-field"]',
     ))
         input.disabled = false;
-    form.querySelectorAll('[data-parquet-codec]').forEach(syncParquetLevel);
+    form.querySelectorAll('[data-parquet-choice]').forEach(syncParquetChoice);
     form.querySelector('[data-action="export-pending"]')?.remove();
 }
 function verifyCreated(created, body, options) {
@@ -1046,7 +1152,7 @@ async function createForm(form) {
                 collection_id: crypto.randomUUID(),
                 name: form.elements.name.value,
                 schema,
-                ...(writeSettings ? { write_settings: writeSettings } : {}),
+                ...(writeSettings ? { write_settings: wireWriteSettings(writeSettings) } : {}),
             };
             draft = { fingerprint: creationFingerprint(body), body, scope: recoveryScope() };
         }
@@ -1162,6 +1268,7 @@ async function saveWriteSettings(form) {
                 readParquetChoice(form.querySelector('[data-parquet-default]')),
                 [...form.querySelectorAll('tr[data-parquet-field]')].map((row) => ({
                     field: row.dataset.parquetField,
+                    type: row.dataset.parquetType,
                     ...readParquetChoice(row),
                 })),
             ),
@@ -1176,7 +1283,7 @@ async function saveWriteSettings(form) {
         try {
             updated = await api.json(`/collections/${encodeURIComponent(id)}/write-settings`, {
                 method: 'POST',
-                body: { expected_version: version, write_settings: settings },
+                body: { expected_version: version, write_settings: wireWriteSettings(settings) },
             });
         } catch (error) {
             if (!current()) return;
@@ -1828,7 +1935,10 @@ document.addEventListener('change', async (event) => {
                 state.collectionId,
                 target.value === 'latest' ? null : target.value,
             );
-        else if (target.matches('[data-parquet-codec]')) syncParquetLevel(target);
+        else if (target.matches('[data-parquet-codec], [data-parquet-encoding]'))
+            syncParquetChoice(target.closest('[data-parquet-choice]'));
+        else if (target.matches('#schema-editor [name=field-type]'))
+            refreshColumnOptions(target.closest('.schema-editor-row'));
         else if (target.dataset.themeColor) {
             state.theme = structuredClone(state.theme);
             state.theme.colors[target.dataset.themeColor] = target.value;
