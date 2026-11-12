@@ -7,17 +7,20 @@
 namespace glamdb {
 namespace {
 
-constexpr TStorageContractVersion CurrentVersion{1, 0};
+constexpr TStorageContractVersion CurrentVersion{1, 1};
 
 void AddOperations(TStorageContract& contract, std::initializer_list<EStorageOperation> operations)
 {
     contract.Operations.insert(contract.Operations.end(), operations.begin(), operations.end());
 }
 
-TStorageContract DescribeContract(CollectionMode mode, const EngineCapabilities& capabilities, const Limits& limits)
+TStorageContract DescribeContract(TStorageContractVersion version,
+    CollectionMode mode,
+    const EngineCapabilities& capabilities,
+    const Limits& limits)
 {
     TStorageContract contract;
-    contract.Version = CurrentVersion;
+    contract.Version = version;
     contract.Mode = mode;
     contract.EffectiveLimits = {.Engine = limits,
         .SchemaFields = static_cast<int64_t>(MaxSchemaFields),
@@ -48,6 +51,17 @@ TStorageContract DescribeContract(CollectionMode mode, const EngineCapabilities&
     if (supportedMode && capabilities.scan) {
         AddOperations(contract, {EStorageOperation::Scan, EStorageOperation::ExplainScan});
         contract.Features.push_back(EStorageFeature::FixedSnapshotScan);
+        if (native && version >= TStorageContractVersion{1, 1}) {
+            AddOperations(contract,
+                {EStorageOperation::AcquireReadView,
+                    EStorageOperation::ReadViewInfo,
+                    EStorageOperation::ScanReadView,
+                    EStorageOperation::RenewReadView,
+                    EStorageOperation::ReleaseReadView,
+                    EStorageOperation::CancelReadView});
+            contract.Features.push_back(EStorageFeature::IndependentReadView);
+            contract.EffectiveLimits.ReadViews = TReadViewLimits{};
+        }
         if (mode == CollectionMode::KeyValue) {
             contract.Operations.push_back(EStorageOperation::Lookup);
         }
@@ -109,10 +123,11 @@ Result<TStorageContract> NegotiateStorageContract(const TStorageContractRequest&
     {
         return std::unexpected(ErrorDetail{"INVALID_ARGUMENT", "invalid contract version range or collection mode"});
     }
-    if (request.MinVersion > CurrentVersion || request.MaxVersion < CurrentVersion) {
+    const auto version = std::min(request.MaxVersion, CurrentVersion);
+    if (request.MinVersion > version || version < TStorageContractVersion{1, 0}) {
         return std::unexpected(ErrorDetail{"UNSUPPORTED_CONTRACT_VERSION", "no supported contract version in range"});
     }
-    auto contract = DescribeContract(request.Mode, capabilities, limits);
+    auto contract = DescribeContract(version, request.Mode, capabilities, limits);
     for (const auto operation : request.RequiredOperations) {
         if (!contract.HasOperation(operation)) {
             return std::unexpected(ErrorDetail{"UNSUPPORTED_OPERATION",

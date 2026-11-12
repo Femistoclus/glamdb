@@ -1,6 +1,6 @@
 # Compute-facing native storage contract
 
-The installed `storage/contract.h` defines native semantic contract **1.0**.
+The installed `storage/contract.h` defines native semantic contracts **1.0** and **1.1**.
 `Engine::NegotiateStorageContract(request)` describes supported operations for an
 intended collection mode and returns the engine's effective limits. It is a
 convenience over the pure `glamdb::NegotiateStorageContract(request,
@@ -44,7 +44,10 @@ auto contract = engine.NegotiateStorageContract(request);
 
 Versions are `(Major, Minor)` pairs ordered lexicographically. The request range
 is inclusive and negotiation selects the highest implemented version in it.
-Only 1.0 is implemented; a range spanning several majors can still select 1.0.
+Versions 1.0 and 1.1 are implemented; a range spanning several majors selects
+1.1. The default request range remains [1.0, 1.0], preserving existing negotiation
+and feature results. New view consumers must include 1.1 and require
+`IndependentReadView`; a 1.0-only request with that requirement fails.
 A new major denotes incompatible semantics; a minor may add optional capabilities
 without changing existing behavior. Callers must require every operation/feature
 they depend on and inspect the returned version. Unknown optional discoveries
@@ -95,6 +98,9 @@ operations are conservatively withheld from custom backends.
 | `FileDetails` | `GetFileDetails` | Yes | Yes |
 | `ExplainScan` | `ExplainScan` | Yes | Yes |
 | `Scan` | `Scan`, then `ScanCursor::Info`, `Next`, `Cancel`, `Profile` | Yes | Yes |
+| `AcquireReadView` / `ReadViewInfo` | `AcquireReadView` / `GetReadViewInfo` (1.1, native only) | Yes | Yes |
+| `ScanReadView` | `ScanReadView` by captured entry index (1.1, native only) | Yes | Yes |
+| `RenewReadView` / `ReleaseReadView` / `CancelReadView` | Corresponding Engine methods (1.1, native only) | Yes | Yes |
 | `Append` | `AppendDurable` | Yes | No |
 | `BulkAppend` | `BulkAppendDurable` | Yes | No |
 | `Upsert` / `Delete` | `UpsertDurable` / `DeleteDurable` | No | Yes |
@@ -163,7 +169,18 @@ cancellation and must not share cursors across principals. Existing metadata
 page tokens are bounded, engine-instance-specific, parameter-bound and bound to
 the supplied `AuthorizationContext`; they expire after five minutes and fail
 across restart. See [metadata](METADATA.md) and [shared resources](SHARED_RESOURCES.md).
-No new handles or resource owners are introduced by negotiation.
+Negotiation itself introduces no handles or resource owners.
+
+Contract 1.1 adds native `IndependentReadView`: `AcquireReadView` atomically
+captures an ordered vector of collection identities/schemas and resolved snapshots
+under one owning engine's state mutex. Repeated/delayed `ScanReadView` calls reuse
+those verified states and root leases across publication, retention and compaction.
+`InitialEmpty`, historical, no-data and zero-limit views retain real identities.
+The vector is a coherent per-store cut, not atomic multi-table writes or a
+cross-store timestamp. See [read views](READ_VIEWS.md) for public signatures,
+trusted authorization scopes, fixed quotas, bounded expiry/renewal, release and
+cancellation, independent Arrow buffer lifetime and distinct restart errors.
+Remote views and split execution remain unimplemented.
 
 ## Writes, publication and outcomes
 
@@ -202,6 +219,10 @@ keys. `AppendRows` and `AppendDecodedBytes` constrain ordinary `AppendDurable`
 and `UpsertDurable` input before KV duplicate resolution. They remain applicable
 in KV mode when `Upsert` is advertised, even though `Append` is not advertised.
 Other operation ceilings apply when their corresponding operation is advertised.
+`EffectiveLimits.ReadViews` is present only with the 1.1 native read-view feature:
+32 active views per engine, 8 per authorization scope, 64 entries per view,
+256 total entries, 256 scope bytes and five minutes maximum absolute lifetime.
+Shared reservations can refuse admission before those ceilings.
 Bulk sources still obey their per-batch 10,000-row/16 MiB bounds, per-file limits
 and replay/lifetime rules in `BulkAppendLimits` and the bulk guide. These limits
 are not wire-body limits and do not promise that every combination fits shared
@@ -218,7 +239,9 @@ The following `EStorageFeature` values are reserved descriptions of future
 capabilities and are **never advertised by 1.0**: `IndependentReadView`,
 `ScanSplits`, `StagedWrites`, `StableCAbi`, `ArrowFlight`, `RemoteDescriptors`,
 `Overwrite`, `Merge`, `SqlMutations`, `SchemaEvolution` and
-`CrossCollectionTransactions`. Requiring any of them fails explicitly. Native
+`CrossCollectionTransactions`. Version 1.1 advertises only `IndependentReadView`
+from this list, only for the local scanner. Requiring any other listed feature
+fails explicitly in either version. Native
 scan cursors and bulk sources do not imply support for these protocols.
 
 ## Executable evidence

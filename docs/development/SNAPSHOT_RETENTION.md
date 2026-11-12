@@ -212,3 +212,14 @@ metadata planner can delay reclamation for its collection. Compaction or a
 separately designed orphan collector could address those different growth
 sources. A future cleanup worker could batch directory fences and queue
 acknowledgments, but must retain publication authority and planner protection.
+
+## Pinned query views
+
+A native [read view](READ_VIEWS.md) acquired before maintenance retains the
+verified generation and a root reader for each captured entry. Its first scan
+can be planned after expiration and still select the captured history. Expired
+snapshot IDs remain unavailable to new acquisitions. Root retirement and pending
+metadata cleanup wait for these pins just as for existing planners; view
+expiration is swept on writer cleanup. Explicit release, cancellation, final
+handle destruction and shutdown release the pins. Physical unlink remains on
+the writer, and current data files remain retained by the existing profile.

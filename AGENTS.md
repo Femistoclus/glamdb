@@ -26,8 +26,11 @@ recovery coordinator, canonical Arrow input, public C++ facade, outcome JSON,
 and network CLI. The installed [native storage contract](docs/development/STORAGE_CONTRACT.md)
 adds pure version/feature negotiation and an Engine convenience method, with
 operation support by append/KV mode and effective limits. Discovery is separate
-from readiness; independent read views, splits, staged sessions, stable C ABI and
-Flight are explicitly unsupported. Keep publication on the existing Engine path.
+from readiness. Contract 1.1 adds bounded, scope-bound native pinned read views
+with a coherent per-store snapshot vector; default 1.0 negotiation stays compatible.
+Read [read views](docs/development/READ_VIEWS.md) for TTL, quotas, release semantics
+and the private planning bridge. Splits, staged sessions, remote read views,
+stable C ABI and Flight are explicitly unsupported. Keep publication on the existing Engine path.
 Independent durable I/O and Arrow/Parquet/Iceberg
 storage primitives provide file production, staging, publication validation,
 recovery verification, and capacity checks. `core/backend/` connects them to the
@@ -217,7 +220,8 @@ It lazily introduces catalog version 3, preserves all receipts and current data,
 and resumes bounded metadata cleanup after recovery. Cleanup reclaims manifest
 lists and merged inputs only after their last retained reference disappears;
 checkpoint recovery verifies original file provenance and receipt totals.
-Already planned cursors keep their fixed data view; new expired reads/preconditions
+Already planned cursors and acquired native read views keep their fixed data view;
+new expired reads/preconditions
 report `SNAPSHOT_EXPIRED`. Default history remains unchanged. Retention preserves
 configured history budgets and pages expiration inventories beyond 8192 entries;
 transport maintenance endpoints are not provided.
@@ -297,6 +301,12 @@ Preserve these boundaries when adding or changing engine behavior:
 - **Snapshot reads.** Resolve the selected view once and enumerate its files
   through verified Iceberg membership. Native scans pin the index with the
   confirmed view; publication/recovery build it with strict closure validation.
+  Query read-view acquisition captures every entry and takes root readers under
+  the same state mutex. Delayed scans must reuse original verified-state aliasing
+  ownership and resolved selectors. Never re-resolve Latest or remove a pinned
+  root during retention/compaction. The registry shares the state mutex; its weak
+  destruction callbacks must run outside that lock. Facade destruction clears
+  pins without cancelling already admitted cursors; shutdown cancels cursors.
   Snapshot prefixes require the append-only profile; see
   [the index contract and benchmark](docs/development/SCAN_INDEX.md).
   Read neither uncommitted nor orphan files by

@@ -3,6 +3,7 @@
 #include "storage/contract.h"
 #include "storage/kv.h"
 #include "storage/metadata.h"
+#include "storage/read_view.h"
 #include "storage/scan.h"
 #include "storage/types.h"
 
@@ -91,6 +92,19 @@ public:
         std::string_view operation_id) const;
     // Reads one fixed view. The cursor retains the store until it is released.
     Result<std::shared_ptr<ScanCursor>> Scan(const ScanRequest& request) const;
+    // Coherent ordered snapshot vector within this engine. Native local backend only.
+    Result<std::shared_ptr<TReadView>> AcquireReadView(const TReadViewRequest& request) const;
+    Result<std::shared_ptr<const TReadViewInfo>> GetReadViewInfo(const TReadView& view,
+        std::string_view authorizationScope) const;
+    Result<std::shared_ptr<ScanCursor>> ScanReadView(const TReadView& view,
+        size_t entry,
+        const TReadViewScanRequest& request,
+        std::string_view authorizationScope) const;
+    // Renewal is capped at acquisition + MaxLifetime, never revives an expired pin.
+    Status
+    RenewReadView(const TReadView& view, std::string_view authorizationScope, std::chrono::milliseconds lifetime) const;
+    Status ReleaseReadView(const TReadView& view, std::string_view authorizationScope) const;
+    Status CancelReadView(const TReadView& view, std::string_view authorizationScope) const;
     Status Reconcile();
     Status Shutdown(std::chrono::milliseconds timeout);
 
@@ -104,7 +118,10 @@ private:
         const detail::TKvInput* kv = nullptr);
     Result<std::shared_ptr<ScanCursor>> ScanImpl(const ScanRequest& request,
         std::shared_ptr<detail::TReadBudget> budget,
-        bool chronologicalFiles = false) const;
+        bool chronologicalFiles = false,
+        const TReadView* view = nullptr,
+        size_t entry = 0,
+        std::string_view authorizationScope = {}) const;
     explicit Engine(std::shared_ptr<Impl> implementation);
     std::shared_ptr<Impl> impl_;
     friend struct detail::EngineFactory;

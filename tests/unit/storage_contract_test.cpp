@@ -28,15 +28,53 @@ TEST(StorageContract, SelectsSupportedVersionFromInclusiveRange)
     request.MaxVersion = {3, 7};
     const auto result = NegotiateStorageContract(request, LocalCapabilities(), {});
     ASSERT_TRUE(result);
-    EXPECT_EQ(result->Version, (TStorageContractVersion{1, 0}));
+    EXPECT_EQ(result->Version, (TStorageContractVersion{1, 1}));
     request.MaxVersion = {1, 0};
     ASSERT_TRUE(NegotiateStorageContract(request, LocalCapabilities(), {}));
+}
+
+TEST(StorageContract, ReadViewsAreAdditiveAndNativeOnly)
+{
+    TStorageContractRequest request;
+    auto old = NegotiateStorageContract(request, LocalCapabilities(), {});
+    ASSERT_TRUE(old);
+    EXPECT_EQ(old->Version, (TStorageContractVersion{1, 0}));
+    EXPECT_FALSE(old->HasFeature(EStorageFeature::IndependentReadView));
+    EXPECT_FALSE(old->HasOperation(EStorageOperation::AcquireReadView));
+    EXPECT_FALSE(old->EffectiveLimits.ReadViews);
+    request.RequiredFeatures = {EStorageFeature::IndependentReadView};
+    ASSERT_FALSE(NegotiateStorageContract(request, LocalCapabilities(), {}));
+    request.MaxVersion = {1, 1};
+    auto latest = NegotiateStorageContract(request, LocalCapabilities(), {});
+    ASSERT_TRUE(latest) << latest.error().code;
+    EXPECT_EQ(latest->Version, (TStorageContractVersion{1, 1}));
+    EXPECT_TRUE(latest->HasOperation(EStorageOperation::AcquireReadView));
+    EXPECT_TRUE(latest->HasOperation(EStorageOperation::ReadViewInfo));
+    EXPECT_TRUE(latest->HasOperation(EStorageOperation::ScanReadView));
+    EXPECT_TRUE(latest->HasOperation(EStorageOperation::RenewReadView));
+    EXPECT_TRUE(latest->HasOperation(EStorageOperation::ReleaseReadView));
+    EXPECT_TRUE(latest->HasOperation(EStorageOperation::CancelReadView));
+    ASSERT_TRUE(latest->EffectiveLimits.ReadViews);
+    EXPECT_EQ(latest->EffectiveLimits.ReadViews->MaxViews, 32U);
+    EXPECT_EQ(latest->EffectiveLimits.ReadViews->MaxEntries, 256U);
+    request.Mode = CollectionMode::KeyValue;
+    EXPECT_TRUE(NegotiateStorageContract(request, LocalCapabilities(), {}));
+    request.Mode = CollectionMode::Append;
+    auto custom = LocalCapabilities();
+    custom.backend = BackendKind::Custom;
+    auto unavailable = NegotiateStorageContract(request, custom, {});
+    ASSERT_FALSE(unavailable);
+    EXPECT_EQ(unavailable.error().code, "UNSUPPORTED_FEATURE");
+    request.RequiredFeatures.push_back(EStorageFeature::ScanSplits);
+    unavailable = NegotiateStorageContract(request, LocalCapabilities(), {});
+    ASSERT_FALSE(unavailable);
+    EXPECT_EQ(unavailable.error().code, "UNSUPPORTED_FEATURE");
 }
 
 TEST(StorageContract, RejectsDisjointVersionRangesAndMalformedRequests)
 {
     for (const auto version :
-        {TStorageContractVersion{0, 9}, TStorageContractVersion{1, 1}, TStorageContractVersion{2, 0}})
+        {TStorageContractVersion{0, 9}, TStorageContractVersion{1, 2}, TStorageContractVersion{2, 0}})
     {
         TStorageContractRequest request;
         request.MinVersion = version;

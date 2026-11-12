@@ -1,5 +1,6 @@
 #include <storage/contract.h>
 #include <storage/engine.h>
+#include <storage/read_view.h>
 #include <storage/scan.h>
 
 #include <arrow/api.h>
@@ -64,6 +65,10 @@ T Take(glamdb::Result<T> result, std::string_view context)
 
 void CheckContract(glamdb::Engine& engine, bool storage)
 {
+    const auto legacy = Take(engine.NegotiateStorageContract(), "negotiate default 1.0 contract");
+    Check(legacy.Version == glamdb::TStorageContractVersion{1, 0} &&
+            !legacy.HasFeature(glamdb::EStorageFeature::IndependentReadView) && !legacy.EffectiveLimits.ReadViews,
+        "default negotiation preserves 1.0 without read views");
     glamdb::TStorageContractRequest request;
     request.MaxVersion = {1, 9};
     if (storage) {
@@ -75,12 +80,15 @@ void CheckContract(glamdb::Engine& engine, bool storage)
             glamdb::EStorageFeature::PreserveAppendDuplicates};
     }
     const auto contract = Take(engine.NegotiateStorageContract(request), "negotiate native contract");
-    Check(contract.Version == glamdb::TStorageContractVersion{1, 0} &&
+    Check(contract.Version == glamdb::TStorageContractVersion{1, 1} &&
             contract.EffectiveLimits.Engine.max_collections == engine.GetLimits().max_collections &&
             contract.EffectiveLimits.SchemaFields == 128 && contract.EffectiveLimits.AppendRows == 10000 &&
             contract.HasOperation(glamdb::EStorageOperation::Scan) == storage &&
             !contract.HasOperation(glamdb::EStorageOperation::Upsert),
         "negotiated append support and effective limits");
+    Check(contract.HasFeature(glamdb::EStorageFeature::IndependentReadView) == storage &&
+            contract.EffectiveLimits.ReadViews.has_value() == storage,
+        "native read-view feature and quotas are gated together");
     request.Mode = glamdb::CollectionMode::KeyValue;
     request.RequiredFeatures.clear();
     request.RequiredOperations.clear();
@@ -300,6 +308,7 @@ void Write(glamdb::Engine& engine, const std::string& receiptPath)
     const auto a = engine.AppendDurable(
         {CollectionId, OperationA, {glamdb::SnapshotPreconditionKind::NoSnapshot, 0}, {MakeBatch(RowsA)}});
     const auto& receiptA = CheckReceipt(a, OperationA, 3);
+    auto pinned = Take(engine.AcquireReadView({{{CollectionId}}, "installed-consumer"}), "acquire read view");
     Check(!receiptA.parent_snapshot_id, "first snapshot has no parent");
     auto fixedLatest = Take(engine.Scan({.collection_id = CollectionId, .batch_rows = 1}), "fixed latest scan");
     const auto b = engine.AppendDurable({CollectionId,
@@ -307,6 +316,9 @@ void Write(glamdb::Engine& engine, const std::string& receiptPath)
         {glamdb::SnapshotPreconditionKind::Equals, receiptA.snapshot_id},
         {MakeBatch(RowsB)}});
     const auto& receiptB = CheckReceipt(b, OperationB, 2);
+    auto delayed = Take(engine.ScanReadView(*pinned, 0, {}, "installed-consumer"), "delayed pinned scan");
+    CheckRows(*delayed, RowsA, glamdb::SnapshotSelector::Id(receiptA.snapshot_id));
+    Check(engine.ReleaseReadView(*pinned, "installed-consumer").has_value(), "release read view");
     Check(receiptA.snapshot_id != receiptB.snapshot_id && receiptB.parent_snapshot_id == receiptA.snapshot_id,
         "second snapshot extends the first");
     CheckRows(*fixedLatest, RowsA, glamdb::SnapshotSelector::Id(receiptA.snapshot_id));
@@ -417,6 +429,8 @@ void CheckUnavailable(glamdb::Engine& engine)
             !capabilities.append && !capabilities.file_pruning && !capabilities.row_group_pruning &&
             !capabilities.durability_qualified,
         "storage-disabled capabilities");
+    const auto view = engine.AcquireReadView({{{CollectionId}}, "installed-consumer"});
+    Check(!view && view.error().code == "UNSUPPORTED_FEATURE", "storage-disabled read views are unavailable");
     const auto stats = engine.GetStatistics(CollectionId);
     const auto history = engine.ListSnapshots(CollectionId);
     const auto explain = engine.ExplainScan({.collection_id = CollectionId});
