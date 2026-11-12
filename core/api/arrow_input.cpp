@@ -279,105 +279,137 @@ std::shared_ptr<arrow::Buffer> Allocate(int64_t bytes, arrow::MemoryPool* pool)
     return std::shared_ptr<arrow::Buffer>(std::move(*buffer));
 }
 
-// One owned column of every batch in schema form: no slice offset, a validity
+// Output buffers of one owned column, filled batch by batch.
+struct TOwnedColumn
+{
+    std::shared_ptr<arrow::Buffer> Validity;
+    // Fixed-width values, the value bitmap (bool) or string offsets.
+    std::shared_ptr<arrow::Buffer> Values;
+    std::shared_ptr<arrow::Buffer> Data;
+    int64_t NullCount = 0;
+    // String bytes counted in the first pass, and copied so far.
+    int64_t DataBytes = 0;
+    int32_t Written = 0;
+};
+
+// Appends rows [0, count) of one batch's column at `first` of the owned column.
+void CopyRows(TOwnedColumn& owned, const Column& column, FieldType type, int64_t first, int64_t count)
+{
+    auto* valid = owned.Validity->mutable_data();
+    auto* values = owned.Values->mutable_data();
+    for (int64_t source = 0; source < count; ++source) {
+        const auto row = first + source;
+        if (column.IsNull(source)) {
+            ++owned.NullCount;
+            if (type == FieldType::String) {
+                reinterpret_cast<int32_t*>(values)[row + 1] = owned.Written;
+            }
+            continue;
+        }
+        arrow::bit_util::SetBit(valid, row);
+        switch (type) {
+            case FieldType::String: {
+                const auto begin = column.Begin(source);
+                const auto length = column.Length(source);
+                if (begin < 0 || length < 0 || length > owned.DataBytes - owned.Written ||
+                    static_cast<int64_t>(begin) + length > column.data_bytes)
+                {
+                    throw InputChanged{};
+                }
+                std::memcpy(owned.Data->mutable_data() + owned.Written, column.data + begin, static_cast<size_t>(length));
+                owned.Written += length;
+                reinterpret_cast<int32_t*>(values)[row + 1] = owned.Written;
+                break;
+            }
+            case FieldType::Bool:
+                if (column.Bool(source)) {
+                    arrow::bit_util::SetBit(values, row);
+                }
+                break;
+            case FieldType::Int64:
+            case FieldType::Float64:
+            case FieldType::TimestampUsUtc: {
+                auto value = column.Value<int64_t>(source);
+                if (type == FieldType::Float64 && std::bit_cast<double>(value) == 0) {
+                    value = std::bit_cast<int64_t>(0.0);
+                }
+                std::memcpy(values + row * 8, &value, 8);
+                break;
+            }
+        }
+    }
+}
+
+// Owned columns of every batch in schema form: no slice offset, a validity
 // bitmap only when a value is NULL (as Arrow builders produce), zeroed NULL
-// slots, +0.0 for -0.0 and no string bytes behind NULLs. Every string range is
-// checked against its source buffer and the space counted for it, so input
+// slots, +0.0 for -0.0 and no string bytes behind NULLs. Batches are visited
+// one at a time with one batch's column views as scratch, so C++ scratch is
+// O(fields) whatever the batch count. Every string range is checked against
+// its source buffer and the bytes counted for it in the first pass, so input
 // that changes after inspection cannot make the copy read or write out of
 // bounds; it only fails the hash comparison afterwards.
-std::shared_ptr<arrow::Array> OwnColumn(const FieldSpec& field,
-    const std::vector<std::vector<Column>>& batches,
-    const std::vector<std::shared_ptr<arrow::RecordBatch>>& sources,
-    size_t index,
+std::shared_ptr<arrow::RecordBatch> OwnBatches(const SchemaSpec& schema,
+    const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
     int64_t rows,
     arrow::MemoryPool* pool)
 {
-    auto validity = Allocate(arrow::bit_util::BytesForBits(rows), pool);
-    auto* valid = validity->mutable_data();
-    int64_t nulls = 0;
-    int64_t row = 0;
-    const auto each = [&](auto&& visit) {
-        row = 0;
-        for (size_t batch = 0; batch < batches.size(); ++batch) {
-            const auto& column = batches[batch][index];
-            const auto length = sources[batch]->num_rows();
-            for (int64_t source = 0; source < length; ++source, ++row) {
-                visit(column, source);
+    std::vector<TOwnedColumn> owned(schema.fields.size());
+    for (const auto& batch : batches) {
+        const auto columns = Columns(schema, *batch, MapFields(schema, *batch, true));
+        for (size_t field = 0; field < columns.size(); ++field) {
+            if (columns[field].type != FieldType::String) {
+                continue;
             }
-        }
-    };
-    each([&](const Column& column, int64_t source) {
-        if (column.IsNull(source)) {
-            ++nulls;
-        } else {
-            arrow::bit_util::SetBit(valid, row);
-        }
-    });
-    std::vector<std::shared_ptr<arrow::Buffer>> buffers{nulls == 0 ? nullptr : validity};
-    switch (field.type) {
-        case FieldType::String: {
-            int64_t bytes = 0;
-            each([&](const Column& column, int64_t source) {
-                if (arrow::bit_util::GetBit(valid, row)) {
-                    bytes += column.Length(source);
+            for (int64_t row = 0; row < batch->num_rows(); ++row) {
+                if (!columns[field].IsNull(row)) {
+                    owned[field].DataBytes += columns[field].Length(row);
                 }
-            });
-            if (bytes > 16LL * 1024 * 1024) {
+            }
+            if (owned[field].DataBytes < 0 || owned[field].DataBytes > 16LL * 1024 * 1024) {
                 throw InputChanged{};
             }
-            auto offsets = Allocate((rows + 1) * static_cast<int64_t>(sizeof(int32_t)), pool);
-            auto data = Allocate(bytes, pool);
-            auto* out = reinterpret_cast<int32_t*>(offsets->mutable_data());
-            int32_t written = 0;
-            each([&](const Column& column, int64_t source) {
-                if (arrow::bit_util::GetBit(valid, row)) {
-                    const auto begin = column.Begin(source);
-                    const auto length = column.Length(source);
-                    if (begin < 0 || length < 0 || length > bytes - written ||
-                        static_cast<int64_t>(begin) + length > column.data_bytes)
-                    {
-                        throw InputChanged{};
-                    }
-                    std::memcpy(data->mutable_data() + written, column.data + begin, static_cast<size_t>(length));
-                    written += length;
-                }
-                out[row + 1] = written;
-            });
-            buffers.push_back(std::move(offsets));
-            buffers.push_back(std::move(data));
-            break;
-        }
-        case FieldType::Bool: {
-            auto values = Allocate(arrow::bit_util::BytesForBits(rows), pool);
-            each([&](const Column& column, int64_t source) {
-                if (arrow::bit_util::GetBit(valid, row) && column.Bool(source)) {
-                    arrow::bit_util::SetBit(values->mutable_data(), row);
-                }
-            });
-            buffers.push_back(std::move(values));
-            break;
-        }
-        case FieldType::Int64:
-        case FieldType::Float64:
-        case FieldType::TimestampUsUtc: {
-            auto values = Allocate(rows * 8, pool);
-            auto* out = values->mutable_data();
-            const bool floating = field.type == FieldType::Float64;
-            each([&](const Column& column, int64_t source) {
-                if (!arrow::bit_util::GetBit(valid, row)) {
-                    return;
-                }
-                auto value = column.Value<int64_t>(source);
-                if (floating && std::bit_cast<double>(value) == 0) {
-                    value = std::bit_cast<int64_t>(0.0);
-                }
-                std::memcpy(out + row * 8, &value, 8);
-            });
-            buffers.push_back(std::move(values));
-            break;
         }
     }
-    return arrow::MakeArray(arrow::ArrayData::Make(MakeArrowType(field.type), rows, std::move(buffers), nulls));
+    for (size_t field = 0; field < owned.size(); ++field) {
+        auto& column = owned[field];
+        column.Validity = Allocate(arrow::bit_util::BytesForBits(rows), pool);
+        switch (schema.fields[field].type) {
+            case FieldType::String:
+                column.Values = Allocate((rows + 1) * static_cast<int64_t>(sizeof(int32_t)), pool);
+                column.Data = Allocate(column.DataBytes, pool);
+                break;
+            case FieldType::Bool:
+                column.Values = Allocate(arrow::bit_util::BytesForBits(rows), pool);
+                break;
+            case FieldType::Int64:
+            case FieldType::Float64:
+            case FieldType::TimestampUsUtc:
+                column.Values = Allocate(rows * 8, pool);
+                break;
+        }
+    }
+    int64_t first = 0;
+    for (const auto& batch : batches) {
+        const auto columns = Columns(schema, *batch, MapFields(schema, *batch, true));
+        for (size_t field = 0; field < columns.size(); ++field) {
+            CopyRows(owned[field], columns[field], schema.fields[field].type, first, batch->num_rows());
+        }
+        first += batch->num_rows();
+    }
+    std::vector<std::shared_ptr<arrow::Array>> arrays;
+    arrays.reserve(owned.size());
+    for (size_t field = 0; field < owned.size(); ++field) {
+        auto& column = owned[field];
+        std::vector<std::shared_ptr<arrow::Buffer>> buffers{
+            column.NullCount == 0 ? nullptr : std::move(column.Validity), std::move(column.Values)};
+        if (column.Data != nullptr) {
+            buffers.push_back(std::move(column.Data));
+        }
+        column.Validity.reset();
+        arrays.push_back(arrow::MakeArray(arrow::ArrayData::Make(
+            MakeArrowType(schema.fields[field].type), rows, std::move(buffers), column.NullCount)));
+    }
+    return arrow::RecordBatch::Make(MakeArrowSchema(schema), rows, std::move(arrays));
 }
 
 size_t Reservation(const SchemaSpec& schema, const Shape& shape)
@@ -468,19 +500,9 @@ Result<NormalizedInput> NormalizeBatches(const SchemaSpec& schema,
         // The only copy of caller memory: canonical owned columns. Every
         // later check, the hash and the writer read this copy, never the
         // caller's buffers again.
-        std::vector<std::vector<Column>> views;
-        views.reserve(batches.size());
-        for (const auto& batch : batches) {
-            views.push_back(Columns(schema, *batch, MapFields(schema, *batch, true)));
-        }
         const auto rows = static_cast<int64_t>(shape.rows);
-        std::vector<std::shared_ptr<arrow::Array>> arrays;
-        arrays.reserve(schema.fields.size());
-        for (size_t field = 0; field < schema.fields.size(); ++field) {
-            arrays.push_back(OwnColumn(schema.fields[field], views, batches, field, rows, pool));
-        }
         NormalizedInput result;
-        result.columns = arrow::RecordBatch::Make(MakeArrowSchema(schema), rows, std::move(arrays));
+        result.columns = OwnBatches(schema, batches, rows, pool);
         std::vector<int> identity(schema.fields.size());
         for (size_t field = 0; field < identity.size(); ++field) {
             identity[field] = static_cast<int>(field);
