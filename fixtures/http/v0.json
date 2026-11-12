@@ -34,7 +34,8 @@
         "api_version": "string",
         "features": "object",
         "predicate_ops": "array",
-        "limits": "object"
+        "limits": "object",
+        "parquet": "object|null"
       },
       "response_schema": "capabilities"
     },
@@ -123,6 +124,15 @@
               "nullable": false
             }
           ]
+        },
+        "write_settings": {
+          "parquet": {
+            "compression": {
+              "codec": "zstd",
+              "level": 3
+            },
+            "columns": []
+          }
         }
       },
       "response_schema": "createOutcome",
@@ -193,6 +203,38 @@
       },
       "response_schema": "appendOutcome",
       "request_schema": "append"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections/{collection_id}/write-settings",
+      "core": "Engine::UpdateWriteSettings",
+      "status": 200,
+      "response_fields": {
+        "write_settings": "object",
+        "write_settings_version": "string"
+      },
+      "request": {
+        "expected_version": "1",
+        "write_settings": {
+          "parquet": {
+            "compression": {
+              "codec": "zstd",
+              "level": 3
+            },
+            "columns": [
+              {
+                "field": "key",
+                "compression": {
+                  "codec": "uncompressed",
+                  "level": null
+                }
+              }
+            ]
+          }
+        }
+      },
+      "response_schema": "collection",
+      "request_schema": "writeSettingsUpdate"
     },
     {
       "method": "GET",

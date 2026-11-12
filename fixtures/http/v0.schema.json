@@ -84,12 +84,114 @@
         },
         "mode": {
           "const": "append"
+        },
+        "write_settings": {
+          "$ref": "#/$defs/writeSettings"
         }
       },
       "required": [
         "collection_id",
         "name",
         "schema"
+      ],
+      "additionalProperties": false
+    },
+    "parquetCompression": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "codec": {
+              "enum": [
+                "uncompressed",
+                "snappy",
+                "gzip",
+                "lz4_raw",
+                "zstd"
+              ]
+            },
+            "level": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "codec"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "writeSettings": {
+      "type": "object",
+      "properties": {
+        "parquet": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "compression": {
+                  "$ref": "#/$defs/parquetCompression"
+                },
+                "columns": {
+                  "anyOf": [
+                    {
+                      "type": "array",
+                      "maxItems": 64,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string"
+                          },
+                          "compression": {
+                            "$ref": "#/$defs/parquetCompression"
+                          }
+                        },
+                        "required": [
+                          "field"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "writeSettingsUpdate": {
+      "type": "object",
+      "properties": {
+        "expected_version": {
+          "$ref": "#/$defs/int64"
+        },
+        "write_settings": {
+          "$ref": "#/$defs/writeSettings"
+        }
+      },
+      "required": [
+        "expected_version",
+        "write_settings"
       ],
       "additionalProperties": false
     },
@@ -437,6 +539,12 @@
               "type": "null"
             }
           ]
+        },
+        "write_settings": {
+          "$ref": "#/$defs/writeSettings"
+        },
+        "write_settings_version": {
+          "$ref": "#/$defs/int64"
         }
       },
       "required": [
@@ -446,7 +554,9 @@
         "schema",
         "mode",
         "creation_sequence",
-        "current_snapshot_id"
+        "current_snapshot_id",
+        "write_settings",
+        "write_settings_version"
       ],
       "additionalProperties": false
     },
@@ -967,6 +1077,75 @@
         },
         "bloom_pruning": {
           "type": "boolean"
+        },
+        "parquet": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "default_compression": {
+                  "$ref": "#/$defs/parquetCompression"
+                },
+                "codecs": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "codec": {
+                        "enum": [
+                          "uncompressed",
+                          "snappy",
+                          "gzip",
+                          "lz4_raw",
+                          "zstd"
+                        ]
+                      },
+                      "level": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "min": {
+                                "type": "integer"
+                              },
+                              "max": {
+                                "type": "integer"
+                              },
+                              "default": {
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "min",
+                              "max",
+                              "default"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "codec",
+                      "level"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "default_compression",
+                "codecs"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [

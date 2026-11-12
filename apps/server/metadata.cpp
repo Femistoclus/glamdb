@@ -2,6 +2,7 @@
 #include "apps/server/scans.h"
 
 #include "apps/transport/outcome_json.h"
+#include "core/api/write_settings.h"
 #include "core/scan/predicate.h"
 
 #include <arrow/util/utf8.h>
@@ -269,11 +270,42 @@ std::string Token()
 EngineCapabilities InstalledCapabilities()
 {
 #if GLAMDB_HTTP_STORAGE
-    return {BackendKind::LocalStorage, true, true, true, false, false, false};
+    return {.backend = BackendKind::LocalStorage,
+        .append = true,
+        .scan = true,
+        .metadata = true,
+        .write_settings = true,
+        .parquet_codecs = detail::ParquetCodecCapabilities()};
 #else
     return {};
 #endif
 }
+
+namespace {
+TJson CompressionJson(const ParquetCompression& compression)
+{
+    return {{"codec", detail::CodecName(compression.codec)},
+        {"level", compression.level ? TJson(*compression.level) : TJson(nullptr)}};
+}
+
+// Parquet value compression of data files, not HTTP content coding.
+TJson ParquetJson(const EngineCapabilities& capabilities)
+{
+    if (!capabilities.write_settings) {
+        return nullptr;
+    }
+    TJson codecs = TJson::array();
+    for (const auto& codec : capabilities.parquet_codecs) {
+        TJson level = nullptr;
+        if (codec.min_level && codec.max_level && codec.default_level) {
+            level = {{"min", *codec.min_level}, {"max", *codec.max_level}, {"default", *codec.default_level}};
+        }
+        codecs.push_back({{"codec", detail::CodecName(codec.codec)}, {"level", std::move(level)}});
+    }
+    return {{"default_compression", CompressionJson(capabilities.default_parquet_compression)},
+        {"codecs", std::move(codecs)}};
+}
+} // namespace
 
 TJson CapabilitiesJson(const EngineCapabilities& capabilities,
     const std::optional<StoreHealth>& health,
@@ -306,7 +338,9 @@ TJson CapabilitiesJson(const EngineCapabilities& capabilities,
                 {"explain", metadata},
                 {"metadata_pagination", metadata},
                 {"pagination", false},
-                {"zero_column_projection", true}}},
+                {"zero_column_projection", true},
+                {"write_settings", capabilities.write_settings}}},
+        {"parquet", ParquetJson(capabilities)},
         {"predicate_ops",
             {"true", "eq", "ne", "lt", "le", "gt", "ge", "in", "is_null", "is_not_null", "and", "or", "not"}},
         {"limits",

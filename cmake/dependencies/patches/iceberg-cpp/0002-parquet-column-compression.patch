@@ -1,0 +1,144 @@
+Parquet writer: column-scoped compression codec and level.
+
+GlamDB lets a collection choose the Parquet compression codec and level for
+its data files, with per-column overrides. The pinned ParquetWriter applies
+only write.parquet.compression-codec and write.parquet.compression-level to
+every column. This patch adds the column-scoped forms, named like Iceberg's
+other column-scoped properties (write.metadata.metrics.column.<name>):
+
+  write.parquet.compression-codec.column.<field-name>
+  write.parquet.compression-level.column.<field-name>
+
+The suffix is the exact name of a top-level primitive field. A column codec
+without a column level uses that codec's own default level: levels are codec
+specific and are never inherited from the file-level setting. A column level
+without a column codec, an unknown column, an unavailable codec, a level for a
+codec without levels and a level outside the codec's range are rejected in
+Open(), before the output file is created. The file-level level is range
+checked the same way (Arrow does not validate levels; an invalid one would
+otherwise fail only while pages are compressed).
+
+Pinned revision: apache/iceberg-cpp 64dc66f159bd62c9817a96d74cbce767268934d0
+(v0.4.0); upstream main 36e0d1a has no column-scoped Parquet properties.
+
+diff --git a/src/iceberg/parquet/parquet_writer.cc b/src/iceberg/parquet/parquet_writer.cc
+index 08c3941..8c4ee00 100644
+--- a/src/iceberg/parquet/parquet_writer.cc
++++ b/src/iceberg/parquet/parquet_writer.cc
+@@ -21,8 +21,10 @@
+ 
+ #include <cmath>
+ #include <cstdint>
++#include <algorithm>
+ #include <memory>
+ #include <optional>
++#include <string>
+ #include <string_view>
+ #include <type_traits>
+ #include <unordered_map>
+@@ -55,8 +57,8 @@ Result<std::shared_ptr<::arrow::io::OutputStream>> OpenOutputStream(
+   return arrow::OpenArrowOutputStream(options.io, options.path);
+ }
+ 
+-Result<::arrow::Compression::type> ParseCompression(const WriterProperties& properties) {
+-  const auto& compression_name = properties.Get(WriterProperties::kParquetCompression);
++Result<::arrow::Compression::type> ParseCompressionName(
++    std::string_view compression_name) {
+   if (compression_name == "uncompressed") {
+     return ::arrow::Compression::UNCOMPRESSED;
+   } else if (compression_name == "snappy") {
+@@ -74,6 +76,10 @@ Result<::arrow::Compression::type> ParseCompression(const WriterProperties& prop
+   }
+ }
+ 
++Result<::arrow::Compression::type> ParseCompression(const WriterProperties& properties) {
++  return ParseCompressionName(properties.Get(WriterProperties::kParquetCompression));
++}
++
+ Status CheckCompressionAvailable(std::string_view compression_name,
+                                  ::arrow::Compression::type compression) {
+   ICEBERG_PRECHECK(::arrow::util::Codec::IsAvailable(compression),
+@@ -233,6 +239,69 @@ Result<std::optional<int32_t>> ParseCodecLevel(const WriterProperties& propertie
+   return level;
+ }
+ 
++// Column-scoped properties, named like Iceberg's other column-scoped properties
++// (write.metadata.metrics.column.<name>): the suffix is the exact name of a
++// top-level primitive field. A column level requires a column codec.
++constexpr std::string_view kColumnCompressionPrefix =
++    "write.parquet.compression-codec.column.";
++constexpr std::string_view kColumnCompressionLevelPrefix =
++    "write.parquet.compression-level.column.";
++
++Status CheckCompressionLevel(std::string_view compression_name,
++                             ::arrow::Compression::type compression, int32_t level) {
++  ICEBERG_PRECHECK(::arrow::util::Codec::SupportsCompressionLevel(compression),
++                   "Parquet compression codec {} does not accept a level",
++                   compression_name);
++  auto minimum = ::arrow::util::Codec::MinimumCompressionLevel(compression);
++  auto maximum = ::arrow::util::Codec::MaximumCompressionLevel(compression);
++  ICEBERG_PRECHECK(minimum.ok() && maximum.ok() && level >= *minimum && level <= *maximum,
++                   "Parquet compression level {} is outside the range of codec {}",
++                   level, compression_name);
++  return {};
++}
++
++Status ApplyColumnCompression(const WriterProperties& properties, const Schema& schema,
++                              ::parquet::WriterProperties::Builder& builder) {
++  std::unordered_map<std::string, std::string> codecs;
++  std::unordered_map<std::string, std::string> levels;
++  for (const auto& [key, value] : properties.configs()) {
++    if (key.starts_with(kColumnCompressionPrefix)) {
++      codecs.emplace(key.substr(kColumnCompressionPrefix.size()), value);
++    } else if (key.starts_with(kColumnCompressionLevelPrefix)) {
++      levels.emplace(key.substr(kColumnCompressionLevelPrefix.size()), value);
++    }
++  }
++  for (const auto& [column, level] : levels) {
++    ICEBERG_PRECHECK(codecs.contains(column),
++                     "Parquet compression level of column {} requires a column codec",
++                     column);
++  }
++  for (const auto& [column, compression_name] : codecs) {
++    const auto& fields = schema.fields();
++    const auto field = std::ranges::find_if(
++        fields, [&](const SchemaField& candidate) { return candidate.name() == column; });
++    ICEBERG_PRECHECK(field != fields.end() && field->type()->is_primitive(),
++                     "Parquet column compression names unknown column {}", column);
++    ICEBERG_ASSIGN_OR_RAISE(auto compression, ParseCompressionName(compression_name));
++    ICEBERG_PRECHECK(::arrow::util::Codec::IsAvailable(compression),
++                     "Parquet compression codec {} is not available in the current build",
++                     compression_name);
++    // Arrow keys column properties by dot string; a top-level column's path is
++    // its field name.
++    builder.compression(column, compression);
++    const auto level = levels.find(column);
++    if (level == levels.end()) {
++      // Levels are codec specific: never inherit the file-level one.
++      builder.compression_level(column, ::arrow::util::kUseDefaultCompressionLevel);
++      continue;
++    }
++    ICEBERG_ASSIGN_OR_RAISE(auto parsed, StringUtils::ParseNumber<int32_t>(level->second));
++    ICEBERG_RETURN_UNEXPECTED(CheckCompressionLevel(compression_name, compression, parsed));
++    builder.compression_level(column, parsed);
++  }
++  return {};
++}
++
+ }  // namespace
+ 
+ class ParquetWriter::Impl {
+@@ -251,8 +320,13 @@ class ParquetWriter::Impl {
+                      "Parquet max row group rows must be greater than 0");
+     properties_builder.max_row_group_length(max_row_group_rows);
+     if (compression_level.has_value()) {
++      ICEBERG_RETURN_UNEXPECTED(CheckCompressionLevel(
++          options.properties.Get(WriterProperties::kParquetCompression), compression,
++          compression_level.value()));
+       properties_builder.compression_level(compression_level.value());
+     }
++    ICEBERG_RETURN_UNEXPECTED(
++        ApplyColumnCompression(options.properties, *schema_, properties_builder));
+     auto writer_properties = properties_builder.memory_pool(pool_)->build();
+     auto arrow_writer_properties = ::parquet::default_arrow_writer_properties();
+ 

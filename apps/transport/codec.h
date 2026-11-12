@@ -32,6 +32,9 @@ TJson ParseJson(std::string_view bytes);
 void CheckKeys(const TJson& value, std::initializer_list<std::string_view> keys);
 int64_t ParseInt64(const TJson& value);
 SchemaSpec ParseSchema(const TJson& value);
+// {"parquet": {"compression": {"codec", "level"}|null, "columns": [{"field", "compression"}]}}.
+// Names only; the engine validates fields, codecs and levels.
+WriteSettings ParseWriteSettings(const TJson& value);
 std::shared_ptr<arrow::RecordBatch> ParseRows(const SchemaSpec& schema, const TJson& rows);
 ScanRequest ParseScan(std::string collectionID, const SchemaSpec& schema, const TJson& body);
 TJson EncodeSchema(const arrow::Schema& schema);

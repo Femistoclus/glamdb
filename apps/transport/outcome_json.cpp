@@ -4,6 +4,7 @@
 #include "core/api/binary.h"
 #include "core/api/canonical.h"
 #include "core/api/codec.h"
+#include "core/api/write_settings.h"
 
 #include <array>
 
@@ -159,6 +160,38 @@ std::string Receipt(const AppendResult& result)
     return out.Finish();
 }
 
+std::string Compression(const std::optional<ParquetCompression>& compression)
+{
+    if (!compression) {
+        return "null";
+    }
+    Object out;
+    out.String("codec", detail::CodecName(compression->codec));
+    out.Add("level", compression->level ? std::to_string(*compression->level) : "null");
+    return out.Finish();
+}
+
+std::string WriteSettingsJson(const WriteSettings& settings)
+{
+    std::string columns = "[";
+    for (size_t i = 0; i < settings.columns.size(); ++i) {
+        if (i != 0) {
+            columns += ',';
+        }
+        Object column;
+        column.String("field", settings.columns[i].field);
+        column.Add("compression", Compression(settings.columns[i].compression));
+        columns += column.Finish();
+    }
+    columns += ']';
+    Object parquet;
+    parquet.Add("compression", Compression(settings.compression));
+    parquet.Add("columns", columns);
+    Object out;
+    out.Add("parquet", parquet.Finish());
+    return out.Finish();
+}
+
 std::string Collection(const CollectionInfo& collection)
 {
     constexpr std::array<std::string_view, 5> types{"string", "bool", "int64", "float64", "timestamp_us_utc"};
@@ -186,6 +219,8 @@ std::string Collection(const CollectionInfo& collection)
     }
     fields += ']';
     out.Add("schema", "{\"fields\":" + fields + "}");
+    out.Add("write_settings", WriteSettingsJson(collection.write_settings));
+    out.Integer("write_settings_version", collection.write_settings_version);
     return out.Finish();
 }
 

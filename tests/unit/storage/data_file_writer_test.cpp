@@ -10,17 +10,22 @@
 #include <arrow/array/builder_primitive.h>
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
+#include <arrow/util/compression.h>
 #include <gtest/gtest.h>
 #include <iceberg/manifest/manifest_entry.h>
 #include <iceberg/partition_spec.h>
 #include <iceberg/sort_order.h>
 #include <iceberg/table_metadata.h>
+#include <parquet/metadata.h>
 
 #include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <limits>
+#include <optional>
+#include <utility>
 
 namespace NGlamDB::NStorage {
 namespace {
@@ -133,7 +138,9 @@ protected:
     }
 
     iceberg::Result<TDataWriteResult> Write(std::vector<std::shared_ptr<arrow::RecordBatch>> batches,
-        TDataWriterLimits limits = {})
+        TDataWriterLimits limits = {},
+        TParquetWriteSpec spec = {},
+        std::string path = {})
     {
         auto attempt = NIO::TIOAttempt::Make({std::string(StoreID),
                                                  std::string(CollectionID),
@@ -149,7 +156,44 @@ protected:
         if (!scope) {
             return std::unexpected(scope.error());
         }
-        return WriteDataFile(IO_, Attempt_, *Metadata_, Path_, std::move(batches), limits);
+        return WriteDataFile(IO_,
+            Attempt_,
+            *Metadata_,
+            path.empty() ? Path_ : path,
+            std::move(batches),
+            limits,
+            std::move(spec));
+    }
+
+    // Data file names end with a five-digit index.
+    std::string OtherPath(int index) const
+    {
+        return Path_.substr(0, Path_.size() - std::string_view("00000.parquet").size()) +
+            std::format("{:05}.parquet", index);
+    }
+
+    std::vector<arrow::Compression::type> FooterCodecs(const std::string& path, std::int64_t length)
+    {
+        auto file = IO_->NewInputFile(path);
+        EXPECT_TRUE(file);
+        auto schema = Metadata_->Schema();
+        EXPECT_TRUE(schema);
+        auto footer = ReadParquetFooter(**file, **schema, {length, 3});
+        EXPECT_TRUE(footer) << (footer ? "" : footer.error().message);
+        std::vector<arrow::Compression::type> codecs;
+        if (footer) {
+            for (int column = 0; column < (*footer)->num_columns(); ++column) {
+                codecs.push_back((*footer)->RowGroup(0)->ColumnChunk(column)->compression());
+            }
+        }
+        return codecs;
+    }
+
+    std::string Bytes(const std::string& path)
+    {
+        auto bytes = IO_->ReadFile(path, std::nullopt);
+        EXPECT_TRUE(bytes);
+        return bytes.value_or("");
     }
 
     std::size_t CountEvents(NTesting::EIOOp operation) const
@@ -232,6 +276,71 @@ TEST_F(TDataFileWriterTest, RejectsInvalidOwnedInputBeforeCreatingAnyFile)
     limits = {};
     limits.MaxRowGroupBytes = 100;
     EXPECT_FALSE(Write({batch}, limits));
+    EXPECT_EQ(CountEvents(NTesting::EIOOp::CreateExclusive), 0);
+}
+
+TEST_F(TDataFileWriterTest, EmptySpecKeepsTheWriterDefaultsByteForByte)
+{
+    const auto defaults = Write({Batch()});
+    ASSERT_TRUE(defaults) << defaults.error().message;
+    const auto bytes = Bytes(Path_);
+    // An empty spec adds no writer properties: zstd at its default level 1,
+    // exactly what an explicit request for that codec produces.
+    for (const auto& [index, level] :
+        std::vector<std::pair<int, std::optional<std::int32_t>>>{{1, std::nullopt}, {2, 1}})
+    {
+        const auto path = OtherPath(index);
+        const auto result =
+            Write({Batch()}, {}, {.Compression = TParquetCompressionSpec{arrow::Compression::ZSTD, level}}, path);
+        ASSERT_TRUE(result) << result.error().message;
+        EXPECT_EQ(Bytes(path), bytes) << index;
+    }
+    EXPECT_EQ(FooterCodecs(Path_, defaults->DataFile->file_size_in_bytes),
+        std::vector<arrow::Compression::type>(5, arrow::Compression::ZSTD));
+}
+
+TEST_F(TDataFileWriterTest, AppliesDefaultAndColumnCodecsAndVerifiesTheFooter)
+{
+    const TParquetWriteSpec spec{.Compression = TParquetCompressionSpec{arrow::Compression::GZIP, 5},
+        .Columns = {{"key", {arrow::Compression::UNCOMPRESSED, std::nullopt}},
+            {"ratio", {arrow::Compression::SNAPPY, std::nullopt}},
+            {"time", {arrow::Compression::ZSTD, 19}}}};
+    const auto result = Write({Batch()}, {}, spec);
+    ASSERT_TRUE(result) << result.error().message;
+    EXPECT_EQ(FooterCodecs(Path_, result->DataFile->file_size_in_bytes),
+        (std::vector<arrow::Compression::type>{arrow::Compression::UNCOMPRESSED,
+            arrow::Compression::GZIP,
+            arrow::Compression::GZIP,
+            arrow::Compression::SNAPPY,
+            arrow::Compression::ZSTD}));
+    EXPECT_EQ(result->DataFile->record_count, 3);
+    // A column codec without a level uses that codec's default, never the
+    // file-level level of another codec (gzip 5 would be invalid for lz4 > 12
+    // and is ignored by snappy).
+    const auto lz4 = Write({Batch()},
+        {},
+        {.Compression = TParquetCompressionSpec{arrow::Compression::ZSTD, 22},
+            .Columns = {{"count", {arrow::Compression::LZ4, std::nullopt}}}},
+        OtherPath(1));
+    ASSERT_TRUE(lz4) << lz4.error().message;
+    EXPECT_EQ(FooterCodecs(OtherPath(1), lz4->DataFile->file_size_in_bytes)[1], arrow::Compression::LZ4);
+}
+
+TEST_F(TDataFileWriterTest, RejectsInvalidCodecSettingsBeforeCreatingAnyFile)
+{
+    for (const auto& spec : std::vector<TParquetWriteSpec>{
+             {.Columns = {{"missing", {arrow::Compression::ZSTD, std::nullopt}}}},
+             {.Compression = TParquetCompressionSpec{arrow::Compression::ZSTD, 99}},
+             {.Compression = TParquetCompressionSpec{arrow::Compression::GZIP, 0}},
+             {.Compression = TParquetCompressionSpec{arrow::Compression::SNAPPY, 1}},
+             {.Columns = {{"key", {arrow::Compression::LZ4, 13}}}},
+             {.Columns = {{"key", {arrow::Compression::UNCOMPRESSED, 1}}}},
+             {.Compression = TParquetCompressionSpec{arrow::Compression::BROTLI, std::nullopt}},
+         })
+    {
+        EXPECT_FALSE(Write({Batch()}, {}, spec));
+        EXPECT_TRUE(Attempt_->Receipts().empty());
+    }
     EXPECT_EQ(CountEvents(NTesting::EIOOp::CreateExclusive), 0);
 }
 

@@ -1,3 +1,4 @@
+#include "apps/server/metadata.h"
 #include "apps/server/routes.h"
 #include "core/engine/engine_factory.h"
 #include "storage/resources.h"
@@ -31,6 +32,25 @@ TEST(NativeRoutes, CapabilitiesReflectThePublicFacade)
     EXPECT_EQ(value["file_pruning"], expected.file_pruning);
     EXPECT_EQ(value["row_group_pruning"], expected.row_group_pruning);
     EXPECT_FALSE(value["durability_qualified"].get<bool>());
+    // The fake backend applies no write settings, so none are advertised.
+    EXPECT_FALSE(value["features"]["write_settings"].get<bool>());
+    EXPECT_TRUE(value["parquet"].is_null());
+}
+
+TEST(NativeRoutes, CapabilitiesListParquetCodecsOfTheBuild)
+{
+    EngineCapabilities capabilities{.backend = BackendKind::LocalStorage,
+        .write_settings = true,
+        .parquet_codecs = {{ParquetCodec::Snappy}, {ParquetCodec::Zstd, 1, 22, 1}}};
+    const auto value = CapabilitiesJson(capabilities, std::nullopt, false, {});
+    EXPECT_TRUE(value["features"]["write_settings"].get<bool>());
+    EXPECT_EQ(value["parquet"]["default_compression"], NTransport::ParseJson(R"({"codec":"zstd","level":null})"));
+    EXPECT_EQ(value["parquet"]["codecs"],
+        NTransport::ParseJson(
+            R"([{"codec":"snappy","level":null},{"codec":"zstd","level":{"min":1,"max":22,"default":1}}])"));
+    // Installed inventory of a storage build advertises the same codecs.
+    const auto installed = InstalledCapabilities();
+    EXPECT_EQ(installed.write_settings, installed.backend == BackendKind::LocalStorage);
 }
 
 TEST(NativeRoutes, OutcomeLookupRetainsUnknownRecoveryContext)

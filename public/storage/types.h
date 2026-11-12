@@ -63,6 +63,41 @@ struct SchemaSpec
     bool operator==(const SchemaSpec&) const = default;
 };
 
+// Parquet value compression of the data files that appends write. Unrelated to
+// HTTP content coding. Wire/footer names: uncompressed, snappy, gzip, lz4_raw
+// (Parquet LZ4_RAW), zstd.
+enum class ParquetCodec : uint8_t { Uncompressed = 1, Snappy, Gzip, Lz4Raw, Zstd };
+
+struct ParquetCompression
+{
+    ParquetCodec codec = ParquetCodec::Zstd;
+    // Absent: the codec's default level (EngineCapabilities). Levels are codec
+    // specific and never inherited; codecs without levels reject one.
+    std::optional<int32_t> level{};
+    bool operator==(const ParquetCompression&) const = default;
+};
+
+struct ColumnWriteSettings
+{
+    // Exact name of a schema field.
+    std::string field;
+    // Absent: the collection default.
+    std::optional<ParquetCompression> compression{};
+    bool operator==(const ColumnWriteSettings&) const = default;
+};
+
+// Settings for data files written by later appends. Existing files keep the
+// codecs recorded in their own footers and stay readable. Empty settings keep
+// the engine defaults. Canonical form: at most one entry per field, each with
+// at least one option, in schema order.
+struct WriteSettings
+{
+    // Absent: the engine default (EngineCapabilities::default_parquet_compression).
+    std::optional<ParquetCompression> compression{};
+    std::vector<ColumnWriteSettings> columns{};
+    bool operator==(const WriteSettings&) const = default;
+};
+
 struct TimestampUs
 {
     int64_t value = 0;
@@ -153,6 +188,9 @@ struct CollectionInfo
     SchemaSpec schema;
     int64_t creation_sequence = 0;
     std::optional<int64_t> current_snapshot_id;
+    // Current canonical settings; version 0 means never set (engine defaults).
+    WriteSettings write_settings{};
+    int64_t write_settings_version = 0;
     bool operator==(const CollectionInfo&) const = default;
 };
 
@@ -161,6 +199,18 @@ struct CreateCollectionRequest
     std::string collection_id;
     std::string exact_name;
     SchemaSpec schema;
+    // Part of the definition: a repeated creation must request the same settings.
+    WriteSettings write_settings{};
+};
+
+// Compare-and-set: applies only when expected_version is the current version.
+// Repeating an applied request (same content, current == expected + 1)
+// succeeds without a change, so a lost response can be retried safely.
+struct UpdateWriteSettingsRequest
+{
+    std::string collection_id;
+    int64_t expected_version = 0;
+    WriteSettings write_settings{};
 };
 
 struct CreateRecoveryContext

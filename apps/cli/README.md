@@ -49,6 +49,16 @@ build/client/glamdb-cli request --url https://db.example.test/databases/DB/colle
   --output result.arrow --headers result.headers.json
 ```
 
+Parquet write settings of a collection travel in the same bodies: add
+`write_settings` to the creation body, or change them for later appends with a
+compare-and-set request (`expected_version` is the collection's current
+`write_settings_version`; see the [HTTP contract](../../docs/development/HTTP_SERVER.md)):
+
+```sh
+printf '%s' '{"expected_version":"0","write_settings":{"parquet":{"compression":{"codec":"zstd","level":9},"columns":[{"field":"payload","compression":{"codec":"uncompressed"}}]}}}' |
+  build/client/glamdb-cli request --url https://db.example.test/databases/DB/collections/COLLECTION/write-settings   --body -
+```
+
 For fixed-snapshot paging, POST the scan body to `.../scan/open` to obtain a
 `cursor`, then POST `{"cursor":"TOKEN"}` to `.../scan`. Continue using the JSON
 `next_cursor` or Arrow `X-GlamDB-Next-Cursor` header until it is absent. Preserve the

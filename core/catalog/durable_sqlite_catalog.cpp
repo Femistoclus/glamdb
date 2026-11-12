@@ -2,9 +2,11 @@
 
 #include "core/api/canonical.h"
 #include "core/api/codec.h"
+#include "core/api/write_settings.h"
 
 #include <algorithm>
 #include <exception>
+#include <format>
 #include <limits>
 
 namespace glamdb::detail {
@@ -12,6 +14,13 @@ namespace {
 
 constexpr std::string_view collection_columns = "collection_id,name,table_uuid,schema_blob,creation_sequence,current_"
                                                 "snapshot_id,schema_hash";
+// Created with catalog version 2 by the first transaction that stores write
+// settings; version 1 catalogs never contain it. Older binaries reject version
+// 2, so they cannot write data files that ignore stored settings.
+constexpr std::string_view write_settings_table =
+    "CREATE TABLE collection_write_settings(collection_id TEXT PRIMARY KEY REFERENCES "
+    "collections(collection_id),version INTEGER NOT NULL CHECK(version>=1),created_blob BLOB NOT NULL "
+    "CHECK(length(created_blob)<=16384),current_blob BLOB NOT NULL CHECK(length(current_blob)<=16384))";
 constexpr std::string_view operation_columns = "collection_id,operation_id,payload_hash,hash_version,base_identity,"
                                                "attempt_id,state,receipt_version,outcome_blob";
 
@@ -122,9 +131,8 @@ void DurableSqliteCatalogStore::OpenConnection(bool create)
             Require(preflight.Text("PRAGMA main.journal_mode") == "delete",
                 "UNSUPPORTED_STORE_VERSION",
                 "unexpected SQLite journal mode");
-            Require(preflight.Integer("PRAGMA user_version") == 1,
-                "UNSUPPORTED_STORE_VERSION",
-                "unknown catalog version");
+            const auto version = preflight.Integer("PRAGMA user_version");
+            Require(version == 1 || version == 2, "UNSUPPORTED_STORE_VERSION", "unknown catalog version");
             const auto rows = preflight.Query("SELECT store_id,format_major,profile_id FROM "
                                               "store_header WHERE singleton=1");
             Require(rows.size() == 1 && Required(rows[0], 0) == info_.store_id && Required(rows[0], 1) == "1" &&
@@ -217,9 +225,14 @@ void DurableSqliteCatalogStore::Configure()
 
 void DurableSqliteCatalogStore::ValidateHeader()
 {
-    Require(database_.Integer("PRAGMA user_version") == 1 && database_.Integer("PRAGMA application_id") == 1196179789,
+    const auto version = database_.Integer("PRAGMA user_version");
+    Require((version == 1 || version == 2) && database_.Integer("PRAGMA application_id") == 1196179789,
         "UNSUPPORTED_STORE_VERSION",
         "unsupported catalog format");
+    const auto tables = database_.Query("SELECT sql FROM sqlite_master WHERE name='collection_write_settings'");
+    Require(version == 1 ? tables.empty() : tables.size() == 1 && tables[0][0] == std::string(write_settings_table),
+        "CORRUPTION",
+        "write settings table does not match the catalog version");
     const auto rows = database_.Query("SELECT store_id,format_major,profile_id,durability_fence FROM "
                                       "store_header WHERE singleton=1");
     Require(rows.size() == 1 && database_.Integer("SELECT COUNT(*) FROM store_header") == 1,
@@ -337,7 +350,100 @@ CollectionInfo DurableSqliteCatalogStore::ReadCollection(const SqlRow& row)
             info.creation_sequence > 0 && SchemaFingerprint(info.schema) == Required(row, 6),
         "CORRUPTION",
         "invalid collection registry");
+    if (HasWriteSettings()) {
+        const auto settings = database_.Query("SELECT version,current_blob,created_blob FROM collection_write_settings "
+                                              "WHERE collection_id=?",
+            {info.collection_id});
+        if (!settings.empty()) {
+            const auto current = DecodeWriteSettings(info.schema, Required(settings[0], 1));
+            const auto created = DecodeWriteSettings(info.schema, Required(settings[0], 2));
+            if (!current || !created) {
+                throw Failure(!current ? current.error() : created.error());
+            }
+            info.write_settings = *current;
+            info.write_settings_version = ParseInteger(Required(settings[0], 0));
+            Require(info.write_settings_version >= 1, "CORRUPTION", "invalid write settings version");
+        }
+    }
     return info;
+}
+
+bool DurableSqliteCatalogStore::HasWriteSettings()
+{
+    return database_.Integer("PRAGMA user_version") == 2;
+}
+
+void DurableSqliteCatalogStore::EnsureWriteSettings()
+{
+    Require(transaction_, "INTERNAL", "write settings require the outer transaction");
+    if (!HasWriteSettings()) {
+        database_.Execute(write_settings_table);
+        database_.Execute("PRAGMA user_version=2");
+    }
+}
+
+WriteSettings DurableSqliteCatalogStore::CreatedWriteSettings(std::string_view id)
+{
+    std::lock_guard lock(mutex_);
+    Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
+    const auto collection = Collection(id);
+    if (!HasWriteSettings()) {
+        return {};
+    }
+    const auto rows = database_.Query("SELECT created_blob FROM collection_write_settings WHERE collection_id=?",
+        {collection.collection_id});
+    if (rows.empty()) {
+        return {};
+    }
+    auto created = DecodeWriteSettings(collection.schema, Required(rows[0], 0));
+    if (!created) {
+        throw Failure(created.error());
+    }
+    return std::move(*created);
+}
+
+CollectionInfo
+DurableSqliteCatalogStore::UpdateWriteSettings(std::string_view id, int64_t expected_version, WriteSettings settings)
+{
+    std::lock_guard lock(mutex_);
+    Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
+    Require(publication_ == nullptr, "INTERNAL", "write settings cannot change during a publication");
+    Require(expected_version >= 0, "INVALID_ARGUMENT", "expected write settings version must be non-negative");
+    auto collection = Collection(id);
+    const auto blob = EncodeWriteSettings(collection.schema, settings);
+    if (!blob) {
+        throw Failure(blob.error());
+    }
+    Transaction([&] {
+        collection = Collection(id);
+        if (collection.write_settings_version == expected_version) {
+            CheckFreeBytes();
+            if (expected_version == 0) {
+                const auto empty = EncodeWriteSettings(collection.schema, {});
+                Require(empty.has_value(), "INTERNAL", "cannot encode default write settings");
+                EnsureWriteSettings();
+                database_.Execute("INSERT INTO collection_write_settings VALUES(?,1,?,?)",
+                    {collection.collection_id, Blob{*empty}, Blob{*blob}});
+            } else {
+                database_.Execute("UPDATE collection_write_settings SET version=version+1,current_blob=? WHERE "
+                                  "collection_id=? AND version=?",
+                    {Blob{*blob}, collection.collection_id, expected_version});
+                Require(database_.Changes() == 1, "INTERNAL", "write settings changed during the transaction");
+            }
+            collection.write_settings = std::move(settings);
+            collection.write_settings_version = expected_version + 1;
+            return;
+        }
+        // A repeated request whose response was lost: same content, applied once.
+        if (collection.write_settings_version != expected_version + 1 || collection.write_settings != settings) {
+            throw Failure({"WRITE_SETTINGS_CONFLICT",
+                std::format("write settings version is {}, not {}",
+                    collection.write_settings_version,
+                    expected_version),
+                RetryHint::FixInput});
+        }
+    });
+    return collection;
 }
 
 std::vector<CollectionInfo> DurableSqliteCatalogStore::Collections()
@@ -504,6 +610,11 @@ void DurableSqliteCatalogStore::CheckCapacity(bool operation)
             (operation ? limits_.max_operations : limits_.max_collections),
         "RESOURCE_EXHAUSTED",
         "permanent catalog capacity is full");
+    CheckFreeBytes();
+}
+
+void DurableSqliteCatalogStore::CheckFreeBytes()
+{
     const auto free = database_.Integer("PRAGMA freelist_count") * database_.Integer("PRAGMA page_size") +
         limits_.max_catalog_bytes - database_.Integer("PRAGMA page_count") * database_.Integer("PRAGMA page_size");
     Require(free >= 24576, "RESOURCE_EXHAUSTED", "catalog cannot reserve a binding and terminal receipt");
@@ -573,7 +684,9 @@ CollectionInfo DurableSqliteCatalogStore::PublishCreate(CollectionInfo collectio
         "INVALID_ARGUMENT",
         "publication requires a closure guard and synchronous body");
     const auto schema = EncodeSchema(collection.schema);
-    Require(schema.has_value() && ValidUuid(collection.collection_id) && ValidUuid(collection.table_uuid) &&
+    const auto settings = EncodeWriteSettings(collection.schema, collection.write_settings);
+    Require(schema.has_value() && settings.has_value() && collection.write_settings_version == 0 &&
+            ValidUuid(collection.collection_id) && ValidUuid(collection.table_uuid) &&
             !collection.current_snapshot_id && !collection.name.empty() && collection.name.size() <= 128 &&
             ValidUtf8(collection.name) && collection.name.find('\0') == std::string::npos,
         "INVALID_ARGUMENT",
@@ -609,6 +722,12 @@ CollectionInfo DurableSqliteCatalogStore::PublishCreate(CollectionInfo collectio
                     Blob{*schema},
                     Sha256(*schema),
                     collection.creation_sequence});
+            if (!IsDefault(collection.write_settings)) {
+                EnsureWriteSettings();
+                database_.Execute("INSERT INTO collection_write_settings VALUES(?,1,?,?)",
+                    {collection.collection_id, Blob{*settings}, Blob{*settings}});
+                collection.write_settings_version = 1;
+            }
         });
         publication_ = nullptr;
         return collection;

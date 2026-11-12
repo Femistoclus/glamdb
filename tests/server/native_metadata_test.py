@@ -12,7 +12,7 @@ from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'sdk/python/src'))
 _test_arguments = sys.argv[4:]
-from native_http_test import NativeHTTP, SERVER, TOKEN
+from native_http_test import CLI, NativeHTTP, SERVER, TOKEN
 sys.argv[1:] = _test_arguments
 
 
@@ -50,6 +50,106 @@ class NativeMetadataHTTP(NativeHTTP):
         b = self.api(path + '/append', {'operation_id': str(uuid.uuid4()), 'rows': [
             {'key': 'later', 'n': '-9223372036854775808', 'ts': '1969-12-31T23:59:59.999999Z'}]})['result']
         return path, a, b
+
+    def footer_codecs(self, operation_id):
+        """Codecs recorded by the footer of one append's file, read independently of the engine."""
+        import pyarrow.parquet as pq
+        files = [path for path in Path(self.root).rglob('*.parquet') if operation_id in path.name]
+        self.assertEqual(len(files), 1, files)
+        footer = pq.ParquetFile(files[0]).metadata
+        codecs = {}
+        for group in range(footer.num_row_groups):
+            for column in range(footer.num_columns):
+                chunk = footer.row_group(group).column(column)
+                codecs.setdefault(chunk.path_in_schema, set()).add(chunk.compression)
+        return {name: values.pop() if len(values) == 1 else values for name, values in codecs.items()}
+
+    def test_parquet_write_settings_reach_footers_restart_and_retries(self):
+        from jsonschema import Draft202012Validator
+        wire = json.loads((Path(__file__).resolve().parents[2] / 'fixtures/http/v0.schema.json').read_text())
+        collection_schema = Draft202012Validator(wire | {'$ref': '#/$defs/collection'})
+        capabilities = self.api('/databases/' + self.store_id + '/capabilities')
+        self.assertTrue(capabilities['features']['write_settings'])
+        codecs = {item['codec']: item['level'] for item in capabilities['parquet']['codecs']}
+        self.assertEqual(codecs['zstd'], {'min': 1, 'max': 22, 'default': 1})
+        self.assertIsNone(codecs['snappy'])
+        self.assertEqual(capabilities['parquet']['default_compression'], {'codec': 'zstd', 'level': None})
+
+        cid = str(uuid.uuid4())
+        path = '/collections/' + cid
+        settings = {'parquet': {'compression': {'codec': 'gzip', 'level': 6},
+                                'columns': [{'field': 'ts', 'compression': {'codec': 'lz4_raw'}},
+                                            {'field': 'key', 'compression': {'codec': 'uncompressed'}}]}}
+        body = {'collection_id': cid, 'name': 'settings', 'write_settings': settings, 'schema': {'fields': [
+            {'name': 'key', 'type': 'string', 'nullable': False},
+            {'name': 'n', 'type': 'int64', 'nullable': True},
+            {'name': 'ts', 'type': 'timestamp_us_utc', 'nullable': True}]}}
+        canonical = {'parquet': {'compression': {'codec': 'gzip', 'level': 6},
+                                 'columns': [{'field': 'key', 'compression': {'codec': 'uncompressed', 'level': None}},
+                                             {'field': 'ts', 'compression': {'codec': 'lz4_raw', 'level': None}}]}}
+        created = self.api('/collections', body)
+        self.assertEqual(created['write_settings'], canonical)
+        info = self.api(path)
+        collection_schema.validate(info)
+        self.assertEqual(info['write_settings'], canonical)
+        self.assertEqual(info['write_settings_version'], '1')
+        # Creation is idempotent only for the same settings.
+        self.assertEqual(self.api('/collections', body), info)
+        mismatch = self.api('/collections', dict(body, write_settings={'parquet': None}), status=409)
+        self.assertEqual(mismatch['error']['code'], 'WRITE_SETTINGS_MISMATCH')
+
+        rows = [{'key': 'dup', 'n': '9007199254740993', 'ts': '2026-01-01T00:00:00.000001Z'},
+                {'key': 'dup', 'n': None, 'ts': None}]
+        first = str(uuid.uuid4())
+        receipt = self.api(path + '/append', {'operation_id': first, 'rows': rows})
+        # PyArrow names the Parquet LZ4_RAW codec "LZ4" (Hadoop-framed LZ4 is "LZ4_HADOOP").
+        self.assertEqual(self.footer_codecs(first), {'key': 'UNCOMPRESSED', 'n': 'GZIP', 'ts': 'LZ4'})
+        files = self.api(path + '/files')['items']
+        details = self.api(path + '/files/' + files[0]['file_id'])
+        reported = {column['field_id']: column['compression']
+                    for group in details['row_groups'] for column in group['field_metrics']}
+        self.assertEqual(reported, {1: 'uncompressed', 2: 'gzip', 3: 'lz4_raw'})
+
+        update = {'expected_version': '1', 'write_settings': {'parquet': {'compression': {'codec': 'snappy'}}}}
+        updated = self.api(path + '/write-settings', update)
+        collection_schema.validate(updated)
+        self.assertEqual(updated['write_settings_version'], '2')
+        # A lost response is retried with the same request.
+        self.assertEqual(self.api(path + '/write-settings', update), updated)
+        conflict = self.api(path + '/write-settings', dict(update, write_settings={'parquet': None}), status=409)
+        self.assertEqual(conflict['error']['code'], 'WRITE_SETTINGS_CONFLICT')
+        for invalid in ({'parquet': {'compression': {'codec': 'brotli'}}},
+                        {'parquet': {'compression': {'codec': 'zstd', 'level': 23}}},
+                        {'parquet': {'compression': {'codec': 'snappy', 'level': 1}}},
+                        {'parquet': {'columns': [{'field': 'missing', 'compression': {'codec': 'zstd'}}]}},
+                        {'parquet': {'columns': [{'field': 'key'}]}},
+                        {'parquet': {'compression': {'codec': 'zstd'}, 'extra': True}},
+                        {'transport': {}}):
+            with self.subTest(invalid=invalid):
+                error = self.api(path + '/write-settings', {'expected_version': '2', 'write_settings': invalid},
+                                 status=400)
+                self.assertEqual(error['error']['code'], 'INVALID_ARGUMENT')
+        second = str(uuid.uuid4())
+        self.api(path + '/append', {'operation_id': second, 'rows': rows[:1]})
+        self.assertEqual(self.footer_codecs(second), {'key': 'SNAPPY', 'n': 'SNAPPY', 'ts': 'SNAPPY'})
+        # Old files keep their codecs; the retried first append returns its receipt.
+        self.assertEqual(self.footer_codecs(first), {'key': 'UNCOMPRESSED', 'n': 'GZIP', 'ts': 'LZ4'})
+        self.assertEqual(self.api(path + '/append', {'operation_id': first, 'rows': rows}), receipt)
+
+        self.stop()
+        self.start()
+        self.assertEqual(self.api(path)['write_settings'],
+                         {'parquet': {'compression': {'codec': 'snappy', 'level': None}, 'columns': []}})
+        scanned = self.api(path + '/scan', {})['rows']
+        self.assertEqual(sorted(json.dumps(row, sort_keys=True) for row in scanned),
+                         sorted(json.dumps(row, sort_keys=True) for row in rows + rows[:1]))
+        historical = self.api(path + '/scan', {'snapshot_id': receipt['result']['snapshot_id']})['rows']
+        self.assertEqual(historical, rows)
+        cli = subprocess.run([CLI, 'request', '--port', str(self.port), '--method', 'POST',
+                              '--path', '/databases/' + self.store_id + path + '/write-settings', '--body', '-'],
+                             input=json.dumps({'expected_version': '2', 'write_settings': {'parquet': None}}),
+                             env=self.env, check=True, capture_output=True, text=True)
+        self.assertEqual(json.loads(cli.stdout)['write_settings_version'], '3')
 
     def test_zero_column_explain_matches_the_wire_schema(self):
         from jsonschema import Draft202012Validator
