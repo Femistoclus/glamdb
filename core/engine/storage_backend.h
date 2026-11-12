@@ -32,6 +32,23 @@ struct CollectionView
     std::vector<ExpiredSnapshotRecord> expired_snapshots{};
 };
 
+// The manifest list of one archived snapshot as its catalog row records it.
+struct ArchivedListReference
+{
+    std::string collection_id;
+    std::string manifest_list;
+    int64_t bytes = 0;
+    std::string sha256;
+};
+
+// A collection's verified checkpoint with the archived snapshot that precedes
+// its oldest root snapshot (the newest archive row), for OpenFromCheckpoints.
+struct CollectionCheckpointView
+{
+    CollectionCheckpoint checkpoint;
+    std::optional<ArchivedSnapshotRecord> newest_archived{};
+};
+
 class StagedCreate
 {
 public:
@@ -39,6 +56,12 @@ public:
     virtual CollectionInfo Info() const = 0;
     virtual iceberg::Status Publish(iceberg::sql::CatalogStore& catalog) = 0;
     virtual Status VerifyClosure(std::string_view final_metadata_location) = 0;
+    // After VerifyClosure: the verified state for the catalog checkpoint, or
+    // nothing when this backend does not provide one.
+    virtual std::optional<CollectionCheckpoint> Checkpoint() const
+    {
+        return std::nullopt;
+    }
 };
 
 class StagedAppend
@@ -65,6 +88,11 @@ public:
     {
         return {};
     }
+    // After VerifyClosure: the verified state for the catalog checkpoint.
+    virtual std::optional<CollectionCheckpoint> Checkpoint() const
+    {
+        return std::nullopt;
+    }
 };
 
 class StagedExpiration
@@ -87,6 +115,11 @@ public:
     {
         return {};
     }
+    // After VerifyClosure: the verified state for the catalog checkpoint.
+    virtual std::optional<CollectionCheckpoint> Checkpoint() const
+    {
+        return std::nullopt;
+    }
 };
 
 class StorageBackend
@@ -99,7 +132,9 @@ public:
         bool write_failure_latched = false;
     };
     virtual ~StorageBackend() = default;
-    virtual Result<StorageFootprint> GetStorageFootprint()
+    // `archived`: every archive row's manifest list. Archived lists and the
+    // manifests they reference are retained metadata, not orphans.
+    virtual Result<StorageFootprint> GetStorageFootprint(std::span<const ArchivedListReference> /*archived*/)
     {
         return std::unexpected(ErrorDetail{"DEPENDENCY_UNAVAILABLE",
             "physical store inventory is not installed",
@@ -188,6 +223,22 @@ public:
         DurableSqliteCatalogStore& catalog)
     {
         return VerifyRetained(store, collections, catalog.Operations());
+    }
+    // Fresh open without re-verifying history: rebuilds every collection's
+    // verified generation from its catalog checkpoint, current root and
+    // current manifests. Any error means the caller must run the full
+    // VerifyRetainedCatalog path instead; no generation is left installed.
+    virtual Status
+    OpenFromCheckpoints(const StoreInfo&, std::span<const CollectionView>, std::span<const CollectionCheckpointView>)
+    {
+        return std::unexpected(
+            ErrorDetail{"DEPENDENCY_UNAVAILABLE", "checkpoint open is not installed", RetryHint::OperatorAction});
+    }
+    // After a successful full verification: one checkpoint per append
+    // collection of the verified generation (none for KV collections).
+    virtual std::vector<CollectionCheckpoint> VerifiedCheckpoints()
+    {
+        return {};
     }
     // Independent read-only view for scans; it never joins a writer attempt.
     virtual Result<std::shared_ptr<iceberg::FileIO>> ReadOnlyFileIO()

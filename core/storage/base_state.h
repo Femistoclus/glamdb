@@ -57,6 +57,40 @@ iceberg::Result<TBaseState> VerifyRetainedSnapshot(const std::shared_ptr<iceberg
     std::int64_t snapshotID,
     const TStorageLimits& limits = {});
 
+// What a verified checkpoint (catalog version 6) asserts about an append
+// collection whose every publication was verified by the publication guard.
+struct TCheckpointedState
+{
+    std::string RootLocation;
+    std::uint64_t RootBytes = 0;
+    std::string RootSha256;
+    std::optional<std::int64_t> SnapshotID;
+    std::int64_t Sequence = 0;
+    // Cumulative usage, including archived metadata still on disk.
+    TStorageUsage Usage;
+    // The ancestry before the oldest root snapshot: the expiration ledger
+    // (`ExpiredIDs`, any order) followed by `Archived` archived snapshots.
+    std::vector<std::int64_t> ExpiredIDs;
+    std::uint64_t Archived = 0;
+    // The snapshot with sequence |ExpiredIDs| + Archived (the oldest root
+    // snapshot's parent), and its live data files when it is archived.
+    std::optional<std::int64_t> PrefixParent;
+    std::optional<std::uint64_t> PrefixDataFiles;
+};
+
+// Rebuilds the state VerifyReachable proves, from the checkpoint, the current
+// root (size and SHA-256 must match), the manifest lists of the root
+// snapshots and the current manifests. Reads no data-file footer, no archived
+// or expired metadata and no superseded manifest. The scan index holds the
+// same files in the same order: list order is preserved per origin by every
+// append and merge. A mismatch is an error; callers fall back to full
+// verification.
+iceberg::Result<TBaseState> RebuildFromCheckpoint(const std::shared_ptr<iceberg::FileIO>& fileIO,
+    const std::string& storeID,
+    const std::string& collectionID,
+    const TCheckpointedState& expected,
+    const TStorageLimits& limits);
+
 // `expired` is the ancestry before the oldest root snapshot, oldest first:
 // the expiration ledger, then the snapshot archive. Its first `expiredCount`
 // entries (all when absent) are expired; the rest stay readable.

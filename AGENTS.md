@@ -216,7 +216,12 @@ Append collections can set `hot_snapshots` (creation, `Engine::UpdateSnapshotArc
 appends then keep only the newest snapshots in the Iceberg root and move older
 ones, still readable, to catalog archive rows in the same outer transaction;
 `Engine::ArchiveSnapshots` is the bounded maintenance call. The first stored
-setting introduces catalog version 5; stores without it are unchanged. See
+setting introduces catalog versions 5 and 6; stores without it are unchanged.
+Version 6 writes a verified per-collection checkpoint with every publication;
+a fresh open of such a store rebuilds state from checkpoints, the current root
+and current manifests instead of re-verifying history, and falls back to full
+verification on any mismatch (`Reconcile`, `Engine::VerifyStoreFull` and
+`OpenStoreRequest::verify_full` always verify fully). See
 [the snapshot archive tier](docs/development/SNAPSHOT_ARCHIVE.md); HTTP/SDK/CLI
 adapters are not provided yet.
 General garbage collection, asynchronous admission, replication,

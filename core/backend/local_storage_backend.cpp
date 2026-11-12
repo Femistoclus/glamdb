@@ -1,5 +1,6 @@
 #include "core/backend/local_storage_backend.h"
 #include "core/backend/archive_records.h"
+#include "core/backend/checkpoint_records.h"
 #include "core/io/tree_inventory.h"
 #include "core/storage/snapshot_archive.h"
 #include "core/storage/snapshot_retention.h"
@@ -1001,12 +1002,19 @@ public:
                              std::string(location)}),
                 "IO_ERROR",
                 "verify collection root");
-            Owner_->RecordCandidate(Info_.collection_id, guard.GetCandidate());
+            Verified_ = guard.GetCandidate();
+            Owner_->RecordCandidate(Info_.collection_id, Verified_);
             return {};
         });
     }
 
+    std::optional<CollectionCheckpoint> Checkpoint() const override
+    {
+        return Verified_ ? MakeCheckpoint(Info_.collection_id, *Verified_, Context_.FileIO) : std::nullopt;
+    }
+
 private:
+    std::shared_ptr<const NStorage::TBaseState> Verified_;
     const std::shared_ptr<TLocalStorageBackend> Owner_;
     const CollectionInfo Info_;
     const std::string Root_;
@@ -1074,7 +1082,8 @@ public:
                 "IO_ERROR",
                 "verify append root");
             Archived_ = ArchivedRecords(guard.GetArchiveCut(), Context_.ArchivePrefix);
-            Owner_->RecordCandidate(CollectionID_, guard.GetCandidate());
+            Verified_ = guard.GetCandidate();
+            Owner_->RecordCandidate(CollectionID_, Verified_);
             return {};
         });
     }
@@ -1084,8 +1093,15 @@ public:
         return Archived_;
     }
 
+    std::optional<CollectionCheckpoint> Checkpoint() const override
+    {
+        return Verified_ ? MakeCheckpoint(CollectionID_, *Verified_, Context_.FileIO, Context_.StagedRoot)
+                         : std::nullopt;
+    }
+
 private:
     std::vector<ArchivedSnapshotRecord> Archived_;
+    std::shared_ptr<const NStorage::TBaseState> Verified_;
     const std::shared_ptr<TLocalStorageBackend> Owner_;
     const std::string CollectionID_;
     const std::string Name_;
@@ -1110,6 +1126,12 @@ public:
     NStorage::TAttemptScope Scope;
     int64_t ExpiredFromArchive = 0;
     std::vector<ArchivedSnapshotRecord> ArchivedRows;
+    std::shared_ptr<const NStorage::TBaseState> Verified;
+
+    std::optional<CollectionCheckpoint> Checkpoint() const override
+    {
+        return Verified ? MakeCheckpoint(CollectionID, *Verified, Context.FileIO) : std::nullopt;
+    }
 
     int64_t ArchivedExpired() const override
     {
@@ -1165,7 +1187,8 @@ public:
                 "IO_ERROR",
                 "verify maintenance root");
             ArchivedRows = ArchivedRecords(guard.GetArchiveCut(), Context.ArchivePrefix);
-            Owner->RecordCandidate(CollectionID, guard.GetCandidate());
+            Verified = guard.GetCandidate();
+            Owner->RecordCandidate(CollectionID, Verified);
             return {};
         });
     }
@@ -2172,6 +2195,7 @@ void TLocalStorageBackend::InvalidateCache()
 {
     std::lock_guard lock(Mutex_);
     VerifiedGeneration_ = false;
+    FromCheckpoints_ = false;
     Collections_.clear();
     AdmittedWarehouseBytes_.reset();
     {
@@ -2353,6 +2377,7 @@ Status TLocalStorageBackend::VerifyRetainedImpl(const StoreInfo& store,
             return !Collections_.contains(item.first);
         });
         VerifiedGeneration_ = true;
+        FromCheckpoints_ = false;
         return {};
     });
 }
@@ -2531,6 +2556,115 @@ std::shared_ptr<const NStorage::TBaseState> TLocalStorageBackend::VerifyCollecti
         memory = ReserveRootMemory(base.collection_id, state.Usage.RootBytes, true, indexBytes);
     }
     return RetainState(std::move(memory), std::make_shared<const NStorage::TBaseState>(std::move(state)));
+}
+
+Status TLocalStorageBackend::OpenFromCheckpoints(const StoreInfo& store,
+    std::span<const CollectionView> collections,
+    std::span<const CollectionCheckpointView> checkpoints)
+{
+    // A failed rebuild must not leave the previous generation available.
+    InvalidateCache();
+    auto status = Guarded<Status>([&]() -> Status {
+        CheckStore(store);
+        CheckIO(Dirs_->CheckIdentity(), EStoragePath::Read, "verify store directories");
+        Require(collections.size() == checkpoints.size(), "CORRUPTION", "checkpoints differ from the registry");
+        const std::shared_ptr<iceberg::FileIO> view =
+            TakeIceberg(FileIO_->ReadOnlyView(), "IO_ERROR", "open read-only FileIO");
+        std::map<std::string, TCollectionState, std::less<>> verified;
+        NStorage::TStorageUsage totalUsage;
+        for (size_t index = 0; index < collections.size(); ++index) {
+            const auto& collection = collections[index];
+            const auto& checkpoint = checkpoints[index];
+            Require(collection.info.mode == CollectionMode::Append &&
+                    checkpoint.checkpoint.collection_id == collection.info.collection_id &&
+                    collection.base.collection_id == collection.info.collection_id &&
+                    collection.base.table_uuid == collection.info.table_uuid &&
+                    collection.base.current_snapshot_id == collection.info.current_snapshot_id &&
+                    checkpoint.checkpoint.metadata_location == collection.base.metadata_location,
+                "CORRUPTION",
+                "checkpoint differs from the collection view");
+            const auto& base = collection.base;
+            auto memory =
+                ReserveRootMemory(base.collection_id, static_cast<uint64_t>(checkpoint.checkpoint.root_bytes), true);
+            auto state = TakeRetained(NStorage::RebuildFromCheckpoint(view,
+                                          Store_.store_id,
+                                          base.collection_id,
+                                          CheckpointedState(checkpoint, collection.expired_snapshots),
+                                          Options_.Storage),
+                "rebuild collection from its checkpoint");
+            CheckIdentity(state, base);
+            CheckSchema(*state.Metadata, collection.info.schema, collection.info.mode);
+            const auto indexBytes = ScanIndexMemory(state);
+            if (memory->GetBytes() < RootMemoryBytes({.RootBytes = state.Usage.RootBytes, .IndexBytes = indexBytes})) {
+                memory.reset();
+                memory = ReserveRootMemory(base.collection_id, state.Usage.RootBytes, true, indexBytes);
+            }
+            totalUsage = TakeUsage(NStorage::ReplaceUsage(totalUsage, {.Previous = {}, .Next = state.Usage}),
+                "CORRUPTION",
+                "aggregate storage usage");
+            auto& entry = verified[collection.info.collection_id];
+            entry.Confirmed = RetainState(memory, std::make_shared<const NStorage::TBaseState>(std::move(state)));
+            entry.ConfirmedMemory = std::move(memory);
+        }
+        CheckUsage(NStorage::CheckStorageCapacity(totalUsage, Options_.Storage),
+            "CORRUPTION",
+            "retained storage capacity");
+        std::lock_guard lock(Mutex_);
+        Collections_ = std::move(verified);
+        // Checkpoints exist only without KV collections, so no no-op root is retained.
+        NoOpRoots_.clear();
+        std::erase_if(CacheMemory_, [&](const auto& item) {
+            return !Collections_.contains(item.first);
+        });
+        VerifiedGeneration_ = true;
+        FromCheckpoints_ = true;
+        return {};
+    });
+    if (!status) {
+        InvalidateCache();
+    }
+    return status;
+}
+
+std::vector<CollectionCheckpoint> TLocalStorageBackend::VerifiedCheckpoints()
+{
+    std::vector<std::pair<std::string, std::shared_ptr<const NStorage::TBaseState>>> states;
+    {
+        std::lock_guard lock(Mutex_);
+        RequireVerified();
+        for (const auto& [id, state] : Collections_) {
+            if (state.Confirmed) {
+                states.emplace_back(id, state.Confirmed);
+            }
+        }
+    }
+    const std::shared_ptr<iceberg::FileIO> view =
+        TakeIceberg(FileIO_->ReadOnlyView(), "IO_ERROR", "open read-only FileIO");
+    std::vector<CollectionCheckpoint> result;
+    for (const auto& [id, state] : states) {
+        if (auto checkpoint = MakeCheckpoint(id, *state, view)) {
+            result.push_back(std::move(*checkpoint));
+        }
+    }
+    return result;
+}
+
+bool TLocalStorageBackend::OpenedFromCheckpoints()
+{
+    std::lock_guard lock(Mutex_);
+    return VerifiedGeneration_ && FromCheckpoints_;
+}
+
+std::map<std::string, std::shared_ptr<const NStorage::TBaseState>, std::less<>> TLocalStorageBackend::ConfirmedStates()
+{
+    std::lock_guard lock(Mutex_);
+    std::map<std::string, std::shared_ptr<const NStorage::TBaseState>, std::less<>> states;
+    for (const auto& [id, state] : Collections_) {
+        if (state.Confirmed) {
+            states.emplace(id, state.Confirmed);
+        }
+    }
+    return states;
 }
 
 } // namespace glamdb::detail

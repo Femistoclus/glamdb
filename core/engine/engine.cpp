@@ -216,6 +216,8 @@ struct Engine::Impl
     Limits limits;
     std::shared_ptr<StoreLease> lease;
     std::shared_ptr<DurableSqliteCatalogStore> catalog;
+    // OpenStoreRequest::verify_full: never open from checkpoints.
+    bool verify_full = false;
     std::shared_ptr<StorageBackend> backend;
     mutable std::mutex state_mutex;
     // Orders corruption reports against a publication decision. The writer
@@ -776,6 +778,15 @@ struct Engine::Impl
             return;
         }
         if (archived->sequence_number < first) {
+            // An open from checkpoints does not re-verify archive rows, so
+            // every use binds the row to its permanent committed receipt.
+            const auto operation = catalog->FindOperation(context.Collection.collection_id, archived->operation_id);
+            Require(operation && operation->state == OperationState::Committed && operation->outcome &&
+                    operation->outcome->result && operation->outcome->result->snapshot_id == archived->snapshot_id &&
+                    operation->outcome->result->parent_snapshot_id == archived->parent_snapshot_id &&
+                    operation->outcome->result->snapshot_created_at_us == archived->timestamp_ms * 1000,
+                "CORRUPTION",
+                "archived snapshot differs from its committed receipt");
             context.Archived = std::make_shared<const ArchivedSnapshotRecord>(std::move(*archived));
         }
     }
@@ -849,6 +860,43 @@ struct Engine::Impl
         }
     }
 
+    // Rebuilds every collection from its catalog checkpoint (no history,
+    // archive rows, receipts or footers are read). False when any collection
+    // has none, is KV, or does not match; nothing stays installed then.
+    bool OpenFromCheckpoints()
+    {
+        if (!backend || !catalog->HasCheckpoints()) {
+            return false;
+        }
+        try {
+            std::vector<CollectionView> views;
+            std::vector<CollectionCheckpointView> checkpoints;
+            std::vector<CollectionCheckpoint> rows;
+            for (const auto& collection : catalog->Collections()) {
+                if (collection.mode != CollectionMode::Append) {
+                    return false;
+                }
+                auto checkpoint = catalog->Checkpoint(collection.collection_id);
+                if (!checkpoint) {
+                    return false;
+                }
+                views.push_back({collection,
+                    catalog->Base(collection.collection_id),
+                    {},
+                    catalog->ExpiredSnapshots(collection.collection_id)});
+                checkpoints.push_back({*checkpoint, catalog->NewestArchivedSnapshot(collection.collection_id)});
+                rows.push_back(std::move(*checkpoint));
+            }
+            catalog->CheckCheckpoints(rows);
+            if (backend->OpenFromCheckpoints(info, views, checkpoints)) {
+                return true;
+            }
+        } catch (const Failure&) {
+        }
+        backend->InvalidateCache();
+        return false;
+    }
+
     void Recover(bool reopen)
     {
         {
@@ -898,12 +946,21 @@ struct Engine::Impl
             }
             catalog->Reopen();
         }
-        VerifyStorage();
-        catalog->DurabilityFence();
-        catalog->ForEachOperation([&](const auto& operation) {
-            if (operation.state != OperationState::Bound) {
-                return;
-            }
+        // A fresh open trusts the verified checkpoints of a version 6 catalog
+        // when all of them match; Reconcile, Shutdown recovery, an explicit
+        // request and any mismatch re-verify the whole retained history.
+        const bool checkpointed = !reopen && !verify_full && OpenFromCheckpoints();
+        if (!checkpointed) {
+            VerifyStorage();
+        }
+        // Full verification re-establishes the checkpoints it just proved.
+        const bool reestablish = !checkpointed && backend && catalog->HasCheckpoints();
+        std::vector<CollectionCheckpoint> reseed;
+        if (reestablish) {
+            reseed = backend->VerifiedCheckpoints();
+        }
+        catalog->DurabilityFence(reseed, reestablish);
+        catalog->ForEachBoundOperation([&](const auto& operation) {
             AppendOutcome failure = Rejected(operation.binding.operation_id,
                 CommitPhase::Reconciling,
                 {"INTERRUPTED", "registered append was interrupted before publication", RetryHint::NewOperationId});
@@ -922,7 +979,11 @@ struct Engine::Impl
             }
             catalog->RecordFailure(operation.binding, failure);
         });
-        catalog->ValidateInventory();
+        if (checkpointed) {
+            catalog->ValidateInventoryLight();
+        } else {
+            catalog->ValidateInventory();
+        }
         RefreshCache();
         DrainExpiredMetadata();
         std::lock_guard lock(state_mutex);
@@ -1066,10 +1127,12 @@ EngineFactory::OpenWith(const OpenStoreRequest& request, const BackendFactory& b
         // bytes/inodes can prevent admission of the next recovery workspace.
         impl->ReserveStoreDevice(impl->lease->Root().string());
         impl->backend = MakeBackend(backend, impl->lease->Root(), impl->info);
+        impl->verify_full = request.verify_full;
         impl->catalog = DurableSqliteCatalogStore::Open(impl->lease->Root() / "catalog.sqlite",
             impl->info,
             impl->limits,
-            std::move(sqlite_vfs));
+            std::move(sqlite_vfs),
+            !request.verify_full);
         impl->Recover(false);
         return metrics.Finish(Result<std::shared_ptr<Engine>>(std::shared_ptr<Engine>(new Engine(std::move(impl)))));
     } catch (const Failure& error) {
@@ -1435,7 +1498,10 @@ CreateOutcome Engine::CreateCollectionImpl(const CreateCollectionRequest& reques
                 return staged->Publish(*impl->catalog);
             },
             migrationIdentity,
-            migrationOperation);
+            migrationOperation,
+            [&] {
+                return staged->Checkpoint();
+            });
         committed = true;
         if (gate.owns_lock()) {
             if (context->candidate_metadata_location) {
@@ -1578,7 +1644,10 @@ Result<SnapshotExpirationResult> Engine::ExpireSnapshots(const SnapshotExpiratio
                 [&] {
                     return staged->Publish(*impl->catalog);
                 },
-                staged->ArchivedExpired());
+                staged->ArchivedExpired(),
+                [&] {
+                    return staged->Checkpoint();
+                });
             committed = true;
             impl->backend->PublicationFinished(request.collection_id, candidate, CommitDisposition::Committed);
             impl->RefreshCache();
@@ -1764,6 +1833,9 @@ Result<SnapshotArchiveStatus> Engine::ArchiveSnapshots(std::string_view collecti
                 },
                 [&] {
                     return staged->Archived();
+                },
+                [&] {
+                    return staged->Checkpoint();
                 });
             committed = true;
             moved = static_cast<int64_t>(staged->Archived().size());
@@ -2516,6 +2588,9 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
                 },
                 [&] {
                     return staged->Archived();
+                },
+                [&] {
+                    return staged->Checkpoint();
                 });
         }
         // Count a confirmed new publication once. Receipt replay paths never
@@ -2650,7 +2725,16 @@ Result<StorageFootprint> Engine::GetStorageFootprint() const
             impl->CheckReady();
         }
         Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "physical inventory requires storage");
-        auto result = impl->backend->GetStorageFootprint();
+        // Archived lists, and the manifests only they reference, stay on disk
+        // as retained metadata; the inventory reads them, never open.
+        std::vector<ArchivedListReference> archived;
+        for (const auto& collection : impl->catalog->Collections()) {
+            impl->catalog->ForEachArchivedSnapshot(collection.collection_id, [&](const ArchivedSnapshotRecord& row) {
+                archived.push_back(
+                    {collection.collection_id, row.manifest_list, row.manifest_list_bytes, row.manifest_list_sha256});
+            });
+        }
+        auto result = impl->backend->GetStorageFootprint(archived);
         if (!result) {
             impl->CloseOnCorruption(result.error());
             return result;
@@ -2894,6 +2978,13 @@ Status Engine::Reconcile()
         metrics.Error(detail.code);
         return std::unexpected(detail);
     }
+}
+
+Status Engine::VerifyStoreFull()
+{
+    // The full recovery path: every receipt, archive row, retained transition
+    // and data-file footer, then fresh checkpoints in the durability fence.
+    return Reconcile();
 }
 
 Status Engine::Shutdown(std::chrono::milliseconds timeout)

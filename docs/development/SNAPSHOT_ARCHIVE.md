@@ -60,10 +60,13 @@ oldest one's parent is archived.
 
 ## Catalog format
 
-Catalog version 5 adds two tables after the version 4 KV tables. It is created
-by the first transaction that stores a setting (creation or update), together
-with any missing version 2–4 tables. Older binaries reject version 5. Stores
-that never store a setting keep their version and stay byte-compatible.
+Catalog version 5 adds two tables after the version 4 KV tables, and version 6
+adds the verified checkpoints (see [verified checkpoints](#verified-checkpoints)).
+Both are created by the first transaction that stores a setting (creation or
+update), together with any missing version 2–4 tables; a version 5 catalog
+written before checkpoints existed becomes version 6 at its first publication.
+Older binaries reject versions 5 and 6. Stores that never store a setting keep
+their version and stay byte-compatible.
 
 ```sql
 CREATE TABLE collection_snapshot_archive(collection_id TEXT PRIMARY KEY REFERENCES collections(collection_id),
@@ -155,6 +158,66 @@ per-history work.
 Archived list integrity is checked when a read or expiration needs the list.
 `manifest_list_bytes` and the retired manifest totals are trusted catalog state
 written by a verified publication, like receipt totals.
+
+This full path remains the one used by `Reconcile`, by recovery during
+`Shutdown`, by `Engine::VerifyStoreFull`, by `OpenStoreRequest::verify_full`
+and whenever a version 6 store's checkpoints are missing or do not match.
+
+## Verified checkpoints
+
+Catalog version 6 stores one checkpoint per append collection and a partial
+index of interrupted operations:
+
+```sql
+CREATE TABLE collection_checkpoints(collection_id TEXT PRIMARY KEY REFERENCES collections(collection_id),
+  snapshot_id INTEGER, sequence_number INTEGER NOT NULL CHECK(sequence_number>=0),
+  metadata_location TEXT NOT NULL CHECK(length(metadata_location)<=2048),
+  root_bytes INTEGER NOT NULL CHECK(root_bytes>=1), root_sha256 TEXT NOT NULL CHECK(length(root_sha256)=64),
+  usage_root_bytes, usage_snapshots, usage_snapshot_log, usage_data_files, usage_manifests,
+  usage_manifest_bytes, usage_manifest_list_bytes, usage_footer_bytes INTEGER NOT NULL CHECK(...>=0),
+  operations, archived, expired INTEGER NOT NULL CHECK(...>=0),
+  receipt_chain TEXT NOT NULL CHECK(length(receipt_chain)=64))
+CREATE INDEX operations_bound ON operations(collection_id,operation_id) WHERE state=0
+```
+
+Every publication of an append collection (creation, ordinary and bulk append,
+archive maintenance, expiration) writes its checkpoint in the same outer
+transaction as the pointer and receipt: the verified candidate's root location,
+size and SHA-256, current snapshot and sequence, and cumulative storage usage.
+The catalog maintains the operation count (every binding increments it), the
+archive and expiration row counts, and a SHA-256 chain over the publications
+since the row was established (kind, root, digest and the encoded receipt). KV
+collections have no checkpoint.
+
+A fresh `OpenExisting` of a version 6 store opens from checkpoints when every
+collection has one and all of them match: the catalog validates its header and
+registry (O(collections), no `integrity_check` and no walk over operation
+records), requires each checkpoint to equal the catalog pointer and current
+snapshot, the archive and ledger row counts, and the operation counts to sum to
+the exact operation count. Each collection is then rebuilt from its root (size
+and digest must match), the manifest lists of its root snapshots and its
+current manifests: the scan index groups the live files by origin sequence in
+list order, which every append and merge preserves, and is identical to the one
+full verification builds; usage comes from the checkpoint and must agree with
+the root and the live files and fit the configured budgets. Open reads no
+data-file footer, no archived or expired list, no superseded manifest and no
+archive row except the newest; interrupted operations are found through the
+partial index. Any mismatch or error discards the attempt and runs the full
+path, which then re-establishes every checkpoint in its durability fence.
+
+What the checkpoint path trusts instead of re-proving: the history before the
+current root (each transition was verified by the publication guard before
+its COMMIT), the cumulative byte totals, archive rows until they are used, and
+the SQLite file itself. Archive rows are therefore checked on use: an archived
+read binds the row to its committed receipt (snapshot, parent, time) and
+requires its `data_files` prefix to end exactly at the files whose origin
+sequence is the row's; a tampered row is `CORRUPTION`, never other data.
+Scrubbing remains explicit: `VerifyStoreFull`, `Reconcile` or `verify_full`.
+
+The physical inventory (`GetStorageFootprint`) reads each archived list with
+its recorded size and SHA-256 and counts it and its manifests as referenced
+metadata, so archiving does not turn retained metadata into "unreferenced"
+warehouse bytes.
 
 ## Validation
 

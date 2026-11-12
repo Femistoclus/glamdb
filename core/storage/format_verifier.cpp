@@ -539,6 +539,8 @@ public:
 };
 
 std::atomic<std::uint64_t> MetadataParses{0};
+std::atomic<std::uint64_t> FooterReads{0};
+std::atomic<std::uint64_t> AvroContainers{0};
 
 iceberg::Result<std::unique_ptr<iceberg::TableMetadata>> ParseBoundedMetadata(std::string bytes,
     const std::string& path)
@@ -572,6 +574,7 @@ iceberg::Result<std::shared_ptr<parquet::FileMetaData>> ReadParquetFooterFromStr
 {
     const auto expectedLength = expected.Length;
     const auto expectedRows = expected.RowCount;
+    FooterReads.fetch_add(1, std::memory_order_relaxed);
     return CatchIcebergExceptions([&]() -> iceberg::Result<std::shared_ptr<parquet::FileMetaData>> {
         if (expectedRows < 0 || limits.MaxFooterBytes > std::numeric_limits<std::int32_t>::max() ||
             limits.MaxThriftContainerElements <= 0)
@@ -645,6 +648,7 @@ iceberg::Result<std::shared_ptr<parquet::FileMetaData>> ReadParquetFooter(iceber
 iceberg::Result<TAvroContainerInfo>
 CheckAvroContainer(iceberg::InputFile& file, std::int64_t expectedLength, TAvroLimits limits)
 {
+    AvroContainers.fetch_add(1, std::memory_order_relaxed);
     const auto maxBytes = limits.MaxBytes;
     const auto maxRecords = limits.MaxRecords;
     return CatchIcebergExceptions([&]() -> iceberg::Result<TAvroContainerInfo> {
@@ -770,5 +774,15 @@ iceberg::Status VerifyTableMetadataBytes(iceberg::FileIO& io,
 std::uint64_t TableMetadataParses() noexcept
 {
     return MetadataParses.load(std::memory_order_relaxed);
+}
+
+std::uint64_t ParquetFooterReads() noexcept
+{
+    return FooterReads.load(std::memory_order_relaxed);
+}
+
+std::uint64_t AvroContainerChecks() noexcept
+{
+    return AvroContainers.load(std::memory_order_relaxed);
 }
 }

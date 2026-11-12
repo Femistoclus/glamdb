@@ -98,7 +98,12 @@ public:
         std::string_view operation_id) const;
     // Reads one fixed view. The cursor retains the store until it is released.
     Result<std::shared_ptr<ScanCursor>> Scan(const ScanRequest& request) const;
+    // Re-verifies the whole retained store, as recovery without checkpoints
+    // does, and re-establishes the catalog checkpoints (catalog version 6).
+    // Reconcile always takes this full path too; only a fresh open of a
+    // version 6 store may use the checkpoints instead.
     Status Reconcile();
+    Status VerifyStoreFull();
     Status Shutdown(std::chrono::milliseconds timeout);
 
 private:

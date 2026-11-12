@@ -113,9 +113,9 @@ public:
         , Times_(std::move(times))
     { }
 
-    Result<StorageFootprint> GetStorageFootprint() override
+    Result<StorageFootprint> GetStorageFootprint(std::span<const ArchivedListReference> archived) override
     {
-        return Inner_->GetStorageFootprint();
+        return Inner_->GetStorageFootprint(archived);
     }
     EngineCapabilities GetCapabilities() const override
     {

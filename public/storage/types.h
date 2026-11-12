@@ -464,6 +464,10 @@ struct OpenStoreRequest
     std::string profile_id = "local-delete-extra-v1";
     Limits limits{};
     std::shared_ptr<ResourceOwner> resources{};
+    // Re-verify the whole retained history (every receipt, archived row,
+    // transition and data-file footer) instead of opening from the verified
+    // checkpoints of a catalog version 6 store.
+    bool verify_full = false;
 };
 
 } // namespace glamdb

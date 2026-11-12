@@ -99,7 +99,7 @@ public:
 
     Health GetHealth() const override;
     EngineCapabilities GetCapabilities() const override;
-    Result<StorageFootprint> GetStorageFootprint() override;
+    Result<StorageFootprint> GetStorageFootprint(std::span<const ArchivedListReference> archived) override;
 
     Result<std::unique_ptr<StagedCreate>>
     PrepareCreate(const StoreInfo& store, const CreateCollectionRequest& request, std::string_view attempt_id) override;
@@ -133,6 +133,15 @@ public:
     Status VerifyRetainedCatalog(const StoreInfo& store,
         std::span<const CollectionView> collections,
         DurableSqliteCatalogStore& catalog) override;
+    Status OpenFromCheckpoints(const StoreInfo& store,
+        std::span<const CollectionView> collections,
+        std::span<const CollectionCheckpointView> checkpoints) override;
+    std::vector<CollectionCheckpoint> VerifiedCheckpoints() override;
+    // Whether the current verified generation came from OpenFromCheckpoints
+    // (false after full verification). For tests and measurements.
+    bool OpenedFromCheckpoints();
+    // The confirmed state of every collection of the verified generation.
+    std::map<std::string, std::shared_ptr<const NGlamDB::NStorage::TBaseState>, std::less<>> ConfirmedStates();
     Result<std::shared_ptr<iceberg::FileIO>> ReadOnlyFileIO() override;
     Result<std::shared_ptr<const NGlamDB::NStorage::TBaseState>> VerifiedScanState(const BaseIdentity& base) override;
     std::shared_ptr<TSnapshotMetadataCache> ReadMetadataCache() override
@@ -169,6 +178,7 @@ private:
     std::mutex Mutex_;
     std::map<std::string, TCollectionState, std::less<>> Collections_;
     bool VerifiedGeneration_ = false;
+    bool FromCheckpoints_ = false;
     // No-op receipts retain their exact historical metadata base permanently.
     // Reservations cover the bounded path set; files count in warehouse usage.
     std::map<std::string, std::shared_ptr<ResourceReservation>, std::less<>> NoOpRoots_;

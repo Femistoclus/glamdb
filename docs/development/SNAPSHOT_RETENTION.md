@@ -96,7 +96,7 @@ publication. Version 3 is introduced transactionally and includes the existing
 write-settings schema plus expiration and cleanup tables. Older binaries reject
 version 3. The immutable store and append receipt formats remain unchanged.
 
-With the [snapshot archive tier](SNAPSHOT_ARCHIVE.md) (catalog version 5),
+With the [snapshot archive tier](SNAPSHOT_ARCHIVE.md) (catalog versions 5 and 6),
 retention counts and ages archived and root snapshots together. Archived
 snapshots are the oldest and expire first, at most 4096 per call; their rows
 move to the expiration ledger and their metadata joins the same cleanup queue.

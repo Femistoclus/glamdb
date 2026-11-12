@@ -87,6 +87,12 @@ if(NOT GLAMDB_IO_ONLY)
         target_include_directories(glamdb_append_history_bench SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party/json/single_include")
         target_link_libraries(glamdb_append_history_bench PRIVATE glamdb::core glamdb_storage glamdb_build_options)
 
+        add_executable(glamdb_archive_history_bench "${PROJECT_SOURCE_DIR}/benchmarks/archive_history.cpp")
+        set_target_properties(glamdb_archive_history_bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/benchmarks")
+        target_include_directories(glamdb_archive_history_bench PRIVATE "${PROJECT_SOURCE_DIR}")
+        target_include_directories(glamdb_archive_history_bench SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party/json/single_include")
+        target_link_libraries(glamdb_archive_history_bench PRIVATE glamdb::core glamdb_storage glamdb_build_options)
+
         add_executable(glamdb_capacity_bench "${PROJECT_SOURCE_DIR}/benchmarks/capacity.cpp")
         set_target_properties(glamdb_capacity_bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/benchmarks")
         target_include_directories(glamdb_capacity_bench PRIVATE "${PROJECT_SOURCE_DIR}")

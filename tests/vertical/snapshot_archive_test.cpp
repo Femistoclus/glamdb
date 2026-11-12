@@ -260,7 +260,8 @@ protected:
 TEST_F(TSnapshotArchiveTest, ArchivedSnapshotsAnswerExactlyAsWhileHot)
 {
     Create(2);
-    EXPECT_EQ(CatalogVersion(Root_), 5);
+    // The archive tier comes with verified checkpoints (catalog version 6).
+    EXPECT_EQ(CatalogVersion(Root_), 6);
     std::map<int64_t, TView> hot;
     std::vector<int64_t> order;
     for (int64_t index = 0; index < 14; ++index) {
@@ -580,6 +581,10 @@ class TArchiveRowTamperingTest
     , public ::testing::WithParamInterface<const char*>
 { };
 
+// Full verification refuses a tampered archive row at open. An open from the
+// verified checkpoints does not read archive rows: it either refuses (row
+// counts) or every later read of a snapshot returns its original answer or
+// an explicit error, never different data.
 TEST_P(TArchiveRowTamperingTest, OpenFailsClosed)
 {
     Create(2);
@@ -587,6 +592,10 @@ TEST_P(TArchiveRowTamperingTest, OpenFailsClosed)
         ASSERT_EQ(Append(index).disposition, CommitDisposition::Committed);
     }
     ASSERT_GE(Status().archived_snapshots, 4);
+    std::map<int64_t, TView> original;
+    for (const auto& [index, receipt] : Receipts_) {
+        original[receipt.snapshot_id] = Capture(*Engine_, test::collection_id, receipt.snapshot_id);
+    }
     ASSERT_TRUE(Engine_->Shutdown(std::chrono::seconds(5)));
     Engine_.reset();
     {
@@ -595,9 +604,63 @@ TEST_P(TArchiveRowTamperingTest, OpenFailsClosed)
         catalog.Execute(GetParam());
         ASSERT_EQ(catalog.Changes(), 1);
     }
+    OpenStoreRequest full{Root_.string(), test::store_id};
+    full.verify_full = true;
+    const auto refused = OpenExisting(full);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "CORRUPTION") << refused.error().message;
     const auto opened = OpenExisting({Root_.string(), test::store_id});
-    ASSERT_FALSE(opened);
-    EXPECT_EQ(opened.error().code, "CORRUPTION") << opened.error().message;
+    if (!opened) {
+        EXPECT_EQ(opened.error().code, "CORRUPTION") << opened.error().message;
+        return;
+    }
+    const auto& engine = **opened;
+    // A detected corruption also closes readiness for later reads.
+    const auto allowed = [](const ErrorDetail& error) {
+        return error.code == "CORRUPTION" || error.code == "NOT_FOUND" || error.code == "RECOVERY_REQUIRED";
+    };
+    for (const auto& [snapshot, expected] : original) {
+        ScanRequest request{test::collection_id};
+        request.selector = SnapshotSelector::Id(snapshot);
+        if (auto cursor = engine.Scan(request)) {
+            std::vector<std::string> rows;
+            bool failed = false;
+            while (true) {
+                auto next = (*cursor)->Next();
+                if (!next) {
+                    EXPECT_TRUE(allowed(next.error())) << next.error().code;
+                    failed = true;
+                    break;
+                }
+                if (!*next) {
+                    break;
+                }
+                auto piece = Render(**next);
+                rows.insert(rows.end(), piece.begin(), piece.end());
+            }
+            if (!failed) {
+                EXPECT_EQ(Sorted(rows), expected.Rows) << snapshot;
+            }
+        } else {
+            EXPECT_TRUE(allowed(cursor.error())) << cursor.error().code << ": " << cursor.error().message;
+        }
+        if (const auto statistics = engine.GetStatistics(test::collection_id, request.selector)) {
+            EXPECT_EQ(statistics->rows.value, expected.StatisticsRows) << snapshot;
+            EXPECT_EQ(statistics->compressed_data_bytes.value, expected.StatisticsBytes) << snapshot;
+        } else {
+            EXPECT_TRUE(allowed(statistics.error())) << statistics.error().code;
+        }
+        if (const auto files = engine.ListFiles(test::collection_id, request.selector)) {
+            std::vector<std::pair<int64_t, int64_t>> listed;
+            for (const auto& file : files->Files) {
+                listed.emplace_back(file.RecordCount, file.CompressedBytes);
+            }
+            std::ranges::sort(listed);
+            EXPECT_EQ(listed, expected.Files) << snapshot;
+        } else {
+            EXPECT_TRUE(allowed(files.error())) << files.error().code;
+        }
+    }
 }
 
 INSTANTIATE_TEST_SUITE_P(SnapshotArchive,
@@ -788,7 +851,9 @@ TEST(SnapshotArchiveChild, Run)
     }
     const auto start = std::chrono::steady_clock::now();
     test::JournalFaultVfs vfs;
-    auto opened = detail::EngineFactory::OpenWith({root, test::store_id}, ArchiveBackend(), vfs.Name());
+    OpenStoreRequest request{root, test::store_id};
+    request.verify_full = std::string_view(mode) == "verify-full";
+    auto opened = detail::EngineFactory::OpenWith(request, ArchiveBackend(), vfs.Name());
     ASSERT_TRUE(opened) << opened.error().code << ": " << opened.error().message;
     auto engine = std::move(*opened);
     const auto openMs =
@@ -829,6 +894,11 @@ TEST_P(TArchiveCrashTest, ProcessExitAroundTheArchivingCommitReopensConsistently
     Engine_.reset();
     RunArchiveChild(Root_, mode, 50, EChildExit::Interrupted);
     RunArchiveChild(Root_, "verify", 0);
+    // The first open after the crash used the checkpoints; full verification
+    // of the same store in another fresh process answers identically.
+    const auto checkpointed = ReadBytes(Directory_.path / "digest-child");
+    RunArchiveChild(Root_, "verify-full", 0);
+    EXPECT_EQ(ReadBytes(Directory_.path / "digest-child"), checkpointed);
     Reopen();
     const auto status = Status();
     EXPECT_EQ(ArchiveRows(Root_, test::collection_id), status.archived_snapshots);

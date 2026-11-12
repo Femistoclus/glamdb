@@ -103,4 +103,8 @@ iceberg::Status VerifyTableMetadataBytes(iceberg::FileIO& io,
 // Number of root JSON parses (ReadTableMetadata and ParseTableMetadata) in
 // this process; cost tests compare it around an operation.
 std::uint64_t TableMetadataParses() noexcept;
+// Parquet footers read (ReadParquetFooter) and Avro containers checked
+// (CheckAvroContainer: manifest lists and manifests) in this process.
+std::uint64_t ParquetFooterReads() noexcept;
+std::uint64_t AvroContainerChecks() noexcept;
 }
