@@ -20,6 +20,10 @@ public:
     JournalFaultVfs& operator=(const JournalFaultVfs&) = delete;
     void Arm(int journal_delete_number, bool after_unlink);
     void Disarm();
+    int FailureCount() const noexcept
+    {
+        return failures_.load(std::memory_order_relaxed);
+    }
     // A negative number pauses the next abs(number) deletions independently.
     void PauseBeforeDelete(int journal_delete_number);
     bool WaitUntilPaused(std::chrono::milliseconds timeout, int count = 1);
@@ -39,6 +43,7 @@ private:
     std::mutex control_mutex_;
     int remaining_ = 0;
     bool after_unlink_ = false;
+    std::atomic<int> failures_{0};
     int pause_remaining_ = 0;
     std::condition_variable pause_changed_;
     int paused_ = 0;

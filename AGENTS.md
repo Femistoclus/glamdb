@@ -375,10 +375,17 @@ boundary and catalog-selected recovery in a fresh process.
 
 `TCombinedStorageFaultTest` composes `TLocalStorageOptions::Fs` with the SQLite
 journal fault VFS through the internal `EngineFactory::CreateWith` seam. It
-checks real file/directory failures followed by lost failure-recording results.
-`TCatalogStorageFaultTest` checks uncertain publication and fresh-process public
-reopen. These controls are test-only; production defaults remain POSIX and the
-default SQLite VFS. See [coordinator fault evidence](docs/development/COORDINATOR.md#combined-storage-faults).
+checks writes (short, zero-progress, EIO/ENOSPC), close and file/directory sync
+failures followed by lost failure-recording results. `TCatalogStorageFaultTest`
+checks binding, publication, Parquet finalization and recovery fences;
+`TShortWriteStorageFaultTest` combines recovery reads and fence faults.
+`TProcessCrashStorageFaultTest` exits without shutdown or reconciliation at
+uncertain SQLite boundaries. Fresh-process public reopen checks literal rows,
+exact acknowledged receipts, historical views and retry identity. Syscall EIO
+stays latched until reopen; ENOSPC and zero-progress writes fail only the attempt.
+These controls are test-only; production defaults remain POSIX and the default
+SQLite VFS. Process exits do not qualify power loss. See
+[coordinator fault evidence](docs/development/COORDINATOR.md#combined-storage-faults).
 
 `GLAMDB_BUILD_IO_PROBE=ON` adds the disposable storage fault probe and requires
 `GLAMDB_BUILD_STORAGE=ON`. Its Python runner checks native receipts and optional
