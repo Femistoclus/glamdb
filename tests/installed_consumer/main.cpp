@@ -1,3 +1,4 @@
+#include <storage/contract.h>
 #include <storage/engine.h>
 #include <storage/scan.h>
 
@@ -59,6 +60,48 @@ T Take(glamdb::Result<T> result, std::string_view context)
         throw std::runtime_error(std::string(context) + ": " + result.error().code + ": " + result.error().message);
     }
     return std::move(*result);
+}
+
+void CheckContract(glamdb::Engine& engine, bool storage)
+{
+    glamdb::TStorageContractRequest request;
+    request.MaxVersion = {1, 9};
+    if (storage) {
+        request.RequiredOperations = {glamdb::EStorageOperation::Scan,
+            glamdb::EStorageOperation::Append,
+            glamdb::EStorageOperation::FindOutcome};
+        request.RequiredFeatures = {glamdb::EStorageFeature::FixedSnapshotScan,
+            glamdb::EStorageFeature::TypedNulls,
+            glamdb::EStorageFeature::PreserveAppendDuplicates};
+    }
+    const auto contract = Take(engine.NegotiateStorageContract(request), "negotiate native contract");
+    Check(contract.Version == glamdb::TStorageContractVersion{1, 0} &&
+            contract.EffectiveLimits.Engine.max_collections == engine.GetLimits().max_collections &&
+            contract.EffectiveLimits.SchemaFields == 128 && contract.EffectiveLimits.AppendRows == 10000 &&
+            contract.HasOperation(glamdb::EStorageOperation::Scan) == storage &&
+            !contract.HasOperation(glamdb::EStorageOperation::Upsert),
+        "negotiated append support and effective limits");
+    request.Mode = glamdb::CollectionMode::KeyValue;
+    request.RequiredFeatures.clear();
+    request.RequiredOperations.clear();
+    if (storage) {
+        request.RequiredOperations = {glamdb::EStorageOperation::Upsert,
+            glamdb::EStorageOperation::Delete,
+            glamdb::EStorageOperation::Lookup,
+            glamdb::EStorageOperation::Compact};
+        request.RequiredFeatures = {glamdb::EStorageFeature::DurableNoOp};
+    }
+    const auto kv = Take(engine.NegotiateStorageContract(request), "negotiate KV contract");
+    Check(!kv.HasOperation(glamdb::EStorageOperation::Append) &&
+            !kv.HasOperation(glamdb::EStorageOperation::ExpireSnapshots),
+        "KV contract refuses raw append and retention");
+    request.RequiredOperations = {glamdb::EStorageOperation::Append};
+    const auto wrongMode = engine.NegotiateStorageContract(request);
+    Check(!wrongMode && wrongMode.error().code == "UNSUPPORTED_OPERATION", "unsupported operation requirement");
+    request.RequiredOperations.clear();
+    request.RequiredFeatures = {glamdb::EStorageFeature::StagedWrites};
+    const auto future = engine.NegotiateStorageContract(request);
+    Check(!future && future.error().code == "UNSUPPORTED_FEATURE", "future features fail explicitly");
 }
 
 std::shared_ptr<arrow::Schema> InputSchema()
@@ -239,6 +282,20 @@ void Write(glamdb::Engine& engine, const std::string& receiptPath)
     Check(created.disposition == glamdb::CommitDisposition::Committed && created.info && !created.error &&
             !created.info->current_snapshot_id,
         "create collection with the default production backend");
+    const auto wrongMode = engine.UpsertDurable({CollectionId, UnknownOperation, {}, {MakeBatch(RowsA)}});
+    Check(wrongMode.disposition == glamdb::CommitDisposition::DefinitelyNotCommitted && wrongMode.error &&
+            wrongMode.error->code == "COLLECTION_MODE_MISMATCH",
+        "append collection refuses KV mutation");
+    const auto valid = MakeBatch({{"bad", 7}});
+    const auto wrongType = arrow::RecordBatch::Make(
+        arrow::schema({arrow::field("key", arrow::int64(), false), arrow::field("n", arrow::int64())}),
+        1,
+        {valid->column(1), valid->column(1)});
+    const auto badInput = engine.AppendDurable({CollectionId, UnknownOperation, {}, {wrongType}});
+    Check(badInput.disposition == glamdb::CommitDisposition::DefinitelyNotCommitted && badInput.error &&
+            badInput.error->code == "INVALID_ARGUMENT" &&
+            !Take(engine.FindAppendOutcome(CollectionId, UnknownOperation), "unbound invalid input"),
+        "wrong Arrow types fail before binding an outcome");
     CheckScan(engine, glamdb::SnapshotSelector::Latest(), {}, glamdb::SnapshotSelector::InitialEmpty());
     const auto a = engine.AppendDurable(
         {CollectionId, OperationA, {glamdb::SnapshotPreconditionKind::NoSnapshot, 0}, {MakeBatch(RowsA)}});
@@ -309,6 +366,10 @@ void WriteKV(glamdb::Engine& engine)
     request.mode = glamdb::CollectionMode::KeyValue;
     Check(engine.GetCapabilities().key_value, "installed KV capability");
     Check(engine.CreateCollection(request).disposition == glamdb::CommitDisposition::Committed, "create installed KV");
+    const auto wrongMode = engine.AppendDurable({KVCollectionId, UnknownOperation, {}, {MakeBatch(RowsA)}});
+    Check(wrongMode.disposition == glamdb::CommitDisposition::DefinitelyNotCommitted && wrongMode.error &&
+            wrongMode.error->code == "COLLECTION_MODE_MISMATCH",
+        "KV collection refuses raw append");
     const auto upsert =
         engine.UpsertDurable({KVCollectionId, OperationA, {}, {MakeBatch({{"a", 1}, {"a", 9}, {"b", 2}})}});
     Check(upsert.disposition == glamdb::CommitDisposition::Committed && upsert.result &&
@@ -403,6 +464,7 @@ try {
     auto engine = mode == "write" ? Take(glamdb::CreateStore({StoreId, argv[2]}), "create store")
                                   : Take(glamdb::OpenExisting({argv[2], StoreId}), "reopen store");
     Check(engine->GetStoreInfo().store_id == StoreId, "store identity");
+    CheckContract(*engine, storage == "storage");
     if (storage == "nostorage") {
         CheckUnavailable(*engine);
     } else if (mode == "write") {

@@ -108,17 +108,71 @@ test('separate read and write panels submit typed rows without a JSON editor', a
     await page.screenshot({ path: '../artifacts/ui-editor/read-write-mobile.png', fullPage: true });
 });
 
-async function newCollection(page) {
+async function newCollection(page, columnCount = 3) {
     await page.goto('/');
     await page.getByLabel('Access token').fill('e2e-only-local-token');
     await page.getByRole('button', { name: 'Open my workspace' }).click();
     await page.getByRole('button', { name: 'New collection', exact: true }).first().click();
     await page.getByLabel('Collection name').fill('typed_' + Date.now());
+    for (let index = 4; index <= columnCount; index++) {
+        await page.getByRole('button', { name: '+ Add column', exact: true }).click();
+        await page.getByLabel(`Column name ${index}`, { exact: true }).fill(`field_${index}`);
+    }
     await page.getByRole('button', { name: 'Create collection', exact: true }).click();
     await expect(page.getByRole('dialog')).not.toBeVisible();
     await page.locator('nav').getByRole('button', { name: 'Data studio', exact: true }).click();
     await expect(page.locator('#write-form')).toBeVisible();
 }
+
+test('adding a row opens only the new row', async ({ page }) => {
+    await newCollection(page);
+    const write = page.locator('#write-form');
+    const rows = write.locator('[data-write-row]');
+    const add = write.getByRole('button', { name: '+ Add row', exact: true });
+    await expandRow(write, 0);
+    await write.getByLabel('key row 1', { exact: true }).fill('first draft');
+    await add.click();
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(0)).toHaveJSProperty('open', false);
+    await expect(rows.nth(1)).toHaveJSProperty('open', true);
+    await write.getByLabel('key row 2', { exact: true }).fill('second draft');
+    await expandRow(write, 0);
+    await add.click();
+    await expect(rows).toHaveCount(3);
+    await expect(rows.nth(0)).toHaveJSProperty('open', false);
+    await expect(rows.nth(1)).toHaveJSProperty('open', false);
+    await expect(rows.nth(2)).toHaveJSProperty('open', true);
+    await expect(write.getByLabel('key row 1', { exact: true })).toHaveValue('first draft');
+    await expect(write.getByLabel('key row 2', { exact: true })).toHaveValue('second draft');
+});
+
+for (const [device, viewport, columnCount] of [
+    ['desktop', { width: 1440, height: 1000 }, 3],
+    ['mobile with a wide schema', { width: 390, height: 844 }, 12],
+]) {
+    test(`adding a row keeps the new row in view in a scrolled ${device} editor`, async ({
+        page,
+    }) => {
+        await newCollection(page, columnCount);
+        await page.setViewportSize(viewport);
+        const write = page.locator('#write-form');
+        const add = write.getByRole('button', { name: '+ Add row', exact: true });
+        for (let index = 0; index < 11; index++) await add.click();
+        await expandRow(write, 11);
+        const list = write.locator('.write-rows');
+        await list.evaluate((node) => (node.scrollTop = node.scrollHeight));
+        await expect.poll(() => list.evaluate((node) => node.scrollTop)).toBeGreaterThan(0);
+        await add.scrollIntoViewIfNeeded();
+        const scrollY = await page.evaluate(() => window.scrollY);
+        await add.click();
+        await expect(write.locator('[data-write-row]')).toHaveCount(13);
+        await expect(write.locator('[data-write-row]').last().locator('summary')).toBeInViewport();
+        await expect(write.getByLabel('key row 13', { exact: true })).toBeInViewport();
+        await expect.poll(() => list.evaluate((node) => node.scrollTop)).toBeGreaterThan(0);
+        await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(scrollY);
+    });
+}
+
 test('form validates before sending and preserves rows while adding and removing fields', async ({
     page,
 }) => {

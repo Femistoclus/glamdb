@@ -23,7 +23,12 @@ must remain usable from a standalone checkout.
 GlamDB is an open-source C++23 columnar key-value storage engine in early
 development. The checkout implements the SQLite catalog, synchronous write and
 recovery coordinator, canonical Arrow input, public C++ facade, outcome JSON,
-and network CLI. Independent durable I/O and Arrow/Parquet/Iceberg
+and network CLI. The installed [native storage contract](docs/development/STORAGE_CONTRACT.md)
+adds pure version/feature negotiation and an Engine convenience method, with
+operation support by append/KV mode and effective limits. Discovery is separate
+from readiness; independent read views, splits, staged sessions, stable C ABI and
+Flight are explicitly unsupported. Keep publication on the existing Engine path.
+Independent durable I/O and Arrow/Parquet/Iceberg
 storage primitives provide file production, staging, publication validation,
 recovery verification, and capacity checks. `core/backend/` connects them to the
 coordinator StorageBackend and `core/scan/` implements `Engine::Scan`
@@ -39,6 +44,10 @@ Scan plans, queued manifest descriptors, individual output descriptors and the
 per-store 32 MiB immutable metadata/footer cache retain shared reservations;
 cursor control admission and live/peak memory profiles are
 described in [shared resources](docs/development/SHARED_RESOURCES.md).
+Verified-index scan opening uses a bounded 16 MiB schema/projection workspace;
+uncached root planning keeps its full history-derived envelope. Core paginated
+history/files pass one admitted planning lease into their nested metadata read,
+while returned results retain independent ownership charges.
 Full engine durability remains unqualified. `Engine::GetHealth()` exposes
 nonblocking read/write admission and recovery/shutdown state; HTTP
 `GET /databases/{id}/readyz` (or legacy `/readyz`) maps write readiness to
@@ -103,7 +112,10 @@ results stay inside Read rows. Light/dark appearance and sidebar preferences are
 local display settings. Runtime design remains configurable through theme JSON.
 Existing Keycloak realms use the client-only migration in
 [compact workbench operations](docs/development/COMPACT_WORKBENCH.md); custom or
-shared authentication flows require explicit review before migration. Native
+shared authentication flows require explicit review before migration. Its optional
+`--demo-user-id` sets the explicitly selected managed account to public temporary
+`hello`/`world` constants through Keycloak, preserving its identity and membership;
+normal provisioning never enables those credentials. Native
 Overview, Snapshots, Storage and Explain use public-facade HTTP metadata;
 reload/restart restore these views from the server. Storage IDs derive from
 selected committed manifest membership; details verify actual Parquet footers,
@@ -349,7 +361,7 @@ Preserve these boundaries when adding or changing engine behavior:
 
 | Path | Use |
 | --- | --- |
-| `public/storage/` | Installed C++ types, scan API and synchronous engine facade. |
+| `public/storage/` | Installed C++ types, versioned native storage contract, scan API and synchronous engine facade. |
 | `core/api/`, `core/catalog/`, `core/engine/` | Canonical input, catalog, coordinator, and internal storage-backend seam. |
 | `core/backend/` | Production StorageBackend over `glamdb_storage`, built with `GLAMDB_BUILD_STORAGE`. |
 | `core/scan/` | Predicate evaluation, conservative zone pruning, snapshot planning, bounded metadata/footer cache and positional Parquet scan cursor. |
@@ -460,6 +472,8 @@ Client conformance uses `GLAMDB_TEST_BACKEND=mock|native`; native requires an
 executable `GLAMDB_NATIVE_SERVER` and fails on setup/identity/storage errors.
 The same SDK TCP/TLS scenarios and `shared-contract.spec.mjs` run against both;
 native checks inspect catalog-selected JSON/Avro/Parquet after closing storage.
+Native browser creation tests cover append/KV with compression and encodings,
+verified Parquet column chunks, and exact settings/rows after close/open.
 `GLAMDB_TEST_BACKEND=static` runs only the browser demo, without an API server.
 See [client conformance](docs/development/CLIENT_CONFORMANCE.md) for commands,
 documented response differences and separate evidence. Normal native acceptance

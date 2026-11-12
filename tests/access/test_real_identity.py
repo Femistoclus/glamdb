@@ -849,10 +849,8 @@ async function admin(path,method='GET',value=null){
 async function context(){return browser.newContext({viewport:{width:1440,height:1000},ignoreHTTPSErrors:false});}
 async function credentials(page,organization,password=organization.password){
  await page.locator('input[name=username]').waitFor({state:'visible',timeout:30000});
+ await expect(page.locator('input[name=password]')).toBeVisible();
  await page.locator('input[name=username]').fill(organization.login);
- if(!(await page.locator('input[name=password]').isVisible())){
-  await page.locator('#kc-login').click();await page.locator('input[name=password]').waitFor({state:'visible'});
- }
  await page.locator('input[name=password]').fill(password);await page.locator('#kc-login').click();
 }
 async function login(page,organization,password=organization.password){

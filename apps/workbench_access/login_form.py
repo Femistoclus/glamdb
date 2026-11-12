@@ -1,6 +1,11 @@
-"""Configure one combined username/password page on the workbench client only."""
+"""Configure combined workbench sign-in and optional, explicit demo credentials."""
+
+from uuid import UUID
 
 FLOW = "glamdb-workbench-browser"
+# Temporary public demonstration credentials; used only with --demo-user-id.
+DEMO_LOGIN = "hello"
+DEMO_PASSWORD = "world"
 
 
 def _credentials_form(executions):
@@ -62,6 +67,43 @@ def configure_login_form(admin):
     return {"client": "glamdb-workbench", "browser_flow": FLOW, "credentials_form": "combined"}
 
 
+def configure_demo_credentials(admin, user_id):
+    user_id = str(UUID(str(user_id)))
+    user = admin.get_user(user_id)
+    managed = user.get("attributes", {}).get("glamdb_managed_org", [])
+    if not user.get("enabled") or len(managed) != 1:
+        raise ValueError("demo credentials require an enabled managed organization account")
+    organization_id = str(UUID(managed[0]))
+    memberships = admin.get_user_organizations(user_id)
+    if len(memberships) != 1 or memberships[0].get("alias") != organization_id:
+        raise ValueError("demo account must belong to its managed organization only")
+    existing = admin.get_user_id(DEMO_LOGIN)
+    if existing and existing != user_id:
+        raise ValueError("the demo login already belongs to another account")
+    realm = admin.get_realm("glamdb")
+    policy = realm.get("passwordPolicy", "")
+    # Keycloak validates administrative password resets against the realm policy.
+    # Permit this one explicitly requested short demo password, then restore it.
+    try:
+        if policy:
+            admin.update_realm("glamdb", {"passwordPolicy": ""})
+        admin.set_user_password(user_id, DEMO_PASSWORD, temporary=False)
+    finally:
+        if policy:
+            admin.update_realm("glamdb", {"passwordPolicy": policy})
+    if user["username"] != DEMO_LOGIN:
+        editable = realm.get("editUsernameAllowed", False)
+        try:
+            if not editable:
+                admin.update_realm("glamdb", {"editUsernameAllowed": True})
+            admin.update_user(user_id, {"username": DEMO_LOGIN})
+        finally:
+            if not editable:
+                admin.update_realm("glamdb", {"editUsernameAllowed": False})
+    admin.user_logout(user_id)
+    return {"demo_login": DEMO_LOGIN}
+
+
 def main():
     import argparse
     import json
@@ -75,6 +117,8 @@ def main():
     parser.add_argument("--password-file", required=True, type=Path)
     parser.add_argument("--ca-file", type=Path)
     parser.add_argument("--test-mode", action="store_true")
+    parser.add_argument("--demo-user-id", type=UUID,
+                        help="Explicitly set this managed demo account to the temporary hello/world credentials")
     args = parser.parse_args()
     origin(args.server, test_mode=args.test_mode)
     admin = KeycloakAdmin(server_url=args.server.rstrip("/") + "/", username=args.admin,
@@ -83,7 +127,10 @@ def main():
                           timeout=10, max_retries=0)
     admin.get_realms()
     admin.connection.realm_name = "glamdb"
-    print(json.dumps(configure_login_form(admin)))
+    result = configure_login_form(admin)
+    if args.demo_user_id:
+        result.update(configure_demo_credentials(admin, args.demo_user_id))
+    print(json.dumps(result))
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "storage/contract.h"
 #include "storage/kv.h"
 #include "storage/metadata.h"
 #include "storage/scan.h"
@@ -35,6 +36,8 @@ public:
     // No catalog/file I/O and no writer wait; remains callable during recovery/shutdown.
     StoreHealth GetHealth() const;
     EngineCapabilities GetCapabilities() const;
+    // Supported semantics and effective limits, independent of GetHealth().
+    Result<TStorageContract> NegotiateStorageContract(const TStorageContractRequest& request = {}) const;
     // Bounded physical inventory; refuses while a writer/recovery owns the store.
     Result<StorageFootprint> GetStorageFootprint() const;
     Result<SnapshotHistory> ListSnapshots(std::string_view collection_id) const;

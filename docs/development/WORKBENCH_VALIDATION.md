@@ -1,5 +1,65 @@
 # Workbench validation record
 
+## Creation choices and combined demo login — 2026-11-12
+
+Started from upstream `main` at `f3fdb09`, then copied into a separate checkout
+and refreshed onto `1268952` before opening the PR. The existing creation UI already exposes
+append/KV mode, collection and column compression, levels, dictionary policies
+and type-filtered encodings when the connected server advertises them. The
+running demonstration's Keycloak client had no browser-flow override, so its
+organization discovery still displayed a username-only first page. Applying the
+existing client-only migration fixed that deployment without changing its UI
+assets or stored data.
+
+The login migration command now has an explicit `--demo-user-id` option for the
+user-requested public `hello`/`world` constants. It changes an existing managed
+account through Keycloak and retains its UUID, organization, attributes and
+roles. Original password policy and username-editing settings are restored after
+the temporary administrative changes. Tests reproduce Keycloak's read-only
+username refusal and cover restoration after reset/rename failures and refusal
+of unrelated accounts. Normal provisioning does not invoke this option.
+
+Executed on macOS arm64 with Python 3.13.5, Node 26.5.0 and Playwright
+1.56.1/Chromium 1194:
+
+- **PASS — 257 Node tests:** `npm --prefix ui test`.
+- **PASS — 162 access tests, 12 explicit infrastructure skips:**
+  `python -m pytest tests/access -q`. This includes 15 login-migration and demo
+  credential tests. The isolated worktree used its own mock/SDK/verification
+  sources through `PYTHONPATH`; an initial run with the original checkout's
+  editable packages failed 12 capability checks, then passed with those paths
+  corrected. No application change was needed for that environment mismatch.
+- **PASS — 56 mock/static Chromium scenarios:**
+  `npm --prefix ui run test:e2e`, with `GLAMDB_E2E_PYTHON` selecting the development
+  interpreter and `GLAMDB_BROWSER_PATH` selecting Chromium. Five focused
+  `write-settings.spec.mjs` scenarios include both modes with compression and
+  column encoding in one create request and retention after adding a column.
+  Their capability/metadata interception is UI contract evidence, not native
+  Parquet-write evidence.
+- **PASS — two native Chromium creation scenarios:** both modes create real
+  collections with `gzip` level 6 and an `amount` override using `zstd` level 3
+  plus `delta_binary_packed`. They write repeated keys through the UI, inspect
+  verified Parquet column-chunk codecs/encodings, close/open each database and
+  compare canonical settings and exact rows again (two rows for append, the last
+  full row for KV, including int64 `9007199254740993`). The run used the installed
+  Linux x86-64 native binary `26a0344` in a separate localhost process and
+  disposable directory, serving the UI from `1268952` through an SSH tunnel.
+  The new cases are in `native.spec.mjs`; reproduce locally with the native
+  profile and `--grep "creation persists compression and encoding through reopen"`.
+- **PASS — actual HTTPS demonstration:** a fresh Chromium context showed both
+  credential fields before submission, accepted `hello`/`world`, and returned
+  the original account subject and organization. The native backend advertised
+  both modes, five compression codecs and six value encodings. Both modes and
+  collection/column settings were selectable in its real creation dialog.
+  That live check closed the dialog without submitting user-data writes.
+- **PASS — UI formatting, changed Python compilation, local documentation links
+  and `git diff --check`.** Independent final review reported no findings.
+
+The full opt-in identity-infrastructure suite, full native suite and rebuild, sanitizers
+and power-loss qualification were **NOT RUN** for this change. The focused live
+login/form check does not replace those suites. The access tests retain the
+existing Starlette/Authlib deprecation warnings.
+
 ## Arrow downloads and SDK stream ownership — 2026-11-12
 
 Issue #57, based on official `main` at `d7c6be1`. Executed on Linux x86-64,

@@ -41,9 +41,10 @@ isolation after their pinned build dependencies are present.
   file count, schema preview and history.
 - **Data studio:** two compact panels separate reading from writing. Select
   output columns and supported typed filters, then run a bounded preview.
-  Fill schema-driven fields in **Write rows**; **Add row** adds another record
-  and nullable fields have an explicit NULL switch. JSON is generated and
-  validated automatically, preserving int64 precision. **Batch editor** opens
+  Fill schema-driven fields in **Write rows**; **Add row** opens the new record,
+  collapses the other rows and scrolls the editor list to the new row without
+  moving the page. Nullable fields have an explicit NULL switch. JSON is generated
+  and validated automatically, preserving int64 precision. **Batch editor** opens
   the optional JSON array editor. **Query JSON** previews and downloads the
   request assembled by the read controls. Arrow export retains the exact result
   snapshot; key lookup is a filter scan.
@@ -229,7 +230,9 @@ exact retry bodies and non-2xx create outcomes. `write-settings.spec.mjs` checks
 that the mock hides Parquet controls, then intercepts capabilities and collection
 responses to exercise create settings, a compare-and-set save, a version conflict
 and type-filtered dictionary/encoding choices; native Parquet behavior needs the
-native profile. New recovery scenarios use their
+native profile. It also submits both append and KV creation with compression and
+column encoding in the same request, checking that adding a column retains the
+chosen settings. New recovery scenarios use their
 own disposable mock child so they do not consume another suite's collection
 budget. The browser server is a disposable child on port 8766, with a separate copied theme. Override
 it using `GLAMDB_E2E_PORT`. Open the HTML report with:
@@ -255,7 +258,10 @@ GLAMDB_E2E_TEMP_ROOT=/absolute/path/to/disposable-test-parent \
 npm --prefix ui run test:e2e
 ```
 
-The parent directory must already exist. The profile checks every native view,
+The parent directory must already exist. The profile also creates append and KV
+collections with compression/encoding overrides, checks written Parquet column
+chunks and verifies exact settings and duplicate-key semantics after close/open.
+The profile checks every native view,
 reload, initial/historical/latest selection, database reopen, original outcome
 lookup and lost-receipt export/import with exact retry. Metadata reads run one
 at a time to leave admission capacity for queries. This fresh browser profile

@@ -10,7 +10,11 @@ namespace {
 using namespace vertical;
 using namespace std::chrono_literals;
 
-const auto MergeBatch = Batch({{"duplicate", 7, {}, {}, {}}, {"duplicate", 7, {}, {}, {}}});
+std::shared_ptr<arrow::RecordBatch> MakeMergeBatch()
+{
+    // Arrow buffers must be released before its global memory pools shut down.
+    return Batch({{"duplicate", 7, {}, {}, {}}, {"duplicate", 7, {}, {}, {}}});
+}
 
 std::string MergeOperation(int index)
 {
@@ -19,6 +23,7 @@ std::string MergeOperation(int index)
 
 void CheckMergeViews(const std::shared_ptr<Engine>& engine, int appends)
 {
+    const auto mergeBatch = MakeMergeBatch();
     const auto history = engine->ListSnapshots(test::collection_id);
     ASSERT_TRUE(history) << history.error().message;
     ASSERT_EQ(history->snapshots.size(), static_cast<size_t>(appends));
@@ -49,7 +54,7 @@ void CheckMergeViews(const std::shared_ptr<Engine>& engine, int appends)
         const auto& outcome = test::Present(*found);
         ASSERT_EQ(outcome.disposition, CommitDisposition::Committed);
         ASSERT_TRUE(outcome.result);
-        EXPECT_EQ(engine->AppendDurable({test::collection_id, MergeOperation(index), {}, {MergeBatch}}), outcome);
+        EXPECT_EQ(engine->AppendDurable({test::collection_id, MergeOperation(index), {}, {mergeBatch}}), outcome);
         const auto cursor = engine->Scan({.collection_id = test::collection_id,
             .selector = SnapshotSelector::Id(test::Present(outcome.result).snapshot_id)});
         ASSERT_TRUE(cursor);
@@ -69,7 +74,7 @@ void CheckMergeViews(const std::shared_ptr<Engine>& engine, int appends)
         ASSERT_TRUE(failed);
         ASSERT_TRUE(*failed);
         ASSERT_EQ(test::Present(*failed).disposition, CommitDisposition::DefinitelyNotCommitted);
-        EXPECT_EQ(engine->AppendDurable({test::collection_id, MergeOperation(100), {}, {MergeBatch}}),
+        EXPECT_EQ(engine->AppendDurable({test::collection_id, MergeOperation(100), {}, {mergeBatch}}),
             test::Present(*failed));
     }
 }
@@ -129,8 +134,9 @@ protected:
 
     void Populate(int count)
     {
+        const auto mergeBatch = MakeMergeBatch();
         for (int index = 1; index <= count; ++index) {
-            const auto result = Engine_->AppendDurable({test::collection_id, MergeOperation(index), {}, {MergeBatch}});
+            const auto result = Engine_->AppendDurable({test::collection_id, MergeOperation(index), {}, {mergeBatch}});
             ASSERT_EQ(result.disposition, CommitDisposition::Committed)
                 << index << ": " << (result.error ? result.error->message : "");
         }
@@ -158,18 +164,19 @@ protected:
 
 TEST_F(ManifestMergeTest, BoundsLatestManifestsAcrossRepeatedMergesAndReopens)
 {
+    const auto mergeBatch = MakeMergeBatch();
     Populate(99);
     ASSERT_FALSE(HasFatalFailure());
     EXPECT_EQ(LatestManifests(), 99U);
     const auto first = Engine_->FindAppendOutcome(test::collection_id, MergeOperation(1));
     ASSERT_TRUE(first && *first);
     for (int index = 100; index <= 205; ++index) {
-        const auto result = Engine_->AppendDurable({test::collection_id, MergeOperation(index), {}, {MergeBatch}});
+        const auto result = Engine_->AppendDurable({test::collection_id, MergeOperation(index), {}, {mergeBatch}});
         ASSERT_EQ(result.disposition, CommitDisposition::Committed)
             << index << ": " << (result.error ? result.error->message : "");
         ASSERT_LT(LatestManifests(), 100U);
     }
-    EXPECT_EQ(Engine_->AppendDurable({test::collection_id, MergeOperation(1), {}, {MergeBatch}}),
+    EXPECT_EQ(Engine_->AppendDurable({test::collection_id, MergeOperation(1), {}, {mergeBatch}}),
         test::Present(*first));
     CheckMergeViews(Engine_, 205);
     FreshProcess(205);
@@ -198,7 +205,7 @@ TEST_P(ManifestMergeFaultTest, FailureAtMergeBoundaryNeverPublishesPartialMember
     } else {
         Vfs_.Arm(2, mode == 4);
     }
-    const auto result = Engine_->AppendDurable({test::collection_id, MergeOperation(100), {}, {MergeBatch}});
+    const auto result = Engine_->AppendDurable({test::collection_id, MergeOperation(100), {}, {MakeMergeBatch()}});
     EXPECT_EQ(result.disposition,
         mode < 3 ? CommitDisposition::DefinitelyNotCommitted : CommitDisposition::CommitUnknown);
     Vfs_.Disarm();
