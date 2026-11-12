@@ -1,0 +1,35 @@
+[Unit]
+Description=Private GlamDB Loki with bounded persistent storage
+Requires=var-lib-glamdb-logging-loki.mount
+BindsTo=var-lib-glamdb-logging-loki.mount
+After=var-lib-glamdb-logging-loki.mount
+RequiresMountsFor=/var/lib/glamdb/logging/loki
+
+[Container]
+Image=docker.io/grafana/loki@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28
+ContainerName=glamdb-logging-loki-1
+Network=glamdb-observability
+NetworkAlias=loki
+PublishPort=127.0.0.1:3100:3100
+User=10001:10001
+Environment=LOKI_LISTEN_ADDRESS=0.0.0.0 LOKI_HTTP_PORT=3100 LOKI_GRPC_PORT=9095 LOKI_DATA_DIR=/loki
+Volume=/var/lib/glamdb/logging/loki.yaml:/etc/loki/loki.yaml:ro,Z
+Volume=/var/lib/glamdb/logging/loki:/loki:Z
+Exec=-config.file=/etc/loki/loki.yaml -config.expand-env=true
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=ALL
+Tmpfs=/tmp:rw,size=64m,noexec,nosuid,nodev
+LogDriver=k8s-file
+LogOpt=max-size=10mb
+PodmanArgs=--memory=1g --cpus=1.5 --pids-limit=256
+
+[Service]
+ExecStartPre=/usr/bin/mountpoint --quiet /var/lib/glamdb/logging/loki
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=180
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

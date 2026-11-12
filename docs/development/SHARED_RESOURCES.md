@@ -32,6 +32,28 @@ and footer/manifest work before parsing;
 Arrow decoder allocations are charged separately. These deliberately coarse
 reservations can reject work before physical memory is scarce. They require
 recalibration if upstream dependencies or the fixed schema/file limits change.
+Scan reservations have separate lifetimes:
+
+| Reservation | Release |
+| --- | --- |
+| 768 MiB metadata planning | End of indexed planning; uncached plans retain it until cursor destruction. Verified membership retains its existing generation charge. |
+| 16 MiB cursor metadata, 1 MiB selection data, 16 KiB ordinary control | Cursor destruction; returned schemas/buffers, including `ScanInfo::output_schema`, also retain the shared cursor metadata envelope. |
+| 256 MiB pending manifest metadata | After all descriptors from that manifest have been consumed, or on scan failure/EOS. |
+| 256 MiB footer/decoder metadata | After the active file reader is destroyed. This overlaps pending manifest admission. |
+| Twice the file size plus 64 KiB data | Last ownership of the whole-file byte source. Arrow allocations are separately charged. |
+| 4 KiB plus 2 KiB per projected field, output metadata | Final ownership of each original result's schema or backing buffers, including slices and nonempty C Data exports. |
+
+The output envelope covers the supported flat arrays' descriptors, buffer
+wrappers, shared-ownership nodes and vectors. Each returned batch receives a
+separate reservation, including zero-column batches. Zero-column slices share
+the charged schema; their C Data conversion has no engine-backed buffers and
+creates caller-owned descriptors. Independently created Arrow wrappers and
+schema transformations are caller allocations. Refusal returns
+`RESOURCE_EXHAUSTED`, preserves earlier results and leaves engine readiness open.
+A failed cursor remains failed; release retained results and open a new cursor
+to resume. No unread files count as pruning because a scan reached its limit
+or was cancelled.
+
 Compound scan predicates reserve metadata before compilation: 4 MiB plus twice
 the measured tree capacity covers compiled vectors, literal copies and transient
 work. The compiled program retains that reservation until cursor destruction.

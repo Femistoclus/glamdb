@@ -8,6 +8,7 @@
 #include "core/scan/scan_planner.h"
 #include "core/storage/format_registry.h"
 #include "core/storage/table_profile.h"
+#include "storage/resources.h"
 #include "tests/support/memory_file_io.h"
 
 #include <arrow/api.h>
@@ -259,6 +260,144 @@ protected:
         return rows;
     }
 };
+
+class TCancellingPool final : public arrow::ProxyMemoryPool
+{
+public:
+    TCancellingPool(std::shared_ptr<std::atomic<bool>> closing, int64_t stopAt)
+        : arrow::ProxyMemoryPool(arrow::default_memory_pool())
+        , Closing_(std::move(closing))
+        , StopAt_(stopAt)
+    { }
+
+    arrow::Status Allocate(int64_t size, int64_t alignment, uint8_t** out) override
+    {
+        auto status = arrow::ProxyMemoryPool::Allocate(size, alignment, out);
+        OnAllocation(status);
+        return status;
+    }
+
+    arrow::Status Reallocate(int64_t oldSize, int64_t newSize, int64_t alignment, uint8_t** pointer) override
+    {
+        auto status = arrow::ProxyMemoryPool::Reallocate(oldSize, newSize, alignment, pointer);
+        OnAllocation(status);
+        return status;
+    }
+
+    int64_t Calls = 0;
+
+private:
+    std::shared_ptr<std::atomic<bool>> Closing_;
+    int64_t StopAt_;
+
+    void OnAllocation(const arrow::Status& status)
+    {
+        if (status.ok() && ++Calls == StopAt_) {
+            Closing_->store(true);
+        }
+    }
+};
+
+TEST_F(ScanMockTest, CancellationDuringOutputDoesNotReportLimitCompletion)
+{
+    const ScanRequest request{.projection = std::vector<std::string>{"key"},
+        .predicate = Predicate::Compare("key", CompareOp::Eq, std::string("a")),
+        .limit = 1};
+    auto context = Context();
+    auto closing = std::make_shared<std::atomic<bool>>(false);
+    auto pool = std::make_shared<TCancellingPool>(closing, 0);
+    context.Pool = pool;
+    context.Closing = closing;
+    auto probe = OpenScan(context, request);
+    ASSERT_TRUE(probe);
+    auto first = (*probe)->Next();
+    ASSERT_TRUE(first);
+    ASSERT_NE(*first, nullptr);
+    const auto allocations = pool->Calls;
+    ASSERT_GT(allocations, 0);
+    first->reset();
+    probe->reset();
+
+    // Sweep every actual allocation boundary, including filtered output after
+    // decoding. No sleeps or assumptions about the decoder's allocation count.
+    bool cancelledAfterFiltering = false;
+    for (int64_t stopAt = 1; stopAt <= allocations; ++stopAt) {
+        SCOPED_TRACE(stopAt);
+        closing->store(false);
+        context.Pool = std::make_shared<TCancellingPool>(closing, stopAt);
+        auto cursor = OpenScan(context, request);
+        ASSERT_TRUE(cursor);
+        const auto next = (*cursor)->Next();
+        ASSERT_FALSE(next);
+        EXPECT_EQ(next.error().code, "CANCELLED");
+        const auto profile = (*cursor)->Profile();
+        cancelledAfterFiltering = cancelledAfterFiltering || profile.rows_filtered.value == 1;
+        EXPECT_EQ(profile.rows_returned.value, 0);
+        EXPECT_EQ(profile.limit_stops.value, 0);
+        EXPECT_EQ(profile.cancellation_stops.value, 1);
+    }
+    EXPECT_TRUE(cancelledAfterFiltering);
+}
+
+TEST_F(ScanMockTest, PendingManifestFilesKeepAdmissionWhileDecoding)
+{
+    auto root = ReadScanRoot(IO_, Base_);
+    ASSERT_TRUE(root);
+    const iceberg::TableIdentifier ident{.ns = iceberg::Namespace{.levels = {"columnar"}}, .name = "events"};
+    auto table = iceberg::Table::Make(ident,
+        std::make_shared<iceberg::TableMetadata>(**root),
+        Base_.metadata_location,
+        IO_,
+        std::make_shared<TInertCatalog>());
+    ASSERT_TRUE(table);
+    auto transaction = iceberg::Transaction::Make(std::move(*table), iceberg::TransactionKind::kUpdate);
+    ASSERT_TRUE(transaction);
+    auto append = (*transaction)->NewFastAppend();
+    ASSERT_TRUE(append);
+    for (const auto* name : {"three", "four"}) {
+        (*append)->AppendFile(WriteMemoryParquet(IO_, **root, Table_ + "/data/" + name + ".parquet", FirstRows));
+    }
+    ASSERT_TRUE((*append)->Commit());
+    auto context = Context();
+    context.Base.metadata_location = Table_ + "/metadata/three.metadata.json";
+    context.Base.current_snapshot_id = (*transaction)->current().current_snapshot_id;
+    ASSERT_TRUE(iceberg::TableMetadataUtil::Write(*IO_, context.Base.metadata_location, (*transaction)->current()));
+    context.Resources = std::make_shared<ResourceOwner>();
+    auto cursor = OpenScan(context, {.batch_rows = 1});
+    ASSERT_TRUE(cursor);
+    // One manifest's descriptors and the active footer coexist. Allow either
+    // envelope alone, but not both, and require refusal before decoding.
+    auto pressure = context.Resources->Reserve(ResourceClass::Metadata,
+        context.Resources->GetLimits().memory_bytes[1] - context.Resources->GetUsage().memory_bytes[1] -
+            (300ULL << 20));
+    ASSERT_TRUE(pressure);
+    auto next = (*cursor)->Next();
+    ASSERT_FALSE(next);
+    EXPECT_EQ(next.error().code, "RESOURCE_EXHAUSTED");
+    pressure->reset();
+    cursor->reset();
+    EXPECT_EQ(context.Resources->GetUsage().memory_bytes[1], 0);
+    cursor = OpenScan(context, {.batch_rows = 1});
+    ASSERT_TRUE(cursor);
+    EXPECT_EQ(Drain(**cursor).size(), 14);
+}
+
+TEST_F(ScanMockTest, UncachedPlansRetainSharedPlanningAdmission)
+{
+    ResourceLimits limits;
+    limits.memory_bytes[1] = 1ULL << 30;
+    auto owner = std::make_shared<ResourceOwner>(limits);
+    auto context = Context();
+    context.Resources = owner;
+    auto first = OpenScan(context, {});
+    ASSERT_TRUE(first) << first.error().message;
+    auto second = OpenScan(context, {});
+    ASSERT_FALSE(second);
+    EXPECT_EQ(second.error().code, "RESOURCE_EXHAUSTED");
+    first->reset();
+    EXPECT_EQ(owner->GetUsage().memory_bytes[1], 0);
+    EXPECT_TRUE(OpenScan(context, {}));
+}
 
 TEST_F(ScanMockTest, PlansHistoricalSnapshotsThroughManifestsOnly)
 {

@@ -56,6 +56,15 @@
       "version": "14.2.7",
       "tag": "v14.2.7",
       "commit": "06034a7fca1ec46eddb4997f7764db89380c5216"
+    },
+    {
+      "name": "quill",
+      "path": "third_party/quill",
+      "url": "https://github.com/odygrd/quill.git",
+      "version": "13.0.0",
+      "tag": "v13.0.0",
+      "commit": "eb802a37c7d585840324886a3d8648c9c2159952",
+      "license": "MIT"
     }
   ],
   "archives": {

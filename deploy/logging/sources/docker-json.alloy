@@ -1,0 +1,16 @@
+// Alternative to journal.alloy. Mount only the selected application's
+// Docker json-file directory read-only; no Docker socket is required.
+loki.source.file "docker_application" {
+  targets = [{__path__ = sys.env("GLAMDB_DOCKER_LOG_GLOB"), service = "glamdb",
+              environment = sys.env("GLAMDB_ENVIRONMENT")}]
+  forward_to = [loki.process.docker_runtime.receiver]
+}
+loki.process "docker_runtime" {
+  stage.docker {}
+  stage.match {
+    selector = "{stream=\"stdout\"}"
+    action = "drop"
+    drop_counter_reason = "machine_stdout"
+  }
+  forward_to = [loki.process.application.receiver]
+}

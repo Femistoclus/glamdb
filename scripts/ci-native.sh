@@ -33,7 +33,8 @@ if [[ $profile == msan || $profile == tsan ]]; then
   export GLAMDB_CI_RUNTIME_PREFIX="$root/.deps/ci-$profile/runtime"
 fi
 configure=(-G Ninja "-DCMAKE_TOOLCHAIN_FILE=$root/cmake/ci/clang.cmake"
-  "-DCMAKE_PREFIX_PATH=$prefix" -DCMAKE_BUILD_TYPE=Debug)
+  "-DCMAKE_PREFIX_PATH=$prefix" -DCMAKE_BUILD_TYPE=Debug
+  "-DPython3_EXECUTABLE=$root/.venv/bin/python")
 
 case "$stage" in
   runtime)

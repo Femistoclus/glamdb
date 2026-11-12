@@ -197,8 +197,12 @@ joins a writer attempt or holds a SQLite read transaction.
 
 Not implemented: file/row-group pruning, page CRC verification and qualification-scale attempt-volume/capacity measurements.
 The [process resource owner](SHARED_RESOURCES.md) now supplies scan working
-reservations, tracked Arrow allocation capacity and leases retained through
-slices and C Data exports. Compiled compound predicates retain metadata
+reservations, separately charged output descriptors, tracked Arrow allocation capacity and leases retained through
+slices and nonempty C Data exports. Zero-column slices retain their output schema lease.
+Uncached plans and queued manifest descriptors keep reservations for their whole
+lifetime; cursor control admission shares the ordinary control budget. Profiles
+separate filtering, limit/cancellation stops and pruning, and expose live/peak
+Arrow allocations and output metadata reservations. Compiled compound predicates retain metadata
 reservations sized before literal copying; explanation predicate subtrees keep
 their result lease when extracted. Reader, writer, metadata, recovery and device
 reservations share the same parent; their ownership is listed in the

@@ -1,0 +1,34 @@
+# Optional: omit this file when the monitoring stack already provides Grafana.
+services:
+  grafana:
+    image: grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205
+    user: "472:472"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_LOG_MODE: console
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SECURITY_ADMIN_USER: operator
+      GF_SECURITY_ADMIN_PASSWORD: '$$__file{/run/secrets/grafana_admin_password}'
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    secrets: [grafana_admin_password]
+    volumes:
+      - ./grafana-datasource.yaml:/etc/grafana/provisioning/datasources/loki.yaml:ro
+      - ${GLAMDB_GRAFANA_DATA_DIR:?set a directory owned by UID472}:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks: [observability]
+    read_only: true
+    tmpfs: ["/tmp:size=32m,noexec,nosuid,nodev"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 128
+    restart: unless-stopped
+    logging:
+      driver: local
+      options: {max-size: "10m", max-file: "3"}
+secrets:
+  grafana_admin_password:
+    file: ${GLAMDB_GRAFANA_PASSWORD_FILE:?set a private password file}

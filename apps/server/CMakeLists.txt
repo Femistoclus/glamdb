@@ -1,6 +1,6 @@
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 add_library(glamdb_routes STATIC routes.cpp databases.cpp scans.cpp metadata.cpp)
-target_link_libraries(glamdb_routes PUBLIC glamdb_transport PRIVATE glamdb_build_options SQLite::SQLite3 OpenSSL::Crypto)
+target_link_libraries(glamdb_routes PUBLIC glamdb_transport glamdb_logging PRIVATE glamdb_build_options SQLite::SQLite3 OpenSSL::Crypto)
 target_compile_definitions(glamdb_routes PRIVATE GLAMDB_HTTP_STORAGE=$<BOOL:${GLAMDB_BUILD_STORAGE}>)
 add_executable(glamdb_server main.cpp server.cpp)
 set_target_properties(glamdb_server PROPERTIES OUTPUT_NAME glamdb)

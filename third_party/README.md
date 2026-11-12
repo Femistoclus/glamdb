@@ -5,6 +5,7 @@
 | Arrow / Parquet | 25.0.0 | `arrow/` submodule; Parquet is part of Arrow. |
 | Iceberg C++ | 0.4.0 | `iceberg-cpp/` submodule. |
 | GoogleTest | 1.17.0 | `googletest/` submodule; built with project tests. |
+| Quill | 13.0.0 | `quill/` submodule; MIT, private asynchronous JSON logging. |
 | CLI11 | 2.7.2 | `cli11/` submodule; header-only CLI parser. |
 | Asio | 1.36.0 | `asio/` submodule; standalone application networking. |
 | nlohmann/json | 3.12.0 | `json/` submodule; application JSON codec. |
@@ -24,7 +25,15 @@ cmake --build --preset deps-local --parallel 2
 This explicitly builds and installs Arrow/Parquet, Iceberg and SQLite into
 `.deps/install`. GoogleTest is built directly from the pinned submodule when
 `BUILD_TESTING=ON`; the dependency build does not compile or install it again.
-GoogleMock is disabled. CLI11 is consumed directly from its pinned submodule by
+GoogleMock is disabled. Quill is header-only and consumed directly by the private telemetry target in every
+build profile, including IO-only; its examples/tests/install are disabled. It uses
+one application-wide BoundedDropping frontend specialization. Preserve its MIT
+license and bundled fmt license when distributing binaries. Python operational
+logging uses python-json-logger 4.2.0 (BSD-2-Clause), pinned with the official PyPI
+wheel hash in `tools/logging/requirements.txt`; its installed wheel retains
+`licenses/LICENSE`. The development lock includes that runtime lock.
+
+CLI11 is consumed directly from its pinned submodule by
 the CLI target; it adds no runtime library or public engine dependency. Its tests,
 examples, and installation are disabled when included as a subproject.
 The dependency build needs

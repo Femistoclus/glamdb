@@ -1,3 +1,5 @@
+add_subdirectory(telemetry)
+
 add_library(glamdb_io STATIC
     io/local_fs.cpp
     io/sha256.cpp
@@ -21,7 +23,7 @@ if(NOT GLAMDB_IO_ONLY)
         scan/predicate.cpp)
     add_library(glamdb::core ALIAS glamdb_core)
     target_link_libraries(glamdb_core PRIVATE "$<BUILD_INTERFACE:glamdb_build_options>" SQLite::SQLite3
-        iceberg::iceberg_sql_catalog_static Arrow::arrow_static)
+        iceberg::iceberg_sql_catalog_static Arrow::arrow_static glamdb_logging)
     target_include_directories(glamdb_core
         PUBLIC "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/public>"
                "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
@@ -39,6 +41,8 @@ if(NOT GLAMDB_IO_ONLY)
         set_target_properties(glamdb_io PROPERTIES EXPORT_NAME io)
         install(TARGETS glamdb_io EXPORT GlamDBTargets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
     endif()
+    set_target_properties(glamdb_logging PROPERTIES EXPORT_NAME logging)
+    install(TARGETS glamdb_logging EXPORT GlamDBTargets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
     install(TARGETS glamdb_core EXPORT GlamDBTargets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
     install(DIRECTORY "${PROJECT_SOURCE_DIR}/public/storage" DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
         FILES_MATCHING PATTERN "*.h")
