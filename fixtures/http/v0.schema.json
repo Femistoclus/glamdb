@@ -96,160 +96,6 @@
       ],
       "additionalProperties": false
     },
-    "parquetCompression": {
-      "anyOf": [
-        {
-          "type": "object",
-          "properties": {
-            "codec": {
-              "enum": [
-                "uncompressed",
-                "snappy",
-                "gzip",
-                "lz4_raw",
-                "zstd"
-              ]
-            },
-            "level": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "codec"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "writeSettings": {
-      "type": "object",
-      "properties": {
-        "parquet": {
-          "anyOf": [
-            {
-              "type": "object",
-              "properties": {
-                "compression": {
-                  "$ref": "#/$defs/parquetCompression"
-                },
-                "dictionary": {
-                  "anyOf": [
-                    {
-                      "enum": [
-                        "auto",
-                        "enabled",
-                        "disabled"
-                      ]
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "dictionary_page_size_limit": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/$defs/int64"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "columns": {
-                  "anyOf": [
-                    {
-                      "type": "array",
-                      "maxItems": 64,
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "field": {
-                            "type": "string"
-                          },
-                          "compression": {
-                            "$ref": "#/$defs/parquetCompression"
-                          },
-                          "dictionary": {
-                            "anyOf": [
-                              {
-                                "enum": [
-                                  "auto",
-                                  "enabled",
-                                  "disabled"
-                                ]
-                              },
-                              {
-                                "type": "null"
-                              }
-                            ]
-                          },
-                          "encoding": {
-                            "anyOf": [
-                              {
-                                "enum": [
-                                  "plain",
-                                  "delta_binary_packed",
-                                  "delta_length_byte_array",
-                                  "delta_byte_array",
-                                  "byte_stream_split",
-                                  "rle"
-                                ]
-                              },
-                              {
-                                "type": "null"
-                              }
-                            ]
-                          }
-                        },
-                        "required": [
-                          "field"
-                        ],
-                        "additionalProperties": false
-                      }
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                }
-              },
-              "additionalProperties": false
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "additionalProperties": false
-    },
-    "writeSettingsUpdate": {
-      "type": "object",
-      "properties": {
-        "expected_version": {
-          "$ref": "#/$defs/int64"
-        },
-        "write_settings": {
-          "$ref": "#/$defs/writeSettings"
-        }
-      },
-      "required": [
-        "expected_version",
-        "write_settings"
-      ],
-      "additionalProperties": false
-    },
     "cell": {
       "anyOf": [
         {
@@ -500,6 +346,14 @@
             "FixInput",
             "OperatorAction"
           ]
+        },
+        "reason": {
+          "$ref": "#/$defs/scanAdmissionReason"
+        },
+        "retry_after_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60000
         }
       },
       "required": [
@@ -1132,6 +986,15 @@
         },
         "bloom_pruning": {
           "type": "boolean"
+        },
+        "scan_sessions": {
+          "$ref": "#/$defs/scanSessions"
+        },
+        "shared_resources": {
+          "$ref": "#/$defs/sharedResources"
+        },
+        "http_activity": {
+          "$ref": "#/$defs/httpActivity"
         },
         "parquet": {
           "anyOf": [
@@ -2581,6 +2444,343 @@
         "bound_encoding"
       ],
       "additionalProperties": true
+    },
+    "scanOccupancy": {
+      "type": "object",
+      "properties": {
+        "live_cursors": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed_replays": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "executing_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "replay_reserved_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "replay_body_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "live_cursors",
+        "completed_replays",
+        "executing_calls",
+        "replay_reserved_bytes",
+        "replay_body_bytes"
+      ],
+      "additionalProperties": false
+    },
+    "scanSessions": {
+      "type": "object",
+      "properties": {
+        "global": {
+          "$ref": "#/$defs/scanOccupancy"
+        },
+        "database": {
+          "$ref": "#/$defs/scanOccupancy"
+        },
+        "completed_evictions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expirations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cancellations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed_eviction_policy": {
+          "const": "oldest_completed_first"
+        },
+        "rejections": {
+          "type": "object",
+          "propertyNames": {
+            "enum": [
+              "global_live_limit",
+              "database_live_limit",
+              "global_replay_limit",
+              "database_replay_limit",
+              "shared_data_memory",
+              "shared_control_memory",
+              "shared_planning_memory",
+              "shared_decode_memory",
+              "session_busy"
+            ]
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "required": [
+            "global_live_limit",
+            "database_live_limit",
+            "global_replay_limit",
+            "database_replay_limit",
+            "shared_data_memory",
+            "shared_control_memory",
+            "shared_planning_memory",
+            "shared_decode_memory",
+            "session_busy"
+          ]
+        }
+      },
+      "required": [
+        "global",
+        "completed_evictions",
+        "expirations",
+        "cancellations",
+        "completed_eviction_policy",
+        "rejections"
+      ],
+      "additionalProperties": false
+    },
+    "sharedResources": {
+      "type": "object",
+      "properties": {
+        "memory_limits_bytes": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "minItems": 5,
+          "maxItems": 5
+        },
+        "memory_bytes": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "minItems": 5,
+          "maxItems": 5
+        },
+        "memory_peak_bytes": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "minItems": 5,
+          "maxItems": 5
+        }
+      },
+      "required": [
+        "memory_limits_bytes",
+        "memory_bytes",
+        "memory_peak_bytes"
+      ],
+      "additionalProperties": false
+    },
+    "httpActivity": {
+      "type": "object",
+      "properties": {
+        "connected_clients": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pending_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "executing_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "waiting_bodies": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "oldest_queue_age_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "connected_clients",
+        "pending_calls",
+        "executing_calls",
+        "waiting_bodies",
+        "oldest_queue_age_ms"
+      ],
+      "additionalProperties": false
+    },
+    "scanAdmissionReason": {
+      "enum": [
+        "global_live_limit",
+        "database_live_limit",
+        "global_replay_limit",
+        "database_replay_limit",
+        "shared_data_memory",
+        "shared_control_memory",
+        "shared_planning_memory",
+        "shared_decode_memory",
+        "session_busy"
+      ]
+    },
+    "parquetCompression": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "codec": {
+              "enum": [
+                "uncompressed",
+                "snappy",
+                "gzip",
+                "lz4_raw",
+                "zstd"
+              ]
+            },
+            "level": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "codec"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "writeSettings": {
+      "type": "object",
+      "properties": {
+        "parquet": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "compression": {
+                  "$ref": "#/$defs/parquetCompression"
+                },
+                "dictionary": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "auto",
+                        "enabled",
+                        "disabled"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "dictionary_page_size_limit": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/int64"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "columns": {
+                  "anyOf": [
+                    {
+                      "type": "array",
+                      "maxItems": 64,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string"
+                          },
+                          "compression": {
+                            "$ref": "#/$defs/parquetCompression"
+                          },
+                          "dictionary": {
+                            "anyOf": [
+                              {
+                                "enum": [
+                                  "auto",
+                                  "enabled",
+                                  "disabled"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "encoding": {
+                            "anyOf": [
+                              {
+                                "enum": [
+                                  "plain",
+                                  "delta_binary_packed",
+                                  "delta_length_byte_array",
+                                  "delta_byte_array",
+                                  "byte_stream_split",
+                                  "rle"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "field"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "writeSettingsUpdate": {
+      "type": "object",
+      "properties": {
+        "expected_version": {
+          "$ref": "#/$defs/int64"
+        },
+        "write_settings": {
+          "$ref": "#/$defs/writeSettings"
+        }
+      },
+      "required": [
+        "expected_version",
+        "write_settings"
+      ],
+      "additionalProperties": false
     }
   }
 }

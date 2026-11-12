@@ -151,7 +151,8 @@ TJson ParquetJson(const EngineCapabilities& capabilities)
 TJson CapabilitiesJson(const EngineCapabilities& capabilities,
     const std::optional<StoreHealth>& health,
     bool databaseManagement,
-    const std::string& storeID)
+    const std::string& storeID,
+    const TScanLimits& scans)
 {
     const bool metadata = capabilities.metadata;
     const std::array backends{"unavailable", "custom", "local"};
@@ -189,11 +190,15 @@ TJson CapabilitiesJson(const EngineCapabilities& capabilities,
                 {"response_bytes", MaxResponseBytes},
                 {"append_rows", 10000},
                 {"scan_page_rows", 10000},
-                {"scan_sessions", TScans::SessionLimit},
-                {"scan_sessions_per_database", TScans::DatabaseSessionLimit},
-                {"scan_lifetime_seconds", TScans::LifetimeSeconds},
-                {"scan_replay_bytes", TScans::ReplayBytes},
-                {"scan_idle_seconds", TScans::IdleSeconds},
+                {"scan_sessions", scans.Live},
+                {"scan_sessions_per_database", scans.LivePerDatabase},
+                {"scan_completed_sessions", scans.Completed},
+                {"scan_completed_sessions_per_database", scans.CompletedPerDatabase},
+                {"scan_lifetime_seconds", scans.Lifetime.count() / 1000},
+                {"scan_replay_bytes", scans.ReplayBytes},
+                {"scan_replay_bytes_per_database", scans.ReplayBytesPerDatabase},
+                {"scan_idle_seconds", scans.Idle.count() / 1000},
+                {"scan_completed_ttl_seconds", scans.CompletedTtl.count() / 1000},
                 {"metadata_page_size", 1000},
                 {"metadata_sessions", MaxSessions},
                 {"metadata_sessions_per_database", MaxDatabaseSessions},
@@ -211,7 +216,7 @@ TJson CapabilitiesJson(const EngineCapabilities& capabilities,
     return value;
 }
 
-TJson ExplainJson(const Engine& engine, const std::string& collection, const TJson& body)
+TJson ExplainJson(const Engine& engine, const std::string& collection, const TJson& body, const TScanLimits& scans)
 {
     const auto info = Unwrap(engine.GetCollection(collection));
     const auto explanation = Unwrap(engine.ExplainScan(ParseScan(collection, info.schema, body)));
@@ -222,7 +227,7 @@ TJson ExplainJson(const Engine& engine, const std::string& collection, const TJs
         output.push_back(field.at("name"));
     }
     auto capabilities =
-        CapabilitiesJson(engine.GetCapabilities(), engine.GetHealth(), false, engine.GetStoreInfo().store_id);
+        CapabilitiesJson(engine.GetCapabilities(), engine.GetHealth(), false, engine.GetStoreInfo().store_id, scans);
     value.update({{"schema", schema},
         {"read_columns", explanation.read_fields},
         {"output_columns", output},

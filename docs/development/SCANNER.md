@@ -195,6 +195,16 @@ joins a writer attempt or holds a SQLite read transaction.
   `Info()` remains valid. Detected corruption during `Next()`
   closes engine readiness. Read failures are errors, never EOS.
 
+Explicit manifest, file-source/footer and output-descriptor reservation refusal
+returns `RESOURCE_EXHAUSTED` with `SameIdAfterReconcile` before consuming the
+next batch. That cursor remains open: release pressure and retry it. A file
+descriptor remains queued until `OpenFile` succeeds. Actual decode, I/O and
+allocator failures remain terminal. Native [HTTP page assembly](SCAN_SESSIONS.md)
+keeps rollback ownership of fetched batches. Explicit admission refusal after
+collecting rows finishes a nonempty page with a continuation, freeing retained
+descriptors before decoding resumes. A refusal before the first row preserves
+the fixed snapshot, cursor tokens and previous replay. Pressure never means EOS.
+
 Not implemented: file/row-group pruning, page CRC verification and qualification-scale attempt-volume/capacity measurements.
 The [process resource owner](SHARED_RESOURCES.md) now supplies scan working
 reservations, separately charged output descriptors, tracked Arrow allocation capacity and leases retained through

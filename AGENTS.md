@@ -50,9 +50,15 @@ are implemented. They can use the native Asio HTTP server over the public Engine
 `--data-dir` starts with no databases; authenticated API/UI operations create,
 list, open, close and reconcile databases. A separate SQLite service registry
 stores identities, persisted engine limits and open intent; collection/data writes remain in core.
-Scans use bounded fixed-view pages with per-database quotas, finite replay retention,
-idle expiry and explicit cancellation. Each admitted cursor reserves its maximum
-replay page before consuming rows. Separate HTTP reader, publisher, lifecycle and
+Scans use bounded fixed-view pages with validated configurable global/per-database
+live, completed replay, byte and lifetime limits. Each admitted cursor reserves
+its maximum replay page in both the local quota and shared process memory before
+planning. Capabilities expose effective limits, separate HTTP/session occupancy,
+shared current/peak memory and bounded refusal/eviction counters. Completed replay
+eviction is oldest-first; live cursors are never evicted. See
+[scan session policy](docs/development/SCAN_SESSIONS.md) for startup options, the
+32-reader profile and `glamdb.scan_policy` real native validation.
+Separate HTTP reader, publisher, lifecycle and
 control pools use bounded fair per-database queues with deadlines and cancellation.
 Outcome lookups refuse tentative catalog reads without waiting on publication.
 HTTP body admission reserves four of sixteen readers from ordinary uploads for
