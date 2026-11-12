@@ -12,6 +12,24 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class NativeAcceptanceRunner(unittest.TestCase):
+    def test_native_ci_requirements_do_not_duplicate_shared_lock_pins(self):
+        def pinned_packages(path):
+            packages = set()
+            for raw_line in path.read_text().splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith(("#", "-r", "--")) or "==" not in line:
+                    continue
+                packages.add(line.split("==", 1)[0].lower())
+            return packages
+
+        shared_packages = pinned_packages(ROOT / "requirements-dev.txt")
+        native_packages = pinned_packages(ROOT / "requirements-native-ci.txt")
+
+        self.assertFalse(
+            shared_packages & native_packages,
+            "native CI requirements must not repin packages from requirements-dev.txt",
+        )
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='native CI ')
         self.addCleanup(self.tmp.cleanup)
