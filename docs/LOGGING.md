@@ -30,7 +30,10 @@ logging archive and thread dependency without requiring Quill headers.
 
 Admin commands wrap the synchronous engine call in the same context. Read and
 quiesce commands retain their stdout protocol. The network client is unchanged;
-the Python adapter is not wired into a production service in this repository.
+the native client and server do not use the Python adapter. The `workbench_access`
+gateway can load this adapter optionally; that integration remains separate from
+the native server logger. It emits runtime start/stop plus organization/database
+mutation events; ordinary gateway HTTP requests remain metrics-only.
 
 ## Libraries and event boundary
 

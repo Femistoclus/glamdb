@@ -35,6 +35,7 @@ jq -Rc --arg id 'paste-request_id-here' \
 | `runtime_started` | Runtime initialization began; this alone does not mean the listener is ready. |
 | `runtime_stopped` | The process runtime finished; `outcome` reflects its exit result, not a durability guarantee. |
 | `request_completed` | One HTTP session finished: operation, duration in microseconds and HTTP status. A cancelled transport can have status 0 or an attempted response status. |
+| `operation_completed` | One instrumented native engine operation finished. Successful completions are sampled independently from successful HTTP completions. |
 | `storage_failed` | The core observed an I/O failure or invalid stored data on an instrumented operation path. |
 | `recovery_required` | The core requires recovery after corruption, an uncertain commit, or failed reconciliation/reopening. `outcome=unknown` means the commit needs authoritative reconciliation. |
 
@@ -46,17 +47,19 @@ a separate runtime context (`operation=other`) and have no HTTP completion.
 No raw URL, headers, credentials, exception text or stored values enter
 structured events.
 
-By default, successful requests are sampled **1 in 100**, with at most **20**
-sampled successes per second. Errors, denials, cancellations and lifecycle/core
-events bypass that sampling, but bounded queues or sink failures can still lose
-events. Logs are diagnostic, not an audit trail or request counter. A successful
-HTTP write means the bytes were sent by the server, not that the client consumed
-them. A failed connection does not establish whether a database commit happened;
-use the operation outcome API. A permanently blocked stderr can delay graceful
-shutdown.
+By default, successful `request_completed` and native `operation_completed`
+events are sampled **1 in 100**, with at most **20** sampled successes per second.
+The two event kinds have independent sampling sequences and share the per-second
+cap. Runtime lifecycle and administrative events, denied or unknown outcomes,
+errors and cancellations bypass success sampling. Bounded queues or sink failures
+can still lose any event. Logs are diagnostic, not an audit trail or request
+counter. A successful HTTP write means the bytes were sent by the server, not that
+the client consumed them. A failed connection does not establish whether a
+database commit happened; use the operation outcome API. A permanently blocked
+stderr can delay graceful shutdown.
 
 `glamdb-admin` also logs `create_store`, `inspect_store`, `scan` (`read`) and
 `quiesce_store`. Its `status_code` is the process exit code, not HTTP status;
 stdout remains the command result. Embedded library users do not start a logger
-implicitly. The Python adapter is a separate utility, not the native server's
-logging implementation.
+implicitly. The optional Python adapter used by `workbench_access` is separate
+from the native server's logging implementation.
