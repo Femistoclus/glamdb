@@ -23,6 +23,20 @@ inline constexpr uint64_t ExtraCollectionSlots(int64_t limit)
 {
     return limit > 8 ? static_cast<uint64_t>(limit - 8) : 0;
 }
+// Full verification streams receipts and archive rows and keeps one compact
+// receipt and ancestor per committed operation (a few hundred bytes; the
+// verified generation's index is charged separately). The recovery reserve
+// covers the actual operations, in chunks so that appends rarely reserve.
+// The fixed RecoveryMemoryBytes envelope covers the first chunk.
+inline constexpr uint64_t RecoveryBytesPerOperation = 1ULL << 10;
+inline constexpr uint64_t RecoveryOperationChunk = 256;
+// The catalog keeps room to double (journal) plus this growth; the recovery
+// workspace keeps at least the former fixed reservation. Both grow with the
+// actual catalog and retained state before an attempt binds.
+inline constexpr uint64_t CatalogGrowthBytes = 64ULL << 20;
+// Workspace units one attempt may add: a snapshot, eight manifests and 256
+// data files.
+inline constexpr uint64_t AttemptWorkspaceBytes = 8192ULL * (1 + 8 + 256);
 inline constexpr uint64_t CollectionMetadataBytes = 1ULL << 20;
 inline constexpr uint64_t CollectionRecoveryBytes = 1ULL << 20;
 inline constexpr uint64_t CollectionControlBytes = 4ULL << 10;

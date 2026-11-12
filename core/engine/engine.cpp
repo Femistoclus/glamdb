@@ -212,6 +212,12 @@ struct Engine::Impl
 {
     std::shared_ptr<ResourceOwner> resources;
     std::vector<std::shared_ptr<ResourceReservation>> store_resources;
+    // Grown with the actual retained state (operations; catalog and recovery
+    // workspace bytes on the store device).
+    std::vector<std::shared_ptr<ResourceReservation>> history_resources;
+    uint64_t history_operations = 0;
+    std::string device_root;
+    uint64_t device_reserved = 0;
     std::vector<std::shared_ptr<ResourceReservation>> attempt_resources;
     StoreInfo info;
     Limits limits;
@@ -255,32 +261,72 @@ struct Engine::Impl
     {
         resources = supplied ? supplied : ResourceOwner::ProcessDefault();
         const auto extra = ExtraCollectionSlots(limits.max_collections);
-        // Every committed append adds at least one never-deleted data file.
-        // Bound expired ancestry independently of the retained root and the
-        // arbitrarily large streamed inventory of failed operations.
-        const auto successes = std::min(limits.max_operations, limits.history.max_data_files);
-        const auto operations = successes > 4096 ? static_cast<uint64_t>(successes - 4096) : 0;
-        store_resources.push_back(Take(resources->Reserve(ResourceClass::Metadata,
-            CatalogMemoryBytes + extra * CollectionMetadataBytes + operations * (16ULL << 10))));
-        store_resources.push_back(Take(resources->Reserve(ResourceClass::Recovery,
-            RecoveryMemoryBytes + extra * CollectionRecoveryBytes + operations * (64ULL << 10))));
+        // Fixed envelopes only: retained history is charged by what exists
+        // (ReserveHistory below and the verified generation's own charge),
+        // never by configured maxima.
+        store_resources.push_back(
+            Take(resources->Reserve(ResourceClass::Metadata, CatalogMemoryBytes + extra * CollectionMetadataBytes)));
+        store_resources.push_back(
+            Take(resources->Reserve(ResourceClass::Recovery, RecoveryMemoryBytes + extra * CollectionRecoveryBytes)));
         if (extra != 0) {
             store_resources.push_back(Take(resources->Reserve(ResourceClass::Control, extra * CollectionControlBytes)));
         }
     }
 
+    // Full verification keeps a compact receipt and ancestor per committed
+    // operation. Grows (in whole chunks, never shrinking while open) to cover
+    // `operations`, before recovery and before every binding.
+    void ReserveHistory(int64_t operations)
+    {
+        // The fixed recovery envelope covers the first chunk.
+        const auto needed =
+            static_cast<uint64_t>(std::max<int64_t>(operations, 0)) / RecoveryOperationChunk * RecoveryOperationChunk;
+        if (needed <= history_operations) {
+            return;
+        }
+        history_resources.push_back(Take(
+            resources->Reserve(ResourceClass::Recovery, (needed - history_operations) * RecoveryBytesPerOperation)));
+        history_operations = needed;
+    }
+
+    // Catalog growth/journal and the recovery workspace on this exact device
+    // stay protected for the engine lifetime, sized by the actual catalog and
+    // retained state (never by the configured maxima) and grown before an
+    // attempt binds.
     void ReserveStoreDevice(const std::string& root)
     {
-        // Catalog growth/journal and a bounded recovery workspace on this
-        // exact device stay protected for the entire engine lifetime.
-        store_resources.push_back(Take(resources->ReserveDevice(root,
-            2 * static_cast<uint64_t>(limits.max_catalog_bytes) +
-                static_cast<uint64_t>(limits.history.max_recovery_workspace_bytes) + (8ULL << 20),
-            32)));
+        device_root = root;
+        store_resources.push_back(Take(resources->ReserveDevice(root, 8ULL << 20, 32)));
+        GrowStoreDevice(0);
+    }
+
+    void GrowStoreDevice(uint64_t workspace)
+    {
+        // Whole growth steps, so that ordinary appends rarely reserve again.
+        const auto step = [](uint64_t bytes) {
+            return (bytes / CatalogGrowthBytes + 1) * CatalogGrowthBytes;
+        };
+        std::error_code error;
+        const auto catalogBytes =
+            std::filesystem::file_size(std::filesystem::path(device_root) / "catalog.sqlite", error);
+        const auto catalogNeed =
+            std::min(2 * step(error ? 0 : catalogBytes), 2 * static_cast<uint64_t>(limits.max_catalog_bytes));
+        const auto workspaceNeed = std::min(std::max(step(workspace + AttemptWorkspaceBytes), WorkspaceDiskBytes),
+            static_cast<uint64_t>(limits.history.max_recovery_workspace_bytes));
+        const auto needed = catalogNeed + workspaceNeed;
+        if (needed <= device_reserved) {
+            return;
+        }
+        store_resources.push_back(Take(resources->ReserveDevice(device_root, needed - device_reserved, 0)));
+        device_reserved = needed;
     }
 
     void ReserveAttempt(bool bulk = false, bool kv = false)
     {
+        // Retained state grows with this attempt: its permanent operation,
+        // catalog rows and recovery workspace units.
+        ReserveHistory(catalog->BoundOperations() + 1);
+        GrowStoreDevice(backend ? backend->RecoveryWorkspaceBytes() : 0);
         std::vector<std::shared_ptr<ResourceReservation>> reserved;
         reserved.push_back(Take(resources->Reserve(ResourceClass::Control, ControlMemoryBytes)));
         reserved.push_back(Take(resources->Reserve(ResourceClass::Completion, CompletionMemoryBytes)));
@@ -1210,6 +1256,7 @@ EngineFactory::CreateWith(const CreateStoreRequest& request, const BackendFactor
             impl->info,
             impl->limits,
             std::move(sqlite_vfs));
+        impl->ReserveHistory(0);
         impl->Recover(false);
         impl->lease->MarkReady(impl->info);
         return metrics.Finish(Result<std::shared_ptr<Engine>>(std::shared_ptr<Engine>(new Engine(std::move(impl)))));
@@ -1244,7 +1291,11 @@ EngineFactory::OpenWith(const OpenStoreRequest& request, const BackendFactory& b
             impl->limits,
             std::move(sqlite_vfs),
             !request.verify_full);
+        impl->ReserveHistory(impl->catalog->BoundOperations());
         impl->Recover(false);
+        if (impl->backend) {
+            impl->GrowStoreDevice(impl->backend->RecoveryWorkspaceBytes());
+        }
         return metrics.Finish(Result<std::shared_ptr<Engine>>(std::shared_ptr<Engine>(new Engine(std::move(impl)))));
     } catch (const Failure& error) {
         metrics.Error(error.detail.code);

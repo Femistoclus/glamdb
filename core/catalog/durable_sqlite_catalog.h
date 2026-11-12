@@ -221,6 +221,8 @@ public:
     // its collection, and their operation counts to sum to the catalog's
     // exact operation count. Indexed counts only; CORRUPTION otherwise.
     void CheckCheckpoints(std::span<const CollectionCheckpoint> checkpoints);
+    // Exact number of bound operations (bound, committed and failed).
+    int64_t BoundOperations();
     // After detected corruption: the next open must verify fully. Waits for
     // a publication of another thread to end (the caller must hold no engine
     // lock that publication needs, such as the commit gate) and returns once

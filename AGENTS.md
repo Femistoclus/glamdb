@@ -616,8 +616,11 @@ temporary-workspace prerequisites and the remaining qualification boundaries.
 
 The opt-in [scalable history profile](docs/development/SCALABLE_HISTORY.md)
 coordinates public engine/HTTP operation and retained-storage budgets, including
-recovery workspace and larger metadata roots. Defaults stay at 4,096 operations
-and snapshots. Catalog inventory/recovery use 256-record keyset pages; healthy
+recovery workspace and larger metadata roots. Defaults for new databases are
+byte-bound (operations by catalog bytes, root snapshots by the hot window,
+retained metadata by fractions of the 1 TiB warehouse budget); reservations
+follow actual retained state, never configured maxima. Persisted HTTP limits and
+explicit embedded `Limits` are kept. Catalog inventory/recovery use 256-record keyset pages; healthy
 outcome lookup remains indexed. `glamdb_history_bench` and `benchmarks/history.py`
 exercise all eight SF=10 tables through ordinary appends and verify exact typed
 row multisets in a fresh process with a bounded external-sort oracle.

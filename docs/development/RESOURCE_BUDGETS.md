@@ -134,17 +134,17 @@ Other private FileIO and attempt limits remain separate. Persistent charges do n
 
 | Limit / unit | Bound and scope | Owner and enforcement / release |
 | --- | --- | --- |
-| Catalog collections / operations, counts | Store-wide `max_collections=8` by default (configurable 1–64), `max_operations=4096`; operations include bound, committed and failed records | Catalog capacity check before insert against an exact count derived once per catalog connection, plus reopen validation. Bindings/outcomes do not expire; closing a store does not refund them. An operation ID is collection-scoped but the cap covers all collections. |
-| Catalog database, page bytes | Store-wide `max_catalog_bytes=256 MiB`, rounded down to whole SQLite pages; configuration 64 KiB–1 TiB | Working connection `max_page_count` and page-count check on open; 24,576 bytes of freelist/growth headroom before a binding or collection creation. Excludes journal, service registry and SQLite heap/cache; catalog cache target is 8 MiB per connection. |
+| Catalog collections / operations, counts | Store-wide `max_collections=8` by default (configurable 1–64), `max_operations=2^40` for new databases (catalog bytes bind; former default 4096); operations include bound, committed and failed records | Catalog capacity check before insert against an exact count derived once per catalog connection, plus reopen validation. Bindings/outcomes do not expire; closing a store does not refund them. An operation ID is collection-scoped but the cap covers all collections. |
+| Catalog database, page bytes | Store-wide `max_catalog_bytes=64 GiB` for new databases (warehouse / 16; former default 256 MiB), rounded down to whole SQLite pages; configuration 64 KiB–1 TiB | Working connection `max_page_count` and page-count check on open; 24,576 bytes of freelist/growth headroom before a binding or collection creation. Excludes journal, service registry and SQLite heap/cache; catalog cache target is 8 MiB per connection. |
 | Individual metadata files, serialized bytes | Root JSON 16 MiB by default (configurable to 64 MiB); manifest 8 MiB; manifest list 16 MiB | Durable FileIO size checks and publication/recovery validation. Keep the disk charge for retained files and orphans. |
 | Aggregate current roots, bytes | Store-wide 64 MiB | Backend aggregate usage and publication guard; root replacement subtracts the previous root before adding the candidate. Superseded roots held by a planning scan still count as physical warehouse usage. |
-| Retained snapshots / snapshot-log entries / manifests / data files, counts | Store-wide 4,096 / 4,096 / 4,096 / 16,384 by default; configurable through `Limits::history` | Publication guard and `VerifyRetained` aggregate `TStorageUsage` across collections. Per-collection metadata log cap 4,096, at most 8 new manifests per commit. Admission never expires history implicitly; explicit maintenance can expire an opted-in oldest prefix. |
-| Retained manifest / manifest-list / footer bytes | Store-wide 256 MiB / 512 MiB / 256 MiB | Guard and recovery count retained serialized structures. These are persisted-structure limits, not shared metadata-memory reservations. |
+| Retained snapshots / snapshot-log entries / manifests / data files, counts | Store-wide 8,192 / 8,192 / 2^40 / 2^40 for new databases (root snapshots bounded by the hot window; former defaults 4,096 / 4,096 / 4,096 / 16,384); configurable through `Limits::history` | Publication guard and `VerifyRetained` aggregate `TStorageUsage` across collections. Per-collection metadata log cap 4,096, at most 8 new manifests per commit. Admission never expires history implicitly; explicit maintenance can expire an opted-in oldest prefix. |
+| Retained manifest / manifest-list / footer bytes | Store-wide 256 GiB / 256 GiB / 64 GiB for new databases (fractions of the 1 TiB warehouse; archived lists and manifests count; former defaults 256 MiB / 512 MiB / 256 MiB) | Guard and recovery count retained serialized structures. These are persisted-structure limits, not shared metadata-memory reservations. |
 | Commit verification, bytes | 32 MiB per commit | Publication guard and recovery preflight the sum of removed manifest inputs, new manifest outputs, the new list and the root. Recovery charges the final root only to the current commit. Rewritten entries are additionally bounded by the store's data-file cap; only new reachable outputs increase retained manifest usage. |
 | Attempt new-file / I/O volume, bytes | 256 MiB new files; 512 MiB requested reads plus writes per attempt, including retries | `TIOAttempt` reserves requested writes before I/O and settles new-file usage to accepted bytes, refunding unused file capacity. Requested I/O stays charged even on failure. Handles retain their originating attempt. Attempt completion does not refund physical files left behind. Not a process memory or device-space reservation. |
 | Warehouse, physical bytes | 1 TiB per store, including orphans; admit only if another 256 MiB attempt fits | Backend preflight accounts for warehouse before binding with a bounded incremental inventory or full-walk fallback, and reuses that bound for the same append, rechecking identity/free space before production. The publication guard rechecks the cap after production from that measurement plus the attempt's durable files and directory growth (creation walks again); ordinary notified growth is caught at the next admission under the [exclusive-ownership contract](WAREHOUSE_INVENTORY.md); strict mode retains unconditional traversal; recovery checks retained physical usage without requiring a future attempt reserve. Successful removal releases physical disk use; the inventory conservatively retains its charge until refresh. No general orphan cleanup. |
 | Filesystem headroom / attempt / journal, available bytes | `max(1 GiB, ceil(filesystem_capacity / 20)) + 256 MiB + 256 MiB` | `CheckDiskReserve` compares against available space. This is a preflight check, not filesystem preallocation or a shared reservation across databases/processes. Preserve journal/recovery room when rejecting new writes. |
-| Recovery workspace, page bytes | Temporary SQLite database, default 256 MiB, configurable 8 KiB–1 TiB per verifier | Native recovery creates it in the store root on the reserved device; isolated storage callers may retain the temporary-filesystem default. Close removes it; exclusive, identity-validated reopen reclaims interrupted regular workspaces before device admission. Publication and recovery also enforce the conservative visited-key count envelope before accepting state; workspace exhaustion fails recovery. |
+| Recovery workspace, page bytes | Temporary SQLite database, default 64 GiB for new databases (former 256 MiB), configurable 8 KiB–1 TiB per verifier; the device reservation follows the actual `8 KiB × (1 + snapshots + manifests + data files)` envelope, at least 256 MiB | Native recovery creates it in the store root on the reserved device; isolated storage callers may retain the temporary-filesystem default. Close removes it; exclusive, identity-validated reopen reclaims interrupted regular workspaces before device admission. Publication and recovery also enforce the conservative visited-key count envelope before accepting state; workspace exhaustion fails recovery. |
 | Shared device capacity, allocated bytes and inodes | Finite process/device reservation profile covering stores, catalog/journals, service registry and recovery workspaces | The shared owner atomically subtracts outstanding byte/inode reservations from current filesystem availability. Open engines protect catalog/journal/workspace growth; attempts reserve growth before binding. Retained files remain charged by filesystem allocation after reservations end. |
 
 Sources: [catalog limits](../../core/catalog/durable_sqlite_catalog.cpp),
@@ -185,7 +185,8 @@ and workload, not a fixed bytes-per-operation allowance or evidence for a larger
 supported ceiling. Failed bound operations also consume permanent capacity;
 retaining receipts does not promise unlimited ingestion.
 
-`max_operations` defaults to 4,096 and accepts positive signed 64-bit values.
+`max_operations` defaults to 2^40 for new databases (catalog bytes bind
+first; it was 4,096) and accepts positive signed 64-bit values.
 The [configurable history profile](SCALABLE_HISTORY.md) coordinates catalog,
 retained counts/bytes, root sizes and recovery workspace; those independent
 budgets can refuse admission before the operation count is reached. Catalog
@@ -304,12 +305,20 @@ recovery workspace without overflowing arithmetic. These are reservation/check
 units; see [the profile and measurement limits](SCALABLE_HISTORY.md).
 
 Snapshot retention maintenance does not refund permanent operation capacity or
-change configured history limits. Successful-history slots are bounded by
-`min(max_operations, history.max_data_files)`; each slot above 4096 reserves
-16 KiB metadata and 64 KiB recovery memory before store creation/open. The
-validated data-file budget bounds multiplication even with an `INT64_MAX`
-operation limit. This covers expired ancestry independently of retained-root
-size. Expired IDs and the sorted retained-manifest union are charged with verified
+change configured history limits. No reservation follows a configured maximum:
+the engine reserves its fixed catalog/recovery envelopes, then recovery memory
+for the operations that exist (1 KiB per bound operation, in chunks of 256,
+before recovery and grown before every binding; refusal consumes no operation),
+and device space for twice the actual catalog file plus 64 MiB steps and the
+actual recovery-workspace envelope (at least 256 MiB), also grown before a
+binding. Full verification of an append collection streams its operations and
+archive rows once and keeps one compact receipt (a few hundred bytes, no
+collection ID or profile string) and one compact ancestor (about 56 bytes) per
+committed snapshot, instead of full snapshots and two receipt maps. Each such
+receipt added at least one never-deleted data file whose descriptor the
+verified generation retains anyway, so verification memory is proportional to
+the retained state rather than to failed receipts or configured limits.
+Expired IDs and the sorted retained-manifest union are charged with verified
 scan state. Last-reference expiration refunds
 logical manifest and list usage; physical files still count until deletion.
 Cleanup records remain durable until unlink and metadata-directory sync complete.

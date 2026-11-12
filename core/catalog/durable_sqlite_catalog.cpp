@@ -1380,6 +1380,13 @@ void DurableSqliteCatalogStore::CheckCapacity(bool operation)
     CheckFreeBytes();
 }
 
+int64_t DurableSqliteCatalogStore::BoundOperations()
+{
+    std::lock_guard lock(mutex_);
+    Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
+    return OperationCount();
+}
+
 int64_t DurableSqliteCatalogStore::OperationCount()
 {
     // Only BindOperation inserts operations, after this count in its own

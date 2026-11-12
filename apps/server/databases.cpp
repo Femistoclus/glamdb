@@ -722,7 +722,13 @@ TDatabases::TDatabases(const std::filesystem::path& directory,
         entry->AutoOpen = autoOpen == "1";
         try {
             const auto stored = ParseJson(detail::Required(row, 4));
-            entry->ResourceLimits = ParseLimits(stored);
+            // A legacy row without history budgets keeps the defaults it was
+            // created under, not the current ones.
+            Limits base;
+            if (!stored.contains("history")) {
+                base.history = LegacyHistoryLimits;
+            }
+            entry->ResourceLimits = ParseLimits(stored, base);
             auto expected = EncodeLimits(entry->ResourceLimits);
             // Version-2 registries written before history budgets contain all
             // seven original fields. Accept that complete legacy shape only;

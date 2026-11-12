@@ -128,6 +128,11 @@ The runs used official base `135651d` with the campaign changes, Release Clang
 `rw,nosuid,nodev,relatime,errors=panic`. The device is a shared virtual disk;
 hardware flush behavior was not qualified. All four commands exited **0**.
 
+These runs used the former defaults (4,096 operations/snapshots/manifests,
+16,384 data files); new databases now default to byte-bound budgets
+([scalable history](SCALABLE_HISTORY.md)), so the "Default" row is the former
+default profile, passed explicitly to reproduce it.
+
 | Profile | Successful / attempted appends | Peak RSS, MiB | Physical warehouse, MiB | Fresh-process reopen, ms | Exact retry, us |
 | --- | --- | --- | --- | --- | --- |
 | Default, budget 5,000 | 4,096 / 4,097 | 71.00 | 198.03 | 18,991.42 | 342.95 |

@@ -1,5 +1,6 @@
 #include "core/api/binary.h"
 #include "core/api/codec.h"
+#include "core/resources/envelopes.h"
 #include "storage/resources.h"
 #include "tests/support/checked.h"
 #include "tests/support/fault_fs.h"
@@ -523,7 +524,9 @@ TEST(SnapshotRetention, VeryLargeOperationLimitAndKeepLastDoNotOverflowMaintenan
     EXPECT_EQ((*opened)->ListSnapshots(test::collection_id)->snapshots.size(), 1U);
 }
 
-TEST(SnapshotRetention, SuccessfulHistoryReservationRefusesBeforeCreationAndBoundsHugeOperationProfiles)
+// Configured maxima reserve nothing: a huge operation profile is admitted, and
+// the recovery reserve follows the operations that actually exist.
+TEST(SnapshotRetention, HugeOperationProfilesReserveOnlyForActualOperations)
 {
     test::TempDir directory;
     const auto root = directory.path / "store";
@@ -532,14 +535,12 @@ TEST(SnapshotRetention, SuccessfulHistoryReservationRefusesBeforeCreationAndBoun
     const auto owner = std::make_shared<ResourceOwner>(budget);
     Limits limits;
     limits.max_operations = std::numeric_limits<int64_t>::max();
-    const auto refused = CreateStore({test::store_id, root.string(), "local-delete-extra-v1", limits, owner});
-    ASSERT_FALSE(refused);
-    EXPECT_EQ(refused.error().code, "RESOURCE_EXHAUSTED");
-    EXPECT_FALSE(std::filesystem::exists(root));
-    limits.history.max_data_files = 2;
+    limits.history.max_data_files = 1LL << 40;
     const auto admitted = CreateStore({test::store_id, root.string(), "local-delete-extra-v1", limits, owner});
     ASSERT_TRUE(admitted) << admitted.error().message;
     EXPECT_TRUE((*admitted)->GetHealth().write_ready);
+    EXPECT_EQ(owner->GetUsage().memory_bytes[static_cast<size_t>(ResourceClass::Recovery)],
+        detail::RecoveryMemoryBytes);
 }
 
 TEST(SnapshotRetention, OptInDoesNotRelaxOtherCollectionsManifestProfile)

@@ -132,8 +132,8 @@ Its result receipt version 2 extends counts without changing old receipts.
   `SameIdAfterReconcile`.
 
 Candidate bounds default to eight collections (configurable 1–64 with shared
-resource admission), 4096 permanent operations by default (explicitly configurable
-up to 8192 with additional shared reservations), 256 MiB of
+resource admission), 2^40 permanent operations by default (catalog bytes bind
+first; reservations follow the actual operations), 64 GiB of
 catalog pages, 16 pending calls and 128 MiB aggregate owned input. Per append:
 10,000 rows, 16 MiB canonical input, 2 MiB per row, 1 MiB per string and 1024
 bytes per key. Writer wait is at most five seconds; append deadline at most

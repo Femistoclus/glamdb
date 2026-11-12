@@ -215,7 +215,11 @@ transport capability formats are unchanged by this native contract.
 
 `EffectiveLimits.Engine` copies the actual `Engine::GetLimits()` selection,
 including configured collection, operation, catalog, owned-input, writer wait,
-deadline and retained-history budgets. The additional fields expose current
+deadline and retained-history budgets. Defaults of new databases are byte-bound
+(2^40 operations within a 64 GiB catalog, root snapshots within the hot window,
+retained metadata within fractions of the 1 TiB warehouse; see
+[scalable history](SCALABLE_HISTORY.md)); a store opened with explicit or
+persisted limits reports those. The additional fields expose current
 validation ceilings: 128 schema fields, 10,000 ordinary append/upsert input rows,
 16 MiB canonical decoded append/upsert input bytes, 65,536 scan batch rows,
 25,600,000 bulk rows, 4 GiB bulk decoded bytes, 4,096 lookup keys and 10,000 delete

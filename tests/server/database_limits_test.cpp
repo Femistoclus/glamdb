@@ -4,6 +4,7 @@
 #include "tests/support/temp_dir.h"
 
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 namespace glamdb::NServer {
 using namespace NTransport;
@@ -37,6 +38,50 @@ TEST(DatabaseLimits, UncertainOpenIntentRetainsAuthoritativeConfiguration)
         EXPECT_EQ(reopened.List().at("items").size(), 1U);
         reopened.Shutdown();
     }
+}
+
+// New databases get the current defaults; persisted rows keep theirs, and a
+// legacy row without history budgets keeps the budgets it was created under.
+TEST(DatabaseLimits, PersistedLimitsSurviveChangedDefaults)
+{
+    test::TempDir temporary;
+    const auto directory = temporary.path / "server";
+    std::string fresh, persisted, legacy;
+    {
+        TDatabases databases(directory);
+        const auto created = databases.Create({{"name", "fresh"}});
+        fresh = created.at("database_id").get<std::string>();
+        EXPECT_EQ(created.at("limits").at("max_operations"), Limits{}.max_operations);
+        EXPECT_EQ(created.at("limits").at("history").at("max_data_files"), HistoryLimits{}.max_data_files);
+        persisted = databases.Create({{"name", "persisted"}}).at("database_id").get<std::string>();
+        legacy = databases.Create({{"name", "legacy"}}).at("database_id").get<std::string>();
+        databases.Shutdown();
+    }
+    {
+        // As written by binaries with the former defaults.
+        detail::Database registry;
+        registry.Open(directory / "registry.sqlite", SQLITE_OPEN_READWRITE, {});
+        auto old = nlohmann::json::parse(registry.Text("SELECT limits FROM databases WHERE name='persisted'"));
+        old["max_operations"] = 4096;
+        old["max_catalog_bytes"] = 256LL << 20;
+        old["history"]["max_snapshots"] = 4096;
+        old["history"]["max_manifests"] = 4096;
+        old["history"]["max_data_files"] = 16384;
+        registry.Execute("UPDATE databases SET limits=? WHERE name='persisted'", {old.dump()});
+        old.erase("history");
+        registry.Execute("UPDATE databases SET limits=? WHERE name='legacy'", {old.dump()});
+    }
+    TDatabases reopened(directory);
+    const auto kept = reopened.Get(persisted).at("limits");
+    EXPECT_EQ(kept.at("max_operations"), 4096);
+    EXPECT_EQ(kept.at("history").at("max_data_files"), 16384);
+    const auto legacyLimits = reopened.Get(legacy).at("limits");
+    EXPECT_EQ(legacyLimits.at("max_operations"), 4096);
+    EXPECT_EQ(legacyLimits.at("history").at("max_snapshots"), LegacyHistoryLimits.max_snapshots);
+    EXPECT_EQ(legacyLimits.at("history").at("max_data_files"), LegacyHistoryLimits.max_data_files);
+    EXPECT_EQ(legacyLimits.at("history").at("max_manifest_bytes"), LegacyHistoryLimits.max_manifest_bytes);
+    EXPECT_EQ(reopened.Get(fresh).at("limits").at("max_catalog_bytes"), Limits{}.max_catalog_bytes);
+    reopened.Shutdown();
 }
 
 TEST(DatabaseLimits, InterruptedInitializationPublishesOnlyCompleteRegistry)

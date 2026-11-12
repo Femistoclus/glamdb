@@ -308,6 +308,10 @@ public:
     {
         return Inner_->VerifiedCheckpoints();
     }
+    uint64_t RecoveryWorkspaceBytes() override
+    {
+        return Inner_->RecoveryWorkspaceBytes();
+    }
 
 private:
     class TStaged final : public detail::StagedAppend

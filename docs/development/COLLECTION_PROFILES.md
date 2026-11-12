@@ -58,9 +58,10 @@ cache separately reserves 32 MiB per store after root creation; refusal of that
 reservation can leave an unpublished root. Shared-resource pressure refuses
 admission rather than silently reducing the selected count.
 
-The 256 MiB catalog byte cap, 4,096 operation/history caps, aggregate file/root
-caps and 256 MiB recovery SQLite workspace remain unchanged. More collections
-share those existing global budgets. The workspace deduplicates globally bounded
+The catalog byte cap, operation/history caps, aggregate file/root caps and the
+recovery SQLite workspace cap are store-wide and unchanged by the collection
+count (see [the defaults](SCALABLE_HISTORY.md)). More collections share those
+global budgets. The workspace deduplicates globally bounded
 files/history and processes collections serially, so collection count does not
 multiply its disk cap. Catalog/journal/workspace device reservations remain in
 force. Catalog enumeration checks the count before materializing schema blobs
