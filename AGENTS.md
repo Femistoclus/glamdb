@@ -214,7 +214,10 @@ Preserve these boundaries when adding or changing engine behavior:
   ID to its canonical content hash before file I/O. Persist the committed
   outcome atomically with the catalog pointer. The same ID and hash return the
   original terminal outcome, including failure; a different hash conflicts.
-  Outcomes survive restart and do not expire. Healthy terminal receipt lookups
+  Outcomes survive restart and do not expire. The
+  [receipt retention decision](docs/development/RESOURCE_BUDGETS.md#operation-receipt-retention-decision)
+  keeps them permanent; larger budget-derived operation/history profiles remain
+  tracked in #156. Healthy terminal receipt lookups
   use the verified generation and query one catalog record without rereading
   warehouse files or enumerating history. Lookup is not a scrub: observed
   corruption or uncertain publication requires full reconciliation and its
