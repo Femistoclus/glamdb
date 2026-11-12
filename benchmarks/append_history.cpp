@@ -334,7 +334,8 @@ try {
                          {"resource_memory_bytes", usage.memory_bytes},
                          {"resource_memory_peak_bytes", usage.memory_peak}}
                          .dump()
-                  << std::endl;
+                  << '\n'
+                  << std::flush;
     }
     Require(engine->Shutdown(std::chrono::seconds(30)).has_value(), "shutdown failed");
     return 0;

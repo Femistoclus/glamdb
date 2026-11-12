@@ -218,7 +218,21 @@ void TScanFiles::push_back(TScanDataFile file)
 
 bool TScanFiles::operator==(const TScanFiles& other) const
 {
-    return Size_ == other.Size_ && std::equal(begin(), end(), other.begin());
+    if (Size_ != other.Size_) {
+        return false;
+    }
+    // Equal sizes give equal leaf boundaries; shared descriptors compare by identity first.
+    for (std::size_t start = 0; start < Size_; start += Width) {
+        const auto& lhs = LeafFor(start).Files;
+        const auto& rhs = other.LeafFor(start).Files;
+        if (!std::equal(lhs.begin(), lhs.end(), rhs.begin(), rhs.end(), [](const auto& left, const auto& right) {
+                return left == right || *left == *right;
+            }))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 TSortedSnapshotIDs::TSortedSnapshotIDs(std::vector<std::int64_t> ids)

@@ -612,7 +612,7 @@ TEST(ScanIndexSharingTest, AmortizedMembershipAllocationsPerAppendAreBoundedByTr
     const auto large = measure(4992);
     // Two leaves complete in 64 appends; each copies one branch per trie level
     // (one level below 1,024 files, two below 32,768): 2 extra allocations each.
-    EXPECT_EQ(large, small + 2 * 2);
+    EXPECT_EQ(large, small + 4U);
     std::cout << "membership allocations per 64 appends: " << small << " / " << large << '\n';
 }
 
@@ -760,6 +760,7 @@ TEST(ScanIndexSharingTest, ReadersOfPublishedGenerationsRaceWithLaterAppends)
     std::atomic<bool> stop{false};
     std::atomic<std::uint64_t> checked{0};
     std::vector<std::thread> readers;
+    readers.reserve(3);
     for (int reader = 0; reader < 3; ++reader) {
         readers.emplace_back([&] {
             while (!stop.load()) {
