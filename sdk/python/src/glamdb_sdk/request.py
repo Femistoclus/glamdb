@@ -7,11 +7,12 @@ import struct
 from typing import Any, Iterable, Mapping
 from uuid import UUID
 
-from .codec import Schema, _canonical_row_size, encode_rows, timestamp_us
+from .codec import Schema, _canonical_row_size, row_plan, timestamp_us
 from .errors import ValidationError
 from .models import ANY
 
-_TAGS = {"string": 1, "bool": 2, "int64": 3, "float64": 4, "timestamp_us_utc": 5}
+APPEND_ROW_LIMIT = 10000
+APPEND_CANONICAL_LIMIT = 16 * 1024**2
 
 
 def uuid_string(value: str | UUID, label: str) -> str:
@@ -31,13 +32,7 @@ def json_bytes(value: Any) -> bytes:
 
 
 def schema_fingerprint(schema: Schema) -> bytes:
-    digest = hashlib.sha256()
-    digest.update(b"COLUMNAR-SCHEMA\0" + struct.pack("<HH", 1, len(schema.fields)))
-    for field in sorted(schema.fields, key=lambda value: value.field_id):
-        name = field.name.encode("utf-8")
-        digest.update(struct.pack("<IH", field.field_id, len(name)) + name)
-        digest.update(bytes([_TAGS[field.type], int(field.nullable)]))
-    return digest.digest()
+    return row_plan(schema).fingerprint
 
 
 def canonical_payload_hash(collection_id: str, schema: Schema, rows: list[dict[str, Any]]) -> str:
@@ -45,9 +40,10 @@ def canonical_payload_hash(collection_id: str, schema: Schema, rows: list[dict[s
     digest.update(b"COLUMNAR-APPEND\0" + struct.pack("<H", 1) + UUID(collection_id).bytes)
     digest.update(schema_fingerprint(schema) + struct.pack("<Q", len(rows)))
     size = 0
+    ordered = sorted(schema.fields, key=lambda value: value.field_id)
     for row in rows:
         row_size = _canonical_row_size(schema, row)
-        for field in sorted(schema.fields, key=lambda value: value.field_id):
+        for field in ordered:
             value = row[field.name]
             if value is None:
                 chunk = b"\0"
@@ -71,6 +67,13 @@ def canonical_payload_hash(collection_id: str, schema: Schema, rows: list[dict[s
     return digest.hexdigest()
 
 
+def _payload_digest(collection_id: str, fingerprint: bytes, row_count: int) -> Any:
+    digest = hashlib.sha256()
+    digest.update(b"COLUMNAR-APPEND\0" + struct.pack("<H", 1) + UUID(collection_id).bytes
+                  + fingerprint + struct.pack("<Q", row_count))
+    return digest
+
+
 @dataclass(frozen=True)
 class AppendRequest:
     collection_id: str
@@ -85,24 +88,45 @@ class AppendRequest:
 
         collection_id = uuid_string(collection_id, "collection_id")
         operation_id = uuid_string(operation_id, "operation_id")
+        plan = row_plan(schema)
         # Bound iteration before normalization so an unbounded generator cannot
         # allocate an unbounded list. The public append profile is 10,000 rows.
+        # Each row is validated once; its canonical bytes feed both the decoded
+        # byte budget and the payload hash, and its wire object feeds the body.
+        sized = isinstance(rows, (list, tuple)) and 0 < len(rows) <= APPEND_ROW_LIMIT
+        expected_rows = len(rows) if sized else 0
+        digest = _payload_digest(collection_id, plan.fingerprint, expected_rows) if sized else None
+        pending: list[bytes] = []  # canonical rows, bounded by the 16 MiB budget
         owned = []
         canonical_bytes = 0
+        encode_row = plan.encode_row
         for row in rows:
-            if len(owned) == 10000:
+            if len(owned) == APPEND_ROW_LIMIT:
                 raise ValidationError("append supports at most 10,000 rows")
-            encoded = encode_rows(schema, [row])[0]
-            row_size = _canonical_row_size(schema, encoded)
-            if row_size > 2 * 1024**2:
-                raise ValidationError("append row exceeds 2 MiB canonical decoded bytes")
-            canonical_bytes += row_size
-            if canonical_bytes > 16 * 1024**2:
+            encoded, canonical = encode_row(row)
+            canonical_bytes += len(canonical)
+            if canonical_bytes > APPEND_CANONICAL_LIMIT:
                 raise ValidationError("append exceeds 16 MiB canonical decoded bytes")
             owned.append(encoded)
+            if digest is not None:
+                digest.update(canonical)
+            else:
+                pending.append(canonical)
         if not owned:
             raise ValidationError("append requires at least one row")
-        payload_hash = canonical_payload_hash(collection_id, schema, owned)
+        if digest is None:
+            # The row count precedes row bytes in the preimage, so unsized
+            # inputs hash only after iteration has finished.
+            digest = _payload_digest(collection_id, plan.fingerprint, len(owned))
+            for canonical in pending:
+                digest.update(canonical)
+            del pending
+            payload_hash = digest.hexdigest()
+        elif len(owned) != expected_rows:
+            # The sequence changed length while being read; hash what was owned.
+            payload_hash = canonical_payload_hash(collection_id, schema, owned)
+        else:
+            payload_hash = digest.hexdigest()
         value = {"operation_id": operation_id, "rows": owned}
         if expected_snapshot is not ANY:
             value["expected_snapshot"] = None if expected_snapshot is None else str(int64(expected_snapshot))
