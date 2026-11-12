@@ -244,18 +244,26 @@ sequences. The SDK preserves their decimal-string wire form in metadata.
 
 ## Parquet write settings
 
-Collections can choose the **Parquet value compression** of the data files that
-later appends write. This is unrelated to HTTP transport compression
-(`Content-Encoding`). Check `client.capabilities()` first:
+Collections can choose how later appends write their Parquet data files: the
+**compression** codec and level, the **dictionary** policy and dictionary page
+size limit, and per-column **value encodings**. This is unrelated to HTTP
+transport compression (`Content-Encoding`). Check `client.capabilities()` first:
 `features.write_settings` must be true, and the top-level `parquet` object lists
 the codecs of the server build with their level ranges (`level` is `null` for
-codecs without levels) and `default_compression`. The development mock does not
-support write settings and rejects them.
+codecs without levels), `default_compression`, the `encodings` with the field
+types each accepts, and `dictionary` (policies, dictionary types and the
+`page_size_limit` range and default). The development mock does not support
+write settings and rejects them.
 
 ```python
 settings = {"parquet": {
     "compression": {"codec": "zstd", "level": 3},  # collection default; level None = codec default
-    "columns": [{"field": "at", "compression": {"codec": "uncompressed"}}],  # a field of `schema`
+    "dictionary": "auto",                          # auto (default) | enabled | disabled
+    "dictionary_page_size_limit": 262144,          # bytes; sent as the decimal string "262144"
+    "columns": [                                   # fields of `schema`; each overrides the defaults
+        {"field": "at", "encoding": "delta_binary_packed"},  # explicit encoding: dictionary off
+        {"field": "key", "compression": {"codec": "uncompressed"}, "dictionary": "disabled"},
+    ],
 }}
 created = client.create_collection("example", schema, collection_id=collection_id,
                                    write_settings=settings)
@@ -264,17 +272,35 @@ print(info["write_settings"], info["write_settings_version"])  # canonical form,
 
 updated = client.update_write_settings(collection_id, info["write_settings_version"],
                                        {"parquet": {"compression": {"codec": "snappy"}}})
-print(updated["write_settings_version"])  # "2"; existing files keep their codecs
+print(updated["write_settings_version"])  # "2"; existing files keep their codecs and encodings
 ```
 
-Settings are plain JSON objects in the wire shape; codecs are `uncompressed`,
-`snappy`, `gzip`, `lz4_raw` and `zstd`. The SDK rejects unknown keys or codecs,
-non-integer levels, duplicate columns and column entries without `compression`
-before sending; level ranges are checked by the server (400 `INVALID_ARGUMENT`).
-`canonical_write_settings(value, schema)` returns the form the server reports:
-columns in schema order, `level` explicit (`None` selects the codec's default)
-and `compression` `None` when unset. Without `write_settings`, create sends
-exactly the same body as before.
+Column options override the collection defaults option by option; a level is
+never inherited from another codec. `dictionary` is `auto` (dictionary pages for
+every type except `bool`), `enabled` (the same, rejected for `bool` columns) or
+`disabled`. A dictionary that outgrows `dictionary_page_size_limit` (4 KiB to
+8 MiB, default 1 MiB) is kept and the remaining data pages fall back to `plain`.
+A column `encoding` selects its non-dictionary value encoding and must fit the
+field type: `plain` (all), `delta_binary_packed` (`int64`, `timestamp_us_utc`),
+`delta_length_byte_array` and `delta_byte_array` (`string`), `byte_stream_split`
+(`int64`, `float64`, `timestamp_us_utc`) and `rle` (`bool`). An explicit encoding
+turns that column's dictionary off and overrides the collection policy, so it
+cannot be combined with `enabled` (or `auto` on a non-`bool` column). A
+collection `enabled` policy requires every `bool` column to set its own
+`dictionary` or `encoding`. See the [native HTTP contract](../../docs/development/HTTP_SERVER.md)
+("Requests and results") for the authoritative rules.
+
+Settings are plain JSON objects in the wire shape. The SDK rejects unknown keys,
+codecs, policies and encodings, non-integer levels or page size limits,
+duplicate columns and column entries that set none of `compression`,
+`dictionary` and `encoding` before sending. Field types, the conflicts above,
+level ranges and the page size limit range are checked by the server
+(400 `INVALID_ARGUMENT`). `canonical_write_settings(value, schema)` returns the
+form the server reports: every option key present (`None` when unset), columns
+in schema order, `level` explicit (`None` selects the codec's default) and the
+page size limit as a decimal string. `PARQUET_CODECS`, `DICTIONARY_POLICIES` and
+`PARQUET_ENCODINGS` list the accepted names. Without `write_settings`, create
+sends exactly the same body as before.
 
 Write settings are part of the collection definition. Repeat a lost create with
 the same value: a different value is refused with 409 `WRITE_SETTINGS_MISMATCH`.
@@ -290,13 +316,15 @@ collection created with defaults and updated once cannot be told apart).
 compare-and-set that replaces the complete settings object: it returns the
 collection with version `expected_version + 1` and the requested settings,
 otherwise `ProtocolError`. Reported settings may contain newer options unknown
-to this SDK; unset (`null`) ones are ignored, set ones raise `ProtocolError`. A stale version raises
-`HTTPError` 409 `WRITE_SETTINGS_CONFLICT`; reload the collection before deciding
-again. A lost response (`TransportError`) or a 5xx such as 503
-`RECOVERY_REQUIRED` (`OutcomeUnknownError`) leaves the result unknown: reconcile
-if requested, then repeat the same call; an identical request that was already
-applied returns the collection unchanged. File details report the codec actually
-used by each column chunk as `compression`.
+to this SDK; unset (`null`) ones are ignored, set ones raise `ProtocolError`. A
+stale version raises `HTTPError` 409 `WRITE_SETTINGS_CONFLICT`; reload the
+collection before deciding again. A lost response (`TransportError`) or a 5xx
+such as 503 `RECOVERY_REQUIRED` (`OutcomeUnknownError`) leaves the result
+unknown: reconcile if requested, then repeat the same call; an identical request
+that was already applied returns the collection unchanged. File details report
+what each column chunk actually used: `compression`, `encodings` and
+`encoding_stats` (page counts per page type and encoding; a dictionary that fell
+back shows both `rle_dictionary` and `plain` data pages).
 
 ## Scalars, predicates and metadata
 

@@ -4,20 +4,36 @@ from pathlib import Path
 import httpx
 import pytest
 
-from glamdb_sdk import (Client, Field, HTTPError, OutcomeUnknownError, PARQUET_CODECS, ProtocolError, Schema,
-                        TransportError, ValidationError, canonical_write_settings)
+from glamdb_sdk import (DICTIONARY_POLICIES, PARQUET_CODECS, PARQUET_ENCODINGS, Client, Field, HTTPError,
+                        OutcomeUnknownError, ProtocolError, Schema, TransportError, ValidationError,
+                        canonical_write_settings)
 
 CID = "11111111-2222-4333-8444-555555555555"
 DB = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 SCHEMA = Schema([Field("key", "string", False), Field("n", "int64", True), Field("payload", "string", True)])
-DEFAULT = {"parquet": {"compression": None, "columns": []}}
-# Columns deliberately out of schema order and without explicit levels.
-REQUEST = {"parquet": {"compression": {"codec": "zstd", "level": 3},
+DEFAULT = {"parquet": {"compression": None, "dictionary": None, "dictionary_page_size_limit": None, "columns": []}}
+# Columns deliberately out of schema order, without explicit levels or unset
+# options, and with an integer page size limit.
+REQUEST = {"parquet": {"compression": {"codec": "zstd", "level": 3}, "dictionary": "auto",
+                       "dictionary_page_size_limit": 65536,
                        "columns": [{"field": "payload", "compression": {"codec": "uncompressed"}},
-                                   {"field": "key", "compression": {"codec": "gzip", "level": 9}}]}}
-CANONICAL = {"parquet": {"compression": {"codec": "zstd", "level": 3},
-                         "columns": [{"field": "key", "compression": {"codec": "gzip", "level": 9}},
-                                     {"field": "payload", "compression": {"codec": "uncompressed", "level": None}}]}}
+                                   {"field": "n", "encoding": "delta_binary_packed"},
+                                   {"field": "key", "compression": {"codec": "gzip", "level": 9},
+                                    "dictionary": "disabled"}]}}
+CANONICAL = {"parquet": {
+    "compression": {"codec": "zstd", "level": 3}, "dictionary": "auto", "dictionary_page_size_limit": "65536",
+    "columns": [
+        {"field": "key", "compression": {"codec": "gzip", "level": 9}, "dictionary": "disabled", "encoding": None},
+        {"field": "n", "compression": None, "dictionary": None, "encoding": "delta_binary_packed"},
+        {"field": "payload", "compression": {"codec": "uncompressed", "level": None}, "dictionary": None,
+         "encoding": None}]}}
+
+
+COMPACT = {"parquet": {
+    "compression": {"codec": "zstd", "level": 3}, "dictionary": "auto", "dictionary_page_size_limit": "65536",
+    "columns": [{"field": "key", "compression": {"codec": "gzip", "level": 9}, "dictionary": "disabled"},
+                {"field": "n", "encoding": "delta_binary_packed"},
+                {"field": "payload", "compression": {"codec": "uncompressed", "level": None}}]}}
 
 
 def reply(data, status=200):
@@ -37,7 +53,8 @@ def client_with(handler, **kwargs):
 
 
 @pytest.mark.parametrize("value", [None, {}, {"parquet": None}, {"parquet": {}},
-                                   {"parquet": {"compression": None, "columns": None}}, DEFAULT])
+                                   {"parquet": {"compression": None, "columns": None}},
+                                   {"parquet": {"dictionary": None, "dictionary_page_size_limit": None}}, DEFAULT])
 def test_default_settings_have_one_canonical_form(value):
     assert canonical_write_settings(value) == DEFAULT
     assert canonical_write_settings(value, SCHEMA) == DEFAULT
@@ -46,12 +63,27 @@ def test_default_settings_have_one_canonical_form(value):
 def test_canonical_form_orders_columns_by_schema_and_makes_default_levels_explicit():
     assert canonical_write_settings(REQUEST, SCHEMA) == CANONICAL
     # Without a schema the caller order is kept; the server checks field names.
-    assert [column["field"] for column in canonical_write_settings(REQUEST)["parquet"]["columns"]] == ["payload", "key"]
+    assert [column["field"] for column in canonical_write_settings(REQUEST)["parquet"]["columns"]] == [
+        "payload", "n", "key"]
     assert canonical_write_settings(CANONICAL, SCHEMA) == CANONICAL
     # An explicit default level is a different setting from "codec default".
     assert canonical_write_settings({"parquet": {"compression": {"codec": "zstd", "level": 1}}}) != \
         canonical_write_settings({"parquet": {"compression": {"codec": "zstd"}}})
     assert PARQUET_CODECS == ("uncompressed", "snappy", "gzip", "lz4_raw", "zstd")
+    assert DICTIONARY_POLICIES == ("auto", "enabled", "disabled")
+    assert PARQUET_ENCODINGS == ("plain", "delta_binary_packed", "delta_length_byte_array", "delta_byte_array",
+                                 "byte_stream_split", "rle")
+
+
+def test_columns_may_set_only_a_dictionary_policy_or_only_an_encoding():
+    value = {"parquet": {"dictionary_page_size_limit": "4096", "columns": [
+        {"field": "payload", "dictionary": "enabled"}, {"field": "key", "encoding": "delta_length_byte_array"}]}}
+    assert canonical_write_settings(value, SCHEMA) == {"parquet": {
+        "compression": None, "dictionary": None, "dictionary_page_size_limit": "4096", "columns": [
+            {"field": "key", "compression": None, "dictionary": None, "encoding": "delta_length_byte_array"},
+            {"field": "payload", "compression": None, "dictionary": "enabled", "encoding": None}]}}
+    # An explicit "auto" is a different setting from an unset policy.
+    assert canonical_write_settings({"parquet": {"dictionary": "auto"}}) != DEFAULT
 
 
 @pytest.mark.parametrize("value", [
@@ -67,7 +99,16 @@ def test_canonical_form_orders_columns_by_schema_and_makes_default_levels_explic
     {"parquet": {"columns": [{"field": "key"}]}},
     {"parquet": {"columns": [{"field": "key", "compression": None}]}},
     {"parquet": {"columns": [{"field": "", "compression": {"codec": "snappy"}}]}},
-    {"parquet": {"columns": [{"field": "key", "compression": {"codec": "snappy"}, "encoding": "plain"}]}},
+    {"parquet": {"columns": [{"field": "key", "compression": {"codec": "snappy"}, "statistics": None}]}},
+    {"parquet": {"columns": [{"field": "key", "compression": None, "dictionary": None, "encoding": None}]}},
+    {"parquet": {"dictionary": "on"}}, {"parquet": {"dictionary": True}}, {"parquet": {"dictionary": "AUTO"}},
+    {"parquet": {"columns": [{"field": "key", "dictionary": "off"}]}},
+    {"parquet": {"columns": [{"field": "key", "encoding": "rle_dictionary"}]}},
+    {"parquet": {"columns": [{"field": "key", "encoding": ["plain"]}]}},
+    {"parquet": {"dictionary_page_size_limit": "4k"}}, {"parquet": {"dictionary_page_size_limit": "065536"}},
+    {"parquet": {"dictionary_page_size_limit": 0}}, {"parquet": {"dictionary_page_size_limit": "-4096"}},
+    {"parquet": {"dictionary_page_size_limit": True}}, {"parquet": {"dictionary_page_size_limit": 4096.0}},
+    {"parquet": {"dictionary_page_size_limit": 2**63}},
     {"parquet": {"columns": [{"field": "key", "compression": {"codec": "snappy"}},
                              {"field": "key", "compression": {"codec": "zstd"}}]}},
     {"parquet": {"columns": [{"field": f"c{index}", "compression": {"codec": "snappy"}} for index in range(65)]}},
@@ -122,7 +163,9 @@ def test_create_sends_canonical_settings_and_verifies_the_created_definition():
     with client_with(handler) as client:
         outcome = client.create_collection("exact", SCHEMA, collection_id=CID, write_settings=REQUEST)
     assert outcome.outcome == "committed" and outcome.info["write_settings_version"] == "1"
-    assert sent == [{"collection_id": CID, "name": "exact", "schema": SCHEMA.to_dict(), "write_settings": CANONICAL}]
+    # Unset options are omitted from requests (compression-only settings stay
+    # acceptable to servers without dictionary/encoding options).
+    assert sent == [{"collection_id": CID, "name": "exact", "schema": SCHEMA.to_dict(), "write_settings": COMPACT}]
 
 
 @pytest.mark.parametrize("info", [
@@ -172,7 +215,7 @@ def test_lost_create_resolution_trusts_current_settings_only_while_none_were_sto
             current["info"] = collection(settings, version=version)
             current["post"] = reply({"outcome": "committed", "info": current["info"]})
             assert client.resolve_create("exact", SCHEMA, collection_id=CID, write_settings=REQUEST)["name"] == "exact"
-            assert posts[-1]["write_settings"] == CANONICAL
+            assert posts[-1]["write_settings"] == COMPACT
             current["post"] = mismatch
             with pytest.raises(ProtocolError, match="write settings"):
                 client.resolve_create("exact", SCHEMA, collection_id=CID,
@@ -214,7 +257,10 @@ def test_update_posts_compare_and_set_body_to_the_scoped_route_and_verifies_the_
     with client_with(handler, database_id=DB) as client:
         assert client.update_write_settings(CID, 3, REQUEST)["write_settings_version"] == "4"
         assert client.update_write_settings(CID, "3", REQUEST)["write_settings"] == CANONICAL
-    body = json.dumps({"expected_version": "3", "write_settings": canonical_write_settings(REQUEST)},
+    compact = canonical_write_settings(REQUEST)["parquet"]
+    compact = {"parquet": {key: value for key, value in compact.items() if key != "columns"} | {"columns": [
+        {key: value for key, value in column.items() if value is not None} for column in compact["columns"]]}}
+    body = json.dumps({"expected_version": "3", "write_settings": compact},
                       separators=(",", ":")).encode()
     assert seen == [("POST", f"/databases/{DB}/collections/{CID}/write-settings", body)] * 2
 
@@ -295,11 +341,10 @@ def test_pre_execution_refusal_is_an_ordinary_http_error():
 
 
 def with_unset_options(settings):
-    """Settings as reported by a newer server with options this SDK does not know, all unset."""
+    """Settings as reported by a future server with options this SDK does not know, all unset."""
     parquet = settings["parquet"]
-    return {"parquet": {"columns": [{"dictionary": None, "encoding": None} | column for column in parquet["columns"]],
-                        "compression": parquet["compression"], "dictionary": None,
-                        "dictionary_page_size_limit": None}}
+    return {"parquet": {"bloom_filter": None, "columns": [{"statistics": None} | column
+                                                          for column in parquet["columns"]]} | parquet}
 
 
 def test_reported_settings_ignore_unknown_unset_options_and_refuse_set_ones():
@@ -307,14 +352,16 @@ def test_reported_settings_ignore_unknown_unset_options_and_refuse_set_ones():
     assert canonical_write_settings(reported, SCHEMA, reported=True) == CANONICAL
     with pytest.raises(ValidationError):
         canonical_write_settings(reported, SCHEMA)
-    for change in ({"dictionary": "auto"}, {"dictionary_page_size_limit": "4096"}):
-        changed = {"parquet": reported["parquet"] | change}
-        with pytest.raises(ValidationError, match="does not support"):
-            canonical_write_settings(changed, SCHEMA, reported=True)
-    encoded = {"parquet": reported["parquet"] | {"columns": [
-        {"field": "n", "compression": None, "dictionary": None, "encoding": "delta_binary_packed"}]}}
+    changed = {"parquet": reported["parquet"] | {"bloom_filter": "enabled"}}
     with pytest.raises(ValidationError, match="does not support"):
-        canonical_write_settings(encoded, SCHEMA, reported=True)
+        canonical_write_settings(changed, SCHEMA, reported=True)
+    column = {"parquet": reported["parquet"] | {"columns": [
+        {"field": "n", "compression": None, "dictionary": None, "encoding": None, "statistics": "page"}]}}
+    with pytest.raises(ValidationError, match="does not support"):
+        canonical_write_settings(column, SCHEMA, reported=True)
+    # Known options keep their strict value checks in reported settings too.
+    with pytest.raises(ValidationError):
+        canonical_write_settings({"parquet": reported["parquet"] | {"dictionary": "sometimes"}}, SCHEMA, reported=True)
 
 
 def test_newer_server_options_do_not_break_verification_unless_they_are_set():
@@ -324,10 +371,41 @@ def test_newer_server_options_do_not_break_verification_unless_they_are_set():
     with client_with(lambda request: reply(collection(with_unset_options(CANONICAL), version="4"))) as client:
         assert client.update_write_settings(CID, "3", REQUEST)["write_settings_version"] == "4"
     enabled = with_unset_options(CANONICAL)
-    enabled["parquet"]["dictionary"] = "off"
+    enabled["parquet"]["bloom_filter"] = "enabled"
     with client_with(lambda request: reply(collection(enabled))) as client:
         with pytest.raises(ProtocolError, match="unsupported"):
             client.resolve_create("exact", SCHEMA, collection_id=CID, write_settings=REQUEST)
     with client_with(lambda request: reply(collection(enabled, version="4"))) as client:
         with pytest.raises(ProtocolError):
             client.update_write_settings(CID, "3", REQUEST)
+
+
+def test_type_and_dictionary_conflicts_are_left_to_the_server():
+    # rle needs a bool column and an explicit encoding cannot use an enabled
+    # dictionary; the SDK sends the shape and the server's 400 is authoritative.
+    conflicting = {"parquet": {"columns": [{"field": "n", "encoding": "rle", "dictionary": "enabled"}]}}
+    sent = []
+    def handler(request):
+        sent.append(json.loads(request.content))
+        return reply({"outcome": "definitely_not_committed", "phase": "binding", "error": {
+            "code": "INVALID_ARGUMENT", "message": "Parquet encoding rle does not accept column n",
+            "retry_hint": "FixInput"}}, 400)
+    with client_with(handler) as client:
+        outcome = client.create_collection("exact", SCHEMA, collection_id=CID, write_settings=conflicting)
+    assert outcome.outcome == "definitely_not_committed" and outcome.error.code == "INVALID_ARGUMENT"
+    assert sent[0]["write_settings"]["parquet"]["columns"] == [
+        {"field": "n", "dictionary": "enabled", "encoding": "rle"}]
+
+
+def test_compression_only_requests_keep_the_shape_older_servers_accept():
+    sent = []
+    def handler(request):
+        sent.append(json.loads(request.content))
+        return reply(collection({"parquet": {"compression": {"codec": "snappy", "level": None}, "columns": []}},
+                                version="2"))
+    with client_with(handler) as client:
+        client.update_write_settings(CID, "1", {"parquet": {"compression": {"codec": "snappy"}}})
+        with pytest.raises(ProtocolError):
+            client.update_write_settings(CID, "1", {"parquet": {"dictionary": "disabled"}})
+    assert sent[0]["write_settings"] == {"parquet": {"compression": {"codec": "snappy", "level": None}, "columns": []}}
+    assert sent[1]["write_settings"] == {"parquet": {"dictionary": "disabled", "columns": []}}

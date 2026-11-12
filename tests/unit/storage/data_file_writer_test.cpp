@@ -341,9 +341,9 @@ TEST_F(TDataFileWriterTest, EmptySpecKeepsTheWriterDefaultsByteForByte)
 TEST_F(TDataFileWriterTest, AppliesDefaultAndColumnCodecsAndVerifiesTheFooter)
 {
     const TParquetWriteSpec spec{.Compression = TParquetCompressionSpec{arrow::Compression::GZIP, 5},
-        .Columns = {{"key", {arrow::Compression::UNCOMPRESSED, std::nullopt}},
-            {"ratio", {arrow::Compression::SNAPPY, std::nullopt}},
-            {"time", {arrow::Compression::ZSTD, 19}}}};
+        .Columns = {{"key", TParquetCompressionSpec{arrow::Compression::UNCOMPRESSED, std::nullopt}},
+            {"ratio", TParquetCompressionSpec{arrow::Compression::SNAPPY, std::nullopt}},
+            {"time", TParquetCompressionSpec{arrow::Compression::ZSTD, 19}}}};
     const auto result = Write({Batch()}, {}, spec);
     ASSERT_TRUE(result) << result.error().message;
     EXPECT_EQ(FooterCodecs(Path_, result->DataFile->file_size_in_bytes),
@@ -359,7 +359,7 @@ TEST_F(TDataFileWriterTest, AppliesDefaultAndColumnCodecsAndVerifiesTheFooter)
     const auto lz4 = Write({Batch()},
         {},
         {.Compression = TParquetCompressionSpec{arrow::Compression::ZSTD, 22},
-            .Columns = {{"count", {arrow::Compression::LZ4, std::nullopt}}}},
+            .Columns = {{"count", TParquetCompressionSpec{arrow::Compression::LZ4, std::nullopt}}}},
         OtherPath(1));
     ASSERT_TRUE(lz4) << lz4.error().message;
     EXPECT_EQ(FooterCodecs(OtherPath(1), lz4->DataFile->file_size_in_bytes)[1], arrow::Compression::LZ4);
@@ -368,12 +368,12 @@ TEST_F(TDataFileWriterTest, AppliesDefaultAndColumnCodecsAndVerifiesTheFooter)
 TEST_F(TDataFileWriterTest, RejectsInvalidCodecSettingsBeforeCreatingAnyFile)
 {
     for (const auto& spec : std::vector<TParquetWriteSpec>{
-             {.Columns = {{"missing", {arrow::Compression::ZSTD, std::nullopt}}}},
+             {.Columns = {{"missing", TParquetCompressionSpec{arrow::Compression::ZSTD, std::nullopt}}}},
              {.Compression = TParquetCompressionSpec{arrow::Compression::ZSTD, 99}},
              {.Compression = TParquetCompressionSpec{arrow::Compression::GZIP, 0}},
              {.Compression = TParquetCompressionSpec{arrow::Compression::SNAPPY, 1}},
-             {.Columns = {{"key", {arrow::Compression::LZ4, 13}}}},
-             {.Columns = {{"key", {arrow::Compression::UNCOMPRESSED, 1}}}},
+             {.Columns = {{"key", TParquetCompressionSpec{arrow::Compression::LZ4, 13}}}},
+             {.Columns = {{"key", TParquetCompressionSpec{arrow::Compression::UNCOMPRESSED, 1}}}},
              {.Compression = TParquetCompressionSpec{arrow::Compression::BROTLI, std::nullopt}},
          })
     {
@@ -381,6 +381,41 @@ TEST_F(TDataFileWriterTest, RejectsInvalidCodecSettingsBeforeCreatingAnyFile)
         EXPECT_TRUE(Attempt_->Receipts().empty());
     }
     EXPECT_EQ(CountEvents(NTesting::EIOOp::CreateExclusive), 0);
+}
+
+TEST_F(TDataFileWriterTest, RejectsDictionaryAndEncodingConflictsBeforeCreatingAnyFile)
+{
+    const auto encoded = [](std::string name, parquet::Encoding::type encoding, std::optional<bool> dictionary) {
+        TParquetColumnSpec column{std::move(name)};
+        column.Encoding = encoding;
+        column.Dictionary = dictionary;
+        return TParquetWriteSpec{.Columns = {std::move(column)}};
+    };
+    for (const auto& spec : std::vector<TParquetWriteSpec>{
+             encoded("key", parquet::Encoding::DELTA_BINARY_PACKED, false),
+             encoded("count", parquet::Encoding::DELTA_BYTE_ARRAY, false),
+             encoded("ratio", parquet::Encoding::DELTA_BINARY_PACKED, false),
+             encoded("enabled", parquet::Encoding::BYTE_STREAM_SPLIT, std::nullopt),
+             // The writer would ignore an encoding while the dictionary is on.
+             encoded("count", parquet::Encoding::DELTA_BINARY_PACKED, std::nullopt),
+             encoded("count", parquet::Encoding::DELTA_BINARY_PACKED, true),
+             encoded("key", parquet::Encoding::RLE_DICTIONARY, false),
+             {.Columns = {{.Name = "enabled", .Dictionary = true}}},
+             {.Columns = {{.Name = "missing", .Dictionary = false}}},
+             {.DictionaryPageSizeLimit = 0},
+         })
+    {
+        EXPECT_FALSE(Write({Batch()}, {}, spec));
+        EXPECT_TRUE(Attempt_->Receipts().empty());
+    }
+    EXPECT_EQ(CountEvents(NTesting::EIOOp::CreateExclusive), 0);
+    // A disabled file default with explicit encodings reaches the footer.
+    const auto result = Write({Batch()},
+        {},
+        {.Dictionary = false,
+            .Columns = {{.Name = "count", .Encoding = parquet::Encoding::DELTA_BINARY_PACKED},
+                {.Name = "enabled", .Encoding = parquet::Encoding::RLE}}});
+    ASSERT_TRUE(result) << result.error().message;
 }
 
 TEST_F(TDataFileWriterTest, OversizedFinalFileIsAnUnpublishedOrphan)

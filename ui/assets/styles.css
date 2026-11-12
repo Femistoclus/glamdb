@@ -1240,8 +1240,26 @@ dialog::backdrop {
     accent-color: var(--color-accent);
 }
 /* Parquet value compression (data files), not HTTP content coding. */
+/* Parquet options sit on a second line of each column row. */
 .schema-editor-row.with-parquet {
-    grid-template-columns: 1.2fr 1fr 54px 1fr 64px 24px;
+    grid-template-columns: 1.25fr 1fr 70px 24px;
+    padding-bottom: 8px;
+    border-bottom: 1px dashed var(--color-border);
+}
+.schema-editor-row.with-parquet > [data-action='remove-field'] {
+    grid-row: 1;
+    grid-column: 4;
+}
+.schema-editor-row .column-parquet {
+    grid-row: 2;
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: 1fr 64px 1fr 1.2fr;
+    gap: 7px;
+}
+.parquet-choice-grid {
+    display: grid;
+    gap: 12px;
 }
 .parquet-settings {
     display: grid;
@@ -1254,11 +1272,26 @@ dialog::backdrop {
 }
 .parquet-settings .field-row > :last-child,
 .write-settings-panel .field-row > :last-child {
-    flex: 0 0 120px;
+    flex: 0 0 200px;
+}
+.parquet-settings input,
+.parquet-settings select,
+.write-settings-panel .field-row input,
+.write-settings-panel .field-row select {
+    width: 100%;
+}
+.file-encodings .pill {
+    margin-left: 4px;
 }
 .write-settings-panel form {
     display: grid;
     gap: 16px;
+}
+.write-settings-table td:last-child {
+    white-space: normal;
+    min-width: 220px;
+    max-width: none;
+    overflow: visible;
 }
 .write-settings-table select,
 .write-settings-table input {
@@ -1645,13 +1678,8 @@ dialog::backdrop {
     .schema-editor-row.with-parquet {
         grid-template-columns: 1fr 1fr 55px 20px;
     }
-    .schema-editor-row.with-parquet [data-parquet-codec] {
-        grid-row: 2;
-        grid-column: 1 / 3;
-    }
-    .schema-editor-row.with-parquet [data-parquet-level] {
-        grid-row: 2;
-        grid-column: 3 / 5;
+    .schema-editor-row .column-parquet {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
     }
     .parquet-settings .field-row > :last-child,
     .write-settings-panel .field-row > :last-child {

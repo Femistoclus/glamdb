@@ -9,10 +9,12 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <format>
 #include <future>
 #include <limits>
 #include <map>
 #include <mutex>
+#include <set>
 
 namespace glamdb {
 namespace {
@@ -22,7 +24,10 @@ using namespace std::chrono_literals;
 
 WriteSettings Settings(std::optional<ParquetCompression> fallback, std::vector<ColumnWriteSettings> columns = {})
 {
-    return {std::move(fallback), std::move(columns)};
+    WriteSettings settings;
+    settings.compression = std::move(fallback);
+    settings.columns = std::move(columns);
+    return settings;
 }
 
 std::vector<std::filesystem::path> DataFiles(const std::filesystem::path& root)
@@ -58,6 +63,40 @@ std::map<std::string, std::string> FooterCodecs(const std::filesystem::path& roo
         }
     }
     return codecs;
+}
+
+struct TChunkEncodings
+{
+    bool Dictionary = false;
+    std::set<std::string> DataPages;
+    bool operator==(const TChunkEncodings&) const = default;
+};
+
+// Independent of the engine: whether each column chunk of one append's file
+// has a dictionary page, and the encodings of its data pages.
+std::map<std::string, TChunkEncodings> FooterEncodings(const std::filesystem::path& root, std::string_view operation)
+{
+    std::map<std::string, TChunkEncodings> result;
+    for (const auto& path : DataFiles(root)) {
+        if (path.filename().string().find(operation) == std::string::npos) {
+            continue;
+        }
+        const auto reader = parquet::ParquetFileReader::OpenFile(path.string());
+        const auto footer = reader->metadata();
+        for (int group = 0; group < footer->num_row_groups(); ++group) {
+            for (int column = 0; column < footer->num_columns(); ++column) {
+                const auto chunk = footer->RowGroup(group)->ColumnChunk(column);
+                auto& item = result[footer->schema()->Column(column)->name()];
+                item.Dictionary = chunk->has_dictionary_page();
+                for (const auto& stats : chunk->encoding_stats()) {
+                    if (stats.page_type != parquet::PageType::DICTIONARY_PAGE && stats.count > 0) {
+                        item.DataPages.insert(parquet::EncodingToString(stats.encoding));
+                    }
+                }
+            }
+        }
+    }
+    return result;
 }
 
 class TWriteSettingsTest : public ::testing::Test
@@ -428,6 +467,161 @@ TEST_F(TWriteSettingsTest, NewerCatalogVersionsFailClosed)
     EXPECT_EQ(opened.error().code, "UNSUPPORTED_STORE_VERSION");
 }
 
+TEST_F(TWriteSettingsTest, DefaultsUseDictionariesExceptForBool)
+{
+    ASSERT_EQ(Create({}).disposition, CommitDisposition::Committed);
+    Append(FirstOperation, FirstRows);
+    const TChunkEncodings dictionary{true, {"RLE_DICTIONARY"}};
+    const std::map<std::string, TChunkEncodings> expected{{"key", dictionary},
+        {"value", dictionary},
+        {"score", dictionary},
+        {"flag", {false, {"PLAIN"}}},
+        {"at", dictionary}};
+    EXPECT_EQ(FooterEncodings(Root_, FirstOperation), expected);
+    const auto capabilities = Engine_->GetCapabilities();
+    EXPECT_EQ(capabilities.parquet_encodings.size(), 6U);
+    EXPECT_EQ(capabilities.dictionary_types,
+        (std::vector<FieldType>{FieldType::String, FieldType::Int64, FieldType::Float64, FieldType::TimestampUsUtc}));
+    EXPECT_EQ(capabilities.default_dictionary_page_size_limit, 1 << 20);
+}
+
+TEST_F(TWriteSettingsTest, ColumnEncodingsAndDictionaryPoliciesReachEveryFooter)
+{
+    WriteSettings settings;
+    settings.columns = {{"key", std::nullopt, std::nullopt, ParquetEncoding::DeltaByteArray},
+        {"value", std::nullopt, DictionaryPolicy::Disabled, ParquetEncoding::DeltaBinaryPacked},
+        {"score", std::nullopt, std::nullopt, ParquetEncoding::ByteStreamSplit},
+        {"flag", std::nullopt, std::nullopt, ParquetEncoding::Rle},
+        {"at", ParquetCompression{ParquetCodec::Snappy, std::nullopt}, DictionaryPolicy::Disabled, std::nullopt}};
+    const auto created = Create(settings);
+    ASSERT_EQ(created.disposition, CommitDisposition::Committed)
+        << (created.error ? created.error->message : std::string());
+    EXPECT_EQ(created.info->write_settings, settings);
+    Append(FirstOperation, FirstRows);
+    Append(SecondOperation, SecondRows);
+    const std::map<std::string, TChunkEncodings> expected{{"key", {false, {"DELTA_BYTE_ARRAY"}}},
+        {"value", {false, {"DELTA_BINARY_PACKED"}}},
+        {"score", {false, {"BYTE_STREAM_SPLIT"}}},
+        {"flag", {false, {"RLE"}}},
+        {"at", {false, {"PLAIN"}}}};
+    EXPECT_EQ(FooterEncodings(Root_, FirstOperation), expected);
+    EXPECT_EQ(FooterEncodings(Root_, SecondOperation), expected);
+    EXPECT_EQ(FooterCodecs(Root_, FirstOperation).at("at"), "snappy");
+    // NULLs, duplicates and every type round-trip exactly.
+    EXPECT_EQ(ScanRows(), Expected({&FirstRows, &SecondRows}));
+
+    // The engine's file details report the same footer encodings.
+    const auto files = Engine_->ListFiles(test::collection_id);
+    ASSERT_TRUE(files);
+    for (const auto& file : files->Files) {
+        const auto details = Engine_->GetFileDetails(test::collection_id, file.FileID);
+        ASSERT_TRUE(details) << details.error().message;
+        const auto& key = details->RowGroups.at(0).Columns.at(0);
+        EXPECT_FALSE(key.DictionaryPageOffset);
+        EXPECT_NE(std::ranges::find(key.Encodings, "delta_byte_array"), key.Encodings.end());
+        ASSERT_FALSE(key.EncodingStats.empty());
+        EXPECT_EQ(key.EncodingStats.back(), (TPageEncodingCount{"data_page", "delta_byte_array", 1}));
+    }
+}
+
+TEST_F(TWriteSettingsTest, DictionaryOverflowFallsBackToPlainPages)
+{
+    WriteSettings settings;
+    settings.dictionary_page_size_limit = 4096;
+    ASSERT_EQ(Create(settings).disposition, CommitDisposition::Committed);
+    // 3,000 distinct keys outgrow a 4 KiB dictionary; 3 values never do.
+    std::vector<TInputRow> rows;
+    for (int index = 0; index < 3000; ++index) {
+        rows.push_back({std::format("key-{:08}", index), index % 3, 0.5, index % 2 == 0, 10});
+    }
+    Append(FirstOperation, rows);
+    const auto footer = FooterEncodings(Root_, FirstOperation);
+    EXPECT_EQ(footer.at("key"), (TChunkEncodings{true, {"RLE_DICTIONARY", "PLAIN"}}));
+    EXPECT_EQ(footer.at("value"), (TChunkEncodings{true, {"RLE_DICTIONARY"}}));
+    EXPECT_EQ(footer.at("flag"), (TChunkEncodings{false, {"PLAIN"}}));
+    EXPECT_EQ(ScanRows(), Expected({&rows}));
+
+    const auto files = Engine_->ListFiles(test::collection_id);
+    ASSERT_TRUE(files);
+    const auto details = Engine_->GetFileDetails(test::collection_id, files->Files.at(0).FileID);
+    ASSERT_TRUE(details);
+    const auto& stats = details->RowGroups.at(0).Columns.at(0).EncodingStats;
+    const auto pages = [&](std::string_view type, std::string_view encoding) {
+        const auto found = std::ranges::find_if(stats, [&](const auto& item) {
+            return item.PageType == type && item.Encoding == encoding;
+        });
+        return found == stats.end() ? 0 : found->Count;
+    };
+    EXPECT_EQ(pages("dictionary_page", "plain"), 1);
+    EXPECT_GE(pages("data_page", "rle_dictionary"), 1);
+    EXPECT_GE(pages("data_page", "plain"), 1);
+}
+
+TEST_F(TWriteSettingsTest, PolicyChangesMixEncodingsAcrossFilesAndRestarts)
+{
+    ASSERT_EQ(Create({}).disposition, CommitDisposition::Committed);
+    const auto first = Append(FirstOperation, FirstRows);
+    WriteSettings disabled;
+    disabled.dictionary = DictionaryPolicy::Disabled;
+    disabled.columns = {{"value", std::nullopt, DictionaryPolicy::Enabled, std::nullopt}};
+    ASSERT_TRUE(Engine_->UpdateWriteSettings({test::collection_id, 0, disabled}));
+    Append(SecondOperation, SecondRows);
+    EXPECT_TRUE(FooterEncodings(Root_, FirstOperation).at("key").Dictionary);
+    const auto second = FooterEncodings(Root_, SecondOperation);
+    EXPECT_EQ(second.at("key"), (TChunkEncodings{false, {"PLAIN"}}));
+    EXPECT_EQ(second.at("value"), (TChunkEncodings{true, {"RLE_DICTIONARY"}}));
+    Reopen();
+    EXPECT_EQ(Engine_->GetCollection(test::collection_id)->write_settings, disabled);
+    EXPECT_EQ(ScanRows(), Expected({&FirstRows, &SecondRows}));
+    EXPECT_EQ(ScanRows(SnapshotSelector::Id(first.snapshot_id)), Expected({&FirstRows}));
+}
+
+TEST_F(TWriteSettingsTest, IncompatibleEncodingsAndConflictsAreRejected)
+{
+    const auto column =
+        [](std::string field, std::optional<DictionaryPolicy> dictionary, std::optional<ParquetEncoding> encoding) {
+            WriteSettings settings;
+            settings.columns = {{std::move(field), std::nullopt, dictionary, encoding}};
+            return settings;
+        };
+    WriteSettings enabled;
+    enabled.dictionary = DictionaryPolicy::Enabled;
+    WriteSettings small;
+    small.dictionary_page_size_limit = 4095;
+    WriteSettings large;
+    large.dictionary_page_size_limit = (8 << 20) + 1;
+    WriteSettings unknown;
+    unknown.dictionary = static_cast<DictionaryPolicy>(7);
+    for (const auto& settings :
+        std::vector<WriteSettings>{column("key", std::nullopt, ParquetEncoding::DeltaBinaryPacked),
+            column("key", std::nullopt, ParquetEncoding::ByteStreamSplit),
+            column("value", std::nullopt, ParquetEncoding::DeltaByteArray),
+            column("score", std::nullopt, ParquetEncoding::DeltaBinaryPacked),
+            column("flag", std::nullopt, ParquetEncoding::ByteStreamSplit),
+            column("at", std::nullopt, ParquetEncoding::Rle),
+            column("flag", DictionaryPolicy::Enabled, std::nullopt),
+            column("key", DictionaryPolicy::Enabled, ParquetEncoding::Plain),
+            column("key", DictionaryPolicy::Auto, ParquetEncoding::DeltaByteArray),
+            column("key", std::nullopt, static_cast<ParquetEncoding>(9)),
+            enabled,
+            small,
+            large,
+            unknown})
+    {
+        const auto created = Create(settings);
+        EXPECT_EQ(created.disposition, CommitDisposition::DefinitelyNotCommitted);
+        ASSERT_TRUE(created.error);
+        EXPECT_EQ(created.error->code, "INVALID_ARGUMENT") << created.error->message;
+    }
+    // Bool columns accept Auto, plain or rle with any collection policy once
+    // they state their own; an explicit encoding implies no dictionary.
+    enabled.columns = {{"flag", std::nullopt, DictionaryPolicy::Auto, ParquetEncoding::Rle}};
+    ASSERT_EQ(Create(enabled).disposition, CommitDisposition::Committed);
+    Append(FirstOperation, FirstRows);
+    EXPECT_EQ(FooterEncodings(Root_, FirstOperation).at("flag"), (TChunkEncodings{false, {"RLE"}}));
+    EXPECT_TRUE(FooterEncodings(Root_, FirstOperation).at("score").Dictionary);
+}
+
 TEST(WriteSettingsCodec, BlobRoundTripsAndRejectsUnknownOptions)
 {
     const auto settings = Settings(ParquetCompression{ParquetCodec::Zstd, 7},
@@ -453,6 +647,16 @@ TEST(WriteSettingsCodec, BlobRoundTripsAndRejectsUnknownOptions)
     newer[16] = 2;
     EXPECT_EQ(detail::DecodeWriteSettings(Schema, newer).error().code, "UNSUPPORTED_STORE_VERSION");
     EXPECT_EQ(detail::DecodeWriteSettings(Schema, encoded->substr(0, encoded->size() - 1)).error().code, "CORRUPTION");
+    // Dictionary and encoding options round-trip; an encoding is column-only.
+    WriteSettings full;
+    full.compression = ParquetCompression{ParquetCodec::Lz4Raw, 3};
+    full.dictionary = DictionaryPolicy::Disabled;
+    full.dictionary_page_size_limit = 65536;
+    full.columns = {{"key", std::nullopt, DictionaryPolicy::Enabled, std::nullopt},
+        {"value", std::nullopt, std::nullopt, ParquetEncoding::DeltaBinaryPacked}};
+    const auto fullBytes = detail::EncodeWriteSettings(Schema, full);
+    ASSERT_TRUE(fullBytes) << fullBytes.error().message;
+    EXPECT_EQ(detail::DecodeWriteSettings(Schema, *fullBytes).value_or(WriteSettings{}), full);
     // Field IDs bind the blob to its schema.
     EXPECT_FALSE(detail::DecodeWriteSettings(SchemaSpec{{{"key", FieldType::String, false}}}, *encoded));
 }

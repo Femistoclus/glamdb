@@ -21,7 +21,7 @@ from .predicates import Predicate
 from .request import AppendRequest, json_bytes, schema_fingerprint, uuid_string
 from .recovery import validate_append_recovery, validate_create_recovery
 from .transport import JSON_ACCEPT_ENCODING, Deadline, read_json, translate_transport
-from .write_settings import canonical_write_settings, write_settings_version
+from .write_settings import canonical_write_settings, request_write_settings, write_settings_version
 
 
 def _bearer_token(value: str) -> str:
@@ -433,8 +433,9 @@ class Client:
                           deadline: float | None = None) -> CreateOutcome:
         """Create or confirm one collection definition.
 
-        ``write_settings`` (Parquet value compression for later appends) is part
-        of the definition: send the same value when repeating a lost create.
+        ``write_settings`` (Parquet compression, dictionary policy and value
+        encodings of data files written by later appends) is part of the
+        definition: send the same value when repeating a lost create.
         """
         cid = uuid_string(collection_id, "collection_id")
         schema = self._schema(schema)
@@ -443,7 +444,7 @@ class Client:
         requested = None if write_settings is None else canonical_write_settings(write_settings, schema)
         body = {"collection_id": cid, "name": name, "schema": schema.to_dict()}
         if requested is not None:
-            body["write_settings"] = requested
+            body["write_settings"] = request_write_settings(requested)
         budget = Deadline(deadline, collection_id=cid)
         status, value = self._json("POST", "collections", budget, body=json_bytes(body), write=True)
         try:
@@ -553,8 +554,9 @@ class Client:
         """Compare-and-set the Parquet write settings used by later appends.
 
         ``expected_version`` is the collection's current ``write_settings_version``;
-        the returned collection has version ``expected_version + 1``. Existing
-        data files keep their codecs. A stale version raises ``HTTPError`` 409
+        the returned collection has version ``expected_version + 1``. The value
+        replaces all settings. Existing data files keep their codecs and
+        encodings. A stale version raises ``HTTPError`` 409
         ``WRITE_SETTINGS_CONFLICT``. After a lost response or
         ``OutcomeUnknownError`` (for example 503 ``RECOVERY_REQUIRED``), repeat
         the same call, after reconciling if requested: an applied identical
@@ -567,7 +569,7 @@ class Client:
         requested = canonical_write_settings(write_settings)
         budget = Deadline(deadline, collection_id=cid)
         status, value = self._json("POST", path, budget, write=True, body=json_bytes(
-            {"expected_version": str(version), "write_settings": requested}))
+            {"expected_version": str(version), "write_settings": request_write_settings(requested)}))
         if status != 200:
             self._http_error(status, value, budget)
         try:

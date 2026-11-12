@@ -688,6 +688,16 @@ ParquetCompression ParseCompression(const TJson& value)
     }
     return result;
 }
+std::optional<DictionaryPolicy> ParsePolicy(const TJson& value)
+{
+    if (!value.contains("dictionary") || value["dictionary"].is_null()) {
+        return std::nullopt;
+    }
+    Require(value["dictionary"].is_string(), "dictionary policy requires a name");
+    const auto policy = detail::ParsePolicyName(value["dictionary"].get<std::string>());
+    Require(policy.has_value(), "unknown dictionary policy");
+    return policy;
+}
 } // namespace
 
 WriteSettings ParseWriteSettings(const TJson& value)
@@ -698,19 +708,29 @@ WriteSettings ParseWriteSettings(const TJson& value)
         return result;
     }
     const auto& parquet = value["parquet"];
-    CheckKeys(parquet, {"compression", "columns"});
+    CheckKeys(parquet, {"compression", "dictionary", "dictionary_page_size_limit", "columns"});
     if (parquet.contains("compression") && !parquet["compression"].is_null()) {
         result.compression = ParseCompression(parquet["compression"]);
+    }
+    result.dictionary = ParsePolicy(parquet);
+    if (parquet.contains("dictionary_page_size_limit") && !parquet["dictionary_page_size_limit"].is_null()) {
+        result.dictionary_page_size_limit = ParseInt64(parquet["dictionary_page_size_limit"]);
     }
     if (parquet.contains("columns") && !parquet["columns"].is_null()) {
         const auto& columns = parquet["columns"];
         Require(columns.is_array() && columns.size() <= 64, "write settings columns require an array of 0..64 items");
         for (const auto& column : columns) {
-            CheckKeys(column, {"field", "compression"});
+            CheckKeys(column, {"field", "compression", "dictionary", "encoding"});
             Require(column.contains("field") && column["field"].is_string(), "column write settings require a field");
             ColumnWriteSettings item{column["field"].get<std::string>(), std::nullopt};
             if (column.contains("compression") && !column["compression"].is_null()) {
                 item.compression = ParseCompression(column["compression"]);
+            }
+            item.dictionary = ParsePolicy(column);
+            if (column.contains("encoding") && !column["encoding"].is_null()) {
+                Require(column["encoding"].is_string(), "Parquet encoding requires a name");
+                item.encoding = detail::ParseEncodingName(column["encoding"].get<std::string>());
+                Require(item.encoding.has_value(), "unknown Parquet encoding");
             }
             result.columns.push_back(std::move(item));
         }

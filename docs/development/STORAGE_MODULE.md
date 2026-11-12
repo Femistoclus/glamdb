@@ -48,7 +48,12 @@ from `VerifyReachable` or a previously confirmed publication.
    unavailable codecs and out-of-range levels before creating the file, and
    after closing it checks that every column chunk of the footer records the
    requested codec. Parquet does not record levels, so levels are verified only
-   by range.
+   by range. The spec also selects the file-level and per-column dictionary
+   use, the dictionary page limit and per-column value encodings; the footer
+   check requires a dictionary page exactly where a dictionary applies (never
+   for `bool`) and data page encodings of `rle_dictionary` with its `plain`
+   fallback there, or exactly the configured encoding (default `plain`)
+   elsewhere.
 3. Create an attempt and hold its `BindAttempt` scope across data writing,
    `StageAppend`, metadata writing, and publication checking. The attempt owns
    sticky errors, budgets, file state, durable receipts, and format verification.

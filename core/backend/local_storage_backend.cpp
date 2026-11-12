@@ -270,20 +270,56 @@ arrow::Compression::type ArrowCodec(ParquetCodec codec)
     Fail("INVALID_ARGUMENT", "write settings", "unknown Parquet codec");
 }
 
+parquet::Encoding::type ParquetValueEncoding(ParquetEncoding encoding)
+{
+    switch (encoding) {
+        case ParquetEncoding::Plain:
+            return parquet::Encoding::PLAIN;
+        case ParquetEncoding::DeltaBinaryPacked:
+            return parquet::Encoding::DELTA_BINARY_PACKED;
+        case ParquetEncoding::DeltaLengthByteArray:
+            return parquet::Encoding::DELTA_LENGTH_BYTE_ARRAY;
+        case ParquetEncoding::DeltaByteArray:
+            return parquet::Encoding::DELTA_BYTE_ARRAY;
+        case ParquetEncoding::ByteStreamSplit:
+            return parquet::Encoding::BYTE_STREAM_SPLIT;
+        case ParquetEncoding::Rle:
+            return parquet::Encoding::RLE;
+    }
+    Fail("INVALID_ARGUMENT", "write settings", "unknown Parquet encoding");
+}
+
 // Settings the coordinator read with the collection before binding; empty
-// settings leave the writer defaults untouched.
-NStorage::TParquetWriteSpec WriterSpec(const WriteSettings& settings)
+// settings leave the writer defaults untouched. An explicit column encoding
+// turns that column's dictionary off; bool columns never take a dictionary.
+NStorage::TParquetWriteSpec WriterSpec(const SchemaSpec& schema, const WriteSettings& settings)
 {
     NStorage::TParquetWriteSpec spec;
     if (settings.compression) {
         spec.Compression =
             NStorage::TParquetCompressionSpec{ArrowCodec(settings.compression->codec), settings.compression->level};
     }
+    if (settings.dictionary == DictionaryPolicy::Disabled) {
+        spec.Dictionary = false;
+    }
+    spec.DictionaryPageSizeLimit = settings.dictionary_page_size_limit;
     for (const auto& column : settings.columns) {
+        const auto field = std::ranges::find(schema.fields, column.field, &FieldSpec::name);
+        Require(field != schema.fields.end(), "INVALID_ARGUMENT", "write settings name an unknown column");
+        NStorage::TParquetColumnSpec item{column.field};
         if (column.compression) {
-            spec.Columns.emplace_back(column.field,
-                NStorage::TParquetCompressionSpec{ArrowCodec(column.compression->codec), column.compression->level});
+            item.Compression =
+                NStorage::TParquetCompressionSpec{ArrowCodec(column.compression->codec), column.compression->level};
         }
+        if (column.dictionary == DictionaryPolicy::Disabled || (column.encoding && !column.dictionary)) {
+            item.Dictionary = false;
+        } else if (column.dictionary && field->type != FieldType::Bool) {
+            item.Dictionary = true;
+        }
+        if (column.encoding) {
+            item.Encoding = ParquetValueEncoding(*column.encoding);
+        }
+        spec.Columns.push_back(std::move(item));
     }
     return spec;
 }
@@ -569,7 +605,7 @@ TLocalStorageBackend::TLocalStorageBackend(StoreInfo store,
 
 EngineCapabilities TLocalStorageBackend::GetCapabilities() const
 {
-    return {.backend = BackendKind::LocalStorage,
+    EngineCapabilities capabilities{.backend = BackendKind::LocalStorage,
         .append = true,
         .scan = true,
         .metadata = true,
@@ -577,6 +613,8 @@ EngineCapabilities TLocalStorageBackend::GetCapabilities() const
         .row_group_pruning = Options_.EnablePruning,
         .write_settings = true,
         .parquet_codecs = ParquetCodecCapabilities()};
+    AddEncodingCapabilities(capabilities);
+    return capabilities;
 }
 
 StorageBackend::Health TLocalStorageBackend::GetHealth() const
@@ -781,7 +819,7 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
                                           dataPath,
                                           {input.writer_batch},
                                           Options_.Writer,
-                                          WriterSpec(collection.write_settings)),
+                                          WriterSpec(collection.schema, collection.write_settings)),
             "IO_ERROR",
             "write data file");
         Require(data.DataFile != nullptr && data.DataFile->record_count == static_cast<int64_t>(input.GetRowCount()),

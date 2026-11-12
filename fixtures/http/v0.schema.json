@@ -1052,11 +1052,109 @@
                     ],
                     "additionalProperties": false
                   }
+                },
+                "encodings": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "encoding": {
+                        "enum": [
+                          "plain",
+                          "delta_binary_packed",
+                          "delta_length_byte_array",
+                          "delta_byte_array",
+                          "byte_stream_split",
+                          "rle"
+                        ]
+                      },
+                      "types": {
+                        "type": "array",
+                        "items": {
+                          "enum": [
+                            "string",
+                            "bool",
+                            "int64",
+                            "float64",
+                            "timestamp_us_utc"
+                          ]
+                        }
+                      }
+                    },
+                    "required": [
+                      "encoding",
+                      "types"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "dictionary": {
+                  "type": "object",
+                  "properties": {
+                    "policies": {
+                      "type": "array",
+                      "items": {
+                        "enum": [
+                          "auto",
+                          "enabled",
+                          "disabled"
+                        ]
+                      }
+                    },
+                    "default_policy": {
+                      "const": "auto"
+                    },
+                    "types": {
+                      "type": "array",
+                      "items": {
+                        "enum": [
+                          "string",
+                          "bool",
+                          "int64",
+                          "float64",
+                          "timestamp_us_utc"
+                        ]
+                      }
+                    },
+                    "fallback_encoding": {
+                      "const": "plain"
+                    },
+                    "page_size_limit": {
+                      "type": "object",
+                      "properties": {
+                        "min": {
+                          "type": "integer"
+                        },
+                        "max": {
+                          "type": "integer"
+                        },
+                        "default": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "min",
+                        "max",
+                        "default"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "policies",
+                    "default_policy",
+                    "types",
+                    "fallback_encoding",
+                    "page_size_limit"
+                  ],
+                  "additionalProperties": false
                 }
               },
               "required": [
                 "default_compression",
-                "codecs"
+                "codecs",
+                "encodings",
+                "dictionary"
               ],
               "additionalProperties": false
             },
@@ -1820,6 +1918,42 @@
         },
         "bound_encoding": {
           "const": "parquet-plain"
+        },
+        "encodings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "encoding_stats": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "page_type": {
+                "enum": [
+                  "data_page",
+                  "data_page_v2",
+                  "dictionary_page",
+                  "index_page",
+                  "unknown"
+                ]
+              },
+              "encoding": {
+                "type": "string"
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "page_type",
+              "encoding",
+              "count"
+            ],
+            "additionalProperties": false
+          }
         }
       },
       "required": [
@@ -2540,6 +2674,30 @@
                 "compression": {
                   "$ref": "#/$defs/parquetCompression"
                 },
+                "dictionary": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "auto",
+                        "enabled",
+                        "disabled"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "dictionary_page_size_limit": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/int64"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "columns": {
                   "anyOf": [
                     {
@@ -2553,6 +2711,37 @@
                           },
                           "compression": {
                             "$ref": "#/$defs/parquetCompression"
+                          },
+                          "dictionary": {
+                            "anyOf": [
+                              {
+                                "enum": [
+                                  "auto",
+                                  "enabled",
+                                  "disabled"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "encoding": {
+                            "anyOf": [
+                              {
+                                "enum": [
+                                  "plain",
+                                  "delta_binary_packed",
+                                  "delta_length_byte_array",
+                                  "delta_byte_array",
+                                  "byte_stream_split",
+                                  "rle"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [

@@ -17,6 +17,7 @@
 #include <parquet/types.h>
 
 #include <algorithm>
+#include <cctype>
 #include <limits>
 #include <map>
 #include <set>
@@ -133,6 +134,32 @@ void CheckRange(int64_t offset, int64_t length, int64_t end)
         "Parquet column range is outside the file data.");
 }
 
+// Lower-case Parquet names, as write settings spell value encodings.
+std::string EncodingName(parquet::Encoding::type encoding)
+{
+    auto name = parquet::EncodingToString(encoding);
+    std::ranges::transform(name, name.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return name;
+}
+
+std::string PageTypeName(parquet::PageType::type type)
+{
+    switch (type) {
+        case parquet::PageType::DATA_PAGE:
+            return "data_page";
+        case parquet::PageType::DATA_PAGE_V2:
+            return "data_page_v2";
+        case parquet::PageType::DICTIONARY_PAGE:
+            return "dictionary_page";
+        case parquet::PageType::INDEX_PAGE:
+            return "index_page";
+        default:
+            return "unknown";
+    }
+}
+
 TColumnChunkMetadata DescribeColumn(const parquet::ColumnChunkMetaData& chunk,
     const parquet::ColumnDescriptor& column,
     const TRowGroupMetadata& group,
@@ -152,6 +179,13 @@ TColumnChunkMetadata DescribeColumn(const parquet::ColumnChunkMetaData& chunk,
         "Parquet column metadata does not match the row group.");
     if (chunk.has_dictionary_page()) {
         result.DictionaryPageOffset = chunk.dictionary_page_offset();
+    }
+    for (const auto encoding : chunk.encodings()) {
+        result.Encodings.push_back(EncodingName(encoding));
+    }
+    for (const auto& stats : chunk.encoding_stats()) {
+        Require(stats.count >= 0, "CORRUPTION", "Parquet page encoding count is negative.");
+        result.EncodingStats.push_back({PageTypeName(stats.page_type), EncodingName(stats.encoding), stats.count});
     }
     CheckRange(result.DataPageOffset, 0, dataEnd);
     CheckRange(result.DictionaryPageOffset.value_or(result.DataPageOffset), result.CompressedBytes, dataEnd);

@@ -150,8 +150,10 @@ TEST(OutcomeJson, CollectionWriteSettingsAreCanonicalParquetObjects)
         SchemaSpec{{{"n", FieldType::Int64, true}, {"s", FieldType::String, true}}},
         1,
         std::nullopt};
-    info.write_settings = {ParquetCompression{ParquetCodec::Zstd, 9},
-        {{"s", ParquetCompression{ParquetCodec::Lz4Raw, std::nullopt}}}};
+    info.write_settings.compression = ParquetCompression{ParquetCodec::Zstd, 9};
+    info.write_settings.dictionary_page_size_limit = 65536;
+    info.write_settings.columns = {
+        {"s", ParquetCompression{ParquetCodec::Lz4Raw, std::nullopt}, std::nullopt, ParquetEncoding::DeltaByteArray}};
     info.write_settings_version = 3;
     const auto encoded = json_adapter::CollectionJson(info);
     ASSERT_TRUE(encoded);
@@ -162,6 +164,10 @@ TEST(OutcomeJson, CollectionWriteSettingsAreCanonicalParquetObjects)
     EXPECT_EQ(JsonAt(*encoded, "$.write_settings.parquet.columns[0].compression.codec").text, "lz4_raw");
     EXPECT_EQ(JsonAt(*encoded, "$.write_settings.parquet.columns[0].compression.level").type, "null");
     EXPECT_EQ(JsonAt(*encoded, "$.write_settings_version").text, "3");
+    EXPECT_EQ(JsonAt(*encoded, "$.write_settings.parquet.dictionary").type, "null");
+    EXPECT_EQ(JsonAt(*encoded, "$.write_settings.parquet.dictionary_page_size_limit").text, "65536");
+    EXPECT_EQ(JsonAt(*encoded, "$.write_settings.parquet.columns[0].encoding").text, "delta_byte_array");
+    EXPECT_EQ(JsonAt(*encoded, "$.write_settings.parquet.columns[0].dictionary").type, "null");
 }
 
 TEST(OutcomeJson, ExhaustedCapacityIs507WhileAdmissionStays429)

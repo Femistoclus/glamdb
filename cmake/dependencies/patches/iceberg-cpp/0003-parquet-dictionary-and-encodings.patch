@@ -1,0 +1,184 @@
+Parquet writer: dictionary policy, dictionary page size and column encodings.
+
+GlamDB lets a collection choose Parquet dictionary use and explicit value
+encodings per column. The pinned ParquetWriter exposes neither. This patch
+reads, in Open() before the output file is created:
+
+  write.parquet.dict-enabled                     file default, true|false
+  write.parquet.dict-enabled.column.<field-name> column override
+  write.parquet.dict-size-bytes                  dictionary page limit (Iceberg's name)
+  write.parquet.encoding.column.<field-name>     plain, delta_binary_packed,
+                                                 delta_length_byte_array,
+                                                 delta_byte_array,
+                                                 byte_stream_split, rle
+
+Encodings are checked against the column's physical type. Arrow ignores an
+explicit encoding while the column's dictionary is enabled and always falls
+back to PLAIN on dictionary overflow, so an explicit encoding requires the
+column's dictionary to be disabled; enabling a dictionary for a boolean column
+(which Arrow never dictionary-encodes) is rejected instead of ignored.
+
+Applies after 0002-parquet-column-compression.patch. Pinned revision:
+apache/iceberg-cpp 64dc66f159bd62c9817a96d74cbce767268934d0 (v0.4.0); upstream
+main 36e0d1a has no such properties.
+
+diff --git a/src/iceberg/parquet/parquet_writer.cc b/src/iceberg/parquet/parquet_writer.cc
+index 8c4ee00..2ee4119 100644
+--- a/src/iceberg/parquet/parquet_writer.cc
++++ b/src/iceberg/parquet/parquet_writer.cc
+@@ -302,6 +302,146 @@ Status ApplyColumnCompression(const WriterProperties& properties, const Schema&
+   return {};
+ }
+ 
++// Dictionary and value-encoding properties. write.parquet.dict-size-bytes is
++// Iceberg's standard name; the others follow its column-scoped naming. The
++// pinned Arrow writer ignores an explicit encoding while a column's dictionary
++// is enabled and always falls back to PLAIN on dictionary overflow, so an
++// explicit encoding requires that column's dictionary to be disabled.
++constexpr std::string_view kDictionaryEnabled = "write.parquet.dict-enabled";
++constexpr std::string_view kColumnDictionaryPrefix = "write.parquet.dict-enabled.column.";
++constexpr std::string_view kDictionarySize = "write.parquet.dict-size-bytes";
++constexpr std::string_view kColumnEncodingPrefix = "write.parquet.encoding.column.";
++
++Result<bool> ParseFlag(std::string_view key, std::string_view value) {
++  if (value == "true") {
++    return true;
++  }
++  if (value == "false") {
++    return false;
++  }
++  return InvalidArgument("Parquet property {} must be true or false", key);
++}
++
++enum class PhysicalKind { kBoolean, kInt32, kInt64, kFloat, kDouble, kByteArray, kOther };
++
++PhysicalKind Physical(TypeId type) {
++  switch (type) {
++    case TypeId::kBoolean:
++      return PhysicalKind::kBoolean;
++    case TypeId::kInt:
++    case TypeId::kDate:
++      return PhysicalKind::kInt32;
++    case TypeId::kLong:
++    case TypeId::kTime:
++    case TypeId::kTimestamp:
++    case TypeId::kTimestampTz:
++    case TypeId::kTimestampNs:
++    case TypeId::kTimestampTzNs:
++      return PhysicalKind::kInt64;
++    case TypeId::kFloat:
++      return PhysicalKind::kFloat;
++    case TypeId::kDouble:
++      return PhysicalKind::kDouble;
++    case TypeId::kString:
++    case TypeId::kBinary:
++      return PhysicalKind::kByteArray;
++    default:
++      return PhysicalKind::kOther;
++  }
++}
++
++Result<::parquet::Encoding::type> ParseEncoding(std::string_view column,
++                                                std::string_view name, TypeId type) {
++  const auto kind = Physical(type);
++  const bool integer = kind == PhysicalKind::kInt32 || kind == PhysicalKind::kInt64;
++  const bool floating = kind == PhysicalKind::kFloat || kind == PhysicalKind::kDouble;
++  if (name == "plain" && kind != PhysicalKind::kOther) {
++    return ::parquet::Encoding::PLAIN;
++  }
++  if (name == "delta_binary_packed" && integer) {
++    return ::parquet::Encoding::DELTA_BINARY_PACKED;
++  }
++  if (name == "delta_length_byte_array" && kind == PhysicalKind::kByteArray) {
++    return ::parquet::Encoding::DELTA_LENGTH_BYTE_ARRAY;
++  }
++  if (name == "delta_byte_array" && kind == PhysicalKind::kByteArray) {
++    return ::parquet::Encoding::DELTA_BYTE_ARRAY;
++  }
++  if (name == "byte_stream_split" && (integer || floating)) {
++    return ::parquet::Encoding::BYTE_STREAM_SPLIT;
++  }
++  if (name == "rle" && kind == PhysicalKind::kBoolean) {
++    return ::parquet::Encoding::RLE;
++  }
++  return InvalidArgument("Parquet encoding {} is not supported for column {}", name,
++                         column);
++}
++
++Result<const SchemaField*> TopLevelPrimitive(const Schema& schema, std::string_view column,
++                                             std::string_view property) {
++  const auto& fields = schema.fields();
++  const auto field = std::ranges::find_if(
++      fields, [&](const SchemaField& candidate) { return candidate.name() == column; });
++  ICEBERG_PRECHECK(field != fields.end() && field->type()->is_primitive(),
++                   "Parquet {} names unknown column {}", property, column);
++  return &*field;
++}
++
++Status ApplyDictionaryAndEncodings(const WriterProperties& properties,
++                                   const Schema& schema,
++                                   ::parquet::WriterProperties::Builder& builder) {
++  const auto& configs = properties.configs();
++  bool file_dictionary = true;
++  if (const auto it = configs.find(std::string(kDictionaryEnabled)); it != configs.end()) {
++    ICEBERG_ASSIGN_OR_RAISE(file_dictionary, ParseFlag(it->first, it->second));
++    if (file_dictionary) {
++      builder.enable_dictionary();
++    } else {
++      builder.disable_dictionary();
++    }
++  }
++  if (const auto it = configs.find(std::string(kDictionarySize)); it != configs.end()) {
++    ICEBERG_ASSIGN_OR_RAISE(auto limit, StringUtils::ParseNumber<int64_t>(it->second));
++    ICEBERG_PRECHECK(limit > 0, "Parquet dictionary page size limit must be positive");
++    builder.dictionary_pagesize_limit(limit);
++  }
++  std::unordered_map<std::string, bool> dictionaries;
++  std::unordered_map<std::string, std::string> encodings;
++  for (const auto& [key, value] : configs) {
++    if (key.starts_with(kColumnDictionaryPrefix)) {
++      ICEBERG_ASSIGN_OR_RAISE(auto enabled, ParseFlag(key, value));
++      dictionaries.emplace(key.substr(kColumnDictionaryPrefix.size()), enabled);
++    } else if (key.starts_with(kColumnEncodingPrefix)) {
++      encodings.emplace(key.substr(kColumnEncodingPrefix.size()), value);
++    }
++  }
++  for (const auto& [column, enabled] : dictionaries) {
++    ICEBERG_ASSIGN_OR_RAISE(auto field,
++                            TopLevelPrimitive(schema, column, "column dictionary"));
++    ICEBERG_PRECHECK(!enabled || field->type()->type_id() != TypeId::kBoolean,
++                     "Parquet dictionary encoding is not supported for boolean column {}",
++                     column);
++    if (enabled) {
++      builder.enable_dictionary(column);
++    } else {
++      builder.disable_dictionary(column);
++    }
++  }
++  for (const auto& [column, name] : encodings) {
++    ICEBERG_ASSIGN_OR_RAISE(auto field, TopLevelPrimitive(schema, column, "column encoding"));
++    const auto type = field->type()->type_id();
++    ICEBERG_ASSIGN_OR_RAISE(auto encoding, ParseEncoding(column, name, type));
++    const auto dictionary = dictionaries.find(column);
++    const bool enabled =
++        dictionary == dictionaries.end() ? file_dictionary : dictionary->second;
++    ICEBERG_PRECHECK(type == TypeId::kBoolean || !enabled,
++                     "Parquet encoding of column {} requires its dictionary to be disabled",
++                     column);
++    builder.encoding(column, encoding);
++  }
++  return {};
++}
++
+ }  // namespace
+ 
+ class ParquetWriter::Impl {
+@@ -327,6 +467,8 @@ class ParquetWriter::Impl {
+     }
+     ICEBERG_RETURN_UNEXPECTED(
+         ApplyColumnCompression(options.properties, *schema_, properties_builder));
++    ICEBERG_RETURN_UNEXPECTED(
++        ApplyDictionaryAndEncodings(options.properties, *schema_, properties_builder));
+     auto writer_properties = properties_builder.memory_pool(pool_)->build();
+     auto arrow_writer_properties = ::parquet::default_arrow_writer_properties();
+ 

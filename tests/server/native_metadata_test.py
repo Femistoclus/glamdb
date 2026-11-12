@@ -84,9 +84,13 @@ class NativeMetadataHTTP(NativeHTTP):
             {'name': 'key', 'type': 'string', 'nullable': False},
             {'name': 'n', 'type': 'int64', 'nullable': True},
             {'name': 'ts', 'type': 'timestamp_us_utc', 'nullable': True}]}}
+        unset = {'dictionary': None, 'encoding': None}
         canonical = {'parquet': {'compression': {'codec': 'gzip', 'level': 6},
-                                 'columns': [{'field': 'key', 'compression': {'codec': 'uncompressed', 'level': None}},
-                                             {'field': 'ts', 'compression': {'codec': 'lz4_raw', 'level': None}}]}}
+                                 'dictionary': None, 'dictionary_page_size_limit': None,
+                                 'columns': [{'field': 'key', 'compression': {'codec': 'uncompressed', 'level': None},
+                                              **unset},
+                                             {'field': 'ts', 'compression': {'codec': 'lz4_raw', 'level': None},
+                                              **unset}]}}
         created = self.api('/collections', body)
         self.assertEqual(created['write_settings'], canonical)
         info = self.api(path)
@@ -141,7 +145,8 @@ class NativeMetadataHTTP(NativeHTTP):
         self.stop()
         self.start()
         self.assertEqual(self.api(path)['write_settings'],
-                         {'parquet': {'compression': {'codec': 'snappy', 'level': None}, 'columns': []}})
+                         {'parquet': {'compression': {'codec': 'snappy', 'level': None}, 'dictionary': None,
+                                      'dictionary_page_size_limit': None, 'columns': []}})
         scanned = self.api(path + '/scan', {})['rows']
         self.assertEqual(sorted(json.dumps(row, sort_keys=True) for row in scanned),
                          sorted(json.dumps(row, sort_keys=True) for row in rows + rows[:1]))
@@ -152,6 +157,56 @@ class NativeMetadataHTTP(NativeHTTP):
                              input=json.dumps({'expected_version': '2', 'write_settings': {'parquet': None}}),
                              env=self.env, check=True, capture_output=True, text=True)
         self.assertEqual(json.loads(cli.stdout)['write_settings_version'], '3')
+
+    def test_parquet_encodings_and_dictionary_fallback_are_independently_visible(self):
+        import pyarrow.parquet as pq
+        capabilities = self.api('/databases/' + self.store_id + '/capabilities')['parquet']
+        encodings = {item['encoding']: item['types'] for item in capabilities['encodings']}
+        self.assertEqual(encodings['delta_byte_array'], ['string'])
+        self.assertEqual(encodings['byte_stream_split'], ['int64', 'float64', 'timestamp_us_utc'])
+        self.assertEqual(capabilities['dictionary']['page_size_limit'], {'min': 4096, 'max': 8388608, 'default': 1048576})
+        self.assertEqual(capabilities['dictionary']['fallback_encoding'], 'plain')
+
+        cid = str(uuid.uuid4())
+        path = '/collections/' + cid
+        settings = {'parquet': {'dictionary_page_size_limit': '4096', 'columns': [
+            {'field': 'n', 'encoding': 'delta_binary_packed'},
+            {'field': 'ts', 'dictionary': 'disabled', 'encoding': 'byte_stream_split'}]}}
+        self.api('/collections', {'collection_id': cid, 'name': 'encodings', 'write_settings': settings,
+                                  'schema': {'fields': [{'name': 'key', 'type': 'string', 'nullable': False},
+                                                        {'name': 'n', 'type': 'int64', 'nullable': True},
+                                                        {'name': 'ts', 'type': 'timestamp_us_utc', 'nullable': True}]}})
+        for invalid in ({'field': 'key', 'encoding': 'delta_binary_packed'},
+                        {'field': 'n', 'dictionary': 'enabled', 'encoding': 'plain'},
+                        {'field': 'n', 'encoding': 'zigzag'},
+                        {'field': 'n', 'dictionary': 'sometimes'}):
+            with self.subTest(invalid=invalid):
+                error = self.api(path + '/write-settings',
+                                 {'expected_version': '1', 'write_settings': {'parquet': {'columns': [invalid]}}},
+                                 status=400)
+                self.assertEqual(error['error']['code'], 'INVALID_ARGUMENT')
+        # Distinct keys outgrow the 4 KiB dictionary; values stay exact.
+        rows = [{'key': 'key-%06d' % i, 'n': str(i * 7) if i % 5 else None,
+                 'ts': '2026-01-01T00:00:%02d.000001Z' % (i % 60)} for i in range(2000)]
+        operation = str(uuid.uuid4())
+        self.api(path + '/append', {'operation_id': operation, 'rows': rows})
+        files = [p for p in Path(self.root).rglob('*.parquet') if operation in p.name]
+        footer = pq.ParquetFile(files[0]).metadata
+        chunks = {footer.row_group(0).column(i).path_in_schema: footer.row_group(0).column(i)
+                  for i in range(footer.num_columns)}
+        self.assertTrue(chunks['key'].has_dictionary_page)
+        self.assertTrue({'RLE_DICTIONARY', 'PLAIN'} <= set(chunks['key'].encodings))
+        self.assertFalse(chunks['n'].has_dictionary_page)
+        self.assertIn('DELTA_BINARY_PACKED', chunks['n'].encodings)
+        self.assertFalse(chunks['ts'].has_dictionary_page)
+        self.assertIn('BYTE_STREAM_SPLIT', chunks['ts'].encodings)
+        details = self.api(path + '/files/' + self.api(path + '/files')['items'][0]['file_id'])
+        key = details['row_groups'][0]['field_metrics'][0]
+        pages = {(item['page_type'], item['encoding']) for item in key['encoding_stats']}
+        self.assertTrue({('dictionary_page', 'plain'), ('data_page', 'rle_dictionary'), ('data_page', 'plain')} <= pages)
+        self.assertIn('delta_binary_packed', details['row_groups'][0]['field_metrics'][1]['encodings'])
+        scanned = self.api(path + '/scan', {'limit': 2000})['rows']
+        self.assertEqual(sorted(scanned, key=lambda row: row['key']), rows)
 
     def test_zero_column_explain_matches_the_wire_schema(self):
         from jsonschema import Draft202012Validator
