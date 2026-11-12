@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -42,6 +43,15 @@ class CmakeConfigurationTest(unittest.TestCase):
         result = self.run_command(*command)
         self.assertEqual(result.returncode, 0, result.stdout)
 
+    @staticmethod
+    def build_flag_options(cxx_only=False):
+        names = ("CXX",) if cxx_only else ("C", "CXX")
+        options = [f"-DCMAKE_{name}_FLAGS={os.environ[f'GLAMDB_TEST_{name}_FLAGS']}"
+                   for name in names if f"GLAMDB_TEST_{name}_FLAGS" in os.environ]
+        if "GLAMDB_TEST_EXE_LINKER_FLAGS" in os.environ:
+            options.append(f"-DCMAKE_EXE_LINKER_FLAGS={os.environ['GLAMDB_TEST_EXE_LINKER_FLAGS']}")
+        return options
+
     def configure(self, *options):
         toolchain = os.environ.get("GLAMDB_TEST_TOOLCHAIN")
         return self.run_command(
@@ -49,6 +59,7 @@ class CmakeConfigurationTest(unittest.TestCase):
             "-G", self.generator, f"-DCMAKE_C_COMPILER={shutil.which(self.c_compiler) or self.c_compiler}",
             f"-DCMAKE_CXX_COMPILER={shutil.which(self.cxx_compiler) or self.cxx_compiler}", "-DCMAKE_BUILD_TYPE=Debug", "-DGLAMDB_IO_ONLY=ON",
             *([f"-DCMAKE_TOOLCHAIN_FILE={toolchain}"] if toolchain else []),
+            *self.build_flag_options(),
             *options,
         )
 
@@ -59,6 +70,35 @@ class CmakeConfigurationTest(unittest.TestCase):
         self.assertEqual(len(list(self.build.rglob("libglamdb_io.a"))), 1)
         self.assertFalse(list(self.build.rglob("libglamdb_core.a")))
         self.assertFalse(list(self.build.rglob("glamdb")))
+
+    def test_nested_configure_preserves_active_language_flags(self):
+        c_flags = " ".join(filter(None, (
+            os.environ.get("GLAMDB_TEST_C_FLAGS"), "-Wno-unused-parameter",
+        )))
+        cxx_flags = " ".join(filter(None, (
+            os.environ.get("GLAMDB_TEST_CXX_FLAGS"), "-Wno-unused-variable",
+        )))
+        with mock.patch.dict(os.environ, {
+            "GLAMDB_TEST_C_FLAGS": c_flags,
+            "GLAMDB_TEST_CXX_FLAGS": cxx_flags,
+        }):
+            result = self.configure("-DBUILD_TESTING=OFF")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        cache = (self.build / "CMakeCache.txt").read_text()
+        self.assertIn(f"CMAKE_C_FLAGS:STRING={c_flags}", cache)
+        self.assertIn(f"CMAKE_CXX_FLAGS:STRING={cxx_flags}", cache)
+
+    def test_nested_configure_preserves_active_executable_linker_flags(self):
+        linker_flags = " ".join(filter(None, (
+            os.environ.get("GLAMDB_TEST_EXE_LINKER_FLAGS"), "-Wl,--as-needed",
+        )))
+        with mock.patch.dict(os.environ, {
+            "GLAMDB_TEST_EXE_LINKER_FLAGS": linker_flags,
+        }):
+            result = self.configure("-DBUILD_TESTING=OFF")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        cache = (self.build / "CMakeCache.txt").read_text()
+        self.assertIn(f"CMAKE_EXE_LINKER_FLAGS:STRING={linker_flags}", cache)
 
     def test_missing_logging_dependency_explains_initialization(self):
         (self.source / "third_party/quill").unlink()
@@ -108,6 +148,7 @@ target_link_libraries(consumer PRIVATE logging::logging)
             f"-DCMAKE_CXX_COMPILER={shutil.which(self.cxx_compiler) or self.cxx_compiler}",
             "-DCMAKE_CXX_SCAN_FOR_MODULES=OFF",
             *([f"-DCMAKE_TOOLCHAIN_FILE={toolchain}"] if toolchain else []),
+            *self.build_flag_options(cxx_only=True),
         )
         self.assert_success(self.cmake, "--build", str(consumer_build))
         self.assert_success(str(consumer_build / "consumer"))

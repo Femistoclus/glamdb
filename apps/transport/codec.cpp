@@ -1,12 +1,15 @@
 #include "apps/transport/codec.h"
+#include "apps/transport/json_reader.h"
 #include "core/api/canonical.h"
 #include "core/scan/predicate.h"
 
 #include <array>
+#include <bit>
 #include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <unordered_set>
 
 namespace glamdb::NTransport {
 namespace {
@@ -117,10 +120,223 @@ private:
     }
 };
 
-int64_t ParseTimestamp(const TJson& value)
+// TJsonParser with the same events, depth/event accounting and duplicate-key
+// checks, except that a top-level object's "rows" value is recorded as
+// TJsonRows nodes. Keys are interned once; duplicate keys of row objects (the
+// elements of a "rows" array) are detected with per-key row stamps.
+class TAppendJsonParser final : public nlohmann::json_sax<TJson>
 {
-    Require(value.is_string(), "timestamp must be an RFC3339 string");
-    const auto& text = value.get_ref<const std::string&>();
+public:
+    TJson Result;
+    explicit TAppendJsonParser(TJsonRows& rows)
+        : Rows_(rows)
+    { }
+    bool null() override
+    {
+        return Scalar(nullptr, TJsonRows::EKind::Null, 0);
+    }
+    bool boolean(bool value) override
+    {
+        return Scalar(value, TJsonRows::EKind::Bool, value ? 1 : 0);
+    }
+    bool number_integer(number_integer_t value) override
+    {
+        return Scalar(value, TJsonRows::EKind::Integer, std::bit_cast<uint64_t>(value));
+    }
+    bool number_unsigned(number_unsigned_t value) override
+    {
+        return Scalar(value, TJsonRows::EKind::Unsigned, value);
+    }
+    bool number_float(number_float_t value, const string_t&) override
+    {
+        return Scalar(value, TJsonRows::EKind::Float, std::bit_cast<uint64_t>(value));
+    }
+    bool string(string_t& value) override
+    {
+        if (!Capturing()) {
+            return Add(std::move(value));
+        }
+        Visit();
+        Emit({.Payload = Rows_.Strings.size(), .Size = static_cast<uint32_t>(value.size())}, TJsonRows::EKind::String);
+        Rows_.Strings += value;
+        return true;
+    }
+    bool binary(binary_t&) override
+    {
+        return false;
+    }
+    bool start_object(size_t) override
+    {
+        return Start(TJson::object(), TJsonRows::EKind::Object);
+    }
+    bool start_array(size_t) override
+    {
+        return Start(TJson::array(), TJsonRows::EKind::Array);
+    }
+    bool key(string_t& value) override
+    {
+        Visit();
+        if (!Capture_.empty()) {
+            CaptureKey(value);
+            return true;
+        }
+        auto& frame = Stack_.back();
+        Require(!frame.Value.contains(value), "duplicate JSON key");
+        frame.Value[value] = nullptr;
+        CaptureNext_ = Stack_.size() == 1 && value == "rows";
+        frame.Key = std::move(value);
+        return true;
+    }
+    bool end_object() override
+    {
+        return End();
+    }
+    bool end_array() override
+    {
+        return End();
+    }
+    bool parse_error(size_t, const std::string&, const TJson::exception&) override
+    {
+        return false;
+    }
+
+private:
+    static constexpr uint32_t NoRow = 0;
+    struct TFrame
+    {
+        TJson Value;
+        std::string Key;
+    };
+    struct TCaptureFrame
+    {
+        size_t Node = 0;
+        uint32_t Row = NoRow;
+        uint32_t Members = 0;
+        std::unordered_set<uint32_t> Seen{};
+    };
+    TJsonRows& Rows_;
+    std::vector<TFrame> Stack_;
+    std::vector<TCaptureFrame> Capture_;
+    std::vector<uint32_t> RowStamps_;
+    std::vector<uint32_t> PreviousRowKeys_;
+    size_t Nodes_ = 0;
+    uint32_t RowSerial_ = 0;
+    uint32_t PendingKey_ = 0;
+    bool CaptureNext_ = false;
+
+    bool Capturing() const
+    {
+        return CaptureNext_ || !Capture_.empty();
+    }
+    void Visit()
+    {
+        Require(Stack_.size() + Capture_.size() <= MaxJsonDepth && ++Nodes_ <= MaxJsonEvents,
+            "JSON complexity limit exceeded");
+    }
+    void Emit(TJsonRows::TNode node, TJsonRows::EKind kind)
+    {
+        node.Kind = kind;
+        if (Capture_.empty()) {
+            CaptureNext_ = false;
+            Rows_.Present = true;
+        } else {
+            auto& parent = Rows_.Nodes[Capture_.back().Node];
+            ++parent.Size;
+            if (parent.Kind == TJsonRows::EKind::Object) {
+                node.Key = PendingKey_;
+            }
+        }
+        Rows_.Nodes.push_back(node);
+    }
+    template <class T>
+    bool Scalar(T value, TJsonRows::EKind kind, uint64_t payload)
+    {
+        if (!Capturing()) {
+            return Add(TJson(value));
+        }
+        Visit();
+        Emit({.Payload = payload}, kind);
+        return true;
+    }
+    bool Start(TJson value, TJsonRows::EKind kind)
+    {
+        Visit();
+        if (!Capturing()) {
+            Stack_.push_back({std::move(value), {}});
+            return true;
+        }
+        // Elements of a top-level "rows" array are the row objects.
+        const bool row = kind == TJsonRows::EKind::Object && Capture_.size() == 1 &&
+            Rows_.Nodes[Capture_.front().Node].Kind == TJsonRows::EKind::Array;
+        const auto index = Rows_.Nodes.size();
+        Emit({}, kind);
+        Capture_.push_back({.Node = index, .Row = row ? ++RowSerial_ : NoRow});
+        return true;
+    }
+    void CaptureKey(string_t& value)
+    {
+        auto& frame = Capture_.back();
+        uint32_t id = 0;
+        // Rows usually repeat the previous row's key order; check that before hashing.
+        const auto position = frame.Members++;
+        if (frame.Row != NoRow && position < PreviousRowKeys_.size() &&
+            *Rows_.KeyNames[PreviousRowKeys_[position]] == value)
+        {
+            id = PreviousRowKeys_[position];
+        } else {
+            const auto it = Rows_.Keys.find(value);
+            if (it != Rows_.Keys.end()) {
+                id = it->second;
+            } else {
+                id = static_cast<uint32_t>(Rows_.KeyNames.size());
+                const auto inserted = Rows_.Keys.emplace(std::move(value), id).first;
+                Rows_.KeyNames.push_back(&inserted->first);
+                RowStamps_.push_back(NoRow);
+            }
+            if (frame.Row != NoRow) {
+                if (position >= PreviousRowKeys_.size()) {
+                    PreviousRowKeys_.resize(position + 1);
+                }
+                PreviousRowKeys_[position] = id;
+            }
+        }
+        if (frame.Row != NoRow) {
+            Require(RowStamps_[id] != frame.Row, "duplicate JSON key");
+            RowStamps_[id] = frame.Row;
+        } else {
+            Require(frame.Seen.insert(id).second, "duplicate JSON key");
+        }
+        PendingKey_ = id;
+    }
+    bool Add(TJson value)
+    {
+        Visit();
+        if (Stack_.empty()) {
+            Result = std::move(value);
+        } else if (Stack_.back().Value.is_array()) {
+            Stack_.back().Value.push_back(std::move(value));
+        } else {
+            Stack_.back().Value.at(Stack_.back().Key) = std::move(value);
+        }
+        return true;
+    }
+    bool End()
+    {
+        if (!Capture_.empty()) {
+            const auto node = Capture_.back().Node;
+            Capture_.pop_back();
+            Visit();
+            Rows_.Nodes[node].Payload = Rows_.Nodes.size();
+            return true;
+        }
+        auto value = std::move(Stack_.back().Value);
+        Stack_.pop_back();
+        return Add(std::move(value));
+    }
+};
+
+int64_t ParseTimestampText(std::string_view text)
+{
     Require(text.size() >= 20 && text.size() <= 32 && text[4] == '-' && text[7] == '-' && text[10] == 'T' &&
             text[13] == ':' && text[16] == ':',
         "invalid UTC microsecond timestamp");
@@ -165,6 +381,20 @@ int64_t ParseTimestamp(const TJson& value)
     const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(instant.time_since_epoch()).count();
     Require(micros >= -62135596800000000LL && micros <= 253402300799999999LL, "timestamp outside years 0001..9999");
     return micros;
+}
+
+int64_t ParseTimestamp(const TJson& value)
+{
+    Require(value.is_string(), "timestamp must be an RFC3339 string");
+    return ParseTimestampText(value.get_ref<const std::string&>());
+}
+
+int64_t ParseInt64Text(std::string_view text)
+{
+    int64_t result = 0;
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), result);
+    Require(!text.empty() && parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size(), "invalid int64");
+    return result;
 }
 
 std::shared_ptr<arrow::DataType> ArrowType(FieldType type)
@@ -375,15 +605,15 @@ Predicate ParsePredicateTree(const SchemaSpec& schema, const TJson& root)
 
 void CheckArrow(const arrow::Status& status)
 {
-    Require(status.ok(), status.ToString(), "RESOURCE_EXHAUSTED");
+    if (!status.ok()) [[unlikely]] {
+        Fail(status.ToString(), "RESOURCE_EXHAUSTED");
+    }
 }
 } // namespace
 
-void Require(bool condition, std::string_view message, std::string_view code)
+void Fail(std::string_view message, std::string_view code)
 {
-    if (!condition) {
-        throw TFailure({std::string(code), detail::BoundedDiagnostic(message), ErrorPolicy(code).Hint});
-    }
+    throw TFailure({std::string(code), detail::BoundedDiagnostic(message), ErrorPolicy(code).Hint});
 }
 
 TJson ParseJson(std::string_view bytes)
@@ -391,6 +621,15 @@ TJson ParseJson(std::string_view bytes)
     Require(bytes.size() <= MaxRequestBytes, "request is too large", "PAYLOAD_TOO_LARGE");
     TJsonParser parser;
     Require(TJson::sax_parse(bytes, &parser), "invalid JSON request");
+    return std::move(parser.Result);
+}
+
+TJson ParseJson(std::string_view bytes, TJsonRows& rows)
+{
+    Require(bytes.size() <= MaxRequestBytes, "request is too large", "PAYLOAD_TOO_LARGE");
+    rows = {};
+    TAppendJsonParser parser(rows);
+    Require(TJsonReader(bytes).Parse(parser), "invalid JSON request");
     return std::move(parser.Result);
 }
 
@@ -406,11 +645,7 @@ void CheckKeys(const TJson& value, std::initializer_list<std::string_view> keys)
 int64_t ParseInt64(const TJson& value)
 {
     Require(value.is_string(), "int64 and snapshot IDs require decimal strings");
-    const auto text = value.get<std::string>();
-    int64_t result = 0;
-    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), result);
-    Require(!text.empty() && parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size(), "invalid int64");
-    return result;
+    return ParseInt64Text(value.get_ref<const std::string&>());
 }
 
 SchemaSpec ParseSchema(const TJson& value)
@@ -492,6 +727,104 @@ std::shared_ptr<arrow::RecordBatch> ParseRows(const SchemaSpec& schema, const TJ
         arrays.push_back(std::move(array));
     }
     return arrow::RecordBatch::Make(arrow::schema(fields), static_cast<int64_t>(rows.size()), arrays);
+}
+
+std::shared_ptr<arrow::RecordBatch> ParseRows(const SchemaSpec& schema, const TJsonRows& rows)
+{
+    using EKind = TJsonRows::EKind;
+    const auto& nodes = rows.Nodes;
+    const bool isArray = rows.Present && nodes.front().Kind == EKind::Array;
+    const size_t count = isArray ? nodes.front().Size : 0;
+    Require(isArray && count != 0 && count <= 10000, "append requires 1..10000 rows");
+    std::vector<std::unique_ptr<arrow::ArrayBuilder>> builders;
+    arrow::FieldVector fields;
+    constexpr auto NoKey = std::numeric_limits<uint32_t>::max();
+    std::vector<uint32_t> fieldKeys;
+    for (const auto& field : schema.fields) {
+        const auto type = ArrowType(field.type);
+        fields.push_back(arrow::field(field.name, type, field.nullable));
+        std::unique_ptr<arrow::ArrayBuilder> builder;
+        CheckArrow(arrow::MakeBuilder(arrow::default_memory_pool(), type, &builder));
+        CheckArrow(builder->Reserve(static_cast<int64_t>(count)));
+        builders.push_back(std::move(builder));
+        const auto key = rows.Keys.find(field.name);
+        fieldKeys.push_back(key == rows.Keys.end() ? NoKey : key->second);
+    }
+    const auto next = [&](size_t index) {
+        const auto kind = nodes[index].Kind;
+        return kind == EKind::Array || kind == EKind::Object ? static_cast<size_t>(nodes[index].Payload) : index + 1;
+    };
+    // Member node of each key in the current row; a stale stamp means the key is absent.
+    std::vector<size_t> members(rows.KeyNames.size());
+    std::vector<uint32_t> stamps(rows.KeyNames.size(), 0);
+    size_t index = 1;
+    for (uint32_t row = 1; row <= count; ++row) {
+        const auto& item = nodes[index];
+        Require(item.Kind == EKind::Object, "row must be an object");
+        const auto end = static_cast<size_t>(item.Payload);
+        for (auto member = index + 1; member < end; member = next(member)) {
+            members[nodes[member].Key] = member;
+            stamps[nodes[member].Key] = row;
+        }
+        size_t matched = 0;
+        for (size_t i = 0; i < schema.fields.size(); ++i) {
+            const auto& field = schema.fields[i];
+            const auto key = fieldKeys[i];
+            const bool present = key != NoKey && stamps[key] == row;
+            matched += present;
+            const auto* value = present ? &nodes[members[key]] : nullptr;
+            if (value == nullptr || value->Kind == EKind::Null) {
+                Require(field.nullable, "missing or null required field");
+                CheckArrow(builders[i]->AppendNull());
+                continue;
+            }
+            const auto text = [&] {
+                return std::string_view(rows.Strings).substr(static_cast<size_t>(value->Payload), value->Size);
+            };
+            auto& builder = *builders[i];
+            switch (field.type) {
+                case FieldType::String:
+                    Require(value->Kind == EKind::String, "expected string");
+                    CheckArrow(static_cast<arrow::StringBuilder&>(builder).Append(text()));
+                    break;
+                case FieldType::Bool:
+                    Require(value->Kind == EKind::Bool, "expected boolean");
+                    CheckArrow(static_cast<arrow::BooleanBuilder&>(builder).Append(value->Payload != 0));
+                    break;
+                case FieldType::Int64:
+                    Require(value->Kind == EKind::String, "int64 and snapshot IDs require decimal strings");
+                    CheckArrow(static_cast<arrow::Int64Builder&>(builder).Append(ParseInt64Text(text())));
+                    break;
+                case FieldType::Float64: {
+                    // Same conversions as TJson::get<double>().
+                    double number = std::numeric_limits<double>::quiet_NaN();
+                    if (value->Kind == EKind::Float) {
+                        number = std::bit_cast<double>(value->Payload);
+                    } else if (value->Kind == EKind::Integer) {
+                        number = static_cast<double>(std::bit_cast<int64_t>(value->Payload));
+                    } else if (value->Kind == EKind::Unsigned) {
+                        number = static_cast<double>(value->Payload);
+                    }
+                    Require(std::isfinite(number), "expected finite number");
+                    CheckArrow(static_cast<arrow::DoubleBuilder&>(builder).Append(number));
+                    break;
+                }
+                case FieldType::TimestampUsUtc:
+                    Require(value->Kind == EKind::String, "timestamp must be an RFC3339 string");
+                    CheckArrow(static_cast<arrow::TimestampBuilder&>(builder).Append(ParseTimestampText(text())));
+                    break;
+            }
+        }
+        Require(matched == item.Size, "unknown row field");
+        index = end;
+    }
+    arrow::ArrayVector arrays;
+    for (auto& builder : builders) {
+        std::shared_ptr<arrow::Array> array;
+        CheckArrow(builder->Finish(&array));
+        arrays.push_back(std::move(array));
+    }
+    return arrow::RecordBatch::Make(arrow::schema(fields), static_cast<int64_t>(count), arrays);
 }
 
 ScanRequest ParseScan(std::string collectionID, const SchemaSpec& schema, const TJson& body)

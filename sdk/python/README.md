@@ -202,6 +202,9 @@ Exiting the context or closing the client closes every reader and HTTP
 response, including on a consumer exception. Already returned Arrow batches
 remain usable after those owners close. Iteration failures remain sticky: another
 `next()` raises the original failure, and integrity never becomes complete.
+Cleanup still attempts every owner and cursor cancellation when a close fails;
+an existing consumer or protocol exception takes precedence over cleanup errors,
+including when leaving the client context or rejecting a later page's view.
 
 `scan_json`, `scan_batches` and `scan_pages` use `/scan/open` before fetching a
 page, so retries and cleanup use the same known cursor even if the first page
@@ -228,6 +231,8 @@ match. With missing integrity metadata it becomes `complete`;
 close, truncation, trailing data, decode failure or digest mismatch never
 claims completion. The SDK requires a fixed `X-GlamDB-Snapshot-Id` header
 (`initial` for the initial view) and identity HTTP content encoding.
+Before returning the first batch, its snapshot header must match an explicitly
+requested snapshot and, when supplied, the snapshot selected by `/scan/open`.
 
 TLS certificate verification is enabled by default. `verify` accepts a bool or
 an `ssl.SSLContext`; disable it only when deliberately configuring a local test.

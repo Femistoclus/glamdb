@@ -38,10 +38,14 @@ reads/retries remain available and Reset demo starts a new simulation.
 
 The owner supplied two PNGs, copied byte-for-byte:
 
-- `ui/assets/brand/wordmark.png`: full logo, login and sidebar;
+- `ui/assets/brand/wordmark.png`: original full logo with its background;
   SHA256 `a2222b67971f388fe2948c18ec9ca9f098a3d25c83a4b3652c10fbfd8eca038e`.
 - `ui/assets/brand/mark.png`: transparent database/sparkles mark, favicon/avatar;
   SHA256 `4656feea9c748658ab75b4b36244ccb6822c1869e10cf029e872d13724a7e010`.
+
+`ui/assets/brand/wordmark-transparent.png` is the background-removed version
+used by the README, login screen and sidebar. It retains PNG alpha transparency;
+the supplied originals above remain unchanged.
 
 Configure paths through `brand.wordmark`/`brand.mark` and sizes through
 `sizing.logo_width`, `login_logo_width`, `logo_mark_size` in theme.json. Assets

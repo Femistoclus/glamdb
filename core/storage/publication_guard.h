@@ -29,6 +29,14 @@ struct IPublicationGuard
     virtual iceberg::Status BeforePointerChange(const TPointerChange& change) = 0;
 };
 
+// The root an append wrote: the in-memory staged metadata and the exact
+// bytes serialized from it.
+struct TStagedRoot
+{
+    std::shared_ptr<const iceberg::TableMetadata> Metadata;
+    std::shared_ptr<const std::string> Bytes;
+};
+
 struct TPublicationContext
 {
     std::shared_ptr<NIO::TStoreDirs> Directories;
@@ -41,6 +49,17 @@ struct TPublicationContext
     std::unordered_map<std::string, std::string> ExpectedSummary{};
     TStorageUsage StoreUsage{};
     TStorageLimits Limits{};
+    // Pre-production warehouse measurement of this append. With it the guard
+    // adds the attempt's durable files instead of walking the warehouse
+    // again; without it (creation, or no admitted measurement) it walks.
+    std::optional<TWarehouseBaseline> Warehouse{};
+    // With a staged root the guard requires the durable root to equal its
+    // bytes and validates the staged metadata instead of parsing the file.
+    // That is the same metadata only because parsing those bytes yields it
+    // again; VerifyStagedRoot additionally parses the file and requires
+    // structural equality and byte-identical reserialization.
+    std::optional<TStagedRoot> StagedRoot{};
+    bool VerifyStagedRoot = false;
 };
 
 class TStoragePublicationGuard final : public IPublicationGuard

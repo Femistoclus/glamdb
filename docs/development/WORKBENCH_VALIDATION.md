@@ -1,4 +1,134 @@
-# Workbench validation record — 2026-11-11
+# Workbench validation record
+
+## Arrow downloads and SDK stream ownership — 2026-11-12
+
+Issue #57, based on official `main` at `d7c6be1`. Executed on Linux x86-64,
+Python 3.13.18, HTTPX 0.28.1, PyArrow 25.0.0, Node 24.13.0 and pinned
+Playwright 1.56.1/Chromium 1194. The existing native Debug service supplies real
+exports; no native runtime, dependencies or persistent format changed.
+
+- **PASS — 903 repository Python tests**, explicit mock profile. One later-page
+  fault case is explicitly skipped because the legacy mock has no cursor pages.
+- **PASS — 38 native SDK/setup/lifecycle tests**, including 23 SDK TCP/TLS,
+  export-integrity and owner-lifetime cases. These require real native storage;
+  native setup never falls back to mock.
+- **PASS — 160 Node tests**, including 24 browser Arrow envelope cases.
+- **PASS — ten native Chromium scenarios and 44 mock/static Chromium scenarios.**
+  Empty downloads retain schema; an append after preview does not change its
+  download; corrupted checksum/EOS/snapshot responses start no download, and a
+  subsequent healthy export succeeds. PyArrow independently decodes saved files.
+- **PASS — five native Arrow IPC encoder cases**, after rebuilding
+  `glamdb_transport_test`: scalars/snapshot, empty schema, zero-column rows,
+  schema/batch/EOS capacity accounting and invalid schema/unresolved view.
+- **PASS — UI formatting, changed-file Python compilation, local documentation
+  targets and whitespace checks.**
+
+Focused regressions failed before the corresponding fixes. A fresh independent
+review and Node/PyArrow probes found malformed schema-table pointers and metadata
+versions, cleanup replacing consumer/later-page protocol errors, and the valid
+null initial selector. Those cases now pass, including real native simultaneous
+later-page snapshot/transport-close failure. No substantive review finding remains.
+The bounded browser Message-envelope checker was retained over buffering SDK
+responses or adding another Arrow runtime; logical schema/value decoding remains
+with native/PyArrow encoding and integration tests, as described in
+[client conformance](CLIENT_CONFORMANCE.md).
+
+The full mock run exposed collection-budget interference from the additional
+scenarios; they now own a separate disposable mock process. Two existing pending
+recovery scenarios timed out during concurrent runs and passed in the final
+sequential full run, without changing those tests or their implementation.
+Chromium required the already available local shared-library bundle through
+`LD_LIBRARY_PATH`; no system package or host trust-store changes were needed.
+Python retains the existing Starlette/httpx deprecation warning.
+
+Commands are in [CLIENT_CONFORMANCE.md](CLIENT_CONFORMANCE.md). Native pytest
+additionally selects `tests/integration/test_backend_harness.py` and
+`tests/integration/test_browser_lifecycle.py`. Encoder checks use
+`cmake --build build/local --target glamdb_transport_test --parallel 2` and
+`ctest --test-dir build/local -R '^glamdb\.transport\.ArrowIpc\.' --output-on-failure`.
+Raw logs, exact commands and the review record remain in ignored
+`artifacts/issue57/`, with separate native/mock browser reports. Sanitizers,
+restart/restore and physical power-loss qualification were **NOT RUN** for this
+client/transport change.
+
+## Native browser process lifecycle — 2026-11-12
+
+Follow-up to the #53 conformance implementation merged in PR #144, based on
+official `main` at `09fa09e`. The native browser wrapper could remain in
+`wait()` after forwarding SIGINT/SIGTERM; killing that wrapper could leave its
+native child alive. A failed child launch also left a stale state marker.
+Focused regressions failed on that base before the fix.
+
+Signals now enter bounded TERM/KILL cleanup and reap the child before removing
+its marker and disposable storage. Repeated signals cannot interrupt cleanup;
+ordinary child exit codes are preserved. The independent review confirmed these
+invariants with a TERM-resistant child and repeated mixed signals. Its remaining
+test-readiness race was fixed by publishing the PID marker atomically. The
+existing shared-backend design was retained; no alternative backend or process
+manager was added.
+
+Executed with Linux x86-64, Python 3.13.18, Node 24.13.0 and Chromium 1194:
+
+- **PASS — 883 repository Python tests**, explicit mock profile, including five
+  lifecycle cases covering SIGINT/SIGTERM, successful/failed child exits and
+  failed startup. The focused five-case run also passed after the PID fix.
+- **PASS — 23 native SDK/setup/lifecycle tests**: the existing eight shared
+  TCP/TLS cases, ten backend setup cases and five lifecycle cases.
+- **PASS — 136 Node tests, 40 mock/static Chromium scenarios, six native
+  Chromium scenarios and five independently selected static scenarios.**
+- **PASS — UI formatting, actionlint, offline zizmor and whitespace checks.**
+
+Commands: `GLAMDB_TEST_BACKEND=mock .venv/bin/python -m pytest -q` and the native
+SDK/browser commands in [CLIENT_CONFORMANCE.md](CLIENT_CONFORMANCE.md), adding
+`tests/integration/test_browser_lifecycle.py` to the native pytest invocation.
+Raw output is in ignored `artifacts/issue-53/followup-*.log`; browser reports
+retain separate backend directories. Python emits the existing Starlette/httpx
+deprecation warning. No native runtime, dependencies or persistent formats
+changed, and no durability qualification is claimed.
+
+## Shared client conformance — 2026-11-12
+
+Executed on Linux x86-64 (Ubuntu 24.04), Python 3.13.18, Node 24.13.0 and pinned
+Playwright 1.56.1/Chromium 1194. The native Debug server was rebuilt from upstream
+base `135651d`; no native runtime source or persistent format changed.
+
+- **PASS — 878 repository Python tests** with the explicit mock profile.
+- **PASS — 18 native SDK/setup tests**: eight shared TCP/TLS scenarios and ten
+  selection, identity, readiness-deadline and cleanup regressions. Native writes
+  require independent SQLite → Iceberg JSON → Avro → Parquet inspection.
+- **PASS — 136 Node tests** and eight native CI-runner tests. SDK failures stop
+  browser acceptance, and its separate JUnit filename matches the CI upload glob.
+- **PASS — six native Chromium scenarios**, including the shared contract and
+  the five existing native recovery/database cases. The shared Arrow download
+  is parsed and compared with the expected row and exact int64 value. Native
+  physical inspection occurs after closing the test database.
+- **PASS — five standalone static Chromium scenarios**, with an invalid inherited
+  native executable, proving the static profile does not start an API backend.
+- **PASS — 40 mock/static Chromium scenarios** with Python 3.13 selected through
+  PATH, including isolated editor mock processes and the shared contract.
+- **PASS — UI formatting, shell syntax, local documentation links and whitespace.**
+
+A fresh independent review identified three harness regressions: partial startup
+output could outlive the readiness timeout, a bare Python executable name was
+incorrectly resolved as a relative file, and extracted mock tests lost proxy
+isolation. Regressions were observed failing, then passing after a single bounded
+readiness deadline, consistent interpreter selection and shared loopback fixture
+were added. The mock scenarios also pass with a deliberately broken inherited
+HTTP proxy. Review additionally caught the JUnit upload mismatch, which is fixed.
+The shared-scenario design was retained to prevent separate backend suites from
+drifting; mock-only fault injection and unsupported collection pagination stay
+separate. A pre-existing stale mock logo expectation was updated to the supplied
+transparent wordmark so the complete mock Python suite passes.
+
+Commands are in [CLIENT_CONFORMANCE.md](CLIENT_CONFORMANCE.md). Native browser
+verification additionally used `GLAMDB_E2E_PYTHON=python3` with the development
+virtualenv on PATH, exercising the interpreter regression in a real browser.
+Raw evidence is in ignored `artifacts/issue53-*.log` and `artifacts/issue53-*.xml`;
+backend browser reports are separate. Chromium libraries were prepared locally;
+no host trust store or system packages changed. Python reports the existing
+Starlette/httpx deprecation warning. Sanitizer, restart/restore and G4 physical
+power-loss qualification campaigns were **NOT RUN** for this test-harness change.
+The earlier records below retain their original dates and scope.
 
 ## Native workbench and request recovery — 2026-11-11
 

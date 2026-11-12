@@ -81,7 +81,7 @@ glamdb/
 | `core/storage/` | `glamdb_storage`: FileIO adapter, profiles, Parquet writer, Iceberg staging, publication, recovery and capacity. |
 | `docker/` | Linux development and dependency toolchains; builds mount product sources read-only. |
 | `apps/cli/`, `apps/client/` | Standalone HTTP/HTTPS CLI and network transport, without core dependencies. |
-| `apps/admin/` | Optional offline store creation and inspection. |
+| `apps/admin/` | Optional offline store creation, data and inspection commands through the facade, plus HTTP mode. |
 | `apps/server/`, `apps/transport/` | Native Asio server and shared JSON/HTTP codecs; no independent writer. |
 | `cmake/` | Compiler options, sanitizers, quality targets, and dependency recipes. |
 | `tests/` | Component/storage pipeline tests, catalog/coordinator tests, process recovery, VFS faults, installed consumers, tooling, and independent client/verification suites. |

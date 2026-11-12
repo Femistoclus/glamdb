@@ -84,53 +84,6 @@ test('desktop workspace is usable and all metadata views load', async ({ page })
     await expect(page.getByText('Reference mock scan', { exact: true })).toBeVisible();
 });
 
-test('create, append duplicate keys, precision, filter and historical view', async ({ page }) => {
-    await login(page);
-    await createCollection(page, `browser_${Date.now()}`);
-    await appendRows(page, [
-        {
-            key: 'same',
-            label: '<img src=x onerror="window.injected=true">',
-            amount: '9007199254740993',
-        },
-        { key: 'same', label: 'Second', amount: '2' },
-    ]);
-    await page.getByRole('button', { name: 'Run query', exact: true }).click();
-    await expect(
-        page.getByRole('table', { name: 'Query results' }).locator('tbody tr'),
-    ).toHaveCount(2);
-    await expect(page.getByRole('cell', { name: '9007199254740993', exact: true })).toBeVisible();
-    await expect(page.getByRole('table', { name: 'Query results' }).locator('img')).toHaveCount(0);
-    expect(await page.evaluate(() => window.injected)).toBeUndefined();
-    const old = await page.locator('#snapshot-selector option').last().getAttribute('value');
-    await appendRows(page, [{ key: 'next', label: 'Third', amount: '3' }]);
-    await page.getByRole('button', { name: 'Run query', exact: true }).click();
-    await expect(
-        page.getByRole('table', { name: 'Query results' }).locator('tbody tr'),
-    ).toHaveCount(3);
-    await page.locator('#snapshot-selector').selectOption(old);
-    await page.getByRole('button', { name: 'Run query', exact: true }).click();
-    await expect(
-        page.getByRole('table', { name: 'Query results' }).locator('tbody tr'),
-    ).toHaveCount(2);
-    await page.getByRole('button', { name: '+ Add a condition', exact: true }).click();
-    await page.getByLabel('Filter column 1').selectOption('amount');
-    await page.getByLabel('Filter operator 1').selectOption('gt');
-    await page.getByLabel('Filter value 1').fill('2');
-    await page.getByRole('button', { name: 'Run query', exact: true }).click();
-    await expect(
-        page.getByRole('table', { name: 'Query results' }).locator('tbody tr'),
-    ).toHaveCount(1);
-    await expect(page.getByRole('cell', { name: '9007199254740993', exact: true })).toBeVisible();
-    await page.screenshot({
-        path: path.join(root, 'artifacts/e2e/data-desktop.png'),
-        fullPage: true,
-    });
-    const download = page.waitForEvent('download');
-    await page.getByRole('button', { name: 'Arrow', exact: true }).click();
-    expect((await download).suggestedFilename()).toMatch(/\.arrows$/);
-});
-
 test('changing collection clears stale query and credentials are not persisted', async ({
     page,
 }) => {

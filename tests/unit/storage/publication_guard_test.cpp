@@ -2,6 +2,7 @@
 #include "core/storage/append_stager.h"
 #include "core/storage/data_file_writer.h"
 #include "core/storage/durable_local_file_io.h"
+#include "core/storage/format_verifier.h"
 #include "core/storage/publication_guard.h"
 #include "tests/support/fault_fs.h"
 #include "tests/support/temp_dir.h"
@@ -492,6 +493,100 @@ TEST_F(TPublicationGuardTest, WritesTwoAppendsAndReopensEveryRetainedFile)
     CheckRows(DataLocations_[0], 1000);
     CheckRows(DataLocations_[1], 10);
     ExpectFreshProcess(Root_, (*second)->MetadataLocation);
+}
+
+// An append's staged root replaces the parse of its durable file only when
+// the file holds exactly its bytes; the verification mode also requires the
+// parse of those bytes to equal the staged metadata.
+TEST_F(TPublicationGuardTest, StagedRootRequiresTheDurableBytesAndRoundTrips)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto empty = create.GetCandidate();
+    enum class EStaged : std::uint8_t { Exact, Verified, ChangedByte, Truncated, DifferentMetadata };
+    std::shared_ptr<const iceberg::TableMetadata> stagedMetadata;
+    const auto stage = [&](EStaged mode) {
+        return [&, mode](TPublicationContext* context, TPointerChange* change) {
+            auto bytes = IO_->ReadFile(change->NewLocation, std::nullopt);
+            ASSERT_TRUE(bytes) << bytes.error().message;
+            auto parsed = ParseTableMetadata(*bytes);
+            ASSERT_TRUE(parsed) << parsed.error().message;
+            if (mode == EStaged::DifferentMetadata) {
+                (*parsed)->last_updated_ms += std::chrono::milliseconds(1);
+            }
+            if (mode == EStaged::ChangedByte) {
+                bytes->back() = bytes->back() == ' ' ? '\n' : ' ';
+            }
+            if (mode == EStaged::Truncated) {
+                bytes->pop_back();
+            }
+            stagedMetadata = std::shared_ptr<const iceberg::TableMetadata>(std::move(*parsed));
+            context->StagedRoot = TStagedRoot{stagedMetadata, std::make_shared<const std::string>(std::move(*bytes))};
+            context->VerifyStagedRoot = mode != EStaged::Exact;
+        };
+    };
+    const auto parses = TableMetadataParses();
+    auto first = Append(1, empty, 3, stage(EStaged::Exact));
+    ASSERT_TRUE(first) << first.error().message;
+    EXPECT_EQ((*first)->Metadata, stagedMetadata) << "the candidate is the staged metadata";
+    EXPECT_EQ(TableMetadataParses(), parses + 1) << "only the test parsed the root";
+    auto second = Append(2, *first, 3, stage(EStaged::Verified));
+    ASSERT_TRUE(second) << second.error().message;
+    EXPECT_EQ((*second)->Metadata, stagedMetadata);
+    int index = 3;
+    for (const auto mode : {EStaged::ChangedByte, EStaged::Truncated, EStaged::DifferentMetadata}) {
+        const auto rejected = Append(index++, *second, 3, stage(mode));
+        ASSERT_FALSE(rejected);
+        if (mode == EStaged::Truncated) {
+            EXPECT_EQ(rejected.error().kind, iceberg::ErrorKind::kValidationFailed) << rejected.error().message;
+        } else {
+            EXPECT_EQ(rejected.error().kind, iceberg::ErrorKind::kInvalid) << rejected.error().message;
+            EXPECT_TRUE(rejected.error().message.starts_with("CORRUPTION: ")) << rejected.error().message;
+        }
+    }
+}
+
+TEST_F(TPublicationGuardTest, StagedRootVerificationComparesSnapshotSummaryAndManifestList)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto empty = create.GetCandidate();
+    // The pinned Iceberg snapshot equality ignores the summary and the
+    // manifest list, so the durable bytes stay exact and only the staged
+    // metadata differs in one of those fields.
+    enum class EField : std::uint8_t { None, Summary, ManifestList };
+    const auto stage = [&](EField field, bool verify) {
+        return [&, field, verify](TPublicationContext* context, TPointerChange* change) {
+            auto bytes = IO_->ReadFile(change->NewLocation, std::nullopt);
+            ASSERT_TRUE(bytes) << bytes.error().message;
+            auto parsed = ParseTableMetadata(*bytes);
+            ASSERT_TRUE(parsed) << parsed.error().message;
+            ASSERT_FALSE((*parsed)->snapshots.empty());
+            if (field != EField::None) {
+                auto snapshot = std::make_shared<iceberg::Snapshot>(*(*parsed)->snapshots.back());
+                if (field == EField::Summary) {
+                    snapshot->summary["extra"] = "different";
+                } else {
+                    snapshot->manifest_list += ".different";
+                }
+                (*parsed)->snapshots.back() = std::move(snapshot);
+            }
+            context->StagedRoot = TStagedRoot{std::shared_ptr<const iceberg::TableMetadata>(std::move(*parsed)),
+                std::make_shared<const std::string>(std::move(*bytes))};
+            context->VerifyStagedRoot = verify;
+        };
+    };
+    const auto base = Append(1, empty, 3, stage(EField::None, true));
+    ASSERT_TRUE(base) << base.error().message;
+    int index = 2;
+    for (const auto field : {EField::Summary, EField::ManifestList}) {
+        const auto rejected = Append(index++, *base, 3, stage(field, true));
+        ASSERT_FALSE(rejected);
+        EXPECT_EQ(rejected.error().kind, iceberg::ErrorKind::kInvalid) << rejected.error().message;
+        EXPECT_TRUE(rejected.error().message.starts_with("CORRUPTION: ")) << rejected.error().message;
+    }
 }
 
 TEST_F(TPublicationGuardTest, RecoveryHonorsExactAndReducedLimitsWithoutChangingTheStore)

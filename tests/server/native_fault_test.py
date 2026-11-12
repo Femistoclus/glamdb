@@ -15,6 +15,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from pathlib import Path
+from urllib.parse import quote
 from tls_proxy import tls_proxy
 
 DRIVER = sys.argv.pop(1)
@@ -611,20 +612,53 @@ class NativeFaultHTTP(unittest.TestCase):
         for after in (False, True):
             with self.subTest(after_unlink=after):
                 cid = str(uuid.uuid4())
-                body = {'collection_id': cid, 'name': cid,
+                body = {'collection_id': cid, 'name': 'exact ' + cid + ' +&=/%\t',
                         'schema': {'fields': [{'name': 'key', 'type': 'string'}]}}
                 self.arm('core', 1, after)
                 unknown = self.api(self.base + '/collections', body, status=503)
                 self.assertEqual(unknown['outcome'], 'commit_unknown')
                 self.assertEqual(unknown['recovery']['collection_id'], cid)
-                self.assertEqual(unknown['recovery']['exact_name'], cid)
+                self.assertEqual(unknown['recovery']['exact_name'], body['name'])
                 self.assertTrue(unknown['recovery_required'])
+                resolve = self.base + '/collections:resolve?name=' + quote(body['name'], safe='')
+                self.assertEqual(self.api(resolve, status=503)['error']['code'], 'RECOVERY_REQUIRED')
                 self.arm('core', 0, False)
                 self.api(self.base + '/reconcile', {})
+                if after:
+                    self.assertEqual(self.api(resolve)['collection_id'], cid)
+                else:
+                    self.assertEqual(self.api(resolve, status=404)['error']['code'], 'COLLECTION_NOT_FOUND')
                 created = self.api(self.base + '/collections', body)
                 self.assertEqual(created['collection_id'], cid)
                 self.assertEqual(self.api(self.base + '/collections', body), created)
         self.assertEqual(len(self.api(self.base + '/collections')['items']), 2)
+
+    def test_pending_create_cannot_resolve_as_absent(self):
+        existing = self.collection()
+        cid = str(uuid.uuid4())
+        body = {'collection_id': cid, 'name': 'pending +&=/%',
+                'schema': {'fields': [{'name': 'key', 'type': 'string'}]}}
+        resolve = self.base + '/collections:resolve?name=' + quote(body['name'], safe='')
+        collection = self.base + '/collections/' + cid
+        self.arm('pause', 1, False)
+        with ThreadPoolExecutor(max_workers=1) as workers:
+            creating = workers.submit(self.api, self.base + '/collections', body)
+            self.wait_for_publication()
+            try:
+                for target in (resolve, collection, collection + '/schema'):
+                    with self.subTest(target=target):
+                        error = self.api(target, status=503)['error']
+                        self.assertEqual(error['code'], 'OPERATION_IN_PROGRESS')
+                        self.assertEqual(error['retry_hint'], 'SameIdAfterReconcile')
+                self.assertEqual(self.api(existing)['collection_id'], existing.rsplit('/', 1)[1])
+            finally:
+                self.arm('release', 0, False)
+            created = creating.result(timeout=10)
+        self.assertEqual(self.api(resolve), created)
+        self.assertEqual(self.api(collection), created)
+        self.assertEqual(self.api(collection + '/schema'), created['schema'])
+        self.assertEqual(self.api(self.base + '/collections:resolve?name=absent', status=404)['error']['code'],
+                         'COLLECTION_NOT_FOUND')
 
     def test_logging_correlates_engine_commit_uncertainty_with_http_completion(self):
         path = self.collection()
