@@ -24,8 +24,9 @@ need a different representation and validation contract.
 `CheckManifest` records a descriptor only after the existing strict manifest
 entry/counter/path checks and Parquet length, row-count, schema and field-ID
 verification succeed. Recovery builds one index while verifying every retained
-transition. Publication copies the verified base index and checks only the new
-closure; that candidate remains tentative until the outer SQLite commit. When
+transition. Publication derives the candidate from the verified base index
+without copying it and checks only the new closure; that candidate remains
+tentative until the outer SQLite commit. When
 manifests are merged, the verifier compares EXISTING entries with the removed
 parent manifests, including metrics and original snapshot/sequence numbers,
 without adding those files or charging their footers again.
@@ -57,11 +58,20 @@ while `GetStatistics`, `ListFiles` and `ExplainScan` may reuse immutable entries
 
 ## Cost and reproduction
 
-The current development caps bound snapshots and files. A live generation takes
-O(files + snapshots) index space; publication copies that space, and cursors may
-retain previous generations. The backend's shared metadata reservation stays
-with the parsed root and its index, including generations pinned by cursors.
-Recovery adds descriptors to one mutable builder before publishing it. The
+The current development caps bound snapshots and files. A live generation
+references O(files + snapshots) index space. Generations are structurally
+shared: files live in a 32-way persistent vector of immutable descriptors, so a
+new generation shares every existing descriptor with its base and allocates
+only its new descriptors, one partial leaf of at most 32 handles and, once per
+32 files, one root-to-leaf path. Only the sorted boundary table, O(retained
+snapshots), is copied per publication. Retained manifest paths (a persistent
+B+-tree) and expired snapshot IDs (one immutable vector) are shared the same
+way. Nothing reachable from a published generation is modified, so cursors
+pinning previous generations keep exactly their own files while later ones
+share nodes with them. The backend's shared metadata reservation stays with the
+parsed root and its index, including generations pinned by cursors; each
+generation charges its whole logical content from incrementally kept totals, in
+O(1). Recovery adds descriptors to one index before publishing it. The
 [shared resource envelopes](SHARED_RESOURCES.md) remain conservative admission
 estimates, not a bound on total process memory.
 
@@ -77,10 +87,12 @@ build/release/tests/glamdb_scan_index_bench 256 1000
 Each run creates a disposable native store with duplicate/NULL rows, compares
 indexed and uncached planning, counts metadata opens, then closes and reopens
 the engine. Reopen is cold with respect to engine state; the OS page cache is
-not flushed. `index_capacity_bytes` counts `TScanMembership`'s own object, vector
-and path-string capacities, excluding allocator rounding, shared-pointer control
-blocks, shared `iceberg::DataFile` descriptors (emitted separately as
-`datafile_descriptor_bytes`), parsed roots/manifests, FileIO instrumentation and process RSS.
+not flushed. `index_capacity_bytes` counts `TScanMembership`'s own object, one
+leaf slot and one descriptor per file, the boundary vector and path-string
+capacities, excluding allocator rounding, shared-pointer control blocks, interior
+trie nodes, shared `iceberg::DataFile` descriptors (emitted separately as
+`datafile_descriptor_bytes`), parsed roots/manifests, FileIO instrumentation and
+process RSS. The table below predates the shared layout and counted vector capacities.
 
 These measurements use the initial implementation on official base `1f48601`.
 

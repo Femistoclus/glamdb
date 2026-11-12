@@ -65,11 +65,16 @@ size_t MetadataOpens(const NGlamDB::NTesting::TFaultFS& fs)
 
 size_t IndexCapacity(const NGlamDB::NStorage::TScanMembership& index)
 {
-    size_t bytes = sizeof(index) + index.Files.capacity() * sizeof(NGlamDB::NStorage::TScanDataFile) +
+    // One leaf slot and one shared descriptor per file.
+    size_t bytes = sizeof(index) +
+        index.Files.size() *
+            (sizeof(std::shared_ptr<const NGlamDB::NStorage::TScanDataFile>) +
+                sizeof(NGlamDB::NStorage::TScanDataFile)) +
         index.Snapshots.capacity() * sizeof(NGlamDB::NStorage::TSnapshotBoundary);
     // Logical store URIs exceed string's inline storage. This counts TScanMembership's
-    // own vector and path-string capacities, excluding allocator rounding, shared-pointer
-    // control blocks, and shared iceberg::DataFile descriptors (reported separately below).
+    // own file slots, descriptors, boundary vector and path-string capacities, excluding
+    // allocator rounding, shared-pointer control blocks, interior trie nodes, and shared
+    // iceberg::DataFile descriptors (reported separately below).
     for (const auto& file : index.Files) {
         bytes += file.Path.capacity() + 1;
     }
