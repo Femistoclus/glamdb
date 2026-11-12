@@ -6,7 +6,7 @@ This page covers C++. For the implemented Python SDK/mock and browser UI, use
 [WORKBENCH.md](WORKBENCH.md). Those packages do not link the C++ core or
 require an Arrow/Iceberg source build.
 
-- CMake 3.28 or newer, Ninja, and Python 3.9 or newer.
+- CMake 3.28 or newer, Ninja, and Python 3.10 or newer.
 - Linux and a C++23 compiler **and standard library** with `std::expected`:
   GCC 14+ or Clang 18+ with a matching STL. Clang with an older system
   libstdc++ may lack this feature. Use the same C++ ABI for all dependencies.
@@ -447,3 +447,18 @@ retry, physical Parquet/Avro membership and quiesced whole-store restore.
 The extra test-only Avro reader is hash-pinned in `tools/acceptance/requirements.txt`.
 Selected reports, screenshots, downloaded Arrow and sanitized traces are retained
 by the pinned official upload Action; private tokens/raw traces are excluded.
+## Operational logging dependencies
+
+All native profiles, including IO-only, consume the pinned header-only Quill
+submodule privately. Initialize `third_party/quill` with the other submodules.
+Logging CTest also uses python-json-logger; install its verified wheel in the
+Python environment selected at configure time:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install --require-hashes --only-binary=:all: --no-deps -r tools/logging/requirements.txt
+cmake -S . -B build/logging -DGLAMDB_IO_ONLY=ON -DPython3_EXECUTABLE="$PWD/.venv/bin/python"
+```
+
+The container development image and native CI install the same pinned formatter.
+Application queues/sinks do not rotate files; see [LOGGING](LOGGING.md).

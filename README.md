@@ -181,3 +181,10 @@ capabilities. It reports read availability separately from write readiness;
 - [Agent guide](AGENTS.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
+
+Operational logging emits bounded structured events independently of store writes.
+See [the logging guide](docs/development/LOGGING.md) for bounded Quill/Python stderr
+events, runtime journal collection, Loki/Alloy, private Grafana search,
+retention/quota setup and overload tests.
+
+For server debugging, see [Reading server logs](docs/development/READING_SERVER_LOGS.md).

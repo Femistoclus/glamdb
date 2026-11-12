@@ -2,6 +2,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+if [[ -f tools/logging/requirements.txt ]]; then
+  git submodule update --init -- third_party/quill
+fi
+
 "${GLAMDB_PYTHON:-python3.13}" -m venv .venv
 .venv/bin/python -m pip install --disable-pip-version-check \
   --require-hashes --only-binary=:all: --no-deps -r tools/workload/requirements.txt

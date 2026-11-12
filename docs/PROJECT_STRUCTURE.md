@@ -26,7 +26,9 @@ glamdb/
 │   ├── engine/
 │   ├── io/
 │   ├── scan/
-│   └── storage/
+│   ├── storage/
+│   └── telemetry/
+├── deploy/logging/
 ├── docker/
 │   ├── dev/
 │   └── deps/
@@ -73,6 +75,8 @@ glamdb/
 | `core/backend/` | Storage backend bridging the coordinator seam to `glamdb_storage` (built with `GLAMDB_BUILD_STORAGE`). |
 | `core/resources/` | Shared memory/device owner, Arrow pools and conservative working envelopes. |
 | `core/scan/` | Predicate evaluation (always built), snapshot planning and Parquet scan cursor (storage builds). |
+| `core/telemetry/` | Internal `glamdb_logging`: bounded typed operational JSON, actual process counters and runtime-collected stderr. |
+| `deploy/logging/`, `tools/logging/` | Pinned collection/storage/search stack, Python control-plane logger and ingestion/redaction probes. |
 | `core/io/` | Independent `glamdb_io`: local filesystem, store directories/URIs, attempts, receipts, SHA-256, durable files and copying. |
 | `core/storage/` | `glamdb_storage`: FileIO adapter, profiles, Parquet writer, Iceberg staging, publication, recovery and capacity. |
 | `docker/` | Linux development and dependency toolchains; builds mount product sources read-only. |
@@ -127,7 +131,7 @@ The public facade and catalog/coordinator are implemented. With
 `GLAMDB_BUILD_STORAGE` (default unless IO-only), `core/backend/` installs the real
 storage backend behind `core/engine/storage_backend.h` and `core/scan/` serves
 `Engine::Scan` with compound SQL three-valued predicates (without file/row-group pruning). Installed public headers work without private headers.
-`GLAMDB_IO_ONLY=ON` builds independent I/O without the engine or CLI; the default
+`GLAMDB_IO_ONLY=ON` builds independent I/O and logging without the engine or CLI; the default
 full build preserves the installed `glamdb::core` package.
 Transport, SDK, and UI dependencies stay outside `public/storage/` and `core/`;
 all production write paths still pass through the engine.

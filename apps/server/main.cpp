@@ -7,6 +7,8 @@
 
 int main(int argc, char** argv)
 try {
+    using namespace NGlamDB::NTelemetry;
+    TLogOptions logOptions;
     CLI::App app{"GlamDB native HTTP server"};
     std::string root, storeID, uiRoot, dataDir;
     std::string address = "127.0.0.1";
@@ -19,7 +21,15 @@ try {
     app.add_option("--port", port, "HTTP port; zero selects an available port");
     app.add_option("--ui-root", uiRoot, "Workbench directory (defaults to installed share/glamdb/ui)");
     app.add_option("--request-timeout-ms", timeoutMs, "Total header/body read timeout")->check(CLI::Range(100, 60000));
+    app.add_option("--log-success-sample-every", logOptions.SuccessSampleEvery, "Log one in N successful requests")
+        ->check(CLI::PositiveNumber);
+    app.add_option("--log-max-success-per-second",
+           logOptions.MaxSuccessPerSecond,
+           "Maximum sampled successes per second")
+        ->check(CLI::Range(1, 1000000));
     CLI11_PARSE(app, argc, argv);
+    TLogRuntime logging(logOptions);
+    TLogScope scope(logging.Get(), ELogOperation::Other, logging.Get() ? logging.Get()->NewRequestID() : 0);
     glamdb::NTransport::Require((!dataDir.empty() && root.empty() && storeID.empty()) ||
             (dataDir.empty() && !root.empty() && !storeID.empty()),
         "use --data-dir, or both --root and --store-id for a legacy store");
@@ -38,20 +48,22 @@ try {
     if (!dataDir.empty()) {
         auto databases = std::make_shared<glamdb::NServer::TDatabases>(dataDir);
         glamdb::NServer::TRoutes routes(databases, uiRoot, token);
-        glamdb::NServer::RunServer(routes, address, port, std::chrono::milliseconds(timeoutMs));
+        glamdb::NServer::RunServer(routes, address, port, std::chrono::milliseconds(timeoutMs), 96, logging.Get());
         routes.CancelScans();
         databases->Shutdown();
+        logging.SetResult(true);
         return 0;
     }
     auto engine = glamdb::NTransport::Unwrap(glamdb::OpenExisting({root, storeID}));
     glamdb::NServer::TRoutes routes(engine, uiRoot, token);
-    glamdb::NServer::RunServer(routes, address, port, std::chrono::milliseconds(timeoutMs));
+    glamdb::NServer::RunServer(routes, address, port, std::chrono::milliseconds(timeoutMs), 96, logging.Get());
     routes.CancelScans();
     const auto closed = engine->Shutdown(std::chrono::milliseconds(60000));
     if (!closed) {
         std::cerr << closed.error().code << ": " << closed.error().message << '\n';
         return 1;
     }
+    logging.SetResult(true);
     return 0;
 } catch (const glamdb::NTransport::TFailure& error) {
     std::cerr << error.Detail.code << ": " << error.Detail.message << '\n';

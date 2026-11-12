@@ -198,6 +198,8 @@ Preserve these boundaries when adding or changing engine behavior:
 | `core/api/`, `core/catalog/`, `core/engine/` | Canonical input, catalog, coordinator, and internal storage-backend seam. |
 | `core/backend/` | Production StorageBackend over `glamdb_storage`, built with `GLAMDB_BUILD_STORAGE`. |
 | `core/scan/` | Predicate evaluation, snapshot planning and Parquet scan cursor. |
+| `core/telemetry/` | Private typed event adapter over pinned Quill; bounded frontend/backend memory and stderr process counters. |
+| `deploy/logging/`, `tools/logging/` | Pinned Loki/Alloy/private Grafana deployment, native macOS/Podman collection, control-plane adapter and real ingestion/redaction checks. |
 | `core/io/` | Independent local filesystem, attempts, receipts, durable files and copying (`glamdb_io`). |
 | `core/storage/` | FileIO, Parquet writer, Iceberg staging, publication/recovery and capacity checks (`glamdb_storage`). |
 | `apps/cli/`, `apps/client/` | Standalone `glamdb-cli`: network database management and HTTP/HTTPS requests, without engine dependencies. |
@@ -250,7 +252,7 @@ limits. Keep secrets in environment or process memory; never browser storage.
 Mock faults require explicit development configuration. Do not give the mock a
 production store path. Every production write must eventually use the C++ core.
 
-Requirements: CMake 3.28+, Ninja, Python 3.9+, Linux, and a C++23 compiler and
+Requirements: CMake 3.28+, Ninja, Python 3.10+, Linux, and a C++23 compiler and
 standard library with `std::expected` (GCC 14+ or Clang 18+ with a matching STL).
 Quality targets require LLVM major version 18 for both `clang-format` and
 `clang-tidy`.
@@ -351,6 +353,26 @@ and tests stay enabled; formatting requires no build. Tidy uses two concurrent p
 (`GLAMDB_TIDY_JOBS` overrides this), with grouped diagnostics and per-file timings. See
 [docs/development/BUILDING.md](docs/development/BUILDING.md) for installation,
 tool path overrides, and build details.
+
+Operational logs are independent of store publication. The native adapter uses
+pinned Quill BoundedDropping queues and its JSON sink on stderr; the Python
+adapter uses logging, python-json-logger and standard bounded QueueHandler /
+QueueListener. Runtime journald/Docker/Kubernetes owns retention and rotation.
+Register native producer threads during worker initialization: only sixteen
+lifetime producer allocations are admitted to bound thread churn even with a
+blocked sink. No application file mode or `GLAMDB_LOG_DIRECTORY` exists.
+Never add payload/header/query text or uncontrolled identifiers to the event
+schema. Quill queue admission and backend callbacks are measurable; exact
+native delivery/backlog are unavailable. Read [LOGGING.md](docs/development/LOGGING.md)
+for actual counters, lifecycle, journal quotas, collection and private search.
+The [macOS/Podman profile](deploy/logging/MACOS_PODMAN.md) installs native Alloy
+and a Loki Quadlet with a dedicated 1 GiB filesystem and required mount guard;
+its file source requires actual bounded schema-1 JSONL producer files.
+Install the pinned formatter before Python/CTest: `python3 -m pip install
+--require-hashes --only-binary=:all: --no-deps -r tools/logging/requirements.txt`
+inside the development virtualenv. Run `python3 -m unittest discover -s
+tests/logging -v` or `glamdb.logging` CTest. Tests exercise real Quill, blocked /
+closed stderr, overload, thread churn, shutdown and secret projection.
 
 For dependency work, read [third_party/README.md](third_party/README.md).
 Verify checked-out revisions without building them:
@@ -485,3 +507,11 @@ acceptance plus a standalone client build in the normal profile. MSan uses the
 ordinary standalone TLS client against the instrumented server; system OpenSSL
 is not instrumented. Test-only native HTTP VFS faults model COMMIT uncertainty
 and lifecycle draining; they do not establish physical power-loss durability.
+
+Server logging is connected to HTTP completion and synchronous core failure/recovery
+paths through a scoped request context. Preserve logger lifetime through worker and
+engine shutdown, and keep stable worker count within the sixteen lifetime producer
+budget. `glamdb.server_logging` tests real requests, stored-data corruption, redaction
+and admin stdout; the native HTTP fault suite checks uncertain-COMMIT correlation.
+See [Reading server logs](docs/development/READING_SERVER_LOGS.md) for sampling,
+status semantics and diagnostic commands. Embedded calls without a scope stay silent.
