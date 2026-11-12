@@ -41,9 +41,10 @@ isolation after their pinned build dependencies are present.
   file count, schema preview and history.
 - **Data studio:** two compact panels separate reading from writing. Select
   output columns and supported typed filters, then run a bounded preview.
-  Fill schema-driven fields in **Write rows**; **Add row** adds another record
-  and nullable fields have an explicit NULL switch. JSON is generated and
-  validated automatically, preserving int64 precision. **Batch editor** opens
+  Fill schema-driven fields in **Write rows**; **Add row** opens the new record,
+  collapses the other rows and scrolls the editor list to the new row without
+  moving the page. Nullable fields have an explicit NULL switch. JSON is generated
+  and validated automatically, preserving int64 precision. **Batch editor** opens
   the optional JSON array editor. **Query JSON** previews and downloads the
   request assembled by the read controls. Arrow export retains the exact result
   snapshot; key lookup is a filter scan.
