@@ -62,7 +62,7 @@ Limits ParseLimits(const TJson& value, Limits limits = {})
         return number;
     };
     limits.max_operations = read("max_operations", limits.max_operations, {1, 4096});
-    limits.max_collections = read("max_collections", limits.max_collections, {1, 8});
+    limits.max_collections = read("max_collections", limits.max_collections, {1, Limits::MaxSupportedCollections});
     limits.max_catalog_bytes = read("max_catalog_bytes", limits.max_catalog_bytes, {65536, 256LL * 1024 * 1024});
     limits.max_pending_calls = read("max_pending_calls", limits.max_pending_calls, {1, 16});
     limits.max_owned_input_bytes =

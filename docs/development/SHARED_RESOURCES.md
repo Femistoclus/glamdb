@@ -29,7 +29,11 @@ Closing a database cannot refund an allocation still owned by its caller.
 For upstream allocations without allocator hooks, the fixed append profile uses
 conservative working reservations: 256 MiB writer data, 768 MiB metadata work,
 64 MiB catalog/coordinator state per engine, and 768 MiB protected recovery per
-engine. Materialized cached roots reserve 32 times their serialized size plus
+engine for limits up to eight collections. Each slot above eight adds 1 MiB
+catalog/descriptor metadata, 1 MiB protected recovery and 4 KiB ordinary control,
+reserved for the engine lifetime before filesystem creation/open. A 64-slot
+profile therefore protects 120 MiB catalog/descriptor metadata, 824 MiB recovery
+and 224 KiB control. Materialized cached roots reserve 32 times their serialized size plus
 4 MiB each, with a separate charge for the verified scan index and every retained
 file descriptor's metric maps and variable buffers. Index vectors use a stable
 two-times-element-count capacity allowance for the pinned standard library so
@@ -113,6 +117,10 @@ journal growth plus a 256 MiB recovery workspace; a write reserves another
 256 MiB and 64 inodes. Native recovery creates its bounded SQLite workspace in
 the store root, on the reserved device. The service registry has a page cap and
 its own memory/disk reservation.
+The 256 MiB recovery workspace and 256 MiB catalog cap remain unchanged for all
+collection profiles: aggregate retained-file/history limits still bound the
+workspace, and catalog pages have independent capacity admission. The selected
+count never increases those limits implicitly. See [collection profiles](COLLECTION_PROFILES.md).
 
 On reopen, memory admission precedes exclusive ownership and identity checks.
 Only then are regular `.recovery-XXXXXX` scratch files with six alphanumeric

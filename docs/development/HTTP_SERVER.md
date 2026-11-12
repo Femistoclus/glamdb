@@ -119,7 +119,7 @@ entry and open again with sufficient limits; data is never discarded.
 | Limit | Range | Default |
 | --- | --- | --- |
 | `max_operations` | 1–4096 | 4096 |
-| `max_collections` | 1–8 | 8 |
+| `max_collections` | 1–64 | 8 |
 | `max_catalog_bytes` | 65536–268435456 | 268435456 |
 | `max_pending_calls` | 1–16 | 16 |
 | `max_owned_input_bytes` | 1–134217728 | 134217728 |
@@ -129,6 +129,13 @@ entry and open again with sufficient limits; data is never discarded.
 Values are JSON integers; booleans, fractions, unknown fields and values outside
 these bounds are rejected before reserving a database. Every database response
 includes normalized limits, including closed/error states. The service registry is created directly in version 3; version 2 is migrated transactionally to add deletion receipts. Core store formats are unchanged.
+
+Profiles above eight reserve additional shared metadata, control and recovery
+capacity before opening the engine. Capabilities report the selected
+`limits.max_collections` and `max_supported_collections=64`. See
+[collection profiles](COLLECTION_PROFILES.md) for the measured 8/16/64 cases.
+Legacy `--root/--store-id` servers accept `--max-collections`; managed services
+configure this through database create/open requests instead.
 
 A separate `registry.sqlite` records identities and intended open state, using
 verified SQLite DELETE/EXTRA settings. The registry does not contain collection
@@ -180,7 +187,7 @@ separate, broader development profile.
 | --- | --- | --- |
 | `GET /capabilities` | Adapter inventory / `Engine::GetHealth` when scoped | Native features, predicates, transport limits; store health when selected |
 | `GET /databases/{id}/readyz` (legacy `/readyz`) | `Engine::GetHealth` plus lifecycle admission | Authenticated readiness snapshot; 200 when write-ready, otherwise 503 |
-| `GET /collections` | `ListCollections` | Complete bounded list; no pagination |
+| `GET /collections` | `ListCollectionsPage` | Creation-ordered fixed inventory; `page_size` and `cursor` |
 | `POST /collections` | `CreateCollection` | Fixed-schema append collection |
 | `GET /collections:resolve?name=...` | `ResolveCollection` | Exact name |
 | `GET /collections/{id}` | `GetCollection` | Identity and current schema |
@@ -666,7 +673,18 @@ Explain retains the validated compound predicate tree, including NULL literals,
 and uses reader admission so a blocked publisher does not delay the selected-view
 plan.
 
-Only history/files support metadata pagination: `page_size` 1..1,000 and opaque
+Collections support `page_size` 1..1,000 and opaque `cursor`, using the core
+fixed-view pages. Repeat the same page size and database until `next_cursor`
+is null. `creation_high_water_mark` is a decimal string and remains fixed;
+later collection creation never changes the inventory. Changed, malformed,
+foreign, expired and pre-restart tokens return HTTP 400 `INVALID_CURSOR`.
+The engine bounds these listings to 32 sessions and 16 MiB of DTO/token
+allocations per database, with a five-minute absolute lifetime. Completed
+collection inventories retain replay until expiry or reclamation by a new
+listing; unread inventories are never evicted. Single-page results retain
+no session. Capabilities advertise this separately from history/file JSON caches.
+
+History/files support metadata pagination: `page_size` 1..1,000 and opaque
 `cursor`, repeated with the same kind/database/collection/selector/page size.
 The first bounded inventory is frozen; later appends cannot change it. Tokens
 expire after 60 seconds idle or 300 seconds total. There are at most 64 metadata

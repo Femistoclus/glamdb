@@ -241,9 +241,10 @@ std::shared_ptr<ResourceOwner> TRoutes::GetResourceOwner() const
 TJson TRoutes::DescribeCapabilities(const EngineCapabilities& capabilities,
     const std::optional<StoreHealth>& health,
     bool databaseManagement,
-    const std::string& storeID) const
+    const std::string& storeID,
+    const Limits& limits) const
 {
-    auto value = CapabilitiesJson(capabilities, health, databaseManagement, storeID, Scans_->GetLimits());
+    auto value = CapabilitiesJson(capabilities, health, databaseManagement, storeID, Scans_->GetLimits(), limits);
     value["features"]["database_drop"] = static_cast<bool>(Databases_);
     value["scan_sessions"] = Scans_->GetStatistics(storeID);
     const auto usage = Resources_->GetUsage();
@@ -387,7 +388,8 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
         return JsonResponse(DescribeCapabilities(Engine_ ? Engine_->GetCapabilities() : InstalledCapabilities(),
             Engine_ ? std::optional(Engine_->GetHealth()) : std::nullopt,
             static_cast<bool>(Databases_),
-            Engine_ ? Engine_->GetStoreInfo().store_id : std::string{}));
+            Engine_ ? Engine_->GetStoreInfo().store_id : std::string{},
+            Engine_ ? Engine_->GetLimits() : Limits{}));
     }
     if (path == "/databases" || path.starts_with("/databases/")) {
         Require(static_cast<bool>(Databases_), "database management requires --data-dir", "UNSUPPORTED_OPERATION");
@@ -413,7 +415,8 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
                         return JsonResponse(DescribeCapabilities(engine->GetCapabilities(),
                             health,
                             false,
-                            engine->GetStoreInfo().store_id));
+                            engine->GetStoreInfo().store_id,
+                            engine->GetLimits()));
                     },
                     true);
             } catch (const TFailure& error) {
@@ -423,7 +426,9 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
                     error.Detail.code);
                 // Installed operations are independent of lifecycle admission.
                 // Keep health inspectable while the per-store gate is unavailable.
-                return JsonResponse(DescribeCapabilities(InstalledCapabilities(), health, false, parts[1]));
+                Limits limits;
+                limits.max_collections = Databases_->Get(parts[1]).at("limits").at("max_collections").get<int64_t>();
+                return JsonResponse(DescribeCapabilities(InstalledCapabilities(), health, false, parts[1], limits));
             }
         }
         if (parts.size() == 3 && request.Method == "POST" &&
@@ -462,21 +467,22 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
             (void)value;
             Require(key == "page_size" || key == "cursor", "unknown query parameter");
         }
-        Require(!query.contains("cursor"), "pagination is unavailable", "UNSUPPORTED_OPERATION");
         int64_t pageSize = 100;
         if (query.contains("page_size")) {
             pageSize = ParseInt64(query.at("page_size"));
         }
         Require(pageSize >= 1 && pageSize <= 1000, "page_size must be 1..1000");
-        const auto collections = Unwrap(Engine_->ListCollections());
-        Require(collections.size() <= static_cast<size_t>(pageSize),
-            "increase page_size; pagination is unavailable",
-            "UNSUPPORTED_OPERATION");
+        Require(!query.contains("cursor") || !query.at("cursor").empty(), "cursor must be nonempty");
+        const auto page = Unwrap(Engine_->ListCollectionsPage({.PageSize = pageSize,
+            .PageToken = query.contains("cursor") ? query.at("cursor") : std::string{},
+            .AuthorizationContext = DatabaseID_}));
         auto items = TJson::array();
-        for (const auto& info : collections) {
+        for (const auto& info : page.Collections) {
             items.push_back(Collection(info));
         }
-        return JsonResponse({{"items", items}, {"next_cursor", nullptr}});
+        return JsonResponse({{"items", std::move(items)},
+            {"creation_high_water_mark", std::to_string(page.CreationHighWaterMark)},
+            {"next_cursor", page.NextPageToken.empty() ? TJson(nullptr) : TJson(page.NextPageToken)}});
     }
     if (request.Method == "POST" && path == "/collections") {
         CheckKeys(body, {"collection_id", "name", "schema", "mode", "write_settings"});

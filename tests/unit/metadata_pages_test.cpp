@@ -63,14 +63,42 @@ TEST(TMetadataPagesTest, ExpiresAbsolutelyAndReclaimsCapacity)
     const auto first = pages.Read({.PageSize = 1}, "collections", load, start);
     ASSERT_TRUE(first);
     const TMetadataPageRequest next{.PageSize = 1, .PageToken = std::get<TCollectionPage>(*first).NextPageToken};
-    ASSERT_TRUE(pages.Read(next, "collections", load, start + std::chrono::seconds(9)));
     const auto full = pages.Read({.PageSize = 1}, "collections", load, start + std::chrono::seconds(9));
     ASSERT_FALSE(full);
     EXPECT_EQ(full.error().code, "RESOURCE_EXHAUSTED");
+    ASSERT_TRUE(pages.Read(next, "collections", load, start + std::chrono::seconds(9)));
     const auto expired = pages.Read(next, "collections", load, start + std::chrono::seconds(10));
     ASSERT_FALSE(expired);
     EXPECT_EQ(expired.error().code, "INVALID_CURSOR");
     ASSERT_TRUE(pages.Read({.PageSize = 1}, "collections", load, start + std::chrono::seconds(10)));
+}
+
+TEST(TMetadataPagesTest, CompletedInventoriesReclaimCountAndBytesWhileUnreadPagesSurvive)
+{
+    for (const auto options : {TMetadataPages::TOptions{.MaxSessions = 2},
+             TMetadataPages::TOptions{.MaxSessions = 32, .MaxBytes = size_t{16} * 1024}})
+    {
+        SCOPED_TRACE(options.MaxSessions);
+        TMetadataPages pages(options);
+        const auto load = []() -> Result<TMetadataPages::TListing> {
+            return Collections();
+        };
+        const auto unread = pages.Read({.PageSize = 1}, "collections", load);
+        ASSERT_TRUE(unread);
+        const auto unreadToken = std::get<TCollectionPage>(*unread).NextPageToken;
+        for (int index = 0; index < 40; ++index) {
+            const auto first = pages.Read({.PageSize = 1}, "collections", load);
+            ASSERT_TRUE(first) << first.error().message;
+            const auto token = std::get<TCollectionPage>(*first).NextPageToken;
+            const auto last = pages.Read({.PageSize = 1, .PageToken = token}, "collections", load);
+            ASSERT_TRUE(last);
+            EXPECT_TRUE(std::get<TCollectionPage>(*last).NextPageToken.empty());
+            EXPECT_TRUE(pages.Read({.PageSize = 1, .PageToken = token}, "collections", load));
+        }
+        const auto continued = pages.Read({.PageSize = 1, .PageToken = unreadToken}, "collections", load);
+        ASSERT_TRUE(continued) << continued.error().message;
+        EXPECT_EQ(std::get<TCollectionPage>(*continued).Collections.front().collection_id, "second");
+    }
 }
 
 TEST(TMetadataPagesTest, ExpiredSessionsReleaseSharedChargesBeforeWorkingAdmission)

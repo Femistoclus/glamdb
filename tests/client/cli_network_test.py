@@ -114,6 +114,36 @@ class Client(unittest.TestCase):
     def run_cli(self, *args, **kwargs):
         return subprocess.run([CLI, *args], env=ENV, capture_output=True, timeout=12, **kwargs)
 
+    def test_create_store_sends_opt_in_collection_limit(self):
+        bodies = []
+        def respond(path, body):
+            self.assertEqual(path, '/databases')
+            bodies.append(body)
+            return {'name': body['name'], 'limits': body.get('limits', {})}
+        with json_server(respond) as url:
+            result = self.run_cli('create-store', '--url', url, '--name', 'profiles', '--max-collections', '64')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(bodies, [{'name': 'profiles', 'limits': {'max_collections': 64}}])
+
+    def test_named_collections_completes_fixed_inventory(self):
+        for changed in (False, True):
+            paths = []
+            def respond(path, body):
+                paths.append(path)
+                return {'items': [{'collection_id': str(len(paths))}],
+                        'creation_high_water_mark': '3' if changed and len(paths) == 2 else '2',
+                        'next_cursor': 'collections-token' if len(paths) == 1 else None}
+            with self.subTest(changed=changed), json_server(respond) as url:
+                result = self.run_cli('collections', '--url', url)
+            if changed:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, b'')
+            else:
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)['items'], [{'collection_id': '1'}, {'collection_id': '2'}])
+            self.assertEqual(paths, ['/collections?page_size=1000',
+                                     '/collections?page_size=1000&cursor=collections-token'])
+
     def test_named_append_outcomes_keep_failure_and_unresolved_exits_distinct(self):
         fixture = json.loads((Path(__file__).resolve().parents[2] / 'fixtures/http/outcomes-v0.json').read_text())
         expected = {'committed': 0, 'pre_binding_rejection': 1, 'registered_failure': 1,

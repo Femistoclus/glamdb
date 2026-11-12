@@ -339,6 +339,8 @@ struct BulkAppendLimits
 
 struct Limits
 {
+    // Finite supported profile; larger selections also require shared resources.
+    static constexpr int64_t MaxSupportedCollections = 64;
     int64_t max_operations = 4096;
     int64_t max_collections = 8;
     int64_t max_catalog_bytes = 256LL * 1024 * 1024;

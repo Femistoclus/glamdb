@@ -190,6 +190,7 @@ try {
     glamdb::NClient::TRequest input;
     std::string url, host = "127.0.0.1", path, file, output, headers, name, database, store;
     uint16_t port = 8080;
+    int64_t maxCollections = 8;
     for (auto* command : commands) {
         command->add_option("--url", url, "Full http(s) URL (create-store: server base URL)");
         command->add_option("--host", host, "Loopback HTTP hostname; use --url for HTTPS");
@@ -205,6 +206,7 @@ try {
     request->add_option("--accept", input.Accept, "Response media type, including application/vnd.apache.arrow.stream");
     request->add_option("--content-type", input.ContentType, "Request media type");
     create->add_option("--name", name, "Database name")->required();
+    create->add_option("--max-collections", maxCollections, "Per-database collection limit (default 8)");
     drop->add_option("--database", database, "Original saved database UUID; never a name")->required();
     drop->add_option("--store-id", store, "Original saved store UUID; must match --database")->required();
     if (argc == 1) {
@@ -235,7 +237,11 @@ try {
     } else if (create->parsed()) {
         path = "/databases";
         input.Method = "POST";
-        input.Body = nlohmann::json{{"name", name}}.dump();
+        nlohmann::json body{{"name", name}};
+        if (create->count("--max-collections")) {
+            body["limits"] = {{"max_collections", maxCollections}};
+        }
+        input.Body = body.dump();
     } else if (drop->parsed()) {
         ValidateDropIdentity(database, store);
         path = "/databases/" + database + "/drop";

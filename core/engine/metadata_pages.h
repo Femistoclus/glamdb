@@ -42,11 +42,13 @@ private:
         TListing Listing;
         TClock::time_point Expires;
         size_t ChargedBytes = 0;
+        bool Completed = false;
         std::vector<std::string> Tokens{};
         std::map<std::string, size_t, std::less<>> Positions{};
     };
 
     void Expire(TClock::time_point now);
+    void Reclaim(size_t incomingBytes, size_t incomingSessions);
     static TListing
     ReadPage(const TSession& session, size_t offset, size_t pageSize, const std::shared_ptr<ResourceOwner>& resources);
 

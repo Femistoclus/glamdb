@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 
 CLI, ADMIN, SERVER = (str(Path(value).resolve()) for value in sys.argv[1:4])
 del sys.argv[1:4]
@@ -48,9 +49,11 @@ class NativeCommands(unittest.TestCase):
         target.write_text(json.dumps(value), encoding="utf-8")
         return str(target)
 
-    def start_server(self, managed=False):
+    def start_server(self, managed=False, max_collections=None):
         log = (self.directory / "server.stderr").open("w+")
         ownership = ["--data-dir", str(self.directory / "databases")] if managed else self.local
+        if max_collections is not None:
+            ownership = ownership + ['--max-collections', str(max_collections)]
         server = subprocess.Popen([SERVER, "serve", *ownership, "--port", "0"],
                                   env=ENV, stdout=subprocess.PIPE, stderr=log, text=True)
         self.addCleanup(log.close)
@@ -73,6 +76,26 @@ class NativeCommands(unittest.TestCase):
         return self.run_command(ADMIN, "create-collection", *self.local,
                                 "--collection-id", COLLECTION, "--name", "events / café",
                                 "--schema", schema)
+
+    def test_offline_and_legacy_server_can_reopen_a_larger_profile(self):
+        schema = self.body_file('profile-schema.json', SCHEMA)
+        ids = [str(uuid.uuid4()) for _ in range(16)]
+        for index, cid in enumerate(ids):
+            self.run_command(ADMIN, 'create-collection', *self.local, '--max-collections', '16',
+                             '--collection-id', cid, '--name', f'table-{index}', '--schema', schema)
+        rejected = self.run_command(ADMIN, 'collections', *self.local, code=1)
+        self.assertIn('CONFIG_TOO_SMALL', rejected.stderr)
+        inventory = self.run_command(ADMIN, 'collections', *self.local, '--max-collections', '16')
+        self.assertEqual({item['collection_id'] for item in inventory['items']}, set(ids))
+        append = self.body_file('profile-append.json', {'operation_id': OPERATION, 'rows': ROWS})
+        original = self.run_command(ADMIN, 'append', *self.local, '--max-collections', '16',
+                                    '--collection-id', ids[8], '--body', append)
+        self.assertEqual(original['outcome'], 'committed')
+        _, url = self.start_server(max_collections=16)
+        remote = self.run_command(CLI, 'collections', '--url', url)
+        self.assertEqual({item['collection_id'] for item in remote['items']}, set(ids))
+        scan = self.run_command(CLI, 'scan', '--url', url, '--collection-id', ids[8])
+        self.assertEqual(scan['rows'], ROWS)
 
     def test_native_local_remote_parity_and_ownership(self):
         created = self.create_collection()

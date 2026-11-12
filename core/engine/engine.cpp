@@ -82,7 +82,7 @@ void ValidateConfig(const StoreInfo& info, const Limits& limits)
     // here rejects a configuration before the store root is created.
     Require(limits.max_catalog_bytes >= 65536 && limits.max_catalog_bytes <= 256LL * 1024 * 1024 &&
             limits.max_operations > 0 && limits.max_operations <= 4096 && limits.max_collections > 0 &&
-            limits.max_collections <= 8,
+            limits.max_collections <= Limits::MaxSupportedCollections,
         "INVALID_ARGUMENT",
         "invalid catalog limits");
 }
@@ -201,8 +201,14 @@ struct Engine::Impl
     void ReserveStoreMemory(const std::shared_ptr<ResourceOwner>& supplied)
     {
         resources = supplied ? supplied : ResourceOwner::ProcessDefault();
-        store_resources.push_back(Take(resources->Reserve(ResourceClass::Metadata, CatalogMemoryBytes)));
-        store_resources.push_back(Take(resources->Reserve(ResourceClass::Recovery, RecoveryMemoryBytes)));
+        const auto extra = ExtraCollectionSlots(limits.max_collections);
+        store_resources.push_back(
+            Take(resources->Reserve(ResourceClass::Metadata, CatalogMemoryBytes + extra * CollectionMetadataBytes)));
+        store_resources.push_back(
+            Take(resources->Reserve(ResourceClass::Recovery, RecoveryMemoryBytes + extra * CollectionRecoveryBytes)));
+        if (extra != 0) {
+            store_resources.push_back(Take(resources->Reserve(ResourceClass::Control, extra * CollectionControlBytes)));
+        }
     }
 
     void ReserveStoreDevice(const std::string& root)
@@ -960,6 +966,11 @@ Result<std::shared_ptr<Engine>> OpenExisting(const OpenStoreRequest& request)
 const StoreInfo& Engine::GetStoreInfo() const
 {
     return impl_->info;
+}
+
+const Limits& Engine::GetLimits() const
+{
+    return impl_->limits;
 }
 
 StoreHealth Engine::GetHealth() const

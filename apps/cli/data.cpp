@@ -202,8 +202,8 @@ TResponse SendDataRequest(const TRequest& request, const TDataCommand& data)
 try {
     auto response = SendRequest(request);
     const bool scan = data.Command == "scan";
-    if ((!scan && data.Command != "snapshots" && data.Command != "files") || response.Status < 200 ||
-        response.Status >= 300)
+    if ((!scan && data.Command != "snapshots" && data.Command != "files" && data.Command != "collections") ||
+        response.Status < 200 || response.Status >= 300)
     {
         return response;
     }
@@ -260,8 +260,14 @@ try {
             // releases the currently retained cursor rather than an older page.
             cleanup.Cursor = next.is_string() ? next.get<std::string>() : token;
         }
-        Require(value.at("identity") == result.at("identity") && value.at("snapshot_id") == result.at("snapshot_id"),
-            "native continuation changed its fixed view");
+        if (data.Command == "collections") {
+            Require(value.at("creation_high_water_mark") == result.at("creation_high_water_mark"),
+                "native continuation changed its fixed inventory");
+        } else {
+            Require(value.at("identity") == result.at("identity") &&
+                    value.at("snapshot_id") == result.at("snapshot_id"),
+                "native continuation changed its fixed view");
+        }
         if (scan) {
             Require(value.at("schema") == result.at("schema"), "native continuation changed schema");
         }

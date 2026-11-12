@@ -18,6 +18,7 @@ try {
     app.require_subcommand(1);
     std::string root;
     std::string id;
+    glamdb::Limits limits;
     auto* create = app.add_subcommand("create-store", "Create an empty store");
     auto* inspect = app.add_subcommand("inspect-store", "Inspect an existing store");
     auto* read = app.add_subcommand("read", "Read a bounded snapshot from an offline store");
@@ -27,6 +28,8 @@ try {
     for (auto* command : glamdb::NClient::AddDataCommands(app, data)) {
         command->add_option("--root", root, "Absolute offline store path");
         command->add_option("--store-id", id, "Expected offline store UUID");
+        command->add_option("--max-collections", limits.max_collections, "Offline collection limit (default 8)")
+            ->check(CLI::Range(int64_t{1}, glamdb::Limits::MaxSupportedCollections));
         command->add_option("--url", remote.Url, "HTTP(S) server base URL; uses HTTP without opening a store");
         command->add_option("--ca-file", remote.CaFile, "Additional PEM certificate authority (remote only)");
         command->add_option("--timeout", remote.TimeoutSeconds, "Whole request deadline in seconds (remote only)");
@@ -34,6 +37,8 @@ try {
     for (auto* command : {create, inspect, read, quiesce}) {
         command->add_option("--root", root, "Absolute store path")->required();
         command->add_option("--store-id", id, "Store UUID")->required();
+        command->add_option("--max-collections", limits.max_collections, "Collection limit (default 8)")
+            ->check(CLI::Range(int64_t{1}, glamdb::Limits::MaxSupportedCollections));
     }
     std::string collectionID, snapshot = "latest";
     int64_t limit = 10000;
@@ -56,6 +61,8 @@ try {
         Require(!remote.Url.empty() || (!root.empty() && !id.empty()),
             "offline commands require --root and --store-id");
         Require(!remote.Url.empty() || data.DatabaseID.empty(), "--database-id is remote only");
+        Require(remote.Url.empty() || app.get_subcommand(std::string(data.Command))->count("--max-collections") == 0,
+            "--max-collections configures offline stores only");
         auto request = glamdb::NClient::BuildDataRequest(data);
         glamdb::NClient::TResponse response;
         glamdb::Status shutdown;
@@ -65,13 +72,16 @@ try {
             request.TimeoutSeconds = remote.TimeoutSeconds;
             response = glamdb::NClient::SendDataRequest(request, data);
         } else {
-            const auto engine = glamdb::NTransport::Unwrap(glamdb::OpenExisting({root, id}));
+            const auto engine = glamdb::NTransport::Unwrap(
+                glamdb::OpenExisting({.absolute_root = root, .expected_store_id = id, .limits = limits}));
             response = glamdb::NAdmin::RunDataCommand(*engine, data, request);
             shutdown = engine->Shutdown(std::chrono::milliseconds(5000));
         }
         return glamdb::NAdmin::WriteDataResponse(response, shutdown, {.Data = std::cout, .Diagnostics = std::cerr});
     }
-    const auto opened = create->parsed() ? glamdb::CreateStore({id, root}) : glamdb::OpenExisting({root, id});
+    const auto opened = create->parsed()
+        ? glamdb::CreateStore({.store_id = id, .absolute_root = root, .limits = limits})
+        : glamdb::OpenExisting({.absolute_root = root, .expected_store_id = id, .limits = limits});
     if (!opened) {
         std::cerr << opened.error().code << ": " << opened.error().message << '\n';
         return 1;

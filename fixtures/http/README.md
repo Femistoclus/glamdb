@@ -49,8 +49,12 @@ ephemeral, replayable until expiry, cleared on database lifecycle changes, and
 cannot survive a server restart. Admission limits are 64 retained inventories,
 eight per database, 16 MiB serialized inventory per request and 64 MiB aggregate
 serialized inventory plus cursor bookkeeping; idle and total lifetimes are
-60 and 300 seconds. Collection pagination remains unsupported and is advertised
-separately from `features.metadata_pagination`.
+60 and 300 seconds. Collection pagination uses the core's separate 32-session,
+16 MiB DTO/token quota per engine, with a five-minute absolute expiry and a
+creation high-water mark; `features.pagination` advertises it. Collection limits
+accept 1–64 and default to eight. `tpch-collections.json` supplies synthetic rows
+for all eight base-table shapes, including precise integer keys; decimals/dates
+use the existing float64/string profile. It is not a TPC-H performance fixture.
 
 Requests contain duplicate rows, NULL, int64 `9007199254740993` and
 `-9223372036854775808`, and exact six-digit UTC timestamps. Canonical v1 schema

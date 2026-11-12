@@ -524,7 +524,13 @@
           }
         },
         "next_cursor": {
-          "type": "null"
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "creation_high_water_mark": {
+          "$ref": "#/$defs/int64"
         }
       },
       "required": [
@@ -1509,7 +1515,7 @@
         "max_collections": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 8
+          "maximum": 64
         },
         "max_catalog_bytes": {
           "type": "integer",

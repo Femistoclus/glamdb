@@ -91,6 +91,10 @@ public:
         for (const auto& field : collection.schema.fields) {
             Add(field.name);
         }
+        Add(collection.write_settings.columns.capacity() * sizeof(ColumnWriteSettings));
+        for (const auto& column : collection.write_settings.columns) {
+            Add(column.field);
+        }
     }
 
     void Add(const SnapshotMetadata& snapshot)
@@ -174,6 +178,22 @@ void TMetadataPages::Expire(TClock::time_point now)
     });
 }
 
+void TMetadataPages::Reclaim(size_t incomingBytes, size_t incomingSessions)
+{
+    while (Sessions_.size() + Pending_ + incomingSessions > Options_.MaxSessions ||
+        incomingBytes > Options_.MaxBytes - ChargedBytes_)
+    {
+        const auto completed = std::ranges::find_if(Sessions_, [](const auto& session) {
+            return session.Completed;
+        });
+        if (completed == Sessions_.end()) {
+            return;
+        }
+        ChargedBytes_ -= completed->ChargedBytes;
+        Sessions_.erase(completed);
+    }
+}
+
 TMetadataPages::TListing TMetadataPages::ReadPage(const TSession& session,
     size_t offset,
     size_t pageSize,
@@ -226,6 +246,9 @@ Result<TMetadataPages::TListing> TMetadataPages::Read(const TMetadataPageRequest
                 "Metadata cursor admission was invalidated.");
             // Reclaim expired leases even when working admission is exhausted.
             Expire(now);
+            if (request.PageToken.empty()) {
+                Reclaim(0, 1);
+            }
         }
         const auto owner = resources ? resources : ResourceOwner::ProcessDefault();
         auto workingMemory = owner->Reserve(ResourceClass::Metadata, MetadataWorkBytes);
@@ -244,17 +267,27 @@ Result<TMetadataPages::TListing> TMetadataPages::Read(const TMetadataPageRequest
                 "Metadata cursor admission was invalidated.");
             if (!request.PageToken.empty()) {
                 Require(ValidDigest(request.PageToken), "INVALID_CURSOR", "Metadata cursor is invalid or expired.");
-                for (const auto& session : Sessions_) {
+                for (auto& session : Sessions_) {
                     const auto positionIt = session.Positions.find(request.PageToken);
                     if (positionIt != session.Positions.end()) {
                         Require(session.Binding == encoded.bytes,
                             "INVALID_CURSOR",
                             "Metadata cursor parameters or authorization changed.");
-                        return ReadPage(session, positionIt->second, pageSize, owner);
+                        auto page = ReadPage(session, positionIt->second, pageSize, owner);
+                        if (std::visit(
+                                [](const auto& value) {
+                                    return value.NextPageToken.empty();
+                                },
+                                page))
+                        {
+                            session.Completed = true;
+                        }
+                        return page;
                     }
                 }
                 throw Failure({"INVALID_CURSOR", "Metadata cursor is invalid or expired.", RetryHint::FixInput});
             }
+            Reclaim(0, 1);
             Require(Sessions_.size() + Pending_ < Options_.MaxSessions,
                 "RESOURCE_EXHAUSTED",
                 "Metadata cursor capacity is exhausted.");
@@ -312,6 +345,7 @@ Result<TMetadataPages::TListing> TMetadataPages::Read(const TMetadataPageRequest
                 "INVALID_CURSOR",
                 "Metadata cursor expired while loading its view.");
             if (count > pageSize) {
+                Reclaim(session.ChargedBytes, 1);
                 Require(session.ChargedBytes <= Options_.MaxBytes - ChargedBytes_,
                     "RESOURCE_EXHAUSTED",
                     "Metadata cursor memory is exhausted.");

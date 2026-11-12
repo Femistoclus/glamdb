@@ -9,6 +9,7 @@ disabled builds return `DEPENDENCY_UNAVAILABLE`.
 | --- | --- |
 | `GetCapabilities()` | Backend identity and supported append, scan, metadata, file-pruning and row-group-pruning operations; no I/O or writer wait. Custom backends identify themselves explicitly. |
 | `GetHealth()` | Current admission/recovery/shutdown state, separate from supported operations. |
+| `GetLimits()` | Immutable effective engine limits selected at create/open, including collection count. |
 | `ListSnapshots(collection)` | Retained snapshots, oldest first, joined with their original committed append receipts. Initial empty is not a snapshot. |
 | `GetStatistics(collection, selector)` | Rows, live data-file count and compressed data-file bytes from the selected view's manifests. |
 | `ListFiles(collection, selector)` | Stable opaque file IDs, lengths, row counts and field-ID metrics from the selected view's live manifest entries. |
@@ -105,7 +106,9 @@ shutdown. Existing readiness errors still apply to cached pages.
 
 Each engine admits at most 32 retained or loading listings and 16 MiB of
 estimated retained DTO/token allocations. Admission refuses excess with
-`RESOURCE_EXHAUSTED`; it does not evict live cursors. Listings expire five
+`RESOURCE_EXHAUSTED`; it never evicts inventories with unread pages. New
+listings reclaim the oldest completed inventories under count or byte pressure;
+reclaimed tokens return `INVALID_CURSOR`. Listings expire five
 minutes after admission, without renewal on replay; the next page request
 reclaims expired entries. Shutdown releases retained listings. Empty and
 single-page results retain no cursor. Listing construction, cached descriptors
@@ -113,6 +116,12 @@ and tokens, and every returned page use the engine's shared metadata parent.
 Returned pages retain independent capacity-sized leases after engine close.
 Pressure refuses a page without consuming its continuation; retry and replay
 remain available after capacity returns. These envelopes are not an RSS limit.
+
+Native HTTP collection inventory uses these same core pages, including the
+creation high-water mark. Its `features.pagination` capability is true;
+the SDK's `list_collections(page_size=..., cursor=...)` exposes continuation and
+the named CLI completes it before output. History/file HTTP caches retain their
+separate JSON quotas and idle timeout; see [the HTTP contract](HTTP_SERVER.md).
 
 Every `Metric` contains an optional integer and a `MetricKind`:
 

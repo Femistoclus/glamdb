@@ -152,8 +152,12 @@ and an explicit KV collection mode. Native capabilities, receipt-backed snapshot
 history, selected-view statistics, snapshot-bound file/row-group details,
 fixed-view collection/history/file pages, explain and cursor profiles use the public
 facade; see [the metadata guide](docs/development/METADATA.md). HTTP/SDK/UI metadata,
-snapshot/file pagination and explain adapters are implemented; HTTP collection
-pagination and object storage remain later extensions. Compaction, snapshot expiration,
+snapshot/file/collection pagination and explain adapters are implemented; object
+storage remains a later extension. Collection limits default to eight and accept
+1–64 with additional shared catalog/control/recovery reservations. See
+[collection profiles](docs/development/COLLECTION_PROFILES.md) for configuration,
+complete inventory, fresh-process validation and measured profile limits.
+Compaction, snapshot expiration,
 garbage collection, asynchronous admission, replication, multiple writers, and
 schema evolution are outside the initial append scope. Consult
 [docs/ROADMAP.md](docs/ROADMAP.md) when assessing feature scope; its current

@@ -213,7 +213,7 @@ void DurableSqliteCatalogStore::Configure()
         "SQLite working connection settings did not take effect");
     Require(limits_.max_catalog_bytes >= 65536 && limits_.max_catalog_bytes <= 256LL * 1024 * 1024 &&
             limits_.max_operations > 0 && limits_.max_operations <= 4096 && limits_.max_collections > 0 &&
-            limits_.max_collections <= 8,
+            limits_.max_collections <= Limits::MaxSupportedCollections,
         "INVALID_ARGUMENT",
         "invalid catalog limits");
     const auto pages = limits_.max_catalog_bytes / database_.Integer("PRAGMA page_size");
@@ -453,8 +453,12 @@ std::vector<CollectionInfo> DurableSqliteCatalogStore::Collections()
 {
     std::lock_guard lock(mutex_);
     Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
-    const auto rows =
-        database_.Query("SELECT " + std::string(collection_columns) + " FROM collections ORDER BY creation_sequence");
+    // Reject an undersized reopen before materializing any schema blobs.
+    Require(database_.Integer("SELECT COUNT(*) FROM collections") <= limits_.max_collections,
+        "CONFIG_TOO_SMALL",
+        "collection count exceeds configured capacity");
+    const auto rows = database_.Query("SELECT " + std::string(collection_columns) +
+        " FROM collections ORDER BY creation_sequence LIMIT " + std::to_string(limits_.max_collections + 1));
     Require(rows.size() <= static_cast<size_t>(limits_.max_collections),
         "CONFIG_TOO_SMALL",
         "collection count exceeds configured capacity");

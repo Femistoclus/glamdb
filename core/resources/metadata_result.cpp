@@ -94,6 +94,10 @@ Status RetainMetadata(const std::shared_ptr<ResourceOwner>& owner, TCollectionPa
         for (const auto& field : collection.schema.fields) {
             capacity.Add(field.name);
         }
+        capacity.Allocation(collection.write_settings.columns.capacity(), sizeof(ColumnWriteSettings));
+        for (const auto& column : collection.write_settings.columns) {
+            capacity.Add(column.field);
+        }
     }
     return Attach(owner, capacity.Bytes, result.ResourceLease);
 }

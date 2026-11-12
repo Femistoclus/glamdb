@@ -8,7 +8,8 @@ absolute root and caller-retained store UUID.
 
 Read/configuration APIs use `Result<T> = std::expected<T, ErrorDetail>` and
 `Status = Result<void>`. `ListCollections()` returns the full vector within the
-eight-collection limit; this MVP has no collection pagination.
+configured finite collection limit. `ListCollectionsPage()` provides bounded
+fixed-view continuation, also exposed over HTTP.
 
 The bridge from the coordinator to the [durable storage primitives](STORAGE_MODULE.md)
 and the scanner are described in [SCANNER.md](SCANNER.md); they are built with
@@ -124,11 +125,14 @@ Its result receipt version 2 extends counts without changing old receipts.
   creation outcomes, including verifier exceptions and writer timeouts, use
   `SameIdAfterReconcile`.
 
-Candidate bounds are eight collections, 4096 permanent operations, 256 MiB of
+Candidate bounds default to eight collections (configurable 1–64 with shared
+resource admission), 4096 permanent operations, 256 MiB of
 catalog pages, 16 pending calls and 128 MiB aggregate owned input. Per append:
 10,000 rows, 16 MiB canonical input, 2 MiB per row, 1 MiB per string and 1024
 bytes per key. Writer wait is at most five seconds; append deadline at most
-60 seconds. Configuration may lower these bounds. These are admission limits,
+60 seconds. Configuration may lower these bounds. See
+[collection profiles](COLLECTION_PROFILES.md) for larger-profile reservations
+and validation. These are admission limits,
 not measured simultaneous RSS or full-storage capacity guarantees. All limits,
 including the catalog limits, are validated before `CreateStore` creates the
 root, so a rejected configuration leaves the root and store UUID reusable.

@@ -166,7 +166,8 @@ TJson CapabilitiesJson(const EngineCapabilities& capabilities,
     const std::optional<StoreHealth>& health,
     bool databaseManagement,
     const std::string& storeID,
-    const TScanLimits& scans)
+    const TScanLimits& scans,
+    const Limits& limits)
 {
     const bool metadata = capabilities.metadata;
     const std::array backends{"unavailable", "custom", "local"};
@@ -193,7 +194,7 @@ TJson CapabilitiesJson(const EngineCapabilities& capabilities,
                 {"files", metadata},
                 {"explain", metadata},
                 {"metadata_pagination", metadata},
-                {"pagination", false},
+                {"pagination", true},
                 {"zero_column_projection", true},
                 {"write_settings", capabilities.write_settings}}},
         {"parquet", ParquetJson(capabilities)},
@@ -201,6 +202,10 @@ TJson CapabilitiesJson(const EngineCapabilities& capabilities,
             {"true", "eq", "ne", "lt", "le", "gt", "ge", "in", "is_null", "is_not_null", "and", "or", "not"}},
         {"limits",
             {{"request_bytes", MaxRequestBytes},
+                {"max_collections", limits.max_collections},
+                {"max_supported_collections", Limits::MaxSupportedCollections},
+                {"collection_sessions_per_database", 32},
+                {"collection_lifetime_seconds", 300},
                 {"response_bytes", MaxResponseBytes},
                 {"append_rows", 10000},
                 {"scan_page_rows", 10000},
@@ -251,8 +256,12 @@ TJson ExplainJson(const Engine& engine, const std::string& collection, const TJs
     for (const auto& field : schema.at("fields")) {
         output.push_back(field.at("name"));
     }
-    auto capabilities =
-        CapabilitiesJson(engine.GetCapabilities(), engine.GetHealth(), false, engine.GetStoreInfo().store_id, scans);
+    auto capabilities = CapabilitiesJson(engine.GetCapabilities(),
+        engine.GetHealth(),
+        false,
+        engine.GetStoreInfo().store_id,
+        scans,
+        engine.GetLimits());
     capabilities["file_pruning"] = explanation.file_pruning;
     capabilities["row_group_pruning"] = explanation.row_group_pruning;
     TJson plan = TJson::array({"resolve confirmed fixed view"});

@@ -21,10 +21,13 @@ try {
     int timeoutMs = 10000;
     glamdb::NServer::TScanLimits scanLimits;
     glamdb::ResourceLimits resourceLimits;
+    glamdb::Limits engineLimits;
     int64_t scanIdle = 60, scanLifetime = 0, completedTtl = 60;
     app.add_option("--data-dir", dataDir, "Server directory for managed databases");
     app.add_option("--root", root, "Legacy single-store path");
     app.add_option("--store-id", storeID, "Expected legacy store UUID");
+    app.add_option("--max-collections", engineLimits.max_collections, "Legacy store collection limit (default 8)")
+        ->check(CLI::Range(int64_t{1}, glamdb::Limits::MaxSupportedCollections));
     app.add_option("--listen", address, "HTTP listen address; use TLS proxy outside loopback");
     app.add_option("--port", port, "HTTP port; zero selects an available port");
     app.add_option("--metrics-listen-address", metricsAddress, "Private Prometheus IP:port; disabled by default");
@@ -77,6 +80,8 @@ try {
     glamdb::NTransport::Require((!dataDir.empty() && root.empty() && storeID.empty()) ||
             (dataDir.empty() && !root.empty() && !storeID.empty()),
         "use --data-dir, or both --root and --store-id for a legacy store");
+    glamdb::NTransport::Require(dataDir.empty() || app.count("--max-collections") == 0,
+        "configure managed collection limits through the database lifecycle API");
     const auto token = glamdb::NTransport::ReadToken();
     if (uiRoot.empty()) {
         std::error_code error;
@@ -101,8 +106,8 @@ try {
         logging.SetResult(true);
         return 0;
     }
-    auto engine = glamdb::NTransport::Unwrap(
-        glamdb::OpenExisting({.absolute_root = root, .expected_store_id = storeID, .resources = resources}));
+    auto engine = glamdb::NTransport::Unwrap(glamdb::OpenExisting(
+        {.absolute_root = root, .expected_store_id = storeID, .limits = engineLimits, .resources = resources}));
     glamdb::NServer::TMetrics metrics(metricsAddress, [engine] {
         return engine->GetHealth().write_ready;
     });

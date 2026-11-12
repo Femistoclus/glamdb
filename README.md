@@ -173,6 +173,12 @@ or remotely with `--url`. Named scans complete HTTP pages within a 10,000-row,
 16 MiB result bound. See the [CLI guide](apps/cli/README.md) for commands, input
 formats and the distinct failure/unresolved exit codes.
 
+Databases default to eight collections and accept a resource-backed opt-in
+limit up to 64. Use `create-store --max-collections 64` or the managed SDK/HTTP
+`limits` object; managed limits survive restarts. Collection inventories support
+fixed-view pages. See [collection profiles](docs/development/COLLECTION_PROFILES.md)
+for configuration and native measurement evidence.
+
 ### Python SDK
 
 Install the SDK from the checkout with Python 3.10 or later:

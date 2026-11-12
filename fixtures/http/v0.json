@@ -144,11 +144,12 @@
     {
       "method": "GET",
       "path": "/databases/{database_id}/collections",
-      "core": "Engine::ListCollections",
+      "core": "Engine::ListCollectionsPage",
       "status": 200,
       "response_fields": {
         "items": "array",
-        "next_cursor": "null"
+        "next_cursor": "string|null",
+        "creation_high_water_mark": "string"
       },
       "response_schema": "collections"
     },

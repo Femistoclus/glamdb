@@ -15,7 +15,7 @@ struct TErrorPolicy
 inline TErrorPolicy ErrorPolicy(std::string_view code)
 {
     using enum RetryHint;
-    if (code == "INVALID_ARGUMENT" || code == "CONFIG_TOO_SMALL") {
+    if (code == "INVALID_ARGUMENT" || code == "CONFIG_TOO_SMALL" || code == "INVALID_CURSOR") {
         return {400, FixInput};
     }
     if (code == "UNAUTHORIZED") {

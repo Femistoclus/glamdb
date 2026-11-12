@@ -231,6 +231,16 @@ literal outcome fixtures separately test exit classification; they are protocol
 evidence, not native publication evidence.
 See the [validation record](../../docs/development/CLI_VALIDATION.md) for the
 independent review findings, regressions and evidence boundaries.
+Managed databases default to eight collections. Opt in through
+`glamdb-cli create-store --url URL --name comparison --max-collections 64`.
+The lifecycle API also accepts partial limits when opening a closed database
+(use `request --path /databases/ID/open --body FILE`). The server persists
+those limits; omission preserves them. Named `collections` completes bounded
+continuations before output, checking the creation high-water mark.
+Offline `glamdb-admin` commands and legacy `glamdb --root ... --store-id ...`
+servers accept `--max-collections 64`; supply the same value on every reopen.
+See [collection profiles](../../docs/development/COLLECTION_PROFILES.md).
+
 # Workload commands
 
 The same executable also offers `generate` and `bench write/read/verify/resolve`

@@ -14,7 +14,8 @@ NTransport::TJson CapabilitiesJson(const EngineCapabilities& capabilities,
     const std::optional<StoreHealth>& health,
     bool databaseManagement,
     const std::string& storeID = {},
-    const TScanLimits& scans = {});
+    const TScanLimits& scans = {},
+    const Limits& limits = {});
 NTransport::TJson ExplainJson(const Engine& engine,
     const std::string& collection,
     const NTransport::TJson& body,

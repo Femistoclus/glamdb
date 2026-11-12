@@ -36,7 +36,8 @@ private:
     NTransport::TJson DescribeCapabilities(const EngineCapabilities& capabilities,
         const std::optional<StoreHealth>& health,
         bool databaseManagement,
-        const std::string& storeID = {}) const;
+        const std::string& storeID,
+        const Limits& limits) const;
     NTransport::TResponse Route(const NTransport::TRequest& request) const;
     NTransport::TResponse RoutePrepared(const NTransport::TRequest& request,
         const std::string& path,

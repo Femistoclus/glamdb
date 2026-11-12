@@ -333,7 +333,11 @@ class Client:
     def create_database(self, name: str, *, database_id: str | UUID | None = None,
                         limits: dict[str, int] | None = None,
                         deadline: float | None = None) -> dict[str, Any]:
-        """Create or open the same named database. Retry with the same name and ID."""
+        """Create or open the same named database. Retry with the same name and ID.
+
+        Native max_collections accepts 1..64 (default 8), subject to shared
+        resource admission. Managed limits persist across service restarts.
+        """
         if not isinstance(name, str) or not name:
             raise ValidationError("database name is required")
         body = {"name": name}
@@ -373,6 +377,10 @@ class Client:
 
     def list_collections(self, *, page_size: int = 100, cursor: str | None = None,
                          deadline: float | None = None) -> Page:
+        """Read a fixed collection inventory; repeat page_size with next_cursor.
+
+        A continuation excludes collections created after the first page.
+        """
         return self._page(self._read("collections", params=self._page_params(page_size, cursor), deadline=deadline))
 
     def resolve_collection(self, name: str, *, deadline: float | None = None) -> dict[str, Any]:

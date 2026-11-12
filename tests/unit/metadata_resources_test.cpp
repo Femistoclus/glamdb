@@ -1,9 +1,39 @@
+#include "core/engine/metadata_pages.h"
 #include "core/resources/metadata_result.h"
 
 #include <gtest/gtest.h>
 
 namespace glamdb::detail {
 namespace {
+TEST(MetadataResources, CollectionPagesChargePerColumnWriteSettings)
+{
+    ResourceLimits limits;
+    limits.memory_bytes[1] = 512ULL << 10;
+    auto owner = std::make_shared<ResourceOwner>(limits);
+    TCollectionPage page;
+    page.Collections.resize(16);
+    for (auto& collection : page.Collections) {
+        for (int index = 0; index < 64; ++index) {
+            const auto name = std::to_string(index) + std::string(125, 'a');
+            collection.schema.fields.push_back({name, FieldType::String, false});
+            collection.write_settings.columns.push_back({name, ParquetCompression{ParquetCodec::Snappy}});
+        }
+    }
+    const auto retained = RetainMetadata(owner, page);
+    EXPECT_FALSE(retained);
+    if (!retained) {
+        EXPECT_EQ(retained.error().code, "RESOURCE_EXHAUSTED");
+    }
+    TMetadataPages pages({.MaxBytes = 256ULL << 10});
+    const auto cached = pages.Read({.PageSize = 1}, "collections", [&]() -> Result<TMetadataPages::TListing> {
+        return page;
+    });
+    EXPECT_FALSE(cached);
+    if (!cached) {
+        EXPECT_EQ(cached.error().code, "RESOURCE_EXHAUSTED");
+    }
+}
+
 TEST(MetadataResources, CompoundPredicatesIncludeNestedLiteralCapacity)
 {
     ResourceLimits limits;

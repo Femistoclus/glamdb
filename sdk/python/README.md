@@ -558,3 +558,22 @@ the drop automatically. Call `drop_database` again with the **same saved UUIDs**
 to retrieve or finish that deletion. Never resolve a name for cleanup: another
 database may already have reused it. This is a network operation; the SDK does
 not remove local files. See [managed database deletion](../../docs/development/DATABASE_DROP.md).
+
+The native collection range is 1–64, with eight as the default. Use
+`create_database("comparison", limits={"max_collections": 64})` to opt in;
+the shared resource owner must admit the profile. Collection pages retain one
+creation inventory, so later creates do not appear midway through enumeration:
+
+```python
+cursor = None
+while True:
+    page = client.list_collections(page_size=7, cursor=cursor)
+    for collection in page.items:
+        consume(collection)
+    cursor = page.next_cursor
+    if cursor is None:
+        break
+```
+
+See [collection profiles](../../docs/development/COLLECTION_PROFILES.md) for the
+native restart, refusal, inventory and measured larger-profile evidence.

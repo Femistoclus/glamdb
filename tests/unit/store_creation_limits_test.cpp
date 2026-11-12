@@ -58,7 +58,7 @@ INSTANTIATE_TEST_SUITE_P(OutOfRangeCatalogLimits,
                         }},
         InvalidLimitsCase{"TooManyCollections",
             [](Limits& limits) {
-                limits.max_collections = 9;
+                limits.max_collections = 65;
             }},
         InvalidLimitsCase{"CatalogTooLarge",
             [](Limits& limits) {
