@@ -201,6 +201,13 @@ transport maintenance endpoints are not provided.
 KV collections refuse snapshot expiration and preserve all retained file intervals
 and no-op bound roots. Their first creation introduces catalog version 4 while
 existing version-3 append retention stores remain compatible.
+Append collections can set `hot_snapshots` (creation, `Engine::UpdateSnapshotArchive`):
+appends then keep only the newest snapshots in the Iceberg root and move older
+ones, still readable, to catalog archive rows in the same outer transaction;
+`Engine::ArchiveSnapshots` is the bounded maintenance call. The first stored
+setting introduces catalog version 5; stores without it are unchanged. See
+[the snapshot archive tier](docs/development/SNAPSHOT_ARCHIVE.md); HTTP/SDK/CLI
+adapters are not provided yet.
 General garbage collection, asynchronous admission, replication,
 multiple writers, and schema evolution are outside the initial append scope. Consult
 [docs/ROADMAP.md](docs/ROADMAP.md) when assessing feature scope; its current
