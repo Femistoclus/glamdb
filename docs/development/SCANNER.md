@@ -187,7 +187,8 @@ joins a writer attempt or holds a SQLite read transaction.
   current column chunk of each read field. A FileIO failure under
   the decoder keeps its storage classification (an I/O error stays `IO_ERROR`
   and does not close readiness), and the stream close is checked after the
-  file is decoded. Before opening a file the cursor keeps the shared scan
+  file is decoded and when a limit completes the scan inside a file (only
+  cancellation and failed scans close best effort). Before opening a file the cursor keeps the shared scan
   budget's reservations (twice the file size plus 64 KiB of data, 256 MiB of
   footer/decoder metadata; see [shared resources](SHARED_RESOURCES.md)); every
   read buffer retains the data reservation until it is released, although at
@@ -219,7 +220,11 @@ joins a writer attempt or holds a SQLite read transaction.
   `IsNull` by a zero and `IsNotNull` by a full null count; `And` prunes when
   any child does, `Or` only when every child does, and a `Not` subtree is
   never reasoned about (it may be `TRUE`). Missing, malformed or inconsistent
-  statistics prune nothing. Manifest string upper bounds of at least 16 code
+  statistics prune nothing: a bound of the wrong width, a string bound that is
+  not valid UTF-8, a non-finite float bound, a lower bound above the upper
+  bound (under the column's ordering), bounds in a column whose null count
+  says every value is `NULL`, or negative or excessive counts discard that
+  field's statistics for the file or row group. Manifest string upper bounds of at least 16 code
   points (`MetricsTruncateLength`, the table profile's `truncate(16)`) may be
   truncated and are ignored; lower bounds are prefixes and remain valid.
   Float bounds are used only when the manifest records a zero NaN count for
