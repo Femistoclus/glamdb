@@ -411,7 +411,7 @@ TJson FileJson(const Engine& engine,
 
 TJson SnapshotArchiveJson(const SnapshotArchiveStatus& status, bool maintenance)
 {
-    TJson value{{"hot_snapshots", OptionalInteger(status.hot_snapshots)},
+    TJson value{{"hot_snapshots", std::to_string(status.hot_snapshots.value_or(KeepAllSnapshotsInRoot))},
         {"root_snapshots", std::to_string(status.root_snapshots)},
         {"archived_snapshots", std::to_string(status.archived_snapshots)},
         {"expired_snapshots", std::to_string(status.expired_snapshots)},
@@ -427,7 +427,8 @@ std::optional<int64_t> ParseHotSnapshots(const TJson& value)
     if (value.is_null()) {
         return std::nullopt;
     }
-    Require(value.is_string(), "hot_snapshots must be a decimal string or null");
+    Require(value.is_string(),
+        "hot_snapshots must be a decimal string (\"0\" keeps every snapshot in the root) or null");
     return ParseInt64(value);
 }
 

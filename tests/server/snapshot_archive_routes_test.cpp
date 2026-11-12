@@ -147,17 +147,26 @@ TEST_F(TSnapshotArchiveRoutesTest, CreationRetriesUpdatesAndRefusalsMapCoreError
 {
     const auto created = Create({{"hot_snapshots", "3"}});
     EXPECT_EQ(created.at("hot_snapshots"), "3");
+    EXPECT_EQ(created.at("hot_snapshots_defaulted"), false);
     EXPECT_EQ(Create({{"hot_snapshots", "3"}}), created);
-    for (const auto& different : {TJson{{"hot_snapshots", "4"}}, TJson::object(), TJson{{"hot_snapshots", nullptr}}}) {
+    // Omitted and null both select the default (100), "0" no archive: every
+    // other effective value is a mismatch.
+    for (const auto& different : {TJson{{"hot_snapshots", "4"}},
+             TJson::object(),
+             TJson{{"hot_snapshots", nullptr}},
+             TJson{{"hot_snapshots", "0"}},
+             TJson{{"hot_snapshots", "100"}}})
+    {
         const auto mismatch = Create(different, 409);
         EXPECT_EQ(mismatch.at("error").at("code"), "SNAPSHOT_ARCHIVE_MISMATCH") << different;
         EXPECT_EQ(mismatch.at("outcome"), "definitely_not_committed");
     }
-    for (const auto& invalid : {TJson("0"), TJson("1099511627777"), TJson("-1"), TJson(3), TJson("3x"), TJson(true)}) {
+    for (const auto& invalid : {TJson("1099511627777"), TJson("-1"), TJson(3), TJson("3x"), TJson(true)}) {
         auto body = TJson{{"hot_snapshots", invalid}};
         const auto response = Call("POST", Path("/snapshot-archive"), body);
         EXPECT_EQ(response.Status, 400) << invalid << response.Body;
         EXPECT_EQ(NTransport::ParseJson(response.Body)["error"]["code"], "INVALID_ARGUMENT");
+        EXPECT_EQ(Create(body, 400).at("error").at("code"), "INVALID_ARGUMENT") << invalid;
     }
     EXPECT_EQ(Json("POST", Path("/snapshot-archive"), TJson::object(), 400).at("error").at("code"), "INVALID_ARGUMENT");
     EXPECT_EQ(Json("POST", Path("/snapshot-archive"), TJson{{"hot_snapshots", "2"}, {"extra", 1}}, 400)
@@ -195,8 +204,14 @@ TEST_F(TSnapshotArchiveRoutesTest, CreationRetriesUpdatesAndRefusalsMapCoreError
             {"archived_snapshots", "0"},
             {"expired_snapshots", "0"},
             {"archive_pending", "0"}}));
-    EXPECT_EQ(Json("POST", Path("/snapshot-archive"), TJson{{"hot_snapshots", nullptr}}).at("hot_snapshots"), nullptr);
-    EXPECT_EQ(Json("GET", Path("/snapshot-archive")).at("hot_snapshots"), nullptr);
+    // "0" and null both stop archiving; the effective value is reported as "0".
+    for (const auto& stop : {TJson("0"), TJson(nullptr)}) {
+        const auto stopped = Json("POST", Path("/snapshot-archive"), TJson{{"hot_snapshots", stop}});
+        EXPECT_EQ(stopped.at("hot_snapshots"), "0");
+        EXPECT_EQ(stopped.at("hot_snapshots_defaulted"), false);
+        EXPECT_EQ(Json("GET", Path("/snapshot-archive")).at("hot_snapshots"), "0");
+    }
+    EXPECT_EQ(Create({{"hot_snapshots", "3"}}).at("hot_snapshots"), "0");
 
     const TJson kv{{"collection_id", KvCollection},
         {"name", "kv"},
@@ -206,7 +221,13 @@ TEST_F(TSnapshotArchiveRoutesTest, CreationRetriesUpdatesAndRefusalsMapCoreError
     refused["hot_snapshots"] = "2";
     EXPECT_EQ(Json("POST", "/collections", refused, 409).at("error").at("code"), "COLLECTION_MODE_MISMATCH");
     EXPECT_EQ(Json("GET", Path({}, KvCollection), std::nullopt, 404).at("error").at("code"), "COLLECTION_NOT_FOUND");
-    EXPECT_EQ(Json("POST", "/collections", kv).at("hot_snapshots"), nullptr);
+    // KV collections never get the default; omitted and "0" are the same creation.
+    const auto kvCreated = Json("POST", "/collections", kv);
+    EXPECT_EQ(kvCreated.at("hot_snapshots"), "0");
+    EXPECT_EQ(kvCreated.at("hot_snapshots_defaulted"), false);
+    auto kvExplicit = kv;
+    kvExplicit["hot_snapshots"] = "0";
+    EXPECT_EQ(Json("POST", "/collections", kvExplicit), kvCreated);
     EXPECT_EQ(Json("POST", Path("/snapshot-archive", KvCollection), TJson{{"hot_snapshots", "2"}}, 409)
                   .at("error")
                   .at("code"),
@@ -214,14 +235,92 @@ TEST_F(TSnapshotArchiveRoutesTest, CreationRetriesUpdatesAndRefusalsMapCoreError
     EXPECT_EQ(
         Json("POST", Path("/snapshot-archive/maintenance", KvCollection), TJson::object(), 409).at("error").at("code"),
         "COLLECTION_MODE_MISMATCH");
-    // Unsetting is the KV collection's only (and unchanged) state.
-    EXPECT_EQ(
-        Json("POST", Path("/snapshot-archive", KvCollection), TJson{{"hot_snapshots", nullptr}}).at("hot_snapshots"),
-        nullptr);
+    // Stopping is the KV collection's only (and unchanged) state.
+    for (const auto& stop : {TJson("0"), TJson(nullptr)}) {
+        EXPECT_EQ(Json("POST", Path("/snapshot-archive", KvCollection), TJson{{"hot_snapshots", stop}}), kvCreated);
+    }
+    EXPECT_EQ(Json("GET", Path("/snapshot-archive", KvCollection)).at("hot_snapshots"), "0");
     EXPECT_EQ(Json("GET", Path("/snapshot-archive", "00112233-4455-6677-8899-aabbccddee02"), std::nullopt, 404)
                   .at("error")
                   .at("code"),
         "COLLECTION_NOT_FOUND");
+}
+
+TEST_F(TSnapshotArchiveRoutesTest, OmittedSettingDefaultsAndRepeatedCreationComparesEffectiveValues)
+{
+    const auto events = [](std::string_view id, std::string_view name, TJson extra) {
+        TJson body{{"collection_id", id},
+            {"name", name},
+            {"schema", {{"fields", {{{"name", "n"}, {"type", "int64"}, {"nullable", true}}}}}}};
+        body.update(extra);
+        return body;
+    };
+    constexpr char Defaulted[] = "00112233-4455-6677-8899-aabbccddee11";
+    constexpr char Hundred[] = "00112233-4455-6677-8899-aabbccddee12";
+    constexpr char NoArchive[] = "00112233-4455-6677-8899-aabbccddee13";
+
+    // Omitted: the default, reported as an effective value plus the flag.
+    const auto defaulted = Json("POST", "/collections", events(Defaulted, "defaulted", TJson::object()));
+    EXPECT_EQ(defaulted.at("hot_snapshots"), "100");
+    EXPECT_EQ(defaulted.at("hot_snapshots_defaulted"), true);
+    EXPECT_EQ(Json("GET", Path({}, Defaulted)), defaulted);
+    // A repeated create matches by effective value: omitted, null and an
+    // explicit 100 are the same creation; "0" and any other value are not.
+    for (const auto& same : {TJson::object(), TJson{{"hot_snapshots", nullptr}}, TJson{{"hot_snapshots", "100"}}}) {
+        EXPECT_EQ(Json("POST", "/collections", events(Defaulted, "defaulted", same)), defaulted) << same;
+    }
+    for (const auto& different : {TJson{{"hot_snapshots", "0"}}, TJson{{"hot_snapshots", "99"}}}) {
+        EXPECT_EQ(Json("POST", "/collections", events(Defaulted, "defaulted", different), 409).at("error").at("code"),
+            "SNAPSHOT_ARCHIVE_MISMATCH")
+            << different;
+    }
+    const auto status = Json("GET", Path("/snapshot-archive", Defaulted));
+    EXPECT_EQ(status.at("hot_snapshots"), "100");
+    EXPECT_EQ(status.at("archive_pending"), "0");
+
+    // Explicit 100 is not defaulted but matches an omitted value.
+    const auto hundred = Json("POST", "/collections", events(Hundred, "hundred", {{"hot_snapshots", "100"}}));
+    EXPECT_EQ(hundred.at("hot_snapshots"), "100");
+    EXPECT_EQ(hundred.at("hot_snapshots_defaulted"), false);
+    EXPECT_EQ(Json("POST", "/collections", events(Hundred, "hundred", TJson::object())), hundred);
+
+    // Explicit opt-out: "0" matches only "0".
+    const auto none = Json("POST", "/collections", events(NoArchive, "none", {{"hot_snapshots", "0"}}));
+    EXPECT_EQ(none.at("hot_snapshots"), "0");
+    EXPECT_EQ(none.at("hot_snapshots_defaulted"), false);
+    EXPECT_EQ(Json("POST", "/collections", events(NoArchive, "none", {{"hot_snapshots", "0"}})), none);
+    for (const auto& different : {TJson::object(), TJson{{"hot_snapshots", nullptr}}, TJson{{"hot_snapshots", "100"}}})
+    {
+        EXPECT_EQ(Json("POST", "/collections", events(NoArchive, "none", different), 409).at("error").at("code"),
+            "SNAPSHOT_ARCHIVE_MISMATCH")
+            << different;
+    }
+    EXPECT_EQ(Json("GET", Path("/snapshot-archive", NoArchive)),
+        TJson({{"hot_snapshots", "0"},
+            {"root_snapshots", "0"},
+            {"archived_snapshots", "0"},
+            {"expired_snapshots", "0"},
+            {"archive_pending", "0"}}));
+
+    // Any update, even to the same value, makes the setting explicit; the
+    // created effective value still decides repeated creation.
+    const auto explicitHundred = Json("POST", Path("/snapshot-archive", Defaulted), TJson{{"hot_snapshots", "100"}});
+    EXPECT_EQ(explicitHundred.at("hot_snapshots"), "100");
+    EXPECT_EQ(explicitHundred.at("hot_snapshots_defaulted"), false);
+    EXPECT_EQ(Json("POST", "/collections", events(Defaulted, "defaulted", TJson::object())), explicitHundred);
+    const auto stopped = Json("POST", Path("/snapshot-archive", Defaulted), TJson{{"hot_snapshots", "0"}});
+    EXPECT_EQ(stopped.at("hot_snapshots"), "0");
+    EXPECT_EQ(Json("POST", "/collections", events(Defaulted, "defaulted", TJson::object())), stopped);
+    EXPECT_EQ(Json("POST", "/collections", events(Defaulted, "defaulted", {{"hot_snapshots", "0"}}), 409)
+                  .at("error")
+                  .at("code"),
+        "SNAPSHOT_ARCHIVE_MISMATCH");
+    // A response can be repeated as the create request of a collection that
+    // was never updated.
+    for (const auto& [id, name, info] : {std::tuple{Hundred, "hundred", hundred}, std::tuple{NoArchive, "none", none}})
+    {
+        EXPECT_EQ(Json("POST", "/collections", events(id, name, {{"hot_snapshots", info.at("hot_snapshots")}})), info);
+    }
 }
 
 TEST_F(TSnapshotArchiveRoutesTest, ArchivedSnapshotsAnswerOverHttpExactlyAsWhileHot)
@@ -330,7 +429,7 @@ TEST_F(TSnapshotArchiveRoutesTest, UncertainCommitsReportRecoveryRequiredAndRetr
         EXPECT_EQ(retried.at("snapshots_archived"), afterUnlink ? "0" : pending.get<std::string>());
         if (!afterUnlink) {
             // Re-create a backlog for the after-unlink case.
-            Json("POST", Path("/snapshot-archive"), TJson{{"hot_snapshots", nullptr}});
+            Json("POST", Path("/snapshot-archive"), TJson{{"hot_snapshots", "0"}});
             snapshots.push_back(Append(static_cast<int64_t>(snapshots.size())));
             snapshots.push_back(Append(static_cast<int64_t>(snapshots.size())));
             Json("POST", Path("/snapshot-archive"), TJson{{"hot_snapshots", "1"}});

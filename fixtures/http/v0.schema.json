@@ -144,7 +144,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Omitted or null: the server default for append collections (100 when features.snapshot_archive, none for KV); \"0\": no archive; \"1\"..\"1099511627776\": that many root snapshots."
         }
       },
       "required": [
@@ -517,14 +518,12 @@
           "$ref": "#/$defs/int64"
         },
         "hot_snapshots": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/int64"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/int64",
+          "description": "Effective setting; \"0\" without an archive."
+        },
+        "hot_snapshots_defaulted": {
+          "type": "boolean",
+          "description": "The value came from the server default at creation and was never set explicitly."
         }
       },
       "required": [
@@ -537,7 +536,8 @@
         "current_snapshot_id",
         "write_settings",
         "write_settings_version",
-        "hot_snapshots"
+        "hot_snapshots",
+        "hot_snapshots_defaulted"
       ],
       "additionalProperties": false
     },
@@ -3051,7 +3051,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "\"0\" or null stops archiving later snapshots; \"1\"..\"1099511627776\" sets an explicit value. Any update clears hot_snapshots_defaulted."
         }
       },
       "required": [
@@ -3063,14 +3064,7 @@
       "type": "object",
       "properties": {
         "hot_snapshots": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/int64"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/int64"
         },
         "root_snapshots": {
           "$ref": "#/$defs/int64"
@@ -3098,14 +3092,7 @@
       "type": "object",
       "properties": {
         "hot_snapshots": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/int64"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/int64"
         },
         "root_snapshots": {
           "$ref": "#/$defs/int64"

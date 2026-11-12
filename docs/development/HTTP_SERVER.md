@@ -739,34 +739,60 @@ See `glamdb.native_metadata` and [system acceptance](NATIVE_ACCEPTANCE.md).
 
 ## Snapshot archive
 
-Create also accepts optional `hot_snapshots` (decimal string 1..2^40, or null for
-none), part of the definition like `write_settings`: a repeated creation with
-another value, or without the original value, returns 409
-`SNAPSHOT_ARCHIVE_MISMATCH`. Collections report `hot_snapshots` (`null` when
-unset). Appends then keep only the newest snapshots in the Iceberg root and
-move older ones to the catalog archive; see
-[the snapshot archive tier](SNAPSHOT_ARCHIVE.md). `features.snapshot_archive`
-advertises it.
+Create accepts an optional `hot_snapshots` decimal string with three meanings:
+omitted (or `null`, which equals an omitted member as elsewhere in request
+JSON) selects the server default, `DefaultHotSnapshots` = 100 for a new append
+collection while `features.snapshot_archive` is advertised and none for KV;
+`"0"` (`KeepAllSnapshotsInRoot`) creates the collection without an archive;
+`"1"`..`"1099511627776"` is an explicit value. Collections report the effective
+value as a decimal string (`"0"` without an archive, never `null`) plus
+`hot_snapshots_defaulted: true|false` (the value came from the default and was
+never set explicitly; any update clears it). The effective value is part of the
+definition like `write_settings`: a repeated creation compares effective values,
+so an omitted value matches a defaulted collection or an explicit `"100"`,
+`"0"` matches only a collection without an archive, and anything else returns
+409 `SNAPSHOT_ARCHIVE_MISMATCH`. A reported collection can therefore be repeated
+as its own create request until it is updated. Consequence for collections
+created before the default existed (by older servers, without an archive): a
+create retry that omits the member no longer matches them; send `"0"`. Opening,
+restarting or reopening such a database through the registry never adds the
+default to existing collections or raises their catalog version; only a new
+collection that omits the setting introduces catalog versions 5 and 6, which
+older servers cannot open. Appends then keep only the newest snapshots in the
+Iceberg root and move older ones to the catalog archive; see
+[the snapshot archive tier](SNAPSHOT_ARCHIVE.md).
 
 `GET /collections/{id}/snapshot-archive` returns `{hot_snapshots,
 root_snapshots, archived_snapshots, expired_snapshots, archive_pending}` (decimal
-strings; `hot_snapshots` may be null) from the confirmed view without I/O; it
-uses the reader pool. `POST` on the same route with `{hot_snapshots:"N"|null}`
-replaces the setting under the writer and returns the collection; nothing moves
-immediately, null stops archiving later snapshots and archived snapshots never
-return to the root. Repeating an applied request returns the collection
-unchanged, so a lost response is retried as is. `POST
+strings; `hot_snapshots` is the effective value, `"0"` without an archive) from
+the confirmed view without I/O; it uses the reader pool. `POST` on the same
+route with `{hot_snapshots:"N"|"0"|null}` (the member is required) replaces the
+setting with an explicit one under the writer and returns the collection;
+nothing moves immediately, `"0"` and `null` stop archiving later snapshots and
+archived snapshots never return to the root. Repeating an applied request
+returns the collection unchanged, so a lost response is retried as is. `POST
 .../snapshot-archive/maintenance` with `{}` archives at most 1024 root snapshots
 above `hot_snapshots` and returns the status plus `snapshots_archived`; repeat it
 while `archive_pending` is not `"0"`. Both POST routes run on the publisher
 pool. There is no PUT route: the server accepts only GET and POST.
 
-KV collections refuse a setting, at creation or update, and maintenance with
-409 `COLLECTION_MODE_MISMATCH` (an update to null succeeds unchanged). Values
-outside 1..2^40, non-string values and `hot_snapshots` above an explicit
-retention `keep_last` return 400 `INVALID_ARGUMENT`. An uncertain COMMIT of an
-update or maintenance call returns 503 `RECOVERY_REQUIRED`
+KV collections refuse a nonzero setting, at creation or update, and maintenance
+with 409 `COLLECTION_MODE_MISMATCH` (`"0"` or `null` succeeds unchanged). Values
+outside 0..2^40, non-decimal or non-string values and `hot_snapshots` above an
+explicit retention `keep_last` return 400 `INVALID_ARGUMENT`. An uncertain
+COMMIT of an update or maintenance call returns 503 `RECOVERY_REQUIRED`
 (`SameIdAfterReconcile`): reconcile the database, then repeat the same request.
+
+Full verification is not a separate route. A default open (server start,
+registry auto-open, `POST /databases/{id}/open`) of a catalog version 6 store
+rebuilds state from its verified checkpoints and falls back to full
+verification on any mismatch; `POST /databases/{id}/reconcile` on an open
+database always re-verifies every receipt, archive row, retained transition and
+data-file footer and re-establishes the checkpoints (`Engine::Reconcile`, the
+same path as `Engine::VerifyStoreFull`). The open body has no one-shot option
+to extend (only `limits`, which the registry persists), so it has no
+`verify_full`. Offline, `glamdb-admin verify-store` opens with
+`OpenStoreRequest::verify_full` (see the [CLI guide](../../apps/cli/README.md)).
 
 Archived snapshots need no other routes. `.../snapshots` lists them before the
 root's snapshots in the same keyset pages, and `.../stats`, `.../files`,

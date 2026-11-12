@@ -1,6 +1,7 @@
 """Snapshot archive over actual native HTTP storage and restart; no mock backend."""
 import json
 from pathlib import Path
+import sqlite3
 import sys
 import unittest
 import uuid
@@ -74,20 +75,39 @@ class NativeSnapshotArchiveHTTP(NativeHTTP):
         body = {'collection_id': cid, 'name': 'archive', 'schema': SCHEMA, 'hot_snapshots': '3'}
         created = self.api('/collections', body)
         self.validate('collection', created)
-        self.assertEqual(created['hot_snapshots'], '3')
-        # An exact retry returns the collection; any other definition is refused.
+        self.assertEqual((created['hot_snapshots'], created['hot_snapshots_defaulted']), ('3', False))
+        # An exact retry returns the collection; any other effective value is refused.
         self.assertEqual(self.api('/collections', body), created)
-        for other in ('4', None, 'omitted'):
+        for other in ('4', None, 'omitted', '0', '100'):
             changed = {key: value for key, value in body.items() if key != 'hot_snapshots'}
             if other != 'omitted':
                 changed['hot_snapshots'] = other
             self.assertEqual(self.error('/collections', changed), 'SNAPSHOT_ARCHIVE_MISMATCH')
+        # Omitted or null: the server default, reported with the flag; an
+        # explicit 100 is the same effective value, "0" is not.
         plain = str(uuid.uuid4())
-        default = self.api('/collections', {'collection_id': plain, 'name': 'plain', 'schema': SCHEMA})
-        self.assertIsNone(default['hot_snapshots'])
-        self.assertEqual(self.api('/collections', {'collection_id': plain, 'name': 'plain', 'schema': SCHEMA,
-                                                   'hot_snapshots': None}), default)
-        for invalid in ('0', '1099511627777', 3, '+3', ''):
+        plain_body = {'collection_id': plain, 'name': 'plain', 'schema': SCHEMA}
+        default = self.api('/collections', plain_body)
+        self.validate('collection', default)
+        self.assertEqual((default['hot_snapshots'], default['hot_snapshots_defaulted']), ('100', True))
+        for same in (None, '100'):
+            self.assertEqual(self.api('/collections', dict(plain_body, hot_snapshots=same)), default)
+        self.assertEqual(self.error('/collections', dict(plain_body, hot_snapshots='0')), 'SNAPSHOT_ARCHIVE_MISMATCH')
+        # Explicit opt-out.
+        none_body = {'collection_id': str(uuid.uuid4()), 'name': 'none', 'schema': SCHEMA, 'hot_snapshots': '0'}
+        none = self.api('/collections', none_body)
+        self.validate('collection', none)
+        self.assertEqual((none['hot_snapshots'], none['hot_snapshots_defaulted']), ('0', False))
+        self.assertEqual(self.api('/collections', none_body), none)
+        for other in (None, '100', 'omitted'):
+            changed = {key: value for key, value in none_body.items() if key != 'hot_snapshots'}
+            if other != 'omitted':
+                changed['hot_snapshots'] = other
+            self.assertEqual(self.error('/collections', changed), 'SNAPSHOT_ARCHIVE_MISMATCH')
+        status = self.api('/collections/' + none_body['collection_id'] + '/snapshot-archive')
+        self.validate('snapshotArchive', status)
+        self.assertEqual((status['hot_snapshots'], status['archive_pending']), ('0', '0'))
+        for invalid in ('-1', '1099511627777', 3, '+3', ''):
             self.assertEqual(self.error('/collections', {'collection_id': str(uuid.uuid4()), 'name': 'bad',
                                                          'schema': SCHEMA, 'hot_snapshots': invalid}, 400),
                              'INVALID_ARGUMENT')
@@ -113,12 +133,15 @@ class NativeSnapshotArchiveHTTP(NativeHTTP):
 
         kv = {'collection_id': str(uuid.uuid4()), 'name': 'kv', 'mode': 'kv', 'schema': SCHEMA}
         self.assertEqual(self.error('/collections', dict(kv, hot_snapshots='2')), 'COLLECTION_MODE_MISMATCH')
-        self.assertIsNone(self.api('/collections', kv)['hot_snapshots'])
+        kv_created = self.api('/collections', kv)
+        self.assertEqual((kv_created['hot_snapshots'], kv_created['hot_snapshots_defaulted']), ('0', False))
+        self.assertEqual(self.api('/collections', dict(kv, hot_snapshots='0')), kv_created)
         kv_path = '/collections/' + kv['collection_id']
         self.assertEqual(self.error(kv_path + '/snapshot-archive', {'hot_snapshots': '2'}),
                          'COLLECTION_MODE_MISMATCH')
         self.assertEqual(self.error(kv_path + '/snapshot-archive/maintenance', {}), 'COLLECTION_MODE_MISMATCH')
-        self.assertIsNone(self.api(kv_path + '/snapshot-archive', {'hot_snapshots': None})['hot_snapshots'])
+        for stop in (None, '0'):
+            self.assertEqual(self.api(kv_path + '/snapshot-archive', {'hot_snapshots': stop}), kv_created)
         status = self.api(kv_path + '/snapshot-archive')
         self.validate('snapshotArchive', status)
         self.assertEqual(status['archived_snapshots'], '0')
@@ -181,8 +204,9 @@ class NativeSnapshotArchiveHTTP(NativeHTTP):
         repeated = self.api(path + '/snapshot-archive/maintenance', {})
         self.assertEqual(repeated, dict(moved, snapshots_archived='0'))
         check_history_and_reads()
-        self.assertEqual(self.api(path + '/snapshot-archive', {'hot_snapshots': None})['hot_snapshots'], None)
-        # Unsetting stops archiving; nothing returns to the root.
+        stopped = self.api(path + '/snapshot-archive', {'hot_snapshots': '0'})
+        self.assertEqual((stopped['hot_snapshots'], stopped['hot_snapshots_defaulted']), ('0', False))
+        # Stopping keeps every later snapshot in the root; nothing returns to it.
         extra = self.api(path + '/append', {'operation_id': str(uuid.uuid4()),
                                             'rows': [{'key': 'after-unset'}]})['result']
         status = self.api(path + '/snapshot-archive')
@@ -196,18 +220,102 @@ class NativeSnapshotArchiveHTTP(NativeHTTP):
         self.stop()
         self.start()
         self.assertEqual(self.api(path + '/snapshot-archive'), status)
-        self.assertIsNone(self.api(path)['hot_snapshots'])
+        self.assertEqual(self.api(path)['hot_snapshots'], '0')
         check_history_and_reads()
         footprint = self.api(f'/databases/{self.store_id}/storage')
         self.assertGreater(int(footprint['referenced_metadata_file_bytes']), 0)
 
+    def catalog_version(self):
+        with sqlite3.connect(f"file:{Path(self.root) / 'catalog.sqlite'}?mode=ro", uri=True) as catalog:
+            return catalog.execute('PRAGMA user_version').fetchone()[0]
+
+    def test_collections_without_an_archive_keep_it_across_restart_and_registry_reopen(self):
+        """A store whose collections all opt out is what an older server created.
+
+        Restarting (registry auto-open) and reopening never add the default to
+        existing collections or raise the catalog version; only a new
+        collection that omits the setting introduces the archive tier.
+        """
+        cid = str(uuid.uuid4())
+        path = '/collections/' + cid
+        body = {'collection_id': cid, 'name': 'legacy', 'schema': SCHEMA, 'hot_snapshots': '0'}
+        created = self.api('/collections', body)
+        for index in range(3):
+            self.api(path + '/append', {'operation_id': str(uuid.uuid4()), 'rows': [{'key': str(index)}]})
+        status = self.api(path + '/snapshot-archive')
+        self.stop()
+        version = self.catalog_version()
+        self.assertLess(version, 5)
+        self.start()
+        database = f'/databases/{self.store_id}'
+        for _ in range(2):
+            current = self.api(path)
+            self.assertEqual((current['hot_snapshots'], current['hot_snapshots_defaulted']), ('0', False))
+            self.assertEqual(self.api(path + '/snapshot-archive'), status)
+            # A retry that omits the setting asks for the default, which this
+            # collection never had.
+            self.assertEqual(self.error('/collections', {key: value for key, value in body.items()
+                                                         if key != 'hot_snapshots'}), 'SNAPSHOT_ARCHIVE_MISMATCH')
+            self.assertEqual(self.api('/collections', body)['collection_id'], created['collection_id'])
+            # Close and reopen through the registry.
+            self.assertEqual(self.api(database + '/close', {})['state'], 'closed')
+            self.assertEqual(self.api(database + '/open', {})['state'], 'open')
+        self.api(path + '/append', {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'after'}]})
+        self.stop()
+        self.assertEqual(self.catalog_version(), version)
+        self.start()
+        added = self.api('/collections', {'collection_id': str(uuid.uuid4()), 'name': 'new', 'schema': SCHEMA})
+        self.assertEqual((added['hot_snapshots'], added['hot_snapshots_defaulted']), ('100', True))
+        self.assertEqual(self.api(path)['hot_snapshots'], '0')
+        self.stop()
+        self.assertEqual(self.catalog_version(), 6)
+        self.start()
+
+    def test_reconcile_reverifies_what_a_checkpoint_open_trusts(self):
+        cid = str(uuid.uuid4())
+        path = '/collections/' + cid
+        self.assertIs(self.api('/collections', {'collection_id': cid, 'name': 'checked',
+                                                'schema': SCHEMA})['hot_snapshots_defaulted'], True)
+        for index in range(3):
+            self.api(path + '/append', {'operation_id': str(uuid.uuid4()), 'rows': [{'key': str(index)}]})
+        database = f'/databases/{self.store_id}'
+        self.assertEqual(self.api(database + '/reconcile', {})['state'], 'open')
+        self.stop()
+        files = sorted(Path(self.root).rglob('*.parquet'), key=lambda item: item.stat().st_mtime_ns)
+        self.assertEqual(len(files), 3)
+        with files[0].open('r+b') as data:
+            data.seek(-4, 2)
+            data.write(b'XXXX')
+        # A restart opens from the verified checkpoints, which do not read
+        # data-file footers; reconcile verifies fully and finds the damage.
+        self.start()
+        self.assertEqual(self.api(path + '/snapshot-archive')['root_snapshots'], '3')
+        code, _, data = self.request(database + '/reconcile', {})
+        self.assertNotEqual(code, 200, data)
+        self.assertEqual(json.loads(data)['error']['code'], 'CORRUPTION')
+
     def test_sdk_archive_methods_against_native_storage(self):
-        from glamdb_sdk import Client, HTTPError, Schema
+        from glamdb_sdk import Client, HTTPError, ProtocolError, Schema
         schema = Schema.from_dict(SCHEMA)
         with Client(f'http://127.0.0.1:{self.port}', TOKEN, database_id=self.store_id) as client:
             cid = str(uuid.uuid4())
             created = client.create_collection('sdk_archive', schema, collection_id=cid, hot_snapshots=2)
             self.assertEqual(created.info['hot_snapshots'], '2')
+            # Omitted: the default, which resolves from a GET alone; an opt-out
+            # resolves through a repeated create.
+            defaulted = str(uuid.uuid4())
+            info = client.create_collection('sdk_default', schema, collection_id=defaulted).info
+            self.assertEqual((info['hot_snapshots'], info['hot_snapshots_defaulted']), ('100', True))
+            self.assertEqual(client.resolve_create('sdk_default', schema, collection_id=defaulted), info)
+            none = str(uuid.uuid4())
+            info = client.create_collection('sdk_none', schema, collection_id=none, hot_snapshots=0).info
+            self.assertEqual((info['hot_snapshots'], info['hot_snapshots_defaulted']), ('0', False))
+            self.assertEqual(client.resolve_create('sdk_none', schema, collection_id=none, hot_snapshots=0), info)
+            with self.assertRaises(ProtocolError):
+                client.resolve_create('sdk_none', schema, collection_id=none)
+            with self.assertRaises(ProtocolError):
+                client.resolve_create('sdk_default', schema, collection_id=defaulted, hot_snapshots=0)
+            self.assertEqual(client.update_snapshot_archive(none, None)['hot_snapshots'], '0')
             ids = [client.append(cid, [{'key': str(index)}], operation_id=uuid.uuid4(), schema=schema)
                    .result['snapshot_id'] for index in range(9)]
             status = client.snapshot_archive(cid)
