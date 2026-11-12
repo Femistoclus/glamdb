@@ -18,6 +18,10 @@ namespace glamdb::detail {
 
 class TSnapshotMetadataCache;
 
+// Archived snapshots one expiration call can remove. The engine passes one
+// more row so the backend knows the oldest archived snapshot that remains.
+inline constexpr uint64_t MaxExpiredArchivePerCall = 4096;
+
 struct CollectionView
 {
     CollectionInfo info;
@@ -51,6 +55,12 @@ public:
     // sticky I/O errors and candidate reopen capacity. A closed flag is not
     // proof.
     virtual Status VerifyClosure(std::string_view final_metadata_location) = 0;
+    // After VerifyClosure: the oldest root snapshots this append moved to the
+    // snapshot archive, for the same outer transaction.
+    virtual std::vector<ArchivedSnapshotRecord> Archived() const
+    {
+        return {};
+    }
 };
 
 class StagedExpiration
@@ -63,6 +73,16 @@ public:
     virtual bool Changed() const = 0;
     virtual iceberg::Status Publish(iceberg::sql::CatalogStore& catalog) = 0;
     virtual Status VerifyClosure(std::string_view location) = 0;
+    // Leading Expired() records that leave the snapshot archive.
+    virtual int64_t ArchivedExpired() const
+    {
+        return 0;
+    }
+    // Archive maintenance: after VerifyClosure, the snapshots it moved.
+    virtual std::vector<ArchivedSnapshotRecord> Archived() const
+    {
+        return {};
+    }
 };
 
 class StorageBackend
@@ -109,13 +129,24 @@ public:
         const CollectionInfo& collection,
         const NormalizedInput& input,
         std::chrono::steady_clock::time_point deadline) = 0;
+    // `archived` holds the oldest archived snapshots (at most 4097), from
+    // which expiration starts.
     virtual Result<std::unique_ptr<StagedExpiration>> PrepareExpiration(const StoreInfo&,
         const CollectionInfo&,
         const BaseIdentity&,
-        const std::optional<SnapshotRetentionPolicy>&)
+        const std::optional<SnapshotRetentionPolicy>&,
+        std::span<const ArchivedSnapshotRecord>)
     {
         return std::unexpected(
             ErrorDetail{"DEPENDENCY_UNAVAILABLE", "snapshot maintenance is not installed", RetryHint::OperatorAction});
+    }
+    // Moves the oldest root snapshots above the collection's hot_snapshots to
+    // the archive, bounded per call. Changed() is false when nothing moves.
+    virtual Result<std::unique_ptr<StagedExpiration>>
+    PrepareArchive(const StoreInfo&, const CollectionInfo&, const BaseIdentity&)
+    {
+        return std::unexpected(
+            ErrorDetail{"DEPENDENCY_UNAVAILABLE", "snapshot archive is not installed", RetryHint::OperatorAction});
     }
     virtual Status RemoveExpiredMetadata(std::string_view, std::string_view)
     {

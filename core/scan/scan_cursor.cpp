@@ -837,12 +837,14 @@ Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanReq
                 RetryHint::OperatorAction});
         }
         auto plan =
-            Take(context.VerifiedState ? PlanVerifiedScan(*context.VerifiedState, context.Base, request.selector)
-                                       : PlanManifests(context.FileIO,
-                                             context.Base,
-                                             request.selector,
-                                             context.Cache.get(),
-                                             context.RootBytes));
+            Take(context.VerifiedState
+                    ? PlanVerifiedScan(*context.VerifiedState, context.Base, request.selector, context.Archived.get())
+                    : PlanManifests(context.FileIO,
+                          context.Base,
+                          request.selector,
+                          context.Cache.get(),
+                          context.RootBytes,
+                          context.Archived.get()));
         // Uncached lists/schemas remain materialized in the plan. Verified
         // membership already retains the backend's shared generation lease.
         auto retainedPlan = context.VerifiedState ? nullptr : planningMemory;

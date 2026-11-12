@@ -48,6 +48,9 @@ struct EngineCapabilities
     int64_t max_dictionary_page_size_limit = 0;
     int64_t default_dictionary_page_size_limit = 0;
     bool storage_footprint = false;
+    // Collections accept hot_snapshots and keep older snapshots readable in
+    // the catalog snapshot archive.
+    bool snapshot_archive = false;
 };
 
 struct TMetadataPageRequest

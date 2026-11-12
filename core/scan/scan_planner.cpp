@@ -3,6 +3,7 @@
 #include "core/api/binary.h"
 #include "core/api/canonical.h"
 #include "core/backend/storage_errors.h"
+#include "core/catalog/durable_sqlite_catalog.h"
 #include "core/scan/buffer_file.h"
 #include "core/scan/metadata_cache.h"
 #include "core/storage/base_state.h"
@@ -217,7 +218,8 @@ Result<TScanManifests> PlanManifests(const std::shared_ptr<iceberg::FileIO>& io,
     const BaseIdentity& base,
     const SnapshotSelector& selector,
     TSnapshotMetadataCache* cache,
-    int64_t root_bytes)
+    int64_t root_bytes,
+    const ArchivedSnapshotRecord* archived)
 {
     try {
         const auto root = ReadScanRoot(io, base, cache, root_bytes);
@@ -226,31 +228,55 @@ Result<TScanManifests> PlanManifests(const std::shared_ptr<iceberg::FileIO>& io,
         }
         const auto& metadata = *root;
         TScanManifests plan;
-        const auto snapshot = SelectSnapshot(*metadata, selector);
-        if (!snapshot) {
-            return plan;
+        std::string listPath;
+        if (archived != nullptr && selector.kind == SnapshotSelectorKind::Id &&
+            archived->snapshot_id == selector.snapshot_id && !metadata->SnapshotById(selector.snapshot_id))
+        {
+            Require(!metadata->snapshots.empty() && metadata->snapshots.front() &&
+                    archived->sequence_number < metadata->snapshots.front()->sequence_number,
+                "NOT_FOUND",
+                "snapshot is not retained by this view");
+            plan.SnapshotID = archived->snapshot_id;
+            listPath = archived->manifest_list;
+        } else {
+            const auto snapshot = SelectSnapshot(*metadata, selector);
+            if (!snapshot) {
+                return plan;
+            }
+            plan.SnapshotID = snapshot->snapshot_id;
+            listPath = snapshot->manifest_list;
+            archived = nullptr;
         }
-        plan.SnapshotID = snapshot->snapshot_id;
         plan.Schema = Take(metadata->Schema(), "CORRUPTION", "table schema");
         plan.Specs = metadata->partition_specs;
         if (cache != nullptr) {
-            if (auto cachedList = cache->FindManifestList(snapshot->manifest_list)) {
+            if (auto cachedList = cache->FindManifestList(listPath)) {
                 plan.Manifests = *cachedList;
                 return plan;
             }
         }
-        const auto listBytes = ReadPersisted(io, snapshot->manifest_list, std::nullopt, "read manifest list");
-        const auto list = DecodePersisted("open manifest list", [&] {
-            return Take(iceberg::ManifestListReader::Make(snapshot->manifest_list, listBytes),
+        std::shared_ptr<iceberg::FileIO> listBytes;
+        if (archived != nullptr) {
+            auto bytes = Take(io->ReadFile(listPath, static_cast<size_t>(archived->manifest_list_bytes)),
                 "IO_ERROR",
-                "open manifest list");
+                "read archived manifest list");
+            Require(static_cast<int64_t>(bytes.size()) == archived->manifest_list_bytes &&
+                    Sha256(bytes) == archived->manifest_list_sha256,
+                "CORRUPTION",
+                "archived manifest list differs from its archive record");
+            listBytes = std::make_shared<TBufferFileIO>(listPath, std::move(bytes));
+        } else {
+            listBytes = ReadPersisted(io, listPath, std::nullopt, "read manifest list");
+        }
+        const auto list = DecodePersisted("open manifest list", [&] {
+            return Take(iceberg::ManifestListReader::Make(listPath, listBytes), "IO_ERROR", "open manifest list");
         });
         auto manifests =
             std::make_shared<const std::vector<iceberg::ManifestFile>>(DecodePersisted("read manifest list", [&] {
                 return Take(list->Files(), "IO_ERROR", "read manifest list");
             }));
         if (cache != nullptr) {
-            cache->TryPutManifestList(snapshot->manifest_list, manifests);
+            cache->TryPutManifestList(listPath, manifests);
         }
         plan.Manifests = *manifests;
         return plan;
@@ -264,8 +290,10 @@ Result<TScanManifests> PlanManifests(const std::shared_ptr<iceberg::FileIO>& io,
     }
 }
 
-Result<TScanManifests>
-PlanVerifiedScan(const NGlamDB::NStorage::TBaseState& state, const BaseIdentity& base, const SnapshotSelector& selector)
+Result<TScanManifests> PlanVerifiedScan(const NGlamDB::NStorage::TBaseState& state,
+    const BaseIdentity& base,
+    const SnapshotSelector& selector,
+    const ArchivedSnapshotRecord* archived)
 {
     try {
         Require(state.Metadata && state.ScanIndex && state.MetadataLocation == base.metadata_location &&
@@ -292,7 +320,23 @@ PlanVerifiedScan(const NGlamDB::NStorage::TBaseState& state, const BaseIdentity&
                 *plan.SnapshotID,
                 {},
                 &NGlamDB::NStorage::TSnapshotBoundary::SnapshotID);
-            Require(boundary != plan.Index->Snapshots.end() && boundary->SnapshotID == *plan.SnapshotID,
+            const bool hot = boundary != plan.Index->Snapshots.end() && boundary->SnapshotID == *plan.SnapshotID;
+            if (!hot && archived != nullptr && selector.kind == SnapshotSelectorKind::Id &&
+                archived->snapshot_id == *plan.SnapshotID)
+            {
+                const auto& snapshots = state.Metadata->snapshots;
+                Require(!snapshots.empty() && snapshots.front() &&
+                        archived->sequence_number < snapshots.front()->sequence_number,
+                    "NOT_FOUND",
+                    "snapshot is not retained by this view");
+                Require(archived->data_files > 0 && static_cast<uint64_t>(archived->data_files) <=
+                        plan.Index->Files.size(),
+                    "CORRUPTION",
+                    "archived snapshot has an invalid membership boundary");
+                plan.FileCount = static_cast<size_t>(archived->data_files);
+                return plan;
+            }
+            Require(hot,
                 selector.kind == SnapshotSelectorKind::Id ? "NOT_FOUND" : "CORRUPTION",
                 "snapshot is not retained by the verified scan index");
             Require(boundary->FileCount <= plan.Index->Files.size(),

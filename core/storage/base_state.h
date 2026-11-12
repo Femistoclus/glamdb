@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -56,12 +57,16 @@ iceberg::Result<TBaseState> VerifyRetainedSnapshot(const std::shared_ptr<iceberg
     std::int64_t snapshotID,
     const TStorageLimits& limits = {});
 
+// `expired` is the ancestry before the oldest root snapshot, oldest first:
+// the expiration ledger, then the snapshot archive. Its first `expiredCount`
+// entries (all when absent) are expired; the rest stay readable.
 iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileIO>& fileIO,
     const std::string& rootLocation,
     const std::string& storeID,
     const std::string& collectionID,
     const TStorageLimits& limits = {},
     const std::string& workspaceDirectory = {},
-    std::span<const std::shared_ptr<iceberg::Snapshot>> expired = {});
+    std::span<const std::shared_ptr<iceberg::Snapshot>> expired = {},
+    std::optional<std::size_t> expiredCount = std::nullopt);
 
 }

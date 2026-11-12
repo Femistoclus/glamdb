@@ -65,6 +65,16 @@ struct TPublicationContext
     std::size_t ExpirationPrefix = 0;
     // Per-collection list validation remains independent of aggregate admission.
     std::optional<TStorageLimits> StoreLimits{};
+    // Archived snapshots an expiration removes (oldest first) before any root
+    // snapshot, and the oldest archived snapshot that remains.
+    std::vector<TArchivedList> ExpiredArchive{};
+    std::optional<TArchivedList> RemainingArchive{};
+    // Oldest root snapshots an append or archive maintenance moves to the
+    // catalog archive. Their metadata files stay; the root drops them.
+    std::size_t ArchivePrefix = 0;
+    // Maintenance that only moves snapshots to the archive: every other root
+    // field, including the retention properties, stays unchanged.
+    bool ArchiveMaintenance = false;
 };
 
 class TStoragePublicationGuard final : public IPublicationGuard
@@ -74,10 +84,14 @@ public:
     iceberg::Status BeforePointerChange(const TPointerChange& change) override;
     // Install this tentative state only after the caller confirms its outer COMMIT.
     std::shared_ptr<const TBaseState> GetCandidate() const;
+    // The verified description of ArchivePrefix that the same outer
+    // transaction must record in the catalog archive.
+    std::shared_ptr<const TArchiveCut> GetArchiveCut() const;
 
 private:
     const TPublicationContext Context_;
     std::shared_ptr<const TBaseState> Candidate_;
+    std::shared_ptr<const TArchiveCut> ArchiveCut_;
     bool Invoked_ = false;
 
     iceberg::Status CheckContext(const TPointerChange& change) const;

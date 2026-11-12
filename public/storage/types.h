@@ -246,6 +246,10 @@ struct CollectionInfo
     // Current canonical settings; version 0 means never set (engine defaults).
     WriteSettings write_settings{};
     int64_t write_settings_version = 0;
+    // Newest snapshots kept in the Iceberg root; older ones move to the
+    // catalog snapshot archive and stay readable. Absent keeps every retained
+    // snapshot in the root.
+    std::optional<int64_t> hot_snapshots{};
     bool operator==(const CollectionInfo&) const = default;
 };
 
@@ -256,6 +260,32 @@ struct CreateCollectionRequest
     SchemaSpec schema;
     // Part of the definition: a repeated creation must request the same settings.
     WriteSettings write_settings{};
+    // Also part of the definition; 1..2^40 when present.
+    std::optional<int64_t> hot_snapshots{};
+};
+
+// Replaces the collection's hot_snapshots setting. Absent stops archiving
+// later snapshots. Archived snapshots never move back into the root. A
+// repeated request is applied once.
+struct UpdateSnapshotArchiveRequest
+{
+    std::string collection_id;
+    std::optional<int64_t> hot_snapshots{};
+};
+
+// Observed from the engine's confirmed view: snapshots in the Iceberg root,
+// in the catalog archive and expired by retention.
+struct SnapshotArchiveStatus
+{
+    std::optional<int64_t> hot_snapshots{};
+    int64_t root_snapshots = 0;
+    int64_t archived_snapshots = 0;
+    int64_t expired_snapshots = 0;
+    // Root snapshots above hot_snapshots that maintenance can still archive.
+    int64_t archive_pending = 0;
+    // Snapshots this maintenance call moved to the archive.
+    int64_t snapshots_archived = 0;
+    bool operator==(const SnapshotArchiveStatus&) const = default;
 };
 
 // Compare-and-set: applies only when expected_version is the current version.

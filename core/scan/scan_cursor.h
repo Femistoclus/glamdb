@@ -25,6 +25,7 @@ class ResourceReservation;
 namespace glamdb::detail {
 
 class TSnapshotMetadataCache;
+struct ArchivedSnapshotRecord;
 
 struct TScanContext
 {
@@ -51,6 +52,9 @@ struct TScanContext
     std::function<void(const ErrorDetail&)> OnError;
     std::shared_ptr<const NGlamDB::NStorage::TBaseState> VerifiedState{};
     int64_t RootBytes = HistoryLimits{}.max_root_file_bytes;
+    // The engine's indexed catalog lookup of a selected snapshot that left
+    // the root for the archive; planning reads it instead of the root entry.
+    std::shared_ptr<const ArchivedSnapshotRecord> Archived{};
 };
 
 Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanRequest& request);

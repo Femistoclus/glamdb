@@ -117,7 +117,10 @@ public:
     Result<std::unique_ptr<StagedExpiration>> PrepareExpiration(const StoreInfo& store,
         const CollectionInfo& collection,
         const BaseIdentity& base,
-        const std::optional<SnapshotRetentionPolicy>& policy) override;
+        const std::optional<SnapshotRetentionPolicy>& policy,
+        std::span<const ArchivedSnapshotRecord> archived) override;
+    Result<std::unique_ptr<StagedExpiration>>
+    PrepareArchive(const StoreInfo& store, const CollectionInfo& collection, const BaseIdentity& base) override;
     Status RemoveExpiredMetadata(std::string_view collectionID, std::string_view path) override;
     void PublicationFinished(std::string_view collectionID,
         std::string_view metadataLocation,
@@ -144,9 +147,11 @@ public:
 
 private:
     using TOperationReader = std::function<void(std::string_view, const DurableSqliteCatalogStore::OperationConsumer&)>;
+    using TArchiveReader = std::function<void(std::string_view, const DurableSqliteCatalogStore::ArchiveConsumer&)>;
     Status VerifyRetainedImpl(const StoreInfo& store,
         std::span<const CollectionView> collections,
-        const TOperationReader& readOperations);
+        const TOperationReader& readOperations,
+        const TArchiveReader& readArchive);
     struct TCollectionState
     {
         std::shared_ptr<const NGlamDB::NStorage::TBaseState> Confirmed;
@@ -197,8 +202,12 @@ private:
     std::shared_ptr<const NGlamDB::NStorage::TBaseState> ResolveBase(const BaseIdentity& base);
     std::shared_ptr<ResourceReservation>
     ReserveRootMemory(std::string_view collectionID, uint64_t bytes, bool reuse, uint64_t indexBytes = 0);
+    // `history` is the expired, then archived, ancestry before the root;
+    // `archive` the usage of the archived lists and their retired manifests.
     std::shared_ptr<const NGlamDB::NStorage::TBaseState> VerifyCollection(const BaseIdentity& base,
-        std::span<const std::shared_ptr<iceberg::Snapshot>> expired = {});
+        std::span<const std::shared_ptr<iceberg::Snapshot>> history = {},
+        std::size_t expired = 0,
+        const NGlamDB::NStorage::TStorageUsage& archive = {});
 };
 
 } // namespace glamdb::detail

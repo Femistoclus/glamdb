@@ -32,6 +32,36 @@ constexpr std::string_view expired_snapshots_table =
 constexpr std::string_view metadata_cleanup_table =
     "CREATE TABLE metadata_cleanup(collection_id TEXT NOT NULL REFERENCES collections(collection_id),"
     "path TEXT NOT NULL CHECK(length(path)<=2048),PRIMARY KEY(collection_id,path))";
+// Created with catalog version 4 by the first transaction that stores a
+// hot_snapshots setting; older binaries reject version 4, so they cannot
+// misread a root whose oldest snapshots live in the archive.
+constexpr std::string_view archive_settings_table =
+    "CREATE TABLE collection_snapshot_archive(collection_id TEXT PRIMARY KEY REFERENCES collections(collection_id),"
+    "created_hot_snapshots INTEGER CHECK(created_hot_snapshots IS NULL OR created_hot_snapshots BETWEEN 1 AND "
+    "1099511627776),hot_snapshots INTEGER CHECK(hot_snapshots IS NULL OR hot_snapshots BETWEEN 1 AND 1099511627776))";
+constexpr std::string_view archived_snapshots_table =
+    "CREATE TABLE archived_snapshots(collection_id TEXT NOT NULL REFERENCES collections(collection_id),"
+    "snapshot_id INTEGER NOT NULL,sequence_number INTEGER NOT NULL CHECK(sequence_number>=1),"
+    "parent_snapshot_id INTEGER,timestamp_ms INTEGER NOT NULL,operation_id TEXT NOT NULL,"
+    "manifest_list TEXT NOT NULL CHECK(length(manifest_list)<=2048),"
+    "manifest_list_bytes INTEGER NOT NULL CHECK(manifest_list_bytes>=1),"
+    "manifest_list_sha256 TEXT NOT NULL CHECK(length(manifest_list_sha256)=64),"
+    "data_files INTEGER NOT NULL CHECK(data_files>=1),retired_manifests INTEGER NOT NULL CHECK(retired_manifests>=0),"
+    "retired_manifest_bytes INTEGER NOT NULL CHECK(retired_manifest_bytes>=0),"
+    "snapshot_blob BLOB NOT NULL CHECK(length(snapshot_blob)<=65536),PRIMARY KEY(collection_id,snapshot_id),"
+    "UNIQUE(collection_id,sequence_number),UNIQUE(collection_id,operation_id),UNIQUE(collection_id,manifest_list),"
+    "FOREIGN KEY(collection_id,operation_id) REFERENCES operations(collection_id,operation_id))";
+constexpr std::string_view archived_columns =
+    "snapshot_id,sequence_number,parent_snapshot_id,timestamp_ms,operation_id,manifest_list,manifest_list_bytes,"
+    "manifest_list_sha256,data_files,retired_manifests,retired_manifest_bytes,snapshot_blob";
+constexpr int64_t max_hot_snapshots = 1LL << 40;
+
+void CheckHotSnapshots(const std::optional<int64_t>& hot)
+{
+    if (hot && (*hot < 1 || *hot > max_hot_snapshots)) {
+        throw Failure({"INVALID_ARGUMENT", "hot_snapshots must be 1..1099511627776", RetryHint::FixInput});
+    }
+}
 
 template <class T, class F>
 iceberg::Result<T> Bridge(F&& body, bool& rollback_only, std::optional<ErrorDetail>* first_error = nullptr)
@@ -141,9 +171,7 @@ void DurableSqliteCatalogStore::OpenConnection(bool create)
                 "UNSUPPORTED_STORE_VERSION",
                 "unexpected SQLite journal mode");
             const auto version = preflight.Integer("PRAGMA user_version");
-            Require(version == 1 || version == 2 || version == 3,
-                "UNSUPPORTED_STORE_VERSION",
-                "unknown catalog version");
+            Require(version >= 1 && version <= 4, "UNSUPPORTED_STORE_VERSION", "unknown catalog version");
             const auto rows = preflight.Query("SELECT store_id,format_major,profile_id FROM "
                                               "store_header WHERE singleton=1");
             Require(rows.size() == 1 && Required(rows[0], 0) == info_.store_id && Required(rows[0], 1) == "1" &&
@@ -237,7 +265,7 @@ void DurableSqliteCatalogStore::Configure()
 void DurableSqliteCatalogStore::ValidateHeader()
 {
     const auto version = database_.Integer("PRAGMA user_version");
-    Require((version == 1 || version == 2 || version == 3) && database_.Integer("PRAGMA application_id") == 1196179789,
+    Require(version >= 1 && version <= 4 && database_.Integer("PRAGMA application_id") == 1196179789,
         "UNSUPPORTED_STORE_VERSION",
         "unsupported catalog format");
     const auto tables = database_.Query("SELECT sql FROM sqlite_master WHERE name='collection_write_settings'");
@@ -251,6 +279,14 @@ void DurableSqliteCatalogStore::ValidateHeader()
         Require(version < 3 ? found.empty() : found.size() == 1 && found[0][0] == std::string(definition),
             "CORRUPTION",
             "retention tables do not match the catalog version");
+    }
+    for (const auto& [name, definition] : {std::pair{"collection_snapshot_archive", archive_settings_table},
+             std::pair{"archived_snapshots", archived_snapshots_table}})
+    {
+        const auto found = database_.Query("SELECT sql FROM sqlite_master WHERE name=?", {std::string(name)});
+        Require(version < 4 ? found.empty() : found.size() == 1 && found[0][0] == std::string(definition),
+            "CORRUPTION",
+            "snapshot archive tables do not match the catalog version");
     }
     const auto rows = database_.Query("SELECT store_id,format_major,profile_id,durability_fence FROM "
                                       "store_header WHERE singleton=1");
@@ -384,7 +420,268 @@ CollectionInfo DurableSqliteCatalogStore::ReadCollection(const SqlRow& row)
             Require(info.write_settings_version >= 1, "CORRUPTION", "invalid write settings version");
         }
     }
+    if (HasArchive()) {
+        const auto archive =
+            database_.Query("SELECT hot_snapshots FROM collection_snapshot_archive WHERE collection_id=?",
+                {info.collection_id});
+        if (!archive.empty() && archive[0][0]) {
+            info.hot_snapshots = ParseInteger(Required(archive[0], 0));
+            Require(*info.hot_snapshots >= 1 && *info.hot_snapshots <= max_hot_snapshots,
+                "CORRUPTION",
+                "invalid hot_snapshots setting");
+        }
+    }
     return info;
+}
+
+bool DurableSqliteCatalogStore::HasArchive()
+{
+    return database_.Integer("PRAGMA user_version") >= 4;
+}
+
+void DurableSqliteCatalogStore::EnsureArchive()
+{
+    Require(transaction_, "INTERNAL", "the snapshot archive requires the outer transaction");
+    EnsureRetention();
+    if (!HasArchive()) {
+        database_.Execute(archive_settings_table);
+        database_.Execute(archived_snapshots_table);
+        database_.Execute("PRAGMA user_version=4");
+    }
+}
+
+std::optional<int64_t> DurableSqliteCatalogStore::CreatedHotSnapshots(std::string_view id)
+{
+    std::lock_guard lock(mutex_);
+    Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
+    const auto collection = Collection(id);
+    if (!HasArchive()) {
+        return std::nullopt;
+    }
+    const auto rows =
+        database_.Query("SELECT created_hot_snapshots FROM collection_snapshot_archive WHERE collection_id=?",
+            {collection.collection_id});
+    if (rows.empty() || !rows[0][0]) {
+        return std::nullopt;
+    }
+    return ParseInteger(Required(rows[0], 0));
+}
+
+CollectionInfo DurableSqliteCatalogStore::UpdateHotSnapshots(std::string_view id, std::optional<int64_t> hot)
+{
+    std::lock_guard lock(mutex_);
+    Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
+    Require(publication_ == nullptr, "INTERNAL", "the archive setting cannot change during a publication");
+    CheckHotSnapshots(hot);
+    auto collection = Collection(id);
+    if (collection.hot_snapshots == hot) {
+        // Also a repeated request whose response was lost: applied once.
+        return collection;
+    }
+    Transaction([&] {
+        collection = Collection(id);
+        if (collection.hot_snapshots == hot) {
+            return;
+        }
+        CheckFreeBytes();
+        EnsureArchive();
+        database_.Execute("INSERT INTO collection_snapshot_archive(collection_id,created_hot_snapshots,hot_snapshots) "
+                          "VALUES(?,NULL,?) ON CONFLICT(collection_id) DO UPDATE SET "
+                          "hot_snapshots=excluded.hot_snapshots",
+            {collection.collection_id, hot ? SqlValue(*hot) : SqlValue(std::monostate{})});
+        Require(database_.Changes() == 1, "INTERNAL", "archive setting was not stored");
+        collection.hot_snapshots = hot;
+    });
+    return collection;
+}
+
+ArchivedSnapshotRecord DurableSqliteCatalogStore::ReadArchived(const SqlRow& row)
+{
+    ArchivedSnapshotRecord record;
+    record.snapshot_id = ParseInteger(Required(row, 0));
+    record.sequence_number = ParseInteger(Required(row, 1));
+    if (row.size() > 2 && row[2]) {
+        record.parent_snapshot_id = ParseInteger(Required(row, 2));
+    }
+    record.timestamp_ms = ParseInteger(Required(row, 3));
+    record.operation_id = Required(row, 4);
+    record.manifest_list = Required(row, 5);
+    record.manifest_list_bytes = ParseInteger(Required(row, 6));
+    record.manifest_list_sha256 = Required(row, 7);
+    record.data_files = ParseInteger(Required(row, 8));
+    record.retired_manifests = ParseInteger(Required(row, 9));
+    record.retired_manifest_bytes = ParseInteger(Required(row, 10));
+    record.snapshot_blob = Required(row, 11);
+    Require(record.sequence_number >= 1 && ValidUuid(record.operation_id) && record.manifest_list_bytes >= 1 &&
+            ValidDigest(record.manifest_list_sha256) && record.data_files >= 1 && record.retired_manifests >= 0 &&
+            record.retired_manifest_bytes >= 0 && !record.snapshot_blob.empty() &&
+            record.snapshot_blob.size() <= 65536 &&
+            (record.retired_manifests == 0) == (record.retired_manifest_bytes == 0),
+        "CORRUPTION",
+        "invalid archived snapshot record");
+    ValidateLocation(record.manifest_list, info_);
+    return record;
+}
+
+int64_t DurableSqliteCatalogStore::ArchiveWatermark(std::string_view id)
+{
+    int64_t watermark = 0;
+    if (database_.Integer("PRAGMA user_version") >= 3) {
+        const auto expired = database_.Query(
+            "SELECT COALESCE(MAX(sequence_number),0) FROM expired_snapshots WHERE collection_id=?", {std::string(id)});
+        watermark = ParseInteger(Required(expired.at(0), 0));
+    }
+    if (HasArchive()) {
+        const auto archived = database_.Query(
+            "SELECT COALESCE(MAX(sequence_number),0) FROM archived_snapshots WHERE collection_id=?", {std::string(id)});
+        watermark = std::max(watermark, ParseInteger(Required(archived.at(0), 0)));
+    }
+    return watermark;
+}
+
+void DurableSqliteCatalogStore::InsertArchived(std::string_view id, std::span<const ArchivedSnapshotRecord> archived)
+{
+    Require(transaction_, "INTERNAL", "archiving requires the outer transaction");
+    if (archived.empty()) {
+        return;
+    }
+    Require(HasArchive(), "CORRUPTION", "archived snapshots require the snapshot archive catalog version");
+    auto sequence = ArchiveWatermark(id);
+    for (const auto& snapshot : archived) {
+        Require(sequence < std::numeric_limits<int64_t>::max() && snapshot.sequence_number == sequence + 1,
+            "CORRUPTION",
+            "archived snapshots do not continue the archive");
+        sequence = snapshot.sequence_number;
+        Require(ValidDigest(snapshot.manifest_list_sha256) && snapshot.manifest_list_bytes >= 1 &&
+                snapshot.data_files >= 1 && snapshot.retired_manifests >= 0 && snapshot.retired_manifest_bytes >= 0 &&
+                !snapshot.snapshot_blob.empty() && snapshot.snapshot_blob.size() <= 65536,
+            "INTERNAL",
+            "invalid archived snapshot record");
+        ValidateLocation(snapshot.manifest_list, info_);
+        const auto operation = FindOperation(id, snapshot.operation_id);
+        Require(operation && operation->state == OperationState::Committed && operation->outcome &&
+                operation->outcome->result && operation->outcome->result->snapshot_id == snapshot.snapshot_id &&
+                operation->outcome->result->parent_snapshot_id == snapshot.parent_snapshot_id &&
+                operation->outcome->result->snapshot_created_at_us == snapshot.timestamp_ms * 1000,
+            "CORRUPTION",
+            "archived snapshot lacks its original committed receipt");
+        database_.Execute("INSERT INTO archived_snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            {std::string(id),
+                snapshot.snapshot_id,
+                snapshot.sequence_number,
+                snapshot.parent_snapshot_id ? SqlValue(*snapshot.parent_snapshot_id) : SqlValue(std::monostate{}),
+                snapshot.timestamp_ms,
+                snapshot.operation_id,
+                snapshot.manifest_list,
+                snapshot.manifest_list_bytes,
+                snapshot.manifest_list_sha256,
+                snapshot.data_files,
+                snapshot.retired_manifests,
+                snapshot.retired_manifest_bytes,
+                Blob{snapshot.snapshot_blob}});
+    }
+}
+
+std::optional<ArchivedSnapshotRecord> DurableSqliteCatalogStore::FindArchivedSnapshot(std::string_view id,
+    int64_t snapshot)
+{
+    std::lock_guard lock(mutex_);
+    Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
+    if (!HasArchive()) {
+        return std::nullopt;
+    }
+    const auto rows = database_.Query("SELECT " + std::string(archived_columns) +
+            " FROM archived_snapshots WHERE collection_id=? AND snapshot_id=?",
+        {std::string(id), snapshot});
+    if (rows.empty()) {
+        return std::nullopt;
+    }
+    return ReadArchived(rows.front());
+}
+
+bool DurableSqliteCatalogStore::IsArchivedManifestList(std::string_view id, std::string_view path)
+{
+    std::lock_guard lock(mutex_);
+    Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
+    return HasArchive() &&
+        !database_
+             .Query("SELECT 1 FROM archived_snapshots WHERE collection_id=? AND manifest_list=?",
+                 {std::string(id), std::string(path)})
+             .empty();
+}
+
+std::vector<ArchivedSnapshotRecord> DurableSqliteCatalogStore::OldestArchivedSnapshots(std::string_view id,
+    int64_t limit)
+{
+    std::lock_guard lock(mutex_);
+    Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
+    Require(limit >= 0 && limit <= 8191, "INTERNAL", "archive page exceeds the catalog result budget");
+    std::vector<ArchivedSnapshotRecord> result;
+    if (!HasArchive() || limit == 0) {
+        return result;
+    }
+    const auto rows = database_.Query("SELECT " + std::string(archived_columns) +
+            " FROM archived_snapshots WHERE collection_id=? ORDER BY sequence_number LIMIT ?",
+        {std::string(id), limit});
+    result.reserve(rows.size());
+    for (const auto& row : rows) {
+        result.push_back(ReadArchived(row));
+    }
+    return result;
+}
+
+ArchivedHistory DurableSqliteCatalogStore::ArchivedSnapshotsBelow(std::string_view id, int64_t before)
+{
+    std::lock_guard lock(mutex_);
+    Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
+    ArchivedHistory history;
+    if (database_.Integer("PRAGMA user_version") >= 3) {
+        const auto expired = database_.Query(
+            "SELECT COALESCE(MAX(sequence_number),0) FROM expired_snapshots WHERE collection_id=?", {std::string(id)});
+        history.expired_through = ParseInteger(Required(expired.at(0), 0));
+    }
+    if (!HasArchive()) {
+        return history;
+    }
+    int64_t last = 0;
+    while (true) {
+        const auto rows = database_.Query("SELECT " + std::string(archived_columns) +
+                " FROM archived_snapshots WHERE collection_id=? AND sequence_number>? AND sequence_number<? ORDER BY "
+                "sequence_number LIMIT 256",
+            {std::string(id), last, before});
+        for (const auto& row : rows) {
+            history.snapshots.push_back(ReadArchived(row));
+        }
+        if (rows.size() < 256) {
+            break;
+        }
+        last = history.snapshots.back().sequence_number;
+    }
+    return history;
+}
+
+void DurableSqliteCatalogStore::ForEachArchivedSnapshot(std::string_view id, const ArchiveConsumer& consume)
+{
+    std::lock_guard lock(mutex_);
+    Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
+    if (!HasArchive()) {
+        return;
+    }
+    int64_t last = 0;
+    while (true) {
+        const auto rows = database_.Query("SELECT " + std::string(archived_columns) +
+                " FROM archived_snapshots WHERE collection_id=? AND sequence_number>? ORDER BY sequence_number "
+                "LIMIT 256",
+            {std::string(id), last});
+        for (const auto& row : rows) {
+            const auto record = ReadArchived(row);
+            last = record.sequence_number;
+            consume(record);
+        }
+        if (rows.size() < 256) {
+            break;
+        }
+    }
 }
 
 bool DurableSqliteCatalogStore::HasWriteSettings()
@@ -734,6 +1031,7 @@ CollectionInfo DurableSqliteCatalogStore::PublishCreate(CollectionInfo collectio
             ValidUtf8(collection.name) && collection.name.find('\0') == std::string::npos,
         "INVALID_ARGUMENT",
         "invalid collection definition");
+    CheckHotSnapshots(collection.hot_snapshots);
     Publication scope{true, collection.name, std::nullopt, guard, {}, 0};
     publication_ = &scope;
     try {
@@ -771,6 +1069,11 @@ CollectionInfo DurableSqliteCatalogStore::PublishCreate(CollectionInfo collectio
                     {collection.collection_id, Blob{*settings}, Blob{*settings}});
                 collection.write_settings_version = 1;
             }
+            if (collection.hot_snapshots) {
+                EnsureArchive();
+                database_.Execute("INSERT INTO collection_snapshot_archive VALUES(?,?,?)",
+                    {collection.collection_id, *collection.hot_snapshots, *collection.hot_snapshots});
+            }
         });
         publication_ = nullptr;
         return collection;
@@ -783,7 +1086,8 @@ CollectionInfo DurableSqliteCatalogStore::PublishCreate(CollectionInfo collectio
 void DurableSqliteCatalogStore::PublishAppend(const BoundOperation& binding,
     const AppendResult& result,
     const Guard& guard,
-    const Body& body)
+    const Body& body,
+    const ArchiveSource& archived)
 {
     std::lock_guard lock(mutex_);
     Require(guard && body && publication_ == nullptr,
@@ -824,6 +1128,21 @@ void DurableSqliteCatalogStore::PublishAppend(const BoundOperation& binding,
             database_.Execute("UPDATE collections SET current_snapshot_id=? "
                               "WHERE collection_id=?",
                 {result.snapshot_id, binding.collection_id});
+            if (HasArchive()) {
+                if (archived) {
+                    InsertArchived(binding.collection_id, archived());
+                }
+                // A random identity reused from the archive would make two
+                // snapshots share one ID.
+                Require(database_
+                            .Query("SELECT 1 FROM archived_snapshots WHERE collection_id=? AND snapshot_id=?",
+                                {binding.collection_id, result.snapshot_id})
+                            .empty(),
+                    "IO_ERROR",
+                    "append reuses an archived snapshot identity");
+            } else if (archived) {
+                Require(archived().empty(), "CORRUPTION", "archiving requires the snapshot archive catalog version");
+            }
         });
         publication_ = nullptr;
     } catch (...) {
@@ -935,10 +1254,14 @@ void DurableSqliteCatalogStore::PublishExpiration(const BaseIdentity& base,
     std::span<const ExpiredSnapshotRecord> expired,
     std::span<const std::string> garbage,
     const Guard& guard,
-    const Body& body)
+    const Body& body,
+    int64_t archived_expired)
 {
     std::lock_guard lock(mutex_);
     Require(guard && body && publication_ == nullptr, "INVALID_ARGUMENT", "maintenance requires an owned publication");
+    Require(archived_expired >= 0 && static_cast<uint64_t>(archived_expired) <= expired.size(),
+        "INVALID_ARGUMENT",
+        "invalid archived expiration prefix");
     const auto collection = Collection(base.collection_id);
     Publication scope{false, collection.name, base, guard, {}, 0};
     publication_ = &scope;
@@ -954,6 +1277,24 @@ void DurableSqliteCatalogStore::PublishExpiration(const BaseIdentity& base,
             Require(applied.has_value() && scope.mutations == 1,
                 "IO_ERROR",
                 "maintenance did not publish one guarded root");
+            Require(archived_expired == 0 || HasArchive(), "CORRUPTION", "expired archive is missing");
+            for (int64_t index = 0; index < archived_expired; ++index) {
+                // Only the oldest archived snapshots expire: the ledger keeps
+                // a contiguous prefix and the archive the following range.
+                const auto& snapshot = expired[static_cast<size_t>(index)];
+                const auto oldest = database_.Query(
+                    "SELECT snapshot_id,sequence_number,operation_id FROM archived_snapshots WHERE collection_id=? "
+                    "ORDER BY sequence_number LIMIT 1",
+                    {base.collection_id});
+                Require(oldest.size() == 1 && ParseInteger(Required(oldest[0], 0)) == snapshot.snapshot_id &&
+                        ParseInteger(Required(oldest[0], 1)) == snapshot.sequence_number &&
+                        Required(oldest[0], 2) == snapshot.operation_id,
+                    "CORRUPTION",
+                    "expiration does not remove the oldest archived snapshot");
+                database_.Execute("DELETE FROM archived_snapshots WHERE collection_id=? AND snapshot_id=?",
+                    {base.collection_id, snapshot.snapshot_id});
+                Require(database_.Changes() == 1, "CORRUPTION", "archived snapshot changed during expiration");
+            }
             for (const auto& snapshot : expired) {
                 const auto operation = FindOperation(base.collection_id, snapshot.operation_id);
                 Require(operation && operation->state == OperationState::Committed && operation->outcome &&
@@ -963,10 +1304,60 @@ void DurableSqliteCatalogStore::PublishExpiration(const BaseIdentity& base,
                 database_.Execute("INSERT INTO expired_snapshots VALUES(?,?,?,?)",
                     {base.collection_id, snapshot.snapshot_id, snapshot.sequence_number, snapshot.operation_id});
             }
+            if (HasArchive() && expired.size() > static_cast<size_t>(archived_expired)) {
+                Require(database_
+                            .Query("SELECT 1 FROM archived_snapshots WHERE collection_id=? LIMIT 1",
+                                {base.collection_id})
+                            .empty(),
+                    "CORRUPTION",
+                    "root snapshots cannot expire before the archive");
+            }
             for (const auto& path : garbage) {
                 ValidateLocation(path, info_);
+                Require(!HasArchive() ||
+                        database_
+                            .Query("SELECT 1 FROM archived_snapshots WHERE collection_id=? AND manifest_list=?",
+                                {base.collection_id, path})
+                            .empty(),
+                    "CORRUPTION",
+                    "cleanup would remove an archived manifest list");
                 database_.Execute("INSERT INTO metadata_cleanup VALUES(?,?)", {base.collection_id, path});
             }
+        });
+        publication_ = nullptr;
+    } catch (...) {
+        publication_ = nullptr;
+        throw;
+    }
+}
+
+void DurableSqliteCatalogStore::PublishArchive(const BaseIdentity& base,
+    const Guard& guard,
+    const Body& body,
+    const ArchiveSource& archived)
+{
+    std::lock_guard lock(mutex_);
+    Require(guard && body && archived && publication_ == nullptr,
+        "INVALID_ARGUMENT",
+        "archive maintenance requires an owned publication");
+    const auto collection = Collection(base.collection_id);
+    Publication scope{false, collection.name, base, guard, {}, 0};
+    publication_ = &scope;
+    try {
+        Transaction([&] {
+            Require(Base(base.collection_id) == base, "STALE_BASE", "exact maintenance base changed");
+            Require(HasArchive(), "CORRUPTION", "archive maintenance requires the snapshot archive catalog version");
+            CheckFreeBytes();
+            const auto applied = body();
+            if (scope.first_error) {
+                throw Failure(*scope.first_error);
+            }
+            Require(applied.has_value() && scope.mutations == 1,
+                "IO_ERROR",
+                "archive maintenance did not publish one guarded root");
+            const auto rows = archived();
+            Require(!rows.empty(), "INTERNAL", "archive maintenance moved no snapshot");
+            InsertArchived(base.collection_id, rows);
         });
         publication_ = nullptr;
     } catch (...) {

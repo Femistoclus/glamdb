@@ -13,6 +13,7 @@
 #include "core/telemetry/metrics.h"
 
 #if GLAMDB_HAS_STORAGE
+#include "core/backend/archive_records.h"
 #include "core/backend/local_storage_backend.h"
 #include "core/scan/file_metadata.h"
 #include "core/scan/metadata.h"
@@ -651,6 +652,9 @@ struct Engine::Impl
             }
             std::vector<std::string> removed;
             for (const auto& path : catalog->PendingMetadata(collection.collection_id)) {
+                Require(!catalog->IsArchivedManifestList(collection.collection_id, path),
+                    "CORRUPTION",
+                    "cleanup path is an archived manifest list");
                 const auto result = backend->RemoveExpiredMetadata(collection.collection_id, path);
                 if (!result) {
                     if (result.error().code == "CORRUPTION") {
@@ -731,6 +735,36 @@ struct Engine::Impl
         } catch (const std::exception& error) {
             release();
             return std::unexpected(ExceptionError(error));
+        }
+    }
+
+    // A selected ID outside the pinned root's verified index may be archived:
+    // one indexed catalog lookup, never an in-memory archive inventory. Only
+    // snapshots older than this view's root are visible through it.
+    void ResolveArchived(TScanContext& context, const SnapshotSelector& selector) const
+    {
+        CheckExpiredSnapshot(context, selector);
+        const auto& state = context.VerifiedState;
+        if (selector.kind != SnapshotSelectorKind::Id || !state || !state->ScanIndex || !state->Metadata ||
+            state->Metadata->snapshots.empty() ||
+            std::ranges::binary_search(state->ScanIndex->Snapshots,
+                selector.snapshot_id,
+                {},
+                &NGlamDB::NStorage::TSnapshotBoundary::SnapshotID))
+        {
+            return;
+        }
+        const auto first = state->Metadata->snapshots.front()->sequence_number;
+        auto archived = catalog->FindArchivedSnapshot(context.Collection.collection_id, selector.snapshot_id);
+        if (!archived) {
+            // Expired after this view was pinned.
+            Require(!catalog->IsExpiredSnapshot(context.Collection.collection_id, selector.snapshot_id),
+                "SNAPSHOT_EXPIRED",
+                "snapshot was removed by explicit retention maintenance");
+            return;
+        }
+        if (archived->sequence_number < first) {
+            context.Archived = std::make_shared<const ArchivedSnapshotRecord>(std::move(*archived));
         }
     }
 #endif
@@ -1220,6 +1254,9 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
                 ValidUtf8(request.exact_name) && request.exact_name.find('\0') == std::string::npos,
             "INVALID_ARGUMENT",
             "invalid collection ID or exact name");
+        Require(!request.hot_snapshots || (*request.hot_snapshots >= 1 && *request.hot_snapshots <= (1LL << 40)),
+            "INVALID_ARGUMENT",
+            "hot_snapshots must be 1..1099511627776");
         const auto schema_hash = Take(SchemaFingerprint(request.schema));
         const auto settings = Take(CanonicalWriteSettings(request.schema, request.write_settings));
         context = CreateRecoveryContext{impl->info.store_id,
@@ -1272,6 +1309,9 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
                 Require(impl->catalog->CreatedWriteSettings(collection.collection_id) == settings,
                     "WRITE_SETTINGS_MISMATCH",
                     "write settings differ from original creation");
+                Require(impl->catalog->CreatedHotSnapshots(collection.collection_id) == request.hot_snapshots,
+                    "SNAPSHOT_ARCHIVE_MISMATCH",
+                    "hot_snapshots differs from original creation");
                 context = CreateRecoveryContext{impl->info.store_id,
                     collection.collection_id,
                     collection.name,
@@ -1296,6 +1336,9 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
             throw Failure(health.error());
         }
         impl->CheckSettingsSupported(settings);
+        Require(!request.hot_snapshots || impl->backend->GetCapabilities().snapshot_archive,
+            "DEPENDENCY_UNAVAILABLE",
+            "the storage backend does not support the snapshot archive");
         const auto attempt = NewUuid();
         context = CreateRecoveryContext{impl->info.store_id,
             request.collection_id,
@@ -1316,6 +1359,7 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
                 info.schema == request.schema && info.write_settings == settings && info.write_settings_version == 0,
             "IO_ERROR",
             "producer changed collection identity, schema or write settings");
+        info.hot_snapshots = request.hot_snapshots;
         context->candidate_table_uuid = info.table_uuid;
         {
             std::lock_guard state_lock(impl->state_mutex);
@@ -1447,9 +1491,16 @@ Result<SnapshotExpirationResult> Engine::ExpireSnapshots(const SnapshotExpiratio
         }
         Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "snapshot maintenance is not installed");
         const auto collection = impl->catalog->Collection(request.collection_id);
+        Require(!request.policy || !request.policy->keep_last || !collection.hot_snapshots ||
+                *collection.hot_snapshots <= *request.policy->keep_last,
+            "INVALID_ARGUMENT",
+            "hot_snapshots must not exceed keep_last");
         base = impl->catalog->Base(request.collection_id);
         impl->ReserveAttempt();
-        auto staged = Take(impl->backend->PrepareExpiration(impl->info, collection, *base, request.policy));
+        const auto archived =
+            impl->catalog->OldestArchivedSnapshots(request.collection_id, MaxExpiredArchivePerCall + 1);
+        auto staged =
+            Take(impl->backend->PrepareExpiration(impl->info, collection, *base, request.policy, archived));
         Require(staged != nullptr, "INTERNAL", "maintenance returned no staged result");
         SnapshotExpirationResult result{staged->Policy(), static_cast<int64_t>(staged->Expired().size()), 0};
         if (staged->Changed()) {
@@ -1473,7 +1524,8 @@ Result<SnapshotExpirationResult> Engine::ExpireSnapshots(const SnapshotExpiratio
                 },
                 [&] {
                     return staged->Publish(*impl->catalog);
-                });
+                },
+                staged->ArchivedExpired());
             committed = true;
             impl->backend->PublicationFinished(request.collection_id, candidate, CommitDisposition::Committed);
             impl->RefreshCache();
@@ -1501,6 +1553,201 @@ Result<SnapshotExpirationResult> Engine::ExpireSnapshots(const SnapshotExpiratio
     } catch (const std::exception& error) {
         if (publicationStarted) {
             invalidate();
+        }
+        return std::unexpected(ExceptionError(error));
+    }
+}
+
+Result<SnapshotArchiveStatus> Engine::GetSnapshotArchive(std::string_view id) const
+{
+    try {
+#if GLAMDB_HAS_STORAGE
+        std::lock_guard lock(impl_->state_mutex);
+        impl_->CheckReady();
+        const auto collection = impl_->CachedCollection(id);
+        const auto found = std::ranges::find_if(impl_->confirmed_views, [&](const auto& view) {
+            return view.info.collection_id == id;
+        });
+        Require(found != impl_->confirmed_views.end() && found->scan_state && found->scan_state->Metadata,
+            "DEPENDENCY_UNAVAILABLE",
+            "snapshot archive metadata is unavailable");
+        const auto& metadata = *found->scan_state->Metadata;
+        const auto expired = NGlamDB::NStorage::ExpiredSequence(metadata);
+        Require(expired.has_value(), "CORRUPTION", "invalid expiration watermark");
+        SnapshotArchiveStatus status{.hot_snapshots = collection.hot_snapshots,
+            .root_snapshots = static_cast<int64_t>(metadata.snapshots.size()),
+            .expired_snapshots = *expired};
+        if (!metadata.snapshots.empty()) {
+            status.archived_snapshots = metadata.snapshots.front()->sequence_number - 1 - *expired;
+        }
+        if (collection.hot_snapshots && status.root_snapshots > *collection.hot_snapshots) {
+            status.archive_pending = status.root_snapshots - *collection.hot_snapshots;
+        }
+        return status;
+#else
+        (void)id;
+        return std::unexpected(
+            ErrorDetail{"DEPENDENCY_UNAVAILABLE", "storage maintenance is not built", RetryHint::OperatorAction});
+#endif
+    } catch (const Failure& error) {
+        return std::unexpected(error.detail);
+    }
+}
+
+Result<CollectionInfo> Engine::UpdateSnapshotArchive(const UpdateSnapshotArchiveRequest& request)
+{
+    const auto impl = impl_;
+    // Appends hold the writer from binding through publication, so a bound
+    // append keeps the setting it read and the next one sees the new one.
+    std::unique_lock writer_lock(impl->writer, std::defer_lock);
+    try {
+        Require(ValidUuid(request.collection_id), "INVALID_ARGUMENT", "collection ID must be a canonical UUID");
+        Require(!request.hot_snapshots || (*request.hot_snapshots >= 1 && *request.hot_snapshots <= (1LL << 40)),
+            "INVALID_ARGUMENT",
+            "hot_snapshots must be 1..1099511627776");
+        const auto collection = impl->ReadCollection([&](const auto& item) {
+            return item.collection_id == request.collection_id;
+        });
+        if (!writer_lock.try_lock_for(impl->limits.writer_wait)) {
+            throw Failure({"RESOURCE_EXHAUSTED",
+                "writer busy; the archive setting was not changed",
+                RetryHint::SameIdAfterReconcile});
+        }
+        uint64_t expected_generation = 0;
+        {
+            std::lock_guard state_lock(impl->state_mutex);
+            impl->CheckReady();
+            expected_generation = impl->health_generation;
+        }
+        if (request.hot_snapshots) {
+            Require(impl->backend && impl->backend->GetCapabilities().snapshot_archive,
+                "DEPENDENCY_UNAVAILABLE",
+                "the storage backend does not support the snapshot archive");
+            const auto policy = Take(GetSnapshotRetention(request.collection_id));
+            Require(!policy.keep_last || *request.hot_snapshots <= *policy.keep_last,
+                "INVALID_ARGUMENT",
+                "hot_snapshots must not exceed keep_last");
+        }
+        {
+            std::lock_guard state_lock(impl->state_mutex);
+            impl->CheckHealthy(expected_generation);
+        }
+        (void)collection;
+        CollectionInfo updated;
+        try {
+            updated = impl->catalog->UpdateHotSnapshots(request.collection_id, request.hot_snapshots);
+        } catch (const Failure& error) {
+            if (!error.uncertain) {
+                throw;
+            }
+            if (impl->backend) {
+                impl->backend->InvalidateCache();
+            }
+            {
+                std::lock_guard state_lock(impl->state_mutex);
+                impl->ready = false;
+                ++impl->health_generation;
+            }
+            return std::unexpected(ErrorDetail{"RECOVERY_REQUIRED",
+                "archive setting outcome is unknown; reconcile, then repeat the same request",
+                RetryHint::SameIdAfterReconcile});
+        }
+        impl->RefreshCache();
+        return updated;
+    } catch (const Failure& error) {
+        impl->CloseOnCorruption(error.detail);
+        return std::unexpected(error.detail);
+    } catch (const std::exception& error) {
+        return std::unexpected(ExceptionError(error));
+    }
+}
+
+Result<SnapshotArchiveStatus> Engine::ArchiveSnapshots(std::string_view collection_id)
+{
+    const auto impl = impl_;
+    std::unique_lock writer_lock(impl->writer, std::defer_lock);
+    Impl::TAttemptRelease release{*impl, writer_lock};
+    std::optional<BaseIdentity> base;
+    std::string candidate;
+    bool publicationStarted = false;
+    bool committed = false;
+    try {
+        Require(ValidUuid(collection_id), "INVALID_ARGUMENT", "collection ID must be a canonical UUID");
+        Require(writer_lock.try_lock_for(impl->limits.writer_wait), "RESOURCE_EXHAUSTED", "writer is busy");
+        uint64_t generation = 0;
+        {
+            std::lock_guard lock(impl->state_mutex);
+            impl->CheckReady();
+            generation = impl->health_generation;
+        }
+        Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "snapshot archive is not installed");
+        const auto collection = impl->catalog->Collection(collection_id);
+        base = impl->catalog->Base(collection_id);
+        impl->ReserveAttempt();
+        auto staged = Take(impl->backend->PrepareArchive(impl->info, collection, *base));
+        Require(staged != nullptr, "INTERNAL", "archive maintenance returned no staged result");
+        int64_t moved = 0;
+        if (staged->Changed()) {
+            std::unique_lock gate(impl->commit_gate);
+            {
+                std::lock_guard lock(impl->state_mutex);
+                impl->CheckHealthy(generation);
+            }
+            publicationStarted = true;
+            impl->catalog->PublishArchive(
+                *base,
+                [&](std::string_view location) -> Status {
+                    const auto status = staged->VerifyClosure(location);
+                    if (!status) {
+                        return status;
+                    }
+                    candidate = location;
+                    return impl->PublicationHealth(generation);
+                },
+                [&] {
+                    return staged->Publish(*impl->catalog);
+                },
+                [&] {
+                    return staged->Archived();
+                });
+            committed = true;
+            moved = static_cast<int64_t>(staged->Archived().size());
+            impl->backend->PublicationFinished(collection_id, candidate, CommitDisposition::Committed);
+            impl->RefreshCache();
+            gate.unlock();
+            impl->RetireRoot(*base);
+        }
+        auto status = Take(GetSnapshotArchive(collection_id));
+        status.snapshots_archived = moved;
+        return status;
+    } catch (const Failure& error) {
+        if (publicationStarted && impl->backend) {
+            impl->backend->PublicationFinished(collection_id,
+                candidate,
+                error.uncertain || committed ? CommitDisposition::CommitUnknown
+                                             : CommitDisposition::DefinitelyNotCommitted);
+        }
+        if (error.uncertain || committed) {
+            if (impl->backend) {
+                impl->backend->InvalidateCache();
+            }
+            std::lock_guard lock(impl->state_mutex);
+            impl->ready = false;
+            ++impl->health_generation;
+            return std::unexpected(ErrorDetail{"RECOVERY_REQUIRED",
+                "archive maintenance outcome requires reconciliation; repeat the request afterward",
+                RetryHint::SameIdAfterReconcile});
+        }
+        impl->CloseOnCorruption(error.detail);
+        return std::unexpected(error.detail);
+    } catch (const std::exception& error) {
+        if (publicationStarted) {
+            if (impl->backend) {
+                impl->backend->InvalidateCache();
+            }
+            std::lock_guard lock(impl->state_mutex);
+            impl->ready = false;
+            ++impl->health_generation;
         }
         return std::unexpected(ExceptionError(error));
     }
@@ -1894,6 +2141,9 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
             },
             [&] {
                 return staged->Publish(*impl->catalog);
+            },
+            [&] {
+                return staged->Archived();
             });
         // Count a confirmed new publication once. Receipt replay paths never
         // reach this boundary; a lost/unknown COMMIT response is not counted.
@@ -2049,6 +2299,23 @@ Result<SnapshotHistory> Engine::ListSnapshots(std::string_view id) const
     return impl->ReadView<SnapshotHistory>(
         id,
         [&](const TScanContext& context) {
+            // Archived snapshots precede the pinned root; read them after it.
+            ArchivedHistory archived;
+            const auto& state = context.VerifiedState;
+            if (state && state->Metadata && !state->Metadata->snapshots.empty()) {
+                const auto first = state->Metadata->snapshots.front()->sequence_number;
+                const auto expired = NGlamDB::NStorage::ExpiredSequence(*state->Metadata);
+                Require(expired.has_value(), "CORRUPTION", "invalid expiration watermark");
+                if (first - 1 > *expired) {
+                    archived = impl->catalog->ArchivedSnapshotsBelow(id, first);
+                }
+            }
+            std::vector<int64_t> archivedIDs;
+            archivedIDs.reserve(archived.snapshots.size());
+            for (const auto& snapshot : archived.snapshots) {
+                archivedIDs.push_back(snapshot.snapshot_id);
+            }
+            std::ranges::sort(archivedIDs);
             std::vector<AppendResult> receipts;
             impl->catalog->ForEachOperation(
                 [&](const auto& record) {
@@ -2058,14 +2325,15 @@ Result<SnapshotHistory> Engine::ListSnapshots(std::string_view id) const
                             std::ranges::binary_search(context.VerifiedState->ScanIndex->Snapshots,
                                 receipt.snapshot_id,
                                 {},
-                                &NGlamDB::NStorage::TSnapshotBoundary::SnapshotID))
+                                &NGlamDB::NStorage::TSnapshotBoundary::SnapshotID) ||
+                            std::ranges::binary_search(archivedIDs, receipt.snapshot_id))
                         {
                             receipts.push_back(receipt);
                         }
                     }
                 },
                 id);
-            return ReadHistory(context, receipts);
+            return ReadHistory(context, receipts, &archived);
         },
         false);
 #else
@@ -2079,8 +2347,9 @@ Result<CollectionStatistics> Engine::GetStatistics(std::string_view id, Snapshot
 {
     const auto impl = impl_;
 #if GLAMDB_HAS_STORAGE
-    return impl->ReadView<CollectionStatistics>(id, [&](const TScanContext& context) {
-        CheckExpiredSnapshot(context, selector);
+    return impl->ReadView<CollectionStatistics>(id, [&](const TScanContext& pinned) {
+        auto context = pinned;
+        impl->ResolveArchived(context, selector);
         return ReadStatistics(context, selector);
     });
 #else
@@ -2094,8 +2363,9 @@ Result<CollectionStatistics> Engine::GetStatistics(std::string_view id, Snapshot
 Result<TFileListing> Engine::ListFiles(std::string_view collectionID, SnapshotSelector selector) const
 {
 #if GLAMDB_HAS_STORAGE
-    return impl_->ReadView<TFileListing>(collectionID, [&](const TScanContext& context) {
-        CheckExpiredSnapshot(context, selector);
+    return impl_->ReadView<TFileListing>(collectionID, [&](const TScanContext& pinned) {
+        auto context = pinned;
+        impl_->ResolveArchived(context, selector);
         return ReadFiles(context, selector);
     });
 #else
@@ -2114,8 +2384,9 @@ Engine::GetFileDetails(std::string_view collectionID, std::string_view fileID, S
 #if GLAMDB_HAS_STORAGE
     return impl_->ReadView<TFileDetails>(
         collectionID,
-        [&](const TScanContext& context) {
-            CheckExpiredSnapshot(context, selector);
+        [&](const TScanContext& pinned) {
+            auto context = pinned;
+            impl_->ResolveArchived(context, selector);
             return ReadFileDetails(context, fileID, selector);
         },
         false);
@@ -2133,8 +2404,9 @@ Result<ScanExplanation> Engine::ExplainScan(const ScanRequest& request) const
 {
     const auto impl = impl_;
 #if GLAMDB_HAS_STORAGE
-    return impl->ReadView<ScanExplanation>(request.collection_id, [&](const TScanContext& context) {
-        CheckExpiredSnapshot(context, request.selector);
+    return impl->ReadView<ScanExplanation>(request.collection_id, [&](const TScanContext& pinned) {
+        auto context = pinned;
+        impl->ResolveArchived(context, request.selector);
         return detail::ExplainScan(context, request);
     });
 #else
@@ -2177,7 +2449,7 @@ Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) con
             leased_root = context.Base.metadata_location;
         }
         Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
-        CheckExpiredSnapshot(context, request.selector);
+        impl->ResolveArchived(context, request.selector);
         const auto capabilities = impl->backend->GetCapabilities();
         context.Resources = impl->resources;
         context.FileIO = Take(impl->backend->ReadOnlyFileIO());

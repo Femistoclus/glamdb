@@ -432,9 +432,12 @@ iceberg::Result<TBaseState> ReadRecoveryRoot(const std::shared_ptr<iceberg::File
 
 // The oldest retained snapshot is a complete checkpoint. Rewritten manifests
 // carry original file provenance even after older lists/manifests are reclaimed.
+// Expired and archived ancestry share this path: neither is in the root, and
+// only the archived snapshots' metadata files remain on disk.
 iceberg::Status SeedRetainedHistory(const std::shared_ptr<iceberg::FileIO>& fileIO,
     TBaseState& state,
     std::span<const std::shared_ptr<iceberg::Snapshot>> expired,
+    std::size_t expiredCount,
     const TStorageLimits& limits,
     TRecoveryVisited& visited,
     TScanMembership& scanIndex,
@@ -592,8 +595,11 @@ iceberg::Status SeedRetainedHistory(const std::shared_ptr<iceberg::FileIO>& file
     state.Usage = usage.Value();
     state.RetainedManifestPaths.assign(paths.begin(), paths.end());
     state.CurrentManifests = std::move(manifests);
-    state.ExpiredSnapshotIDs.reserve(expired.size());
-    for (const auto& snapshot : expired) {
+    if (expiredCount > expired.size()) {
+        return iceberg::ValidationFailed("Invalid expiration ledger size.");
+    }
+    state.ExpiredSnapshotIDs.reserve(expiredCount);
+    for (const auto& snapshot : expired.first(expiredCount)) {
         state.ExpiredSnapshotIDs.push_back(snapshot->snapshot_id);
     }
     std::ranges::sort(state.ExpiredSnapshotIDs);
@@ -830,7 +836,8 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
     const std::string& collectionID,
     const TStorageLimits& configuredLimits,
     const std::string& workspaceDirectory,
-    std::span<const std::shared_ptr<iceberg::Snapshot>> expired)
+    std::span<const std::shared_ptr<iceberg::Snapshot>> expired,
+    std::optional<std::size_t> expiredCount)
 {
     return CatchIcebergExceptions([&]() -> iceberg::Result<TBaseState> {
         ICEBERG_ASSIGN_OR_RAISE(auto state,
@@ -844,7 +851,8 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
         scanIndex->Files.reserve(original->snapshots.size());
         scanIndex->Snapshots.reserve(original->snapshots.size());
         ICEBERG_ASSIGN_OR_RAISE(auto expiredSequence, ExpiredSequence(*original));
-        if (expiredSequence != static_cast<std::int64_t>(expired.size()) ||
+        const auto ledger = expiredCount.value_or(expired.size());
+        if (ledger > expired.size() || expiredSequence != static_cast<std::int64_t>(ledger) ||
             (!expired.empty() && original->snapshots.empty()))
         {
             return iceberg::ValidationFailed("Expiration ledger differs from the retained root.");
@@ -852,7 +860,7 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
         std::size_t firstIndex = 0;
         if (!expired.empty()) {
             ICEBERG_RETURN_UNEXPECTED(
-                SeedRetainedHistory(fileIO, state, expired, limits, *visited, *scanIndex, storeID));
+                SeedRetainedHistory(fileIO, state, expired, ledger, limits, *visited, *scanIndex, storeID));
             const auto& parent = expired.back();
             view->snapshots.push_back(parent);
             view->snapshot_log.push_back({parent->timestamp_ms, parent->snapshot_id});

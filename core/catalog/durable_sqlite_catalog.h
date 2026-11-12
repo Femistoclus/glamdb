@@ -50,6 +50,38 @@ struct ExpiredSnapshotRecord
     std::string operation_id;
 };
 
+// A snapshot moved out of the Iceberg root into the catalog archive. It stays
+// readable: its manifest list and manifests remain on disk.
+struct ArchivedSnapshotRecord
+{
+    int64_t snapshot_id = 0;
+    int64_t sequence_number = 0;
+    std::optional<int64_t> parent_snapshot_id;
+    int64_t timestamp_ms = 0;
+    std::string operation_id;
+    std::string manifest_list;
+    int64_t manifest_list_bytes = 0;
+    // Lowercase hex SHA-256 of the manifest-list bytes.
+    std::string manifest_list_sha256;
+    // Live data files of the snapshot: the length of its chronological
+    // membership prefix in the append-only profile.
+    int64_t data_files = 0;
+    // Manifests whose last referencing snapshot is this one.
+    int64_t retired_manifests = 0;
+    int64_t retired_manifest_bytes = 0;
+    // Lossless encoding of the complete Iceberg snapshot entry.
+    std::string snapshot_blob;
+    bool operator==(const ArchivedSnapshotRecord&) const = default;
+};
+
+// Archived snapshots below a sequence, oldest first, read together with the
+// current expiration watermark.
+struct ArchivedHistory
+{
+    std::vector<ArchivedSnapshotRecord> snapshots;
+    int64_t expired_through = 0;
+};
+
 // Every call, including the entire outer publication, owns this same recursive
 // serialization lock. The callback must be synchronous and use this instance.
 class DurableSqliteCatalogStore final : public iceberg::sql::CatalogStore
@@ -83,14 +115,36 @@ public:
     WriteSettings CreatedWriteSettings(std::string_view id);
     // Compare-and-set of canonical settings; see UpdateWriteSettingsRequest.
     CollectionInfo UpdateWriteSettings(std::string_view id, int64_t expected_version, WriteSettings settings);
-    void PublishAppend(const BoundOperation& binding, const AppendResult& result, const Guard& guard, const Body& body);
+    // Called after the guarded body: the root snapshots the publication moved
+    // to the archive, oldest first.
+    using ArchiveSource = std::function<std::vector<ArchivedSnapshotRecord>()>;
+    void PublishAppend(const BoundOperation& binding,
+        const AppendResult& result,
+        const Guard& guard,
+        const Body& body,
+        const ArchiveSource& archived = {});
+    // The first `archived_expired` records leave the snapshot archive.
     void PublishExpiration(const BaseIdentity& base,
         std::span<const ExpiredSnapshotRecord> expired,
         std::span<const std::string> garbage,
         const Guard& guard,
-        const Body& body);
+        const Body& body,
+        int64_t archived_expired = 0);
+    void PublishArchive(const BaseIdentity& base, const Guard& guard, const Body& body, const ArchiveSource& archived);
     std::vector<ExpiredSnapshotRecord> ExpiredSnapshots(std::string_view collection_id);
     bool IsExpiredSnapshot(std::string_view collection_id, int64_t snapshot_id);
+    // The setting a collection was created with (absent when none was given).
+    std::optional<int64_t> CreatedHotSnapshots(std::string_view collection_id);
+    CollectionInfo UpdateHotSnapshots(std::string_view collection_id, std::optional<int64_t> hot_snapshots);
+    // Indexed lookups; empty results before the archive catalog version.
+    std::optional<ArchivedSnapshotRecord> FindArchivedSnapshot(std::string_view collection_id, int64_t snapshot_id);
+    bool IsArchivedManifestList(std::string_view collection_id, std::string_view path);
+    std::vector<ArchivedSnapshotRecord> OldestArchivedSnapshots(std::string_view collection_id, int64_t limit);
+    ArchivedHistory ArchivedSnapshotsBelow(std::string_view collection_id, int64_t before_sequence);
+    // Keyset pages of 256 rows in sequence order, with no live statement
+    // between pages. The callback must not change the archive.
+    using ArchiveConsumer = std::function<void(const ArchivedSnapshotRecord&)>;
+    void ForEachArchivedSnapshot(std::string_view collection_id, const ArchiveConsumer& consume);
     int64_t PendingMetadataCount(std::string_view id);
     std::vector<std::string> PendingMetadata(std::string_view collection_id);
     void AcknowledgeMetadata(std::string_view collection_id, std::span<const std::string> paths);
@@ -143,6 +197,11 @@ private:
     bool HasWriteSettings();
     void EnsureWriteSettings();
     void EnsureRetention();
+    bool HasArchive();
+    void EnsureArchive();
+    void InsertArchived(std::string_view collection_id, std::span<const ArchivedSnapshotRecord> archived);
+    ArchivedSnapshotRecord ReadArchived(const SqlRow& row);
+    int64_t ArchiveWatermark(std::string_view collection_id);
     void CheckBinding(const BoundOperation& binding);
     void Complete(const BoundOperation& binding, const AppendOutcome& outcome);
     struct PointerTarget
