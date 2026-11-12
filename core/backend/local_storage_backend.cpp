@@ -93,66 +93,28 @@ void AddMemory(uint64_t& bytes, uint64_t count, uint64_t width = 1)
     bytes += count * width;
 }
 
-uint64_t DataFileMemory(const iceberg::DataFile& file)
+// Saturated storage-layer sums mean the retained metadata size overflows.
+uint64_t CheckedMemory(uint64_t bytes)
 {
-    // Conservative map-node/control-block allowance for the pinned standard
-    // library, plus the actual capacities of every retained variable buffer.
-    uint64_t bytes = sizeof(file) + 256;
-    AddMemory(bytes, file.file_path.capacity() + 1);
-    for (const auto count : {file.column_sizes.size(),
-             file.value_counts.size(),
-             file.null_value_counts.size(),
-             file.nan_value_counts.size()})
-    {
-        AddMemory(bytes, count, 96);
-    }
-    for (const auto* bounds : {&file.lower_bounds, &file.upper_bounds}) {
-        AddMemory(bytes, bounds->size(), 96);
-        for (const auto& [field, value] : *bounds) {
-            (void)field;
-            AddMemory(bytes, value.capacity());
-        }
-    }
-    AddMemory(bytes, file.key_metadata.capacity());
-    AddMemory(bytes, file.split_offsets.capacity(), sizeof(int64_t));
-    AddMemory(bytes, file.equality_ids.capacity(), sizeof(int32_t));
-    if (file.referenced_data_file) {
-        AddMemory(bytes, file.referenced_data_file->capacity() + 1);
+    if (bytes == std::numeric_limits<uint64_t>::max()) {
+        throw Failure({"RESOURCE_EXHAUSTED", "retained metadata size overflows", RetryHint::OperatorAction});
     }
     return bytes;
 }
 
-uint64_t ScanIndexMemory(const NStorage::TBaseState& state, const std::function<void()>& check = {})
+uint64_t DataFileMemory(const iceberg::DataFile& file)
+{
+    return CheckedMemory(NStorage::DataFileMemory(file));
+}
+
+// O(1): the shared generation keeps every per-element term incrementally.
+uint64_t ScanIndexMemory(const NStorage::TBaseState& state)
 {
     if (!state.ScanIndex) {
         return 0;
     }
-    const auto& index = *state.ScanIndex;
-    uint64_t bytes = sizeof(index);
-    AddMemory(bytes, state.ExpiredSnapshotIDs.capacity(), sizeof(int64_t));
-    AddMemory(bytes, state.RetainedManifestPaths.size() * 2, sizeof(std::string));
-    for (const auto& path : state.RetainedManifestPaths) {
-        if (check) {
-            check();
-        }
-        AddMemory(bytes, path.capacity() + 1, 1);
-    }
-    // Copy-and-grow publication and reserve-and-grow recovery can give the
-    // same history different vector capacities. Both are bounded by twice
-    // the final element count in the pinned standard library. Charge that
-    // stable envelope so reconciliation can reuse its admitted reservation.
-    AddMemory(bytes, index.Files.size(), 2 * sizeof(NStorage::TScanDataFile));
-    AddMemory(bytes, index.Snapshots.size(), 2 * sizeof(NStorage::TSnapshotBoundary));
-    for (const auto& file : index.Files) {
-        if (check) {
-            check();
-        }
-        AddMemory(bytes, file.Path.capacity() + 1);
-        if (file.DataFile) {
-            AddMemory(bytes, DataFileMemory(*file.DataFile));
-        }
-    }
-    return bytes;
+    return CheckedMemory(
+        NStorage::ScanIndexBytes(*state.ScanIndex, state.ExpiredSnapshotIDs, state.RetainedManifestPaths));
 }
 
 struct TRootMemorySize
@@ -1749,7 +1711,7 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareKvAppend(cons
     // complete charged envelope conservatively covers live range copies;
     // scratch, pending rows and output descriptors retain their fixed margin.
     uint64_t temporaryBytes = 128ULL << 20;
-    AddMemory(temporaryBytes, ScanIndexMemory(*base, check));
+    AddMemory(temporaryBytes, ScanIndexMemory(*base));
     auto memory = Options_.Resources->Reserve(ResourceClass::Metadata, temporaryBytes);
     if (!memory) {
         throw Failure(memory.error());
@@ -2136,7 +2098,7 @@ Status TLocalStorageBackend::RemoveExpiredMetadata(std::string_view collectionID
             Require(!NStorage::IsKVMetadata(*found->second.Confirmed->Metadata),
                 "CORRUPTION",
                 "KV collection has unsupported metadata cleanup");
-            Require(!std::ranges::binary_search(found->second.Confirmed->RetainedManifestPaths, path),
+            Require(!found->second.Confirmed->RetainedManifestPaths.Contains(path),
                 "CORRUPTION",
                 "cleanup manifest is still referenced");
             for (const auto& snapshot : found->second.Confirmed->Metadata->snapshots) {

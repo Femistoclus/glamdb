@@ -228,10 +228,10 @@ Result<StorageFootprint> TLocalStorageBackend::GetStorageFootprint()
                 // KV overwrites retain historical manifests even when none of
                 // their files remain live. The verified union covers append
                 // manifest merging and every retained KV snapshot alike.
-                for (const auto& path : base->RetainedManifestPaths) {
+                base->RetainedManifestPaths.ForEach([&](const std::string& path) {
                     chargePath(path);
                     inventory.Metadata.insert(path);
-                }
+                });
             }
             // A durable no-op permanently references its exact prepared root,
             // including an initial-empty root superseded by later mutations.

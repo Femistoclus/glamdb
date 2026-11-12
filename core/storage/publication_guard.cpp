@@ -282,14 +282,15 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
         for (const auto& expired : Context_.ExpiredArchive) {
             candidate.ExpiredSnapshotIDs.push_back(expired.SnapshotID);
         }
+        std::vector<std::int64_t> expiredIDs(candidate.ExpiredSnapshotIDs.begin(), candidate.ExpiredSnapshotIDs.end());
         for (std::size_t i = 0; i < Context_.ExpirationPrefix; ++i) {
             const auto& expired = Context_.Base->Metadata->snapshots[i];
-            candidate.ExpiredSnapshotIDs.push_back(expired->snapshot_id);
+            expiredIDs.push_back(expired->snapshot_id);
             std::erase_if(index->Snapshots, [&](const auto& boundary) {
                 return boundary.SnapshotID == expired->snapshot_id;
             });
         }
-        std::ranges::sort(candidate.ExpiredSnapshotIDs);
+        candidate.ExpiredSnapshotIDs = TSortedSnapshotIDs(std::move(expiredIDs));
         candidate.ScanIndex = std::move(index);
     }
     if (Context_.ArchivePrefix != 0) {

@@ -599,11 +599,12 @@ iceberg::Status SeedRetainedHistory(const std::shared_ptr<iceberg::FileIO>& file
     if (expiredCount > expired.size()) {
         return iceberg::ValidationFailed("Invalid expiration ledger size.");
     }
-    state.ExpiredSnapshotIDs.reserve(expiredCount);
+    std::vector<std::int64_t> expiredIDs;
+    expiredIDs.reserve(expiredCount);
     for (const auto& snapshot : expired.first(expiredCount)) {
-        state.ExpiredSnapshotIDs.push_back(snapshot->snapshot_id);
+        expiredIDs.push_back(snapshot->snapshot_id);
     }
-    std::ranges::sort(state.ExpiredSnapshotIDs);
+    state.ExpiredSnapshotIDs = TSortedSnapshotIDs(std::move(expiredIDs));
     scanIndex.Snapshots.push_back({first->snapshot_id, scanIndex.Files.size()});
     return {};
 }
@@ -730,9 +731,8 @@ iceberg::Result<TBaseState> CheckAppendClosureImpl(const std::shared_ptr<iceberg
         candidate.Usage = usage.Value();
         candidate.CurrentCommitMetadataBytes = changes.MetadataBytes;
         for (const auto* manifest : changes.Added) {
-            candidate.RetainedManifestPaths.push_back(manifest->manifest_path);
+            candidate.RetainedManifestPaths.Insert(manifest->manifest_path);
         }
-        std::ranges::sort(candidate.RetainedManifestPaths);
         candidate.CurrentManifests = std::move(manifests);
         ICEBERG_RETURN_UNEXPECTED(MarkVerified(attempt, snapshot->manifest_list));
         if (scanIndex) {
@@ -761,6 +761,7 @@ iceberg::Result<TBaseState> CheckAppendClosure(const std::shared_ptr<iceberg::Fi
         if (!candidate.ScanIndex || !candidate.Metadata || IsKVMetadata(*candidate.Metadata)) {
             return iceberg::ValidationFailed("Append has no verified scan index.");
         }
+        // Shares every base descriptor; the base generation is never modified.
         auto scanIndex = std::make_shared<TScanMembership>(*candidate.ScanIndex);
         ICEBERG_ASSIGN_OR_RAISE(auto state,
             CheckAppendClosureImpl(fileIO,
@@ -866,7 +867,6 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
         ICEBERG_ASSIGN_OR_RAISE(auto visited,
             TRecoveryVisited::Make(limits.RecoveryWorkspaceBytes, workspaceDirectory));
         auto scanIndex = std::make_shared<TScanMembership>();
-        scanIndex->Files.reserve(original->snapshots.size());
         scanIndex->Snapshots.reserve(original->snapshots.size());
         ICEBERG_ASSIGN_OR_RAISE(auto expiredSequence, ExpiredSequence(*original));
         const auto ledger = expiredCount.value_or(expired.size());

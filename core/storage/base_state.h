@@ -31,9 +31,9 @@ struct TBaseState
     std::vector<iceberg::ManifestFile> CurrentManifests;
     TStorageUsage Usage;
     std::shared_ptr<const TScanMembership> ScanIndex{};
-    std::vector<std::int64_t> ExpiredSnapshotIDs{};
+    TSortedSnapshotIDs ExpiredSnapshotIDs{};
     // Sorted union across every retained snapshot, including merged-out inputs.
-    std::vector<std::string> RetainedManifestPaths{};
+    TManifestPathSet RetainedManifestPaths{};
     // The latest data publication's list and manifest inputs/outputs, excluding
     // the root. Maintenance preserves this conservative recovery byte charge.
     std::uint64_t CurrentCommitMetadataBytes = 0;

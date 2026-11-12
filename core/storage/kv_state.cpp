@@ -515,7 +515,7 @@ iceberg::Result<TBaseState> CheckKVTransition(const std::shared_ptr<iceberg::Fil
         {
             return iceberg::ValidationFailed("KV reuses a historical manifest.");
         }
-        if (!replay && std::ranges::binary_search(base.RetainedManifestPaths, manifest.manifest_path)) {
+        if (!replay && base.RetainedManifestPaths.Contains(manifest.manifest_path)) {
             return iceberg::ValidationFailed("KV reuses a historical manifest.");
         }
         if (proof.Visited) {
@@ -682,8 +682,11 @@ iceberg::Result<TBaseState> CheckKVTransition(const std::shared_ptr<iceberg::Fil
     for (const auto& path : rewrittenLive) {
         if (!live.contains(path)) {
             actualRemoved.insert(path);
-            auto& file = index.Files[proof.Known.at(path)];
-            file.RemovedSequence = snapshot->sequence_number;
+            const auto offset = proof.Known.at(path);
+            index.Files.Update(offset, [&](TScanDataFile& removed) {
+                removed.RemovedSequence = snapshot->sequence_number;
+            });
+            const auto& file = index.Files[offset];
             ++counts.RemovedFiles;
             counts.RemovedRows += static_cast<std::uint64_t>(file.RecordCount);
             counts.RemovedBytes += static_cast<std::uint64_t>(file.SizeBytes);
@@ -780,12 +783,12 @@ iceberg::Result<TBaseState> CheckKVTransition(const std::shared_ptr<iceberg::Fil
     if (!replay) {
         candidate.RetainedManifestPaths = base.RetainedManifestPaths;
     }
-    auto& retained = replay ? proof.RetainedManifestPaths : candidate.RetainedManifestPaths;
     for (const auto* manifest : addedManifests) {
-        retained.push_back(manifest->manifest_path);
-    }
-    if (!replay) {
-        std::ranges::sort(retained);
+        if (replay) {
+            proof.RetainedManifestPaths.push_back(manifest->manifest_path);
+        } else {
+            candidate.RetainedManifestPaths.Insert(manifest->manifest_path);
+        }
     }
     candidate.CurrentManifests = std::move(manifests);
     if (replay) {
@@ -859,7 +862,6 @@ iceberg::Result<TBaseState> VerifyKVReachable(const std::shared_ptr<iceberg::Fil
         TKVReplay replay;
         replay.Index = std::make_shared<TScanMembership>();
         replay.Index->KeyValue = true;
-        replay.Index->Files.reserve(original->snapshots.size());
         replay.Index->Snapshots.reserve(original->snapshots.size());
         ICEBERG_ASSIGN_OR_RAISE(replay.Visited,
             TRecoveryVisited::Make(limits.RecoveryWorkspaceBytes, workspaceDirectory));
@@ -911,7 +913,6 @@ iceberg::Result<TBaseState> VerifyKVReachable(const std::shared_ptr<iceberg::Fil
             return iceberg::ValidationFailed("KV recovery root has an inconsistent current view.");
         }
         state.RetainedManifestPaths = std::move(replay.RetainedManifestPaths);
-        std::ranges::sort(state.RetainedManifestPaths);
         state.Metadata = std::move(original);
         return state;
     });
