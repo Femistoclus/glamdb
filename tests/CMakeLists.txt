@@ -91,6 +91,12 @@ if(NOT GLAMDB_IO_ONLY)
         target_include_directories(glamdb_history_bench PRIVATE "${PROJECT_SOURCE_DIR}")
         target_include_directories(glamdb_history_bench SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party/json/single_include")
         target_link_libraries(glamdb_history_bench PRIVATE glamdb::core glamdb_storage glamdb_build_options)
+        add_executable(glamdb_catalog_history_bench "${PROJECT_SOURCE_DIR}/benchmarks/catalog_history.cpp")
+        set_target_properties(glamdb_catalog_history_bench PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/benchmarks")
+        target_include_directories(glamdb_catalog_history_bench PRIVATE "${PROJECT_SOURCE_DIR}")
+        target_link_libraries(glamdb_catalog_history_bench PRIVATE
+            glamdb::core glamdb_storage glamdb_build_options SQLite::SQLite3)
         add_test(NAME glamdb.history_campaign COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/integration/history_test.py" "$<TARGET_FILE:glamdb_history_bench>")
         set_tests_properties(glamdb.history_campaign PROPERTIES LABELS "integration;capacity" TIMEOUT 180)
