@@ -135,7 +135,13 @@ protected:
 
     CreateOutcome Create(WriteSettings settings)
     {
-        return Engine_->CreateCollection({test::collection_id, "events", Schema, std::move(settings)});
+        // Catalog versions are this suite's subject: no archive tier.
+        return Engine_->CreateCollection({test::collection_id,
+            "events",
+            Schema,
+            std::move(settings),
+            CollectionMode::Append,
+            KeepAllSnapshotsInRoot});
     }
 
     AppendResult Append(const char* operation, const std::vector<TInputRow>& rows)

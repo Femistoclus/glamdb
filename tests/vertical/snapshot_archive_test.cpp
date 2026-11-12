@@ -327,7 +327,7 @@ TEST_F(TSnapshotArchiveTest, ArchivedSnapshotsAnswerExactlyAsWhileHot)
 
 TEST_F(TSnapshotArchiveTest, StoresWithoutTheSettingStayUnchanged)
 {
-    Create(std::nullopt);
+    Create(KeepAllSnapshotsInRoot);
     for (int64_t index = 0; index < 6; ++index) {
         ASSERT_EQ(Append(index).disposition, CommitDisposition::Committed);
     }
@@ -357,7 +357,7 @@ TEST_F(TSnapshotArchiveTest, SettingIsValidatedPersistedAndPartOfCreation)
     const auto mismatch = Engine_->CreateCollection(retry);
     EXPECT_EQ(mismatch.disposition, CommitDisposition::DefinitelyNotCommitted);
     EXPECT_EQ(test::Present(mismatch.error).code, "SNAPSHOT_ARCHIVE_MISMATCH");
-    for (const auto value : {int64_t{0}, int64_t{-1}, (int64_t{1} << 40) + 1}) {
+    for (const auto value : {int64_t{-1}, (int64_t{1} << 40) + 1}) {
         const auto invalid = Engine_->UpdateSnapshotArchive({test::collection_id, value});
         ASSERT_FALSE(invalid);
         EXPECT_EQ(invalid.error().code, "INVALID_ARGUMENT");
@@ -393,9 +393,83 @@ TEST_F(TSnapshotArchiveTest, SettingIsValidatedPersistedAndPartOfCreation)
     EXPECT_EQ(Engine_->GetSnapshotArchive(SecondCollection)->archived_snapshots, 0);
 }
 
-TEST_F(TSnapshotArchiveTest, MaintenanceArchivesAnExistingHistoryInBoundedCalls)
+// New append collections get DefaultHotSnapshots unless they opt out with
+// KeepAllSnapshotsInRoot; a repeated creation compares effective values.
+TEST_F(TSnapshotArchiveTest, NewAppendCollectionsDefaultToTheArchiveTier)
 {
     Create(std::nullopt);
+    auto info = Engine_->GetCollection(test::collection_id);
+    ASSERT_TRUE(info);
+    EXPECT_EQ(info->hot_snapshots, DefaultHotSnapshots);
+    EXPECT_TRUE(info->hot_snapshots_defaulted);
+    EXPECT_EQ(CatalogVersion(Root_), 6);
+    CreateCollectionRequest retry{test::collection_id, "events", Schema};
+    EXPECT_EQ(Engine_->CreateCollection(retry).disposition, CommitDisposition::Committed);
+    retry.hot_snapshots = DefaultHotSnapshots;
+    EXPECT_EQ(Engine_->CreateCollection(retry).disposition, CommitDisposition::Committed);
+    retry.hot_snapshots = KeepAllSnapshotsInRoot;
+    EXPECT_EQ(test::Present(Engine_->CreateCollection(retry).error).code, "SNAPSHOT_ARCHIVE_MISMATCH");
+    // Opting out at creation: no setting is stored.
+    CreateCollectionRequest optOut{SecondCollection, "all-in-root", Schema};
+    optOut.hot_snapshots = KeepAllSnapshotsInRoot;
+    ASSERT_EQ(Engine_->CreateCollection(optOut).disposition, CommitDisposition::Committed);
+    info = Engine_->GetCollection(SecondCollection);
+    EXPECT_FALSE(info->hot_snapshots);
+    EXPECT_FALSE(info->hot_snapshots_defaulted);
+    EXPECT_EQ(Engine_->CreateCollection(optOut).disposition, CommitDisposition::Committed);
+    optOut.hot_snapshots.reset();
+    EXPECT_EQ(test::Present(Engine_->CreateCollection(optOut).error).code, "SNAPSHOT_ARCHIVE_MISMATCH");
+    // Opting out later, and an explicit value, end the default.
+    ASSERT_TRUE(Engine_->UpdateSnapshotArchive({test::collection_id, DefaultHotSnapshots}));
+    EXPECT_FALSE(Engine_->GetCollection(test::collection_id)->hot_snapshots_defaulted);
+    EXPECT_EQ(Engine_->GetCollection(test::collection_id)->hot_snapshots, DefaultHotSnapshots);
+    ASSERT_TRUE(Engine_->UpdateSnapshotArchive({test::collection_id, KeepAllSnapshotsInRoot}));
+    EXPECT_FALSE(Engine_->GetCollection(test::collection_id)->hot_snapshots);
+    // KV collections never get the default; an explicit opt-out is accepted.
+    const std::string kvID = "00000000-0000-4000-8000-0000000000c3";
+    CreateCollectionRequest kv{kvID, "kv", Schema};
+    kv.mode = CollectionMode::KeyValue;
+    ASSERT_EQ(Engine_->CreateCollection(kv).disposition, CommitDisposition::Committed);
+    EXPECT_FALSE(Engine_->GetCollection(kvID)->hot_snapshots);
+    kv.hot_snapshots = KeepAllSnapshotsInRoot;
+    EXPECT_EQ(Engine_->CreateCollection(kv).disposition, CommitDisposition::Committed);
+    Reopen();
+    EXPECT_FALSE(Engine_->GetCollection(test::collection_id)->hot_snapshots);
+    EXPECT_FALSE(Engine_->GetCollection(kvID)->hot_snapshots);
+}
+
+// A retention keep_last below a defaulted hot_snapshots lowers it in the
+// expiration's transaction; an explicitly set value is refused instead.
+TEST_F(TSnapshotArchiveTest, RetentionLowersOnlyADefaultedSetting)
+{
+    Create(std::nullopt);
+    for (int64_t index = 0; index < 6; ++index) {
+        ASSERT_EQ(Append(index).disposition, CommitDisposition::Committed);
+    }
+    const auto expired = Engine_->ExpireSnapshots({test::collection_id, SnapshotRetentionPolicy{4}});
+    ASSERT_TRUE(expired) << expired.error().message;
+    EXPECT_EQ(expired->snapshots_expired, 2);
+    auto info = Engine_->GetCollection(test::collection_id);
+    EXPECT_EQ(info->hot_snapshots, 4);
+    EXPECT_TRUE(info->hot_snapshots_defaulted);
+    // The same policy again changes nothing; a lower one lowers it again.
+    ASSERT_TRUE(Engine_->ExpireSnapshots({test::collection_id, SnapshotRetentionPolicy{4}}));
+    ASSERT_TRUE(Engine_->ExpireSnapshots({test::collection_id, SnapshotRetentionPolicy{3}}));
+    EXPECT_EQ(Engine_->GetCollection(test::collection_id)->hot_snapshots, 3);
+    Reopen();
+    info = Engine_->GetCollection(test::collection_id);
+    EXPECT_EQ(info->hot_snapshots, 3);
+    EXPECT_TRUE(info->hot_snapshots_defaulted);
+    ASSERT_TRUE(Engine_->UpdateSnapshotArchive({test::collection_id, 3}));
+    const auto refused = Engine_->ExpireSnapshots({test::collection_id, SnapshotRetentionPolicy{2}});
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "INVALID_ARGUMENT");
+    EXPECT_EQ(Engine_->GetCollection(test::collection_id)->hot_snapshots, 3);
+}
+
+TEST_F(TSnapshotArchiveTest, MaintenanceArchivesAnExistingHistoryInBoundedCalls)
+{
+    Create(KeepAllSnapshotsInRoot);
     for (int64_t index = 0; index < 30; ++index) {
         ASSERT_EQ(Append(index).disposition, CommitDisposition::Committed);
     }
@@ -433,7 +507,7 @@ TEST_F(TSnapshotArchiveTest, MaintenanceArchivesAnExistingHistoryInBoundedCalls)
 
 TEST_F(TSnapshotArchiveTest, AppendsShrinkALongBacklogByABoundedCut)
 {
-    Create(std::nullopt);
+    Create(KeepAllSnapshotsInRoot);
     for (int64_t index = 0; index < 80; ++index) {
         ASSERT_EQ(Append(index).disposition, CommitDisposition::Committed);
     }
@@ -883,7 +957,7 @@ TEST_P(TArchiveCrashTest, ProcessExitAroundTheArchivingCommitReopensConsistently
 {
     const std::string mode = GetParam();
     const bool append = mode.starts_with("crash-append-");
-    Create(append ? std::optional<int64_t>(2) : std::nullopt);
+    Create(append ? 2 : KeepAllSnapshotsInRoot);
     for (int64_t index = 0; index < (append ? 4 : 6); ++index) {
         ASSERT_EQ(Append(index).disposition, CommitDisposition::Committed);
     }
@@ -999,9 +1073,9 @@ protected:
             store->Engine = std::move(*created);
             for (const auto& collection : Collections_) {
                 CreateCollectionRequest request{collection, collection, Schema};
-                if (store == &Archived_ && collection == Collections_[0]) {
-                    request.hot_snapshots = 3;
-                }
+                // The reference keeps every snapshot in its roots.
+                request.hot_snapshots =
+                    store == &Archived_ && collection == Collections_[0] ? 3 : KeepAllSnapshotsInRoot;
                 ASSERT_EQ(store->Engine->CreateCollection(request).disposition, CommitDisposition::Committed);
             }
         }
@@ -1353,7 +1427,10 @@ TEST(SnapshotArchiveCost, DISABLED_BaselineWithoutArchiveGrowsWithHistory)
     auto created = CreateStore({test::store_id, root.string(), "local-delete-extra-v1", limits});
     ASSERT_TRUE(created) << created.error().message;
     auto engine = std::move(*created);
-    ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", Schema}).disposition,
+    ASSERT_EQ(engine
+                  ->CreateCollection(
+                      {test::collection_id, "events", Schema, {}, CollectionMode::Append, KeepAllSnapshotsInRoot})
+                  .disposition,
         CommitDisposition::Committed);
     int64_t next = 0;
     for (const auto history : CostHistories()) {

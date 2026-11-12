@@ -300,7 +300,10 @@ try {
     auto engine =
         Take(EngineFactory::CreateWith({StoreID, root.string(), "local-delete-extra-v1", limits, owner}, factory));
     const SchemaSpec schema{{{"key", FieldType::String, false}, {"value", FieldType::Int64, true}}};
-    Require(engine->CreateCollection({CollectionID, CollectionID, schema}).disposition == CommitDisposition::Committed,
+    Require(
+        engine->CreateCollection(
+                  {CollectionID, CollectionID, schema, {}, CollectionMode::Append, KeepAllSnapshotsInRoot})
+                .disposition == CommitDisposition::Committed,
         "create collection failed");
     std::vector<double> appendUs;
     double expireUs = 0;

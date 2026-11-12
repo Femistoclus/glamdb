@@ -81,6 +81,10 @@ constexpr std::string_view checkpoints_table =
     "usage_footer_bytes INTEGER NOT NULL CHECK(usage_footer_bytes>=0),"
     "operations INTEGER NOT NULL CHECK(operations>=0),archived INTEGER NOT NULL CHECK(archived>=0),"
     "expired INTEGER NOT NULL CHECK(expired>=0),receipt_chain TEXT NOT NULL CHECK(length(receipt_chain)=64))";
+// Collections whose hot_snapshots came from the creation default and was never
+// set explicitly; a retention keep_last may lower it.
+constexpr std::string_view hot_defaults_table =
+    "CREATE TABLE collection_hot_defaults(collection_id TEXT PRIMARY KEY REFERENCES collections(collection_id))";
 // Interrupted (Bound) operations without a walk over every record.
 constexpr std::string_view bound_operations_index =
     "CREATE INDEX operations_bound ON operations(collection_id,operation_id) WHERE state=0";
@@ -340,8 +344,9 @@ void DurableSqliteCatalogStore::ValidateHeader()
             "CORRUPTION",
             "snapshot archive tables do not match the catalog version");
     }
-    for (const auto& [name, definition] :
-        {std::pair{"collection_checkpoints", checkpoints_table}, std::pair{"operations_bound", bound_operations_index}})
+    for (const auto& [name, definition] : {std::pair{"collection_checkpoints", checkpoints_table},
+             std::pair{"operations_bound", bound_operations_index},
+             std::pair{"collection_hot_defaults", hot_defaults_table}})
     {
         const auto found = database_.Query("SELECT sql FROM sqlite_master WHERE name=?", {std::string(name)});
         Require(version < 6 ? found.empty() : found.size() == 1 && found[0][0] == std::string(definition),
@@ -508,6 +513,14 @@ CollectionInfo DurableSqliteCatalogStore::ReadCollection(const SqlRow& row)
                 "CORRUPTION",
                 "invalid hot_snapshots setting");
         }
+        if (HasCheckpoints()) {
+            info.hot_snapshots_defaulted =
+                !database_.Query("SELECT 1 FROM collection_hot_defaults WHERE collection_id=?", {info.collection_id})
+                     .empty();
+            Require(!info.hot_snapshots_defaulted || info.hot_snapshots,
+                "CORRUPTION",
+                "a defaulted hot_snapshots setting has no value");
+        }
     }
     return info;
 }
@@ -542,6 +555,7 @@ void DurableSqliteCatalogStore::EnsureCheckpoints()
         Require(HasArchive(), "INTERNAL", "checkpoints follow the snapshot archive catalog version");
         database_.Execute(checkpoints_table);
         database_.Execute(bound_operations_index);
+        database_.Execute(hot_defaults_table);
         database_.Execute("PRAGMA user_version=6");
     }
 }
@@ -699,6 +713,21 @@ void DurableSqliteCatalogStore::CheckCheckpoints(std::span<const CollectionCheck
     Require(operations == OperationCount(), "CORRUPTION", "checkpoints differ from the operation count");
 }
 
+bool DurableSqliteCatalogStore::DropCheckpoints()
+{
+    std::unique_lock lock(mutex_, std::try_to_lock);
+    if (!lock.owns_lock() || uncertain_ || transaction_ || publication_ != nullptr) {
+        return false;
+    }
+    if (!HasCheckpoints()) {
+        return true;
+    }
+    Transaction([&] {
+        database_.Execute("DELETE FROM collection_checkpoints");
+    });
+    return true;
+}
+
 std::optional<ArchivedSnapshotRecord> DurableSqliteCatalogStore::NewestArchivedSnapshot(std::string_view id)
 {
     std::lock_guard lock(mutex_);
@@ -742,17 +771,20 @@ CollectionInfo DurableSqliteCatalogStore::UpdateHotSnapshots(std::string_view id
     if (hot && collection.mode != CollectionMode::Append) {
         throw Failure({"COLLECTION_MODE_MISMATCH", "hot_snapshots requires an append collection", RetryHint::FixInput});
     }
-    if (collection.hot_snapshots == hot) {
+    if (collection.hot_snapshots == hot && !collection.hot_snapshots_defaulted) {
         // Also a repeated request whose response was lost: applied once.
         return collection;
     }
     Transaction([&] {
         collection = Collection(id);
-        if (collection.hot_snapshots == hot) {
+        if (collection.hot_snapshots == hot && !collection.hot_snapshots_defaulted) {
             return;
         }
         CheckFreeBytes();
         EnsureArchive();
+        // An explicit value, even the default one, is no longer a default.
+        database_.Execute("DELETE FROM collection_hot_defaults WHERE collection_id=?", {collection.collection_id});
+        collection.hot_snapshots_defaulted = false;
         database_.Execute("INSERT INTO collection_snapshot_archive(collection_id,created_hot_snapshots,hot_snapshots) "
                           "VALUES(?,NULL,?) ON CONFLICT(collection_id) DO UPDATE SET "
                           "hot_snapshots=excluded.hot_snapshots",
@@ -761,6 +793,29 @@ CollectionInfo DurableSqliteCatalogStore::UpdateHotSnapshots(std::string_view id
         collection.hot_snapshots = hot;
     });
     return collection;
+}
+
+void DurableSqliteCatalogStore::LowerDefaultHot(std::string_view id, int64_t hot)
+{
+    Require(transaction_, "INTERNAL", "the archive setting requires the outer transaction");
+    CheckHotSnapshots(hot);
+    const auto collection = Collection(id);
+    Require(collection.hot_snapshots_defaulted && collection.hot_snapshots && *collection.hot_snapshots > hot,
+        "INVALID_ARGUMENT",
+        "only a defaulted hot_snapshots setting is lowered to keep_last");
+    database_.Execute("UPDATE collection_snapshot_archive SET hot_snapshots=? WHERE collection_id=?",
+        {hot, collection.collection_id});
+    Require(database_.Changes() == 1, "INTERNAL", "archive setting was not stored");
+}
+
+void DurableSqliteCatalogStore::LowerDefaultHotSnapshots(std::string_view id, int64_t hot)
+{
+    std::lock_guard lock(mutex_);
+    Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
+    Require(publication_ == nullptr, "INTERNAL", "the archive setting cannot change during a publication");
+    Transaction([&] {
+        LowerDefaultHot(id, hot);
+    });
 }
 
 ArchivedSnapshotRecord DurableSqliteCatalogStore::ReadArchived(const SqlRow& row)
@@ -1411,6 +1466,9 @@ CollectionInfo DurableSqliteCatalogStore::PublishCreate(CollectionInfo collectio
     std::string_view migrationOperation,
     const CheckpointSource& checkpoint)
 {
+    Require(!collection.hot_snapshots_defaulted || collection.hot_snapshots,
+        "INVALID_ARGUMENT",
+        "a defaulted hot_snapshots setting needs a value");
     std::lock_guard lock(mutex_);
     Require(guard && body && publication_ == nullptr,
         "INVALID_ARGUMENT",
@@ -1484,6 +1542,9 @@ CollectionInfo DurableSqliteCatalogStore::PublishCreate(CollectionInfo collectio
                 EnsureArchive();
                 database_.Execute("INSERT INTO collection_snapshot_archive VALUES(?,?,?)",
                     {collection.collection_id, *collection.hot_snapshots, *collection.hot_snapshots});
+                if (collection.hot_snapshots_defaulted) {
+                    database_.Execute("INSERT INTO collection_hot_defaults VALUES(?)", {collection.collection_id});
+                }
             }
             WriteCheckpoint(collection.collection_id,
                 checkpoint ? checkpoint() : std::nullopt,
@@ -1721,7 +1782,8 @@ void DurableSqliteCatalogStore::PublishExpiration(const BaseIdentity& base,
     const Guard& guard,
     const Body& body,
     int64_t archived_expired,
-    const CheckpointSource& checkpoint)
+    const CheckpointSource& checkpoint,
+    std::optional<int64_t> lower_default_hot)
 {
     std::lock_guard lock(mutex_);
     Require(guard && body && publication_ == nullptr, "INVALID_ARGUMENT", "maintenance requires an owned publication");
@@ -1791,6 +1853,9 @@ void DurableSqliteCatalogStore::PublishExpiration(const BaseIdentity& base,
                     "CORRUPTION",
                     "cleanup would remove an archived manifest list");
                 database_.Execute("INSERT INTO metadata_cleanup VALUES(?,?)", {base.collection_id, path});
+            }
+            if (lower_default_hot) {
+                LowerDefaultHot(base.collection_id, *lower_default_hot);
             }
             WriteCheckpoint(base.collection_id,
                 checkpoint ? checkpoint() : std::nullopt,

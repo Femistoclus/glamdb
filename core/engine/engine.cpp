@@ -218,6 +218,8 @@ struct Engine::Impl
     std::shared_ptr<DurableSqliteCatalogStore> catalog;
     // OpenStoreRequest::verify_full: never open from checkpoints.
     bool verify_full = false;
+    // Detected corruption whose checkpoints are not yet deleted.
+    std::atomic<bool> forget_checkpoints{false};
     std::shared_ptr<StorageBackend> backend;
     mutable std::mutex state_mutex;
     // Orders corruption reports against a publication decision. The writer
@@ -816,14 +818,21 @@ struct Engine::Impl
             TLogScope::Emit(ELogEvent::StorageFailed);
         }
         if (error.code == "CORRUPTION" || error.code == "UNSUPPORTED_STORE_VERSION") {
-            std::lock_guard gate(commit_gate);
-            if (backend) {
-                backend->InvalidateCache();
+            {
+                std::lock_guard gate(commit_gate);
+                if (backend) {
+                    backend->InvalidateCache();
+                }
+                std::lock_guard lock(state_mutex);
+                ready = false;
+                ++health_generation;
+                TLogScope::Emit(ELogEvent::RecoveryRequired);
             }
-            std::lock_guard lock(state_mutex);
-            ready = false;
-            ++health_generation;
-            TLogScope::Emit(ELogEvent::RecoveryRequired);
+            // Outside the commit gate: a publication may hold the catalog
+            // while it waits for the gate.
+            if (error.code == "CORRUPTION") {
+                ForgetCheckpoints();
+            }
         }
     }
 
@@ -897,6 +906,22 @@ struct Engine::Impl
         return false;
     }
 
+    // Detected corruption must be found again by the next open, which the
+    // checkpoint path (no footers, no history) might not do.
+    // Never waits for the catalog: a busy catalog leaves the request pending
+    // for the next recovery (Reconcile, or Shutdown of an unready engine).
+    void ForgetCheckpoints() noexcept
+    {
+        try {
+            forget_checkpoints = true;
+            if (catalog && catalog->DropCheckpoints()) {
+                forget_checkpoints = false;
+            }
+        } catch (...) {
+            // Best effort; a catalog that cannot write keeps the request pending.
+        }
+    }
+
     void Recover(bool reopen)
     {
         {
@@ -904,8 +929,14 @@ struct Engine::Impl
             recovering = true;
         }
         try {
+            if (forget_checkpoints) {
+                ForgetCheckpoints();
+            }
             RecoverStore(reopen);
         } catch (const Failure& error) {
+            if (error.detail.code == "CORRUPTION") {
+                ForgetCheckpoints();
+            }
             using namespace NGlamDB::NTelemetry;
             if (error.detail.code == "IO_ERROR" || error.detail.code == "CORRUPTION" ||
                 error.detail.code == "UNSUPPORTED_STORE_VERSION")
@@ -1345,9 +1376,10 @@ CreateOutcome Engine::CreateCollectionImpl(const CreateCollectionRequest& reques
                 ValidUtf8(request.exact_name) && request.exact_name.find('\0') == std::string::npos,
             "INVALID_ARGUMENT",
             "invalid collection ID or exact name");
-        Require(!request.hot_snapshots || (*request.hot_snapshots >= 1 && *request.hot_snapshots <= (1LL << 40)),
+        Require(!request.hot_snapshots ||
+                (*request.hot_snapshots >= KeepAllSnapshotsInRoot && *request.hot_snapshots <= (1LL << 40)),
             "INVALID_ARGUMENT",
-            "hot_snapshots must be 1..1099511627776");
+            "hot_snapshots must be 0 (keep all in the root) or 1..1099511627776");
         Require(request.mode == CollectionMode::Append || request.mode == CollectionMode::KeyValue,
             "INVALID_ARGUMENT",
             "invalid collection mode");
@@ -1358,7 +1390,23 @@ CreateOutcome Engine::CreateCollectionImpl(const CreateCollectionRequest& reques
                         }),
                 "INVALID_ARGUMENT",
                 "KV collections require a non-null string key field");
-            Require(!request.hot_snapshots, "COLLECTION_MODE_MISMATCH", "hot_snapshots requires an append collection");
+            Require(!request.hot_snapshots || *request.hot_snapshots == KeepAllSnapshotsInRoot,
+                "COLLECTION_MODE_MISMATCH",
+                "hot_snapshots requires an append collection");
+        }
+        // The effective setting: an append collection that does not choose
+        // gets DefaultHotSnapshots when the backend supports the archive.
+        std::optional<int64_t> hot;
+        bool hotDefaulted = false;
+        if (request.mode == CollectionMode::Append) {
+            if (!request.hot_snapshots) {
+                if (impl->backend && impl->backend->GetCapabilities().snapshot_archive) {
+                    hot = DefaultHotSnapshots;
+                    hotDefaulted = true;
+                }
+            } else if (*request.hot_snapshots != KeepAllSnapshotsInRoot) {
+                hot = request.hot_snapshots;
+            }
         }
         const auto schema_hash = Take(SchemaFingerprint(request.schema));
         const auto settings = Take(CanonicalWriteSettings(request.schema, request.write_settings));
@@ -1418,7 +1466,7 @@ CreateOutcome Engine::CreateCollectionImpl(const CreateCollectionRequest& reques
                 Require(impl->catalog->CreatedWriteSettings(collection.collection_id) == settings,
                     "WRITE_SETTINGS_MISMATCH",
                     "write settings differ from original creation");
-                Require(impl->catalog->CreatedHotSnapshots(collection.collection_id) == request.hot_snapshots,
+                Require(impl->catalog->CreatedHotSnapshots(collection.collection_id) == hot,
                     "SNAPSHOT_ARCHIVE_MISMATCH",
                     "hot_snapshots differs from original creation");
                 context = CreateRecoveryContext{impl->info.store_id,
@@ -1445,7 +1493,7 @@ CreateOutcome Engine::CreateCollectionImpl(const CreateCollectionRequest& reques
             throw Failure(health.error());
         }
         impl->CheckSettingsSupported(settings);
-        Require(!request.hot_snapshots || impl->backend->GetCapabilities().snapshot_archive,
+        Require(!hot || impl->backend->GetCapabilities().snapshot_archive,
             "DEPENDENCY_UNAVAILABLE",
             "the storage backend does not support the snapshot archive");
         const auto attempt = NewUuid();
@@ -1469,7 +1517,8 @@ CreateOutcome Engine::CreateCollectionImpl(const CreateCollectionRequest& reques
                 info.mode == request.mode,
             "IO_ERROR",
             "producer changed collection identity, schema or write settings");
-        info.hot_snapshots = request.hot_snapshots;
+        info.hot_snapshots = hot;
+        info.hot_snapshots_defaulted = hotDefaulted;
         context->candidate_table_uuid = info.table_uuid;
         {
             std::lock_guard state_lock(impl->state_mutex);
@@ -1611,10 +1660,15 @@ Result<SnapshotExpirationResult> Engine::ExpireSnapshots(const SnapshotExpiratio
         Require(collection.mode == CollectionMode::Append,
             "COLLECTION_MODE_MISMATCH",
             "snapshot expiration requires append mode");
-        Require(!request.policy || !request.policy->keep_last || !collection.hot_snapshots ||
-                *collection.hot_snapshots <= *request.policy->keep_last,
-            "INVALID_ARGUMENT",
-            "hot_snapshots must not exceed keep_last");
+        // A defaulted hot_snapshots above a new keep_last is lowered to it with
+        // the expiration; an explicitly set one is refused.
+        std::optional<int64_t> lowerDefaultHot;
+        if (request.policy && request.policy->keep_last && collection.hot_snapshots &&
+            *collection.hot_snapshots > *request.policy->keep_last)
+        {
+            Require(collection.hot_snapshots_defaulted, "INVALID_ARGUMENT", "hot_snapshots must not exceed keep_last");
+            lowerDefaultHot = *request.policy->keep_last;
+        }
         base = impl->catalog->Base(request.collection_id);
         impl->ReserveAttempt();
         const auto archived =
@@ -1647,12 +1701,16 @@ Result<SnapshotExpirationResult> Engine::ExpireSnapshots(const SnapshotExpiratio
                 staged->ArchivedExpired(),
                 [&] {
                     return staged->Checkpoint();
-                });
+                },
+                lowerDefaultHot);
             committed = true;
             impl->backend->PublicationFinished(request.collection_id, candidate, CommitDisposition::Committed);
             impl->RefreshCache();
             gate.unlock();
             impl->RetireRoot(*base);
+        } else if (lowerDefaultHot) {
+            impl->catalog->LowerDefaultHotSnapshots(request.collection_id, *lowerDefaultHot);
+            impl->RefreshCache();
         }
         impl->DrainExpiredMetadata();
         result.cleanup_pending = impl->catalog->PendingMetadataCount(request.collection_id);
@@ -1724,9 +1782,12 @@ Result<CollectionInfo> Engine::UpdateSnapshotArchive(const UpdateSnapshotArchive
     std::unique_lock writer_lock(impl->writer, std::defer_lock);
     try {
         Require(ValidUuid(request.collection_id), "INVALID_ARGUMENT", "collection ID must be a canonical UUID");
-        Require(!request.hot_snapshots || (*request.hot_snapshots >= 1 && *request.hot_snapshots <= (1LL << 40)),
+        Require(!request.hot_snapshots ||
+                (*request.hot_snapshots >= KeepAllSnapshotsInRoot && *request.hot_snapshots <= (1LL << 40)),
             "INVALID_ARGUMENT",
-            "hot_snapshots must be 1..1099511627776");
+            "hot_snapshots must be 0 (keep all in the root) or 1..1099511627776");
+        const std::optional<int64_t> hot =
+            request.hot_snapshots == KeepAllSnapshotsInRoot ? std::nullopt : request.hot_snapshots;
         const auto collection = impl->ReadCollection([&](const auto& item) {
             return item.collection_id == request.collection_id;
         });
@@ -1741,7 +1802,7 @@ Result<CollectionInfo> Engine::UpdateSnapshotArchive(const UpdateSnapshotArchive
             impl->CheckReady();
             expected_generation = impl->health_generation;
         }
-        if (request.hot_snapshots) {
+        if (hot) {
             Require(collection.mode == CollectionMode::Append,
                 "COLLECTION_MODE_MISMATCH",
                 "hot_snapshots requires an append collection");
@@ -1749,7 +1810,7 @@ Result<CollectionInfo> Engine::UpdateSnapshotArchive(const UpdateSnapshotArchive
                 "DEPENDENCY_UNAVAILABLE",
                 "the storage backend does not support the snapshot archive");
             const auto policy = Take(GetSnapshotRetention(request.collection_id));
-            Require(!policy.keep_last || *request.hot_snapshots <= *policy.keep_last,
+            Require(!policy.keep_last || *hot <= *policy.keep_last,
                 "INVALID_ARGUMENT",
                 "hot_snapshots must not exceed keep_last");
         }
@@ -1759,7 +1820,7 @@ Result<CollectionInfo> Engine::UpdateSnapshotArchive(const UpdateSnapshotArchive
         }
         CollectionInfo updated;
         try {
-            updated = impl->catalog->UpdateHotSnapshots(request.collection_id, request.hot_snapshots);
+            updated = impl->catalog->UpdateHotSnapshots(request.collection_id, hot);
         } catch (const Failure& error) {
             if (!error.uncertain) {
                 throw;

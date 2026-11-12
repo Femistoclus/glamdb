@@ -595,10 +595,14 @@ TEST_F(TCheckpointOpenTest, DamagedRootOrCurrentManifestIsRefused)
         ASSERT_FALSE(opened) << path;
         EXPECT_EQ(opened.error().code, "CORRUPTION") << opened.error().message;
         WriteBytes(path, original);
+        // The detected corruption removed the checkpoints: the restored store
+        // is verified fully once, then opens from re-established checkpoints.
         auto restored = Open(false);
         ASSERT_TRUE(restored) << restored.error().message;
-        ASSERT_TRUE(Backend_->OpenedFromCheckpoints() || path == root);
+        EXPECT_FALSE(Backend_->OpenedFromCheckpoints());
         Engine_ = std::move(*restored);
+        Reopen(false);
+        EXPECT_TRUE(Backend_->OpenedFromCheckpoints());
         ASSERT_TRUE(Engine_->Shutdown(std::chrono::seconds(5)));
         Engine_.reset();
     }
@@ -635,6 +639,9 @@ TEST_F(TCheckpointOpenTest, LowerLimitsAreRefusedLikeFullVerification)
         ASSERT_FALSE(verified) << name;
         EXPECT_EQ(checkpointed.error().code, verified.error().code) << name;
     }
+    // A refusal for CORRUPTION removed the checkpoints; full verification
+    // under the original limits re-establishes them.
+    Reopen(false);
     Reopen(false);
     EXPECT_TRUE(Backend_->OpenedFromCheckpoints());
 }
@@ -654,6 +661,7 @@ TEST_F(TCheckpointOpenTest, Version5StoresOpenFullyAndUpgradeOnTheFirstPublicati
     Engine_.reset();
     Tamper("DROP INDEX operations_bound");
     Tamper("DROP TABLE collection_checkpoints");
+    Tamper("DROP TABLE collection_hot_defaults");
     Tamper("PRAGMA user_version=5");
     Reopen(false);
     EXPECT_FALSE(Backend_->OpenedFromCheckpoints());

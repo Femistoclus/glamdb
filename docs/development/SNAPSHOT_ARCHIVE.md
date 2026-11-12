@@ -4,8 +4,11 @@ An append collection can keep only its newest snapshots in the Iceberg root and
 move older ones to an archive in the SQLite catalog, as DuckLake stores
 snapshots as catalog rows. Archived snapshots stay readable; only the explicit
 retention policy of [snapshot retention](SNAPSHOT_RETENTION.md) makes a
-snapshot unreadable. Without the setting nothing changes: every retained
-snapshot stays in the root and no catalog table is created.
+snapshot unreadable. New append collections use the tier by default
+(`DefaultHotSnapshots` = 100); a collection created with
+`KeepAllSnapshotsInRoot` keeps every retained snapshot in the root, and a store
+whose collections all opt out creates no archive table. Existing collections
+keep their setting on open and upgrade.
 
 | State | Where the snapshot entry lives | Readable | Manifest list and manifests |
 | --- | --- | --- | --- |
@@ -15,23 +18,38 @@ snapshot stays in the root and no catalog table is created.
 
 ```cpp
 CreateCollectionRequest request{collection_id, "events", schema};
-request.hot_snapshots = 100;                  // part of the definition
+// absent: DefaultHotSnapshots (100) for append collections
+// request.hot_snapshots = 50;                      // explicit
+// request.hot_snapshots = KeepAllSnapshotsInRoot;  // explicit opt-out (0)
 engine->CreateCollection(request);
 engine->UpdateSnapshotArchive({collection_id, 50});   // later appends apply it
 auto status = engine->GetSnapshotArchive(collection_id);
 auto moved = engine->ArchiveSnapshots(collection_id); // bounded maintenance
 ```
 
-`hot_snapshots` accepts 1–2^40 and is stored per collection in the catalog.
-`CollectionInfo::hot_snapshots` reports it. A repeated creation must request
-the same value as the original creation (`SNAPSHOT_ARCHIVE_MISMATCH`).
-`UpdateSnapshotArchive` replaces it under the writer, is applied once when
-repeated and moves nothing by itself; an absent value stops archiving later
-snapshots. Raising it does not move archived snapshots back. Retention must
-keep at least the hot snapshots: `hot_snapshots` greater than `keep_last` is
-`INVALID_ARGUMENT`, whichever of the two is changed. KV collections need their
-complete root history; the setting and archive maintenance return
-`COLLECTION_MODE_MISMATCH` for them, like retention.
+The creation request is tri-state: absent means the default (100 for append
+collections when the backend supports the archive, none for KV and for
+backends without it), `KeepAllSnapshotsInRoot` (0) means no archive, and
+1–2^40 is an explicit value. The effective value is stored per collection in
+the catalog like an explicit one; `CollectionInfo::hot_snapshots` reports it
+(absent: no archive) and `CollectionInfo::hot_snapshots_defaulted` whether it
+came from the default and was never set explicitly (catalog table
+`collection_hot_defaults`, version 6). A repeated creation compares effective
+values (`SNAPSHOT_ARCHIVE_MISMATCH` otherwise): omitting the field matches a
+collection that received the default or was created with an explicit 100; an
+explicit opt-out matches neither. A creation retry that omits the field no
+longer matches a collection created before the default existed.
+`UpdateSnapshotArchive` replaces the value with an explicit one under the
+writer, is applied once when repeated and moves nothing by itself; an absent
+value or `KeepAllSnapshotsInRoot` stops archiving later snapshots. Raising it
+does not move archived snapshots back. Retention must keep at least the hot
+snapshots: an explicitly set `hot_snapshots` greater than `keep_last` is
+`INVALID_ARGUMENT`, whichever of the two is changed; a defaulted value above a
+new `keep_last` is lowered to `keep_last` in the expiration's transaction (or
+its own when the root does not change) and stays marked as defaulted. KV
+collections need their complete root history; the default never applies to
+them, an explicit value and archive maintenance return
+`COLLECTION_MODE_MISMATCH`, like retention.
 
 ## Appends and maintenance
 
@@ -213,6 +231,9 @@ read binds the row to its committed receipt (snapshot, parent, time) and
 requires its `data_files` prefix to end exactly at the files whose origin
 sequence is the row's; a tampered row is `CORRUPTION`, never other data.
 Scrubbing remains explicit: `VerifyStoreFull`, `Reconcile` or `verify_full`.
+Detected `CORRUPTION` (during recovery or by any read) deletes every
+checkpoint, so the next open verifies fully and finds it again instead of
+reopening ready; a successful full verification re-establishes them.
 
 The physical inventory (`GetStorageFootprint`) reads each archived list with
 its recorded size and SHA-256 and counts it and its manifests as referenced

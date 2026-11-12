@@ -177,7 +177,11 @@ public:
         const Guard& guard,
         const Body& body,
         int64_t archived_expired = 0,
-        const CheckpointSource& checkpoint = {});
+        const CheckpointSource& checkpoint = {},
+        std::optional<int64_t> lower_default_hot = std::nullopt);
+    // Lowers a defaulted hot_snapshots setting (to a retention keep_last)
+    // and keeps it marked as defaulted. INVALID_ARGUMENT otherwise.
+    void LowerDefaultHotSnapshots(std::string_view collection_id, int64_t hot_snapshots);
     void PublishArchive(const BaseIdentity& base,
         const Guard& guard,
         const Body& body,
@@ -217,6 +221,10 @@ public:
     // its collection, and their operation counts to sum to the catalog's
     // exact operation count. Indexed counts only; CORRUPTION otherwise.
     void CheckCheckpoints(std::span<const CollectionCheckpoint> checkpoints);
+    // After detected corruption: the next open must verify fully. Never
+    // waits for the catalog lock; false when it could not run now (busy, in a
+    // transaction or after an uncertain one). True when nothing remains.
+    bool DropCheckpoints();
     // The archived snapshot with the highest sequence, if any.
     std::optional<ArchivedSnapshotRecord> NewestArchivedSnapshot(std::string_view collection_id);
     // Bound (interrupted) operations in key order. Version 6 seeks a partial
@@ -277,6 +285,7 @@ private:
     bool HasArchive();
     void EnsureArchive();
     void EnsureCheckpoints();
+    void LowerDefaultHot(std::string_view collection_id, int64_t hot_snapshots);
     int64_t CountRows(std::string_view table, std::string_view collection_id);
     // Inside a publication or fence transaction of a version 5+ catalog.
     // `kind` and `receipt` (encoded outcome, may be empty) extend the chain.

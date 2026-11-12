@@ -120,7 +120,11 @@ protected:
             detail::EngineFactory::CreateWith({test::store_id, Root_.string()}, RetentionBackend(options), Vfs_.Name());
         ASSERT_TRUE(created) << created.error().message;
         Engine_ = std::move(*created);
-        ASSERT_EQ(Engine_->CreateCollection({test::collection_id, "events", Schema}).disposition,
+        // Retention (#184) without the archive tier is this suite's subject.
+        ASSERT_EQ(Engine_
+                      ->CreateCollection(
+                          {test::collection_id, "events", Schema, {}, CollectionMode::Append, KeepAllSnapshotsInRoot})
+                      .disposition,
             CommitDisposition::Committed);
         const auto a = Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
         const auto b = Engine_->AppendDurable({test::collection_id, SecondOperation, {}, {Batch(SecondRows)}});

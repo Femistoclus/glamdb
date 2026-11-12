@@ -29,7 +29,11 @@ TEST(KVRetentionIntegration, OfficialVersionThreeAppendStoreUpgradesLazilyAndReo
     ASSERT_TRUE(opened);
     auto engine = *opened;
     opened->reset();
-    ASSERT_EQ(engine->CreateCollection({test::collection_id, "append", Schema}).disposition,
+    // An official version 3 retention store: created without the archive tier.
+    ASSERT_EQ(engine
+                  ->CreateCollection(
+                      {test::collection_id, "append", Schema, {}, CollectionMode::Append, KeepAllSnapshotsInRoot})
+                  .disposition,
         CommitDisposition::Committed);
     const auto first = engine->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
     const auto second = engine->AppendDurable({test::collection_id, SecondOperation, {}, {Batch(SecondRows)}});

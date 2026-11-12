@@ -264,8 +264,18 @@ struct CollectionInfo
     // catalog snapshot archive and stay readable. Absent keeps every retained
     // snapshot in the root. Append collections only.
     std::optional<int64_t> hot_snapshots{};
+    // The value is DefaultHotSnapshots applied at creation (possibly lowered
+    // to a retention keep_last since) and was never set explicitly.
+    bool hot_snapshots_defaulted = false;
     bool operator==(const CollectionInfo&) const = default;
 };
+
+// hot_snapshots of a new append collection whose creation does not choose
+// one, when the storage backend supports the snapshot archive.
+inline constexpr int64_t DefaultHotSnapshots = 100;
+// Explicit hot_snapshots value for "no archive": every retained snapshot
+// stays in the Iceberg root.
+inline constexpr int64_t KeepAllSnapshotsInRoot = 0;
 
 struct CreateCollectionRequest
 {
@@ -275,13 +285,16 @@ struct CreateCollectionRequest
     // Part of the definition: a repeated creation must request the same settings.
     WriteSettings write_settings{};
     CollectionMode mode = CollectionMode::Append;
-    // Also part of the definition; 1..2^40 when present.
+    // Also part of the definition, compared by effective value on a repeated
+    // creation. Absent: DefaultHotSnapshots for append collections (when the
+    // backend supports the archive), none for KV. KeepAllSnapshotsInRoot (0):
+    // no archive. 1..2^40: that many root snapshots (append only).
     std::optional<int64_t> hot_snapshots{};
 };
 
-// Replaces the collection's hot_snapshots setting. Absent stops archiving
-// later snapshots. Archived snapshots never move back into the root. A
-// repeated request is applied once.
+// Replaces the collection's hot_snapshots setting with an explicit value.
+// Absent or KeepAllSnapshotsInRoot stops archiving later snapshots. Archived
+// snapshots never move back into the root. A repeated request is applied once.
 struct UpdateSnapshotArchiveRequest
 {
     std::string collection_id;
