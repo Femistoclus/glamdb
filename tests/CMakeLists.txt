@@ -19,6 +19,8 @@ add_test(NAME glamdb.tooling
         "CC=${CMAKE_C_COMPILER}" "CXX=${CMAKE_CXX_COMPILER}"
         "GLAMDB_TEST_CMAKE=${CMAKE_COMMAND}" "GLAMDB_TEST_GENERATOR=${CMAKE_GENERATOR}"
         "GLAMDB_TEST_TOOLCHAIN=${CMAKE_TOOLCHAIN_FILE}" "GLAMDB_TEST_PREFIX=${CMAKE_PREFIX_PATH}"
+        "GLAMDB_TEST_C_FLAGS=${CMAKE_C_FLAGS}" "GLAMDB_TEST_CXX_FLAGS=${CMAKE_CXX_FLAGS}"
+        "GLAMDB_TEST_EXE_LINKER_FLAGS=${CMAKE_EXE_LINKER_FLAGS}"
         "${Python3_EXECUTABLE}" -m unittest discover
         -s "${CMAKE_CURRENT_SOURCE_DIR}/tooling" -p "test_*.py" -v
 )
@@ -52,12 +54,23 @@ if(NOT GLAMDB_IO_ONLY)
         target_include_directories(glamdb_vertical PRIVATE "${PROJECT_SOURCE_DIR}")
         target_link_libraries(glamdb_vertical PRIVATE glamdb::core glamdb_storage glamdb_build_options
             GTest::gtest_main SQLite::SQLite3)
+        # Release builds skip the staged-root round-trip parse by default; the
+        # public-API storage tests always verify it.
         gtest_discover_tests(glamdb_vertical TEST_PREFIX glamdb.vertical.
-            PROPERTIES LABELS "vertical;scan" TIMEOUT 60)
+            PROPERTIES LABELS "vertical;scan" TIMEOUT 60 ENVIRONMENT "GLAMDB_VERIFY_ROUNDTRIP=1")
 
         add_executable(glamdb_scan_index_bench "${PROJECT_SOURCE_DIR}/benchmarks/scan_index.cpp" support/fault_fs.cpp)
         target_include_directories(glamdb_scan_index_bench PRIVATE "${PROJECT_SOURCE_DIR}")
         target_link_libraries(glamdb_scan_index_bench PRIVATE glamdb::core glamdb_storage glamdb_build_options)
+
+        add_executable(glamdb_capacity_bench "${PROJECT_SOURCE_DIR}/benchmarks/capacity.cpp")
+        set_target_properties(glamdb_capacity_bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/benchmarks")
+        target_include_directories(glamdb_capacity_bench PRIVATE "${PROJECT_SOURCE_DIR}")
+        target_include_directories(glamdb_capacity_bench SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party/json/single_include")
+        target_link_libraries(glamdb_capacity_bench PRIVATE glamdb::core glamdb_storage glamdb_build_options)
+        add_test(NAME glamdb.capacity_campaign COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/integration/capacity_test.py" "$<TARGET_FILE:glamdb_capacity_bench>")
+        set_tests_properties(glamdb.capacity_campaign PROPERTIES LABELS "integration;capacity" TIMEOUT 180)
 
         add_executable(glamdb_parquet_settings_bench "${PROJECT_SOURCE_DIR}/benchmarks/parquet_settings.cpp")
         target_include_directories(glamdb_parquet_settings_bench PRIVATE "${PROJECT_SOURCE_DIR}")
@@ -72,6 +85,11 @@ if(NOT GLAMDB_IO_ONLY)
     gtest_discover_tests(glamdb_fault TEST_PREFIX glamdb.fault. PROPERTIES LABELS fault TIMEOUT 30)
 
     if(TARGET glamdb_admin)
+        add_executable(glamdb_admin_result_test admin/result_test.cpp)
+        target_link_libraries(glamdb_admin_result_test PRIVATE glamdb_admin_commands glamdb_build_options GTest::gtest_main)
+        target_compile_definitions(glamdb_admin_result_test PRIVATE
+            GLAMDB_OUTCOME_FIXTURE="${PROJECT_SOURCE_DIR}/fixtures/http/outcomes-v0.json")
+        gtest_discover_tests(glamdb_admin_result_test TEST_PREFIX glamdb.admin_result. PROPERTIES LABELS unit TIMEOUT 30)
         add_test(NAME glamdb.admin COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/integration/cli_test.py" "$<TARGET_FILE:glamdb_admin>")
         set_tests_properties(glamdb.admin PROPERTIES LABELS integration TIMEOUT 30)
     endif()
@@ -129,6 +147,17 @@ if(TARGET glamdb_server)
     if(GLAMDB_TEST_CLI_EXECUTABLE)
         set(glamdb_test_cli "${GLAMDB_TEST_CLI_EXECUTABLE}")
     endif()
+    if(TARGET glamdb_admin)
+        add_test(NAME glamdb.cli_data COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/client/cli_data_test.py"
+            "${glamdb_test_cli}" "$<TARGET_FILE:glamdb_admin>" "$<TARGET_FILE:glamdb_server>")
+        set_tests_properties(glamdb.cli_data PROPERTIES LABELS "integration;http;cli" TIMEOUT 180)
+        if(GLAMDB_ENABLE_MSAN)
+            # System OpenSSL is not instrumented. Other network scenarios use
+            # the ordinary standalone CLI selected above; admin stays native.
+            set_property(TEST glamdb.cli_data APPEND PROPERTY ENVIRONMENT "GLAMDB_TEST_ADMIN_HTTP=0")
+        endif()
+    endif()
     add_test(NAME glamdb.native_metadata COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/server/native_metadata_test.py"
         "$<TARGET_FILE:glamdb_server>" "${glamdb_test_cli}" "${PROJECT_SOURCE_DIR}/ui")
@@ -163,10 +192,24 @@ if(TARGET glamdb_server)
     set_tests_properties(glamdb.scan_http PROPERTIES LABELS "integration;http;scan" TIMEOUT 420)
 endif()
 if(TARGET glamdb_transport)
-    add_executable(glamdb_transport_test server/transport_test.cpp server/outcome_conformance_test.cpp server/arrow_ipc_test.cpp)
-    target_link_libraries(glamdb_transport_test PRIVATE glamdb_transport glamdb_build_options GTest::gtest_main OpenSSL::Crypto)
+    find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+    add_executable(glamdb_transport_test
+        server/transport_test.cpp
+        server/outcome_conformance_test.cpp
+        server/arrow_ipc_test.cpp
+        server/json_codec_test.cpp
+    )
+    target_link_libraries(glamdb_transport_test PRIVATE
+        glamdb_transport
+        glamdb_build_options
+        GTest::gtest_main
+        OpenSSL::Crypto
+    )
     gtest_discover_tests(glamdb_transport_test TEST_PREFIX glamdb.transport.
         PROPERTIES LABELS "unit;http" TIMEOUT 120)
+    # Manual codec micro-benchmark; not a CTest case.
+    add_executable(glamdb_json_codec_bench server/json_codec_bench.cpp)
+    target_link_libraries(glamdb_json_codec_bench PRIVATE glamdb_transport glamdb_build_options)
 endif()
 
 if(TARGET glamdb_routes)

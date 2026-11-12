@@ -7,6 +7,7 @@
 #include "core/storage/metadata_validation.h"
 
 #include <iceberg/file_io.h>
+#include <iceberg/snapshot.h>
 #include <iceberg/table_metadata.h>
 
 #include <limits>
@@ -57,6 +58,27 @@ iceberg::Status TStoragePublicationGuard::CheckContext(const TPointerChange& cha
     return {};
 }
 
+namespace {
+
+// The pinned Iceberg snapshot equality ignores the summary and the manifest
+// list location, so compare them explicitly for every snapshot.
+bool SameSnapshotDetails(const iceberg::TableMetadata& left, const iceberg::TableMetadata& right)
+{
+    if (left.snapshots.size() != right.snapshots.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < left.snapshots.size(); ++index) {
+        const auto& a = left.snapshots[index];
+        const auto& b = right.snapshots[index];
+        if (!a || !b || a->summary != b->summary || a->manifest_list != b->manifest_list) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
 iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& change)
 {
     const auto record = Context_.Attempt->Record(change.NewLocation);
@@ -79,14 +101,31 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
     if (rootSize < 0 || static_cast<std::uint64_t>(rootSize) != record.Value().Length) {
         return iceberg::ValidationFailed("Candidate metadata length differs from its receipt.");
     }
-    ICEBERG_ASSIGN_OR_RAISE(auto metadata,
-        ReadTableMetadata(*Context_.FileIO,
-            change.NewLocation,
-            std::nullopt,
-            static_cast<std::int64_t>(Context_.Limits.RootBytes)));
     TBaseState candidate;
     candidate.MetadataLocation = change.NewLocation;
-    candidate.Metadata = std::shared_ptr<iceberg::TableMetadata>(std::move(metadata));
+    const auto maxRootBytes = static_cast<std::int64_t>(Context_.Limits.RootBytes);
+    if (const auto& staged = Context_.StagedRoot) {
+        if (!staged->Metadata || !staged->Bytes || staged->Bytes->size() != record.Value().Length) {
+            return iceberg::ValidationFailed("Candidate metadata differs from its staged root.");
+        }
+        ICEBERG_RETURN_UNEXPECTED(
+            VerifyTableMetadataBytes(*Context_.FileIO, change.NewLocation, *staged->Bytes, maxRootBytes));
+        if (Context_.VerifyStagedRoot) {
+            ICEBERG_ASSIGN_OR_RAISE(auto parsed, ParseTableMetadata(*staged->Bytes));
+            ICEBERG_ASSIGN_OR_RAISE(auto reserialized, SerializeTableMetadata(*parsed));
+            ICEBERG_ASSIGN_OR_RAISE(auto stagedBytes, SerializeTableMetadata(*staged->Metadata));
+            if (!(*parsed == *staged->Metadata) || !SameSnapshotDetails(*parsed, *staged->Metadata) ||
+                reserialized != *staged->Bytes || stagedBytes != *staged->Bytes)
+            {
+                return iceberg::Invalid("CORRUPTION: Staged metadata does not round-trip through its root bytes.");
+            }
+        }
+        candidate.Metadata = staged->Metadata;
+    } else {
+        ICEBERG_ASSIGN_OR_RAISE(auto metadata,
+            ReadTableMetadata(*Context_.FileIO, change.NewLocation, std::nullopt, maxRootBytes));
+        candidate.Metadata = std::shared_ptr<iceberg::TableMetadata>(std::move(metadata));
+    }
     if (Context_.Base) {
         ICEBERG_RETURN_UNEXPECTED(
             CheckAppendMetadata(*Context_.Base->Metadata, *candidate.Metadata, Context_.ExpectedSummary));
@@ -117,9 +156,18 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
     if (!total || CheckStorageCapacity(total.Value(), Context_.Limits)) {
         return iceberg::ValidationFailed("CAPACITY: Candidate exceeds store capacity.");
     }
-    // Admission measured the warehouse before file production. Recheck the
-    // physical cap, including staged files and orphans, before publication.
-    const auto warehouse = MeasureWarehouse(*Context_.Directories, Context_.Limits);
+    // Admission measured the warehouse, including orphans, before file
+    // production. Recheck the physical cap with the staged files before
+    // publication: from that measurement plus this attempt's durable files
+    // when the backend supplied it, otherwise by walking the warehouse.
+    auto warehouse = Context_.Warehouse
+        ? EstimateAttemptWarehouse(*Context_.Directories, *Context_.Warehouse, *Context_.Attempt, Context_.Limits)
+        : MeasureWarehouse(*Context_.Directories, Context_.Limits);
+    if (!warehouse && Context_.Warehouse && warehouse.Error() != std::errc::no_space_on_device &&
+        warehouse.Error() != std::errc::value_too_large)
+    {
+        warehouse = MeasureWarehouse(*Context_.Directories, Context_.Limits);
+    }
     if (!warehouse) {
         if (warehouse.Error() == std::errc::no_space_on_device || warehouse.Error() == std::errc::value_too_large) {
             return iceberg::ValidationFailed("CAPACITY: Candidate exceeds warehouse capacity.");

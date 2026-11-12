@@ -185,6 +185,12 @@ There is no authenticated server-configuration write endpoint in this slice.
 
 ## Verification
 
+The SDK and browser share compatible contract scenarios across explicit mock
+and native profiles. See [client conformance](CLIENT_CONFORMANCE.md) for both
+commands, required physical storage evidence and backend-specific cases.
+`GLAMDB_TEST_BACKEND=static npm --prefix ui run test:e2e` runs the browser-only
+demo without starting either API server.
+
 Install the test browser once:
 
 ```sh
@@ -212,7 +218,7 @@ it using `GLAMDB_E2E_PORT`. Open the HTML report with:
 
 ```sh
 cd ui
-npx --no-install playwright show-report ../artifacts/playwright-report
+npx --no-install playwright show-report ../artifacts/playwright-report/mock
 ```
 
 `npm --prefix ui run test:e2e:headed` visibly operates Chromium. For a locally

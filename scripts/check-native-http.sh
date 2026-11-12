@@ -12,13 +12,15 @@ build=$(realpath -- "$1")
 client=$(realpath -- "$2")
 server="$build/apps/server/glamdb"
 [[ -x $server && -x $client ]] || { echo 'Native server or standalone CLI is missing' >&2; exit 1; }
-"$python" -c 'import glamdb_sdk, httpx, pyarrow, jsonschema'
+"$python" -c 'import glamdb_sdk, httpx, pyarrow, jsonschema, pytest, fastavro'
 export GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1
+export GLAMDB_TEST_BACKEND=native
 export GLAMDB_NATIVE_SERVER="$server" GLAMDB_E2E_PYTHON="$python"
 mkdir -p artifacts/native-normal
 exec > >(tee artifacts/native-normal/client-browser.log) 2>&1
 "$python" tests/client/cli_network_test.py "$client" "$server"
 "$python" tools/workload/tests/native_e2e_test.py "$client" "$server" --report-root artifacts/native-normal/workload
-# The native Playwright profile selects native.spec.mjs and starts a real server.
-# Existing workbench CI separately retains all mock, session and public-demo checks.
+"$python" -m pytest tests/integration/test_network_sdk.py -q \
+  --junitxml=artifacts/native-normal/sdk-conformance-junit.xml
+# Native and mock run the shared contract; backend-specific scenarios stay separate.
 npm --prefix ui run test:e2e

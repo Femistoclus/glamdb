@@ -73,8 +73,9 @@ New appends return a known original receipt before acquiring new execution
 capacity. Before binding a new ID, the coordinator reserves data, metadata,
 ordinary control, completion and device growth. A known result releases the
 attempt; uncertainty transfers ownership to reconciliation. Socket closure does
-not refund an executing attempt. Lookup and lifecycle requests use protected
-completion memory. Socket/header descriptors reserve 256 KiB from protected
+not refund an executing attempt. Append-outcome lookup, exact-name create
+resolution and lifecycle requests use protected completion memory.
+Socket/header descriptors reserve 256 KiB from protected
 completion memory, bounded by the 96-connection ceiling, so ordinary control
 pressure does not prevent accepting an outcome lookup. Control bodies up to
 64 KiB use protected admission; larger bodies use ordinary

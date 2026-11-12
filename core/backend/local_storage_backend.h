@@ -5,6 +5,7 @@
 #include "core/storage/data_file_writer.h"
 #include "core/storage/durable_local_file_io.h"
 
+#include <cstdlib>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -47,6 +48,29 @@ struct TLocalStorageOptions
     // faults here.
     std::shared_ptr<NGlamDB::NIO::ILocalFS> Fs{};
     std::shared_ptr<ResourceOwner> Resources{};
+    // Publication rechecks the physical warehouse cap. By default it adds the
+    // append's own durable files to the admission measurement, so growth by
+    // anything else after admission is first seen by the next admission.
+    // True walks the whole warehouse again before every append publication.
+    bool WalkWarehouseAtPublication = false;
+    // The guard validates an append's in-memory staged root after comparing
+    // the durable file with its serialized bytes. True also parses the file
+    // and requires the parse to equal the staged root and to reserialize to
+    // the same bytes. Defaults to GLAMDB_VERIFY_ROUNDTRIP when set ("0" is
+    // off), otherwise on in builds without NDEBUG.
+    bool VerifyStagedRoot = DefaultVerifyStagedRoot();
+
+    static bool DefaultVerifyStagedRoot()
+    {
+        if (const char* value = std::getenv("GLAMDB_VERIFY_ROUNDTRIP"); value && *value) {
+            return std::string_view(value) != "0";
+        }
+#ifdef NDEBUG
+        return false;
+#else
+        return true;
+#endif
+    }
 };
 
 // Production bridge from the coordinator seam to the durable storage
@@ -125,8 +149,9 @@ private:
     void CheckStore(const StoreInfo& store) const;
     // Root identity, warehouse limit and free-space reserve before a write.
     // `remember` keeps the measured warehouse bytes for the same append's
-    // PrepareAppend; `reuse` consumes them instead of walking again.
-    std::error_code CheckWriteCapacity(bool remember, bool reuse);
+    // PrepareAppend; `reuse` consumes them instead of walking again. Returns
+    // the warehouse bytes it checked.
+    NGlamDB::NIO::TResult<std::uint64_t> CheckWriteCapacity(bool remember, bool reuse);
     // The caller holds Mutex_. Usage and cached bases are authoritative only
     // after VerifyRetained; InvalidateCache revokes them.
     void RequireVerified() const;

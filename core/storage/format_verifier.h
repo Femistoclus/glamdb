@@ -73,4 +73,21 @@ iceberg::Result<std::unique_ptr<iceberg::TableMetadata>> ReadTableMetadata(icebe
     std::optional<std::string_view> expectedBytes = std::nullopt,
     std::int64_t maxBytes = 16LL << 20);
 
+// The exact bytes iceberg::TableMetadataUtil::Write writes for `metadata`.
+iceberg::Result<std::string> SerializeTableMetadata(const iceberg::TableMetadata& metadata);
+
+// Parses root bytes with the same depth bound and parser as ReadTableMetadata.
+iceberg::Result<std::unique_ptr<iceberg::TableMetadata>> ParseTableMetadata(std::string bytes);
+
+// Reads a durable root and requires exactly `expectedBytes` within the same
+// size and nesting bounds as ReadTableMetadata, without parsing it.
+iceberg::Status VerifyTableMetadataBytes(iceberg::FileIO& io,
+    const std::string& path,
+    std::string_view expectedBytes,
+    std::int64_t maxBytes = 16LL << 20);
+
+// Number of root JSON parses (ReadTableMetadata and ParseTableMetadata) in
+// this process; cost tests compare it around an operation.
+std::uint64_t TableMetadataParses() noexcept;
+
 }

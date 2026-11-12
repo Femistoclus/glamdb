@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <limits>
 #include <span>
 #include <unordered_set>
@@ -363,6 +364,32 @@ private:
     std::string Bytes_;
 };
 
+// Captures the bytes TableMetadataUtil::Write produces without writing them.
+class TCapturedBytes : public iceberg::FileIO
+{
+public:
+    iceberg::Status WriteFile(const std::string&, std::string_view content) override
+    {
+        Bytes.assign(content);
+        return {};
+    }
+
+    std::string Bytes;
+};
+
+std::atomic<std::uint64_t> MetadataParses{0};
+
+iceberg::Result<std::unique_ptr<iceberg::TableMetadata>> ParseBoundedMetadata(std::string bytes,
+    const std::string& path)
+{
+    if (!HasBoundedJsonDepth(bytes)) {
+        return iceberg::Invalid("CORRUPTION: Metadata JSON exceeds its nesting depth limit.");
+    }
+    MetadataParses.fetch_add(1, std::memory_order_relaxed);
+    TMetadataBytes loader(std::move(bytes));
+    return iceberg::TableMetadataUtil::Read(loader, path);
+}
+
 }
 
 iceberg::Result<TParquetFileInfo> CheckParquet(iceberg::InputFile& file,
@@ -474,12 +501,50 @@ iceberg::Result<std::unique_ptr<iceberg::TableMetadata>> ReadTableMetadata(icebe
         if (expectedBytes && bytes != *expectedBytes) {
             return iceberg::Invalid("CORRUPTION: Metadata bytes differ from the written content.");
         }
+        return ParseBoundedMetadata(std::move(bytes), path);
+    });
+}
+
+iceberg::Result<std::string> SerializeTableMetadata(const iceberg::TableMetadata& metadata)
+{
+    return CatchIcebergExceptions([&]() -> iceberg::Result<std::string> {
+        TCapturedBytes captured;
+        ICEBERG_RETURN_UNEXPECTED(iceberg::TableMetadataUtil::Write(captured, "memory.metadata.json", metadata));
+        return std::move(captured.Bytes);
+    });
+}
+
+iceberg::Result<std::unique_ptr<iceberg::TableMetadata>> ParseTableMetadata(std::string bytes)
+{
+    return CatchIcebergExceptions([&]() -> iceberg::Result<std::unique_ptr<iceberg::TableMetadata>> {
+        return ParseBoundedMetadata(std::move(bytes), "memory.metadata.json");
+    });
+}
+
+iceberg::Status VerifyTableMetadataBytes(iceberg::FileIO& io,
+    const std::string& path,
+    std::string_view expectedBytes,
+    std::int64_t maxBytes)
+{
+    return CatchIcebergExceptions([&]() -> iceberg::Status {
+        if (!path.ends_with(".metadata.json")) {
+            return iceberg::InvalidArgument("Metadata verification requires an uncompressed JSON file.");
+        }
+        ICEBERG_ASSIGN_OR_RAISE(auto file, io.NewInputFile(path));
+        ICEBERG_ASSIGN_OR_RAISE(auto bytes, ReadBounded(*file, std::nullopt, maxBytes));
+        if (bytes != expectedBytes) {
+            return iceberg::Invalid("CORRUPTION: Metadata bytes differ from the written content.");
+        }
         if (!HasBoundedJsonDepth(bytes)) {
             return iceberg::Invalid("CORRUPTION: Metadata JSON exceeds its nesting depth limit.");
         }
-        TMetadataBytes loader(std::move(bytes));
-        return iceberg::TableMetadataUtil::Read(loader, path);
+        return {};
     });
+}
+
+std::uint64_t TableMetadataParses() noexcept
+{
+    return MetadataParses.load(std::memory_order_relaxed);
 }
 
 }

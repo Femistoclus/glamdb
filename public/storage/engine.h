@@ -47,6 +47,8 @@ public:
     // that is already bound keeps the settings it read. Not part of any
     // append's operation identity.
     Result<CollectionInfo> UpdateWriteSettings(const UpdateWriteSettingsRequest& request);
+    // Cache misses return OPERATION_IN_PROGRESS while a writer is active;
+    // confirmed hits remain readable. Neither lookup waits for the writer.
     Result<CollectionInfo> GetCollection(std::string_view collection_id) const;
     Result<CollectionInfo> ResolveCollection(std::string_view exact_name) const;
     Result<std::vector<CollectionInfo>> ListCollections() const;

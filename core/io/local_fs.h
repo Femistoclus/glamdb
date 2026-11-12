@@ -36,6 +36,8 @@ struct TFileStat
     std::uint64_t Inode;
     std::uint64_t Size;
     EFileType Type;
+    // Allocated bytes (st_blocks * 512); zero when the adapter cannot tell.
+    std::uint64_t Allocated = 0;
 };
 
 struct TSpaceInfo

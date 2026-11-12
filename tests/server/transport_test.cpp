@@ -5,6 +5,22 @@
 #include <gtest/gtest.h>
 
 namespace glamdb::NTransport {
+TEST(Transport, ExactCreateResolutionUsesProtectedAdmission)
+{
+    for (const auto* target : {"/collections:resolve?name=a%2Bb%26c%3Dd%2F%25",
+             "/databases/00000000-0000-0000-0000-000000000001/collections:resolve?name=events",
+             "/databases/00000000-0000-0000-0000-000000000001/%63ollections:resolve?name=events"})
+    {
+        SCOPED_TRACE(target);
+        EXPECT_TRUE(UsesProtectedAdmission({"GET", target, {}, {}}));
+        EXPECT_FALSE(UsesProtectedAdmission({"POST", target, {}, {}}));
+    }
+    for (const auto* target : {"/collections", "/collections:resolve/extra?name=events", "/collections/id/scan"}) {
+        SCOPED_TRACE(target);
+        EXPECT_FALSE(UsesProtectedAdmission({"GET", target, {}, {}}));
+    }
+}
+
 TEST(Transport, EveryCoreErrorHasAnExplicitStatusAndRetryPolicy)
 {
     using enum RetryHint;

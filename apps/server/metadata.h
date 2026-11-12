@@ -1,6 +1,7 @@
 #pragma once
 
 #include "apps/transport/http.h"
+#include "apps/transport/metadata.h"
 
 #include <chrono>
 #include <functional>
@@ -12,15 +13,6 @@ NTransport::TJson CapabilitiesJson(const EngineCapabilities& capabilities,
     const std::optional<StoreHealth>& health,
     bool databaseManagement,
     const std::string& storeID = {});
-SnapshotSelector MetadataSelector(const std::map<std::string, std::string>& query);
-NTransport::TJson
-StatisticsJson(const Engine& engine, const std::string& collection, const std::map<std::string, std::string>& query);
-NTransport::TJson SnapshotsJson(const Engine& engine, const std::string& collection, SnapshotSelector selector);
-NTransport::TJson FilesJson(const Engine& engine, const std::string& collection, SnapshotSelector selector);
-NTransport::TJson FileJson(const Engine& engine,
-    const std::string& collection,
-    const std::string& file,
-    const std::map<std::string, std::string>& query);
 NTransport::TJson ExplainJson(const Engine& engine, const std::string& collection, const NTransport::TJson& body);
 
 // Bounded, expiring value pages. The first public-facade result and resolved

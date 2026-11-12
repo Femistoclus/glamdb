@@ -474,6 +474,30 @@ struct Engine::Impl
         return *it;
     }
 
+    template <typename TPredicate>
+    CollectionInfo ReadCollection(const TPredicate& matches)
+    {
+        std::unique_lock stateLock(state_mutex);
+        CheckReady();
+        auto collectionIt = std::ranges::find_if(collections, matches);
+        if (collectionIt != collections.end()) {
+            return *collectionIt;
+        }
+        // A cache miss cannot prove absence while a writer may still publish.
+        stateLock.unlock();
+        std::unique_lock writerLock(writer, std::try_to_lock);
+        if (!writerLock.owns_lock()) {
+            throw Failure({"OPERATION_IN_PROGRESS",
+                "Collection absence is unresolved while a writer is active.",
+                RetryHint::SameIdAfterReconcile});
+        }
+        stateLock.lock();
+        CheckReady();
+        collectionIt = std::ranges::find_if(collections, matches);
+        Require(collectionIt != collections.end(), "COLLECTION_NOT_FOUND", "Collection does not exist.");
+        return *collectionIt;
+    }
+
     template <typename T, typename TLoad>
     Result<T> ReadMetadataPage(const TMetadataPageRequest& request, std::string_view parameters, TLoad&& load)
     {
@@ -951,9 +975,9 @@ Result<CollectionInfo> Engine::GetCollection(std::string_view id) const
 {
     try {
         const auto impl = impl_;
-        std::lock_guard lock(impl->state_mutex);
-        impl->CheckReady();
-        return impl->CachedCollection(id);
+        return impl->ReadCollection([&](const auto& collection) {
+            return collection.collection_id == id;
+        });
     } catch (const Failure& error) {
         return std::unexpected(error.detail);
     }
@@ -963,13 +987,9 @@ Result<CollectionInfo> Engine::ResolveCollection(std::string_view name) const
 {
     try {
         const auto impl = impl_;
-        std::lock_guard lock(impl->state_mutex);
-        impl->CheckReady();
-        const auto it = std::ranges::find_if(impl->collections, [&](const auto& item) {
-            return item.name == name;
+        return impl->ReadCollection([&](const auto& collection) {
+            return collection.name == name;
         });
-        Require(it != impl->collections.end(), "COLLECTION_NOT_FOUND", "exact collection name does not exist");
-        return *it;
     } catch (const Failure& error) {
         return std::unexpected(error.detail);
     }

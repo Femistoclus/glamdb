@@ -1,4 +1,4 @@
-# GlamDB network CLI
+# GlamDB CLI
 
 `glamdb-cli` is an independent HTTP client. It does not link the engine, SQLite,
 Arrow, Parquet or Iceberg. It uses the pinned CLI11 and standalone Asio submodules,
@@ -113,16 +113,111 @@ The optional `glamdb-admin` executable retains local `create-store --root ...
 repository with `-DGLAMDB_BUILD_ADMIN=ON` to enable it. It links the engine and must
 not open a store already owned by the server.
 
+## Data and inspection commands
+
+Both executables offer the following named JSON commands. `glamdb-cli` uses HTTP;
+`glamdb-admin` uses the public embedded facade with `--root ABSOLUTE_PATH
+--store-id UUID`, or HTTP with `--url BASE_URL`. Remote mode never opens a store.
+Combining `--url` with offline ownership options is an error. No data command
+creates a missing store.
+
+| Command | Additional options | Result |
+| --- | --- | --- |
+| `create-collection` | `--collection-id UUID --name NAME --schema FILE` | Created collection or original matching collection |
+| `collections` | None | Collection inventory |
+| `resolve-collection` | `--name NAME` | Exact-name lookup, including after a lost create reply |
+| `collection` | `--collection-id UUID` | Collection identity and schema |
+| `schema` | `--collection-id UUID` | Fixed schema with stable field IDs |
+| `append` | `--collection-id UUID --body FILE` | Complete native write outcome and receipt |
+| `scan` | `--collection-id UUID [--body FILE]` | Complete bounded JSON rows with schema and selected identity |
+| `operation` | `--collection-id UUID --operation-id UUID` | Original append outcome |
+| `snapshots` | `--collection-id UUID [--snapshot SELECTOR]` | Receipt-backed snapshot history |
+| `files` | `--collection-id UUID [--snapshot SELECTOR]` | Committed file membership and opaque IDs |
+| `file` | `--collection-id UUID --file-id ID [--snapshot SELECTOR]` | Verified Parquet footer and row groups |
+
+Remote commands accept `--database-id UUID` for a managed server, or a base URL
+already scoped to `/databases/UUID`. Omit both for legacy single-store servers.
+The network executable also accepts the existing `--host`/`--port`, TLS, timeout,
+atomic `--output`, and `--headers` options. `glamdb-admin` remote mode accepts
+`--ca-file` and `--timeout` and writes JSON to stdout. Tokens remain exclusively
+in `GLAMDB_TOKEN`; TLS verification and loopback-only HTTP rules apply in both.
+
+Schema files contain `{"fields":[...]}`. Append files contain the original
+`operation_id`, `rows`, and optional `expected_snapshot` (`null` means no previous
+snapshot; an exact decimal string requires that snapshot). Files may be `-` for
+stdin. Scan bodies use the same `snapshot_id`, `projection`, `predicate`, `limit`
+and `batch_rows` fields as HTTP; the default is `{}`. Metadata selectors are
+`latest`, `initial`, or a canonical decimal snapshot ID. Initial scan and metadata
+views report JSON `null` as their snapshot ID. Int64 values remain decimal
+strings, timestamps retain six UTC fractional digits, and duplicate keys remain
+separate rows.
+
+```sh
+# Create a store explicitly before opening it offline or serving it.
+glamdb-admin create-store --root /absolute/store --store-id STORE_UUID
+glamdb-admin create-collection --root /absolute/store --store-id STORE_UUID \
+  --collection-id COLLECTION_UUID --name events --schema schema.json
+glamdb-admin append --root /absolute/store --store-id STORE_UUID \
+  --collection-id COLLECTION_UUID --body append.json
+glamdb-admin scan --root /absolute/store --store-id STORE_UUID \
+  --collection-id COLLECTION_UUID --body scan.json
+
+# The server owns the store until it stops. Offline access now fails STATE_IN_USE.
+glamdb serve --root /absolute/store --store-id STORE_UUID --port 8080
+# In another terminal, use HTTP without acquiring another store lease:
+glamdb-cli scan --url http://localhost:8080 --collection-id COLLECTION_UUID
+glamdb-admin operation --url http://localhost:8080 \
+  --collection-id COLLECTION_UUID --operation-id ORIGINAL_OPERATION_UUID
+```
+
+`glamdb serve --data-dir DIRECTORY` runs the managed database server. The existing
+server invocation without `serve` remains supported. Serving an existing
+single-store root calls `OpenExisting`; it never creates a missing store.
+
+Named scans complete fixed-view HTTP continuations automatically, up to 10,000
+rows and 16 MiB of JSON. Use predicates, projections or `limit` for larger data;
+use `request` and its explicit cursor/Arrow protocol for larger exports. Named
+snapshot/file inventories also complete HTTP continuations within 16 MiB.
+An oversized result or failed continuation produces no partial JSON result;
+unfinished remote scans are cancelled on a best-effort basis, with server expiry
+as fallback. `--timeout` applies to each HTTP exchange, including continuations.
+Aggregated `--headers` describe the output length and omit per-page checksums
+and continuation tokens. Other metadata comes from the first response.
+
+Named commands use exits `0` for success, `1` for definite failure, `2` for usage
+errors, `3` for unresolved outcomes (including complete `commit_unknown`,
+`OPERATION_IN_PROGRESS` and `RECOVERY_REQUIRED` replies), and `4` for output failure
+after a complete response. These outcome-aware exits apply to both local and
+remote named commands; the generic `request` command retains its HTTP-level
+exit contract above. JSON responses, including failed write outcomes, go to
+stdout; diagnostics go to stderr. Lost append/create POST replies also return `3`;
+interrupted named scans are read failures (`1`). Offline shutdown failures preserve
+the original response and go to stderr. A confirmed success followed by failed
+shutdown returns `4`; unresolved outcomes retain exit `3`, even if output fails.
+Retain the
+original collection/operation IDs and body, resolve through exact-name or
+operation lookup, and never interpret a lost reply as rollback. Writes are never
+automatically retried or reconciled.
+
 Run wire/TLS/output-fault tests, or include the native server for the complete
 JSON/Arrow lifecycle test (the latter requires Python `pyarrow`):
 
 ```sh
 python tests/client/cli_network_test.py build/client/glamdb-cli
 python tests/client/cli_network_test.py build/client/glamdb-cli build/local/apps/server/glamdb
+python tests/client/cli_data_test.py build/client/glamdb-cli \
+  build/local/apps/admin/glamdb-admin build/local/apps/server/glamdb
 ```
 
 These checks use real localhost sockets and disposable certificates/stores. They
 verify client transport and engine API access, not storage power-loss durability.
+`glamdb.cli_data` uses native SQLite/Arrow/Parquet/Iceberg for local/remote parity,
+precise scalars, duplicate rows, retained snapshots, exact retries after restart,
+multi-page scans, bounded results and exclusive ownership. The wire suite's
+literal outcome fixtures separately test exit classification; they are protocol
+evidence, not native publication evidence.
+See the [validation record](../../docs/development/CLI_VALIDATION.md) for the
+independent review findings, regressions and evidence boundaries.
 # Workload commands
 
 The same executable also offers `generate` and `bench write/read/verify/resolve`

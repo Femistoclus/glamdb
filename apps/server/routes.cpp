@@ -294,22 +294,30 @@ TResponse TRoutes::Route(const TRequest& request) const
     const auto [path, query] = ParseTarget(request.Target);
     Require(path != "/healthz" || request.Method == "GET", "health requires GET");
     TJson body;
+    TJsonRows rows;
     if (request.Method == "POST") {
         const auto type = request.Headers.find("content-type");
         if (type == request.Headers.end() || !IsJsonContentType(type->second)) {
             return ErrorResponse(415, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json");
         }
         Require(query.empty(), "POST query parameters are unsupported");
-        body = ParseJson(request.Body);
+        // Append rows go straight from the parser's compact form to Arrow
+        // builders once the collection schema is known; no DOM is built for them.
+        if (path.ends_with("/append")) {
+            body = ParseJson(request.Body, rows);
+        } else {
+            body = ParseJson(request.Body);
+        }
         Require(body.is_object(), "request body must be an object");
     }
-    return RoutePrepared(request, path, query, body);
+    return RoutePrepared(request, path, query, body, &rows);
 }
 
 TResponse TRoutes::RoutePrepared(const TRequest& request,
     const std::string& path,
     const std::map<std::string, std::string>& query,
-    const TJson& body) const
+    const TJson& body,
+    const TJsonRows* rows) const
 {
     if (request.Method != "GET" && request.Method != "POST") {
         return ErrorResponse(405, "METHOD_NOT_ALLOWED", "use GET or POST");
@@ -392,7 +400,7 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
                 routes.Engine_ = engine;
                 routes.Databases_.reset();
                 routes.DatabaseID_ = parts[1];
-                return routes.RoutePrepared(request, suffix, query, body);
+                return routes.RoutePrepared(request, suffix, query, body, rows);
             },
             recoveryOnly);
     }
@@ -470,7 +478,10 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
                 ? SnapshotPrecondition{SnapshotPreconditionKind::NoSnapshot, 0}
                 : SnapshotPrecondition{SnapshotPreconditionKind::Equals, ParseInt64(body["expected_snapshot"])};
         }
-        append.batches.push_back(ParseRows(Unwrap(Engine_->SchemaForAppend(id)), body.at("rows")));
+        const auto schema = Unwrap(Engine_->SchemaForAppend(id));
+        const auto& rowsJson = body.at("rows");
+        append.batches.push_back(
+            rows != nullptr && rows->Present ? ParseRows(schema, *rows) : ParseRows(schema, rowsJson));
         return OutcomeResponse(json_adapter::ToJson(Engine_->AppendDurable(append)));
     }
     if (request.Method == "GET" && parts.size() == 3 && action == "stats") {

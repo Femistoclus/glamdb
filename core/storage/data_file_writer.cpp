@@ -114,6 +114,9 @@ iceberg::Result<TInputShape> CheckBatches(const std::vector<std::shared_ptr<arro
     TInputShape shape;
     std::int64_t inputBytes = 0;
     std::int64_t maxRowBytes = 1;
+    // rowEnds[i] is the accounted size of input rows [0, i], in input order
+    // across batches. Eight bytes per row, bounded by MaxRows.
+    std::vector<std::int64_t> rowEnds;
     const auto fields = schema.fields();
     if (fields.empty() || fields.size() > 64) {
         return iceberg::InvalidArgument("Data schema must contain 1..64 fields.");
@@ -146,6 +149,7 @@ iceberg::Result<TInputShape> CheckBatches(const std::vector<std::shared_ptr<arro
         for (std::int64_t row = 0; row < batch->num_rows(); ++row) {
             ICEBERG_ASSIGN_OR_RAISE(auto rowBytes, CheckRow(*batch, fields, row));
             maxRowBytes = std::max(maxRowBytes, rowBytes);
+            rowEnds.push_back((rowEnds.empty() ? 0 : rowEnds.back()) + rowBytes);
         }
     }
     const auto offsetBytes = 4 * static_cast<std::int64_t>(std::ranges::count_if(fields, [](const auto& field) {
@@ -155,7 +159,32 @@ iceberg::Result<TInputShape> CheckBatches(const std::vector<std::shared_ptr<arro
     {
         return iceberg::InvalidArgument("Input is empty or a row exceeds the row group byte limit.");
     }
-    shape.RowGroupRows = std::min(shape.Rows, (limits.MaxRowGroupBytes - offsetBytes) / maxRowBytes);
+    // The pinned Parquet writer continues one buffered row group across writes
+    // and closes it at exactly max-row-group-rows, so every group but the last
+    // holds that many consecutive input rows. Choose the largest such count for
+    // which every resulting group, measured by its actual rows, stays within
+    // the decoded bound (row estimates plus one trailing offset per string
+    // field). The largest-row quotient always qualifies and is the answer for
+    // uniform rows; a single wide row no longer shrinks every other group.
+    const auto bound = limits.MaxRowGroupBytes - offsetBytes;
+    const auto fits = [&](std::int64_t groupRows) {
+        for (std::int64_t start = 0; start < shape.Rows; start += groupRows) {
+            const auto end = std::min(shape.Rows, start + groupRows);
+            const auto bytes = rowEnds[static_cast<std::size_t>(end - 1)] -
+                (start == 0 ? 0 : rowEnds[static_cast<std::size_t>(start - 1)]);
+            if (bytes > bound) {
+                return false;
+            }
+        }
+        return true;
+    };
+    shape.RowGroupRows = std::min(shape.Rows, bound / maxRowBytes);
+    for (auto groupRows = shape.Rows; groupRows > shape.RowGroupRows; --groupRows) {
+        if (fits(groupRows)) {
+            shape.RowGroupRows = groupRows;
+            break;
+        }
+    }
     return shape;
 }
 

@@ -158,8 +158,11 @@ iceberg::Status CheckAppendMetadata(const iceberg::TableMetadata& base,
         if (!std::ranges::equal(base.snapshots,
                 std::span(candidate.snapshots).first(base.snapshots.size()),
                 [](const auto& previous, const auto& current) {
-                    return *previous == *current && previous->summary == current->summary &&
-                        previous->manifest_list == current->manifest_list;
+                    // A staged root shares the base's snapshot objects; the
+                    // same object trivially compares equal to itself.
+                    return previous == current ||
+                        (*previous == *current && previous->summary == current->summary &&
+                            previous->manifest_list == current->manifest_list);
                 }))
         {
             return iceberg::ValidationFailed("Append changes a retained snapshot.");

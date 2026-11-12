@@ -29,7 +29,7 @@ ENV = dict(os.environ, GLAMDB_TOKEN=TOKEN)
 
 
 @contextlib.contextmanager
-def raw_server(reply, delay=0, requests=None):
+def raw_server(reply, delay=0, requests=None, before_reply=None):
     with socket.socket() as listener:
         listener.bind(('127.0.0.1', 0))
         listener.listen()
@@ -56,6 +56,8 @@ def raw_server(reply, delay=0, requests=None):
                         data += chunk
                     if requests is not None:
                         requests.append(data)
+                    if before_reply is not None:
+                        before_reply()
                     time.sleep(delay)
                     conn.sendall(reply)
             except (BrokenPipeError, ConnectionResetError):
@@ -75,9 +77,170 @@ def raw_server(reply, delay=0, requests=None):
                 raise errors[0]
 
 
+@contextlib.contextmanager
+def json_server(respond):
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = 'HTTP/1.1'
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
+            value = respond(self.path, json.loads(body) if body else None)
+            if value is None:
+                self.close_connection = True
+                return
+            data = json.dumps(value).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        do_GET = do_POST
+
+        def log_message(self, *_):
+            pass
+
+    with http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler) as server:
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            yield f'http://127.0.0.1:{server.server_port}'
+        finally:
+            server.shutdown()
+            thread.join(5)
+
+
 class Client(unittest.TestCase):
     def run_cli(self, *args, **kwargs):
         return subprocess.run([CLI, *args], env=ENV, capture_output=True, timeout=12, **kwargs)
+
+    def test_named_append_outcomes_keep_failure_and_unresolved_exits_distinct(self):
+        fixture = json.loads((Path(__file__).resolve().parents[2] / 'fixtures/http/outcomes-v0.json').read_text())
+        expected = {'committed': 0, 'pre_binding_rejection': 1, 'registered_failure': 1,
+                    'unknown_publication': 3, 'blocked_lookup': 3}
+        for case in fixture['cases']:
+            if case['name'] not in expected:
+                continue
+            with self.subTest(case=case['name']):
+                body = json.dumps(case['response']).encode()
+                reply = (f"HTTP/1.1 {case['status']} Result\r\nContent-Type: application/json\r\n"
+                         f"Content-Length: {len(body)}\r\n\r\n").encode() + body
+                with raw_server(reply) as port:
+                    result = self.run_cli('append', '--url', f'http://localhost:{port}',
+                                          '--collection-id', fixture['collection_id'], '--body', '-', input=b'{}')
+                self.assertEqual(result.returncode, expected[case['name']], result.stderr)
+                self.assertEqual(json.loads(result.stdout), case['response'])
+
+    def test_named_output_failure_preserves_unresolved_exit(self):
+        fixture = json.loads((Path(__file__).resolve().parents[2] / 'fixtures/http/outcomes-v0.json').read_text())
+        expected = {'committed': 4, 'registered_failure': 4, 'unknown_publication': 3, 'blocked_lookup': 3}
+        cases = [(case['name'], case['status'], case['response'], expected[case['name']])
+                 for case in fixture['cases'] if case['name'] in expected]
+        for code in ('OPERATION_IN_PROGRESS', 'RECOVERY_REQUIRED'):
+            cases.append((code, 503, {'error': {'code': code, 'message': 'lookup is blocked',
+                                              'retry_hint': 'SameIdAfterReconcile'}}, 3))
+        for name, status, response, exit_code in cases:
+            body = json.dumps(response).encode()
+            reply = (f'HTTP/1.1 {status} Result\r\nContent-Type: application/json\r\n'
+                     f'Content-Length: {len(body)}\r\n\r\n').encode() + body
+            for command in ('append', 'operation'):
+                for destination in ('stdout', '--output', '--headers'):
+                    with self.subTest(case=name, command=command, destination=destination), \
+                            tempfile.TemporaryDirectory(dir='/tmp') as tmp, open('/dev/full', 'wb') as sink:
+                        output = Path(tmp) / 'response.json'
+                        # Replace a valid destination only after output preflight and the HTTP request.
+                        before_reply = output.mkdir if destination != 'stdout' else None
+                        with raw_server(reply, before_reply=before_reply) as port:
+                            args = [command, '--url', f'http://localhost:{port}',
+                                    '--collection-id', fixture['collection_id']]
+                            if command == 'append':
+                                args += ['--body', '-']
+                            else:
+                                args += ['--operation-id', fixture['appends']['a']['operation_id']]
+                            if destination != 'stdout':
+                                args += [destination, str(output)]
+                            result = subprocess.run([CLI, *args], env=ENV,
+                                input=b'{}' if command == 'append' else None,
+                                stdout=sink if destination == 'stdout' else subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=12)
+                        self.assertEqual(result.returncode, exit_code, result.stderr)
+                        self.assertIn(b'output failed after complete HTTP', result.stderr)
+                        if destination != 'stdout':
+                            self.assertTrue(output.is_dir())
+                            self.assertEqual(result.stdout, b'')
+                            self.assertEqual(list(Path(tmp).glob('*.tmp.*')), [])
+
+    def test_lost_named_scan_reply_is_a_read_failure(self):
+        with raw_server(b'') as port:
+            result = self.run_cli('scan', '--url', f'http://localhost:{port}',
+                                  '--collection-id', '00000000-0000-0000-0000-000000000052')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout, b'')
+        self.assertNotIn(b'reconcile using operation ID', result.stderr)
+
+    def test_named_scan_cancels_after_failed_or_invalid_continuation(self):
+        fixture = json.loads((Path(__file__).resolve().parents[2] / 'fixtures/http/outcomes-v0.json').read_text())
+        identity = next(case['response']['recovery']['base'] for case in fixture['cases']
+                        if case['name'] == 'unknown_publication')
+        for failure in ('disconnect', 'changed_view', 'missing_rows', 'repeated_cursor'):
+            requests = []
+            def respond(path, body):
+                requests.append((path, body))
+                if path.endswith('/cancel'):
+                    return {'cancelled': True}
+                page = {'identity': identity, 'schema': {'fields': []}, 'snapshot_id': None,
+                        'profile': {'rows_returned': '1'}, 'rows': [{}], 'next_cursor': 'token-1'}
+                if body.get('cursor'):
+                    if failure == 'disconnect':
+                        return None
+                    if failure == 'changed_view':
+                        page.update(snapshot_id='1', next_cursor='token-2')
+                    if failure == 'missing_rows':
+                        del page['rows']
+                return page
+            with self.subTest(failure=failure), json_server(respond) as url:
+                result = self.run_cli('scan', '--url', url,
+                                      '--collection-id', '00000000-0000-0000-0000-000000000052')
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(result.stdout, b'')
+            self.assertTrue(requests[-1][0].endswith('/cancel'), requests)
+            self.assertEqual(requests[-1][1]['cursor'], 'token-2' if failure == 'changed_view' else 'token-1')
+
+    def test_named_metadata_follows_pages_with_original_parameters(self):
+        fixture = json.loads((Path(__file__).resolve().parents[2] / 'fixtures/http/outcomes-v0.json').read_text())
+        unknown = next(case['response'] for case in fixture['cases'] if case['name'] == 'unknown_publication')
+        identity = unknown['recovery']['base']
+        receipts = [next(case['response']['result'] for case in fixture['cases'] if case['name'] == name)
+                    for name in ('committed', 'committed_b')]
+        selected = receipts[-1]['snapshot_id']
+        identity['current_snapshot_id'] = selected
+        for command in ('snapshots', 'files'):
+            if command == 'snapshots':
+                items = [{'snapshot_id': receipt['snapshot_id'], 'parent_id': receipt['parent_snapshot_id'],
+                          'parent_snapshot_id': receipt['parent_snapshot_id'],
+                          'created_at_us': receipt['snapshot_created_at_us'], 'rows_added': receipt['rows_appended'],
+                          'operation_id': receipt['operation_id'], 'receipt': receipt, 'backend': 'local', 'mock': False}
+                         for receipt in receipts]
+            else:
+                items = [{'file_id': character * 64, 'path': None, 'content': 'data', 'format': 'parquet',
+                          'record_count': '2', 'compressed_bytes': '100', 'field_metrics': [], 'synthetic': False,
+                          'physical_file_exists': None, 'backend': 'local', 'mock': False}
+                         for character in ('a', 'b')]
+            paths = []
+            def respond(path, body):
+                paths.append(path)
+                self.assertIsNone(body)
+                return {'identity': identity, 'snapshot_id': selected, 'backend': 'local', 'mock': False,
+                        'synthetic': False, 'durability_validation': 'designed', 'items': [items[len(paths) - 1]],
+                        'next_cursor': 'metadata-token' if len(paths) == 1 else None}
+            with self.subTest(command=command), json_server(respond) as url:
+                result = self.run_cli(command, '--url', url, '--snapshot', selected,
+                                      '--collection-id', fixture['collection_id'])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIsNone(json.loads(result.stdout)['next_cursor'])
+            self.assertEqual(json.loads(result.stdout)['items'], items)
+            expected = f"/collections/{fixture['collection_id']}/{command}?snapshot_id={selected}&page_size=1000"
+            self.assertEqual(paths, [expected, expected + '&cursor=metadata-token'])
 
     def test_proxy_headers_preserve_repeated_values(self):
         reply = (b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n'

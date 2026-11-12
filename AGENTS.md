@@ -60,7 +60,15 @@ authenticated database lifecycle and scan cancellation, including through a TLS
 proxy; public/static POSTs cannot spend that reserve. Excess bodies wait within
 the connection ceiling and their original read deadline.
 The network CLI also builds independently with OpenSSL; optional offline commands
-are in `apps/admin` and never required for server initialization.
+are in `apps/admin` and never required for server initialization. Both expose
+named collection/schema, append, scan, operation, snapshot and file commands.
+The admin tool's `--url` mode calls HTTP without opening an engine; offline
+commands require explicit root/identity and fail while the server owns the store.
+Command grammar in `apps/cli/data.*` has no core dependency; metadata JSON in
+`apps/transport/metadata.*` is shared with HTTP. Named JSON scans complete remote
+pages within 10,000 rows/16 MiB, cancel unfinished cursors, and distinguish
+unresolved outcomes (exit 3) from definite failures (exit 1). See the
+[CLI guide](apps/cli/README.md). `glamdb serve` aliases existing server startup.
 Collection routes are scoped by `/databases/{id}`; optional legacy
 `--root/--store-id` mode retains unscoped routes. A
 separate, explicitly disposable in-memory mock remains a development profile. The architecture and
@@ -191,7 +199,8 @@ Preserve these boundaries when adding or changing engine behavior:
   published state can be reopened within the same limits. Capacity exhaustion
   produces backpressure before publication, not partial success or hidden
   deletion of history. Publication rechecks physical warehouse usage after
-  production; recovery checks the same physical cap without reserving a future
+  production (admission walk plus the attempt's own durable files; outside
+  growth after admission is caught by the next admission); recovery checks the same physical cap without reserving a future
   attempt. Logical reachable
   usage is accumulated with overflow and limit checks across collections.
   Warehouse orphan files consume capacity; their automatic cleanup is
@@ -215,7 +224,7 @@ Preserve these boundaries when adding or changing engine behavior:
 | `core/io/` | Independent local filesystem, attempts, receipts, durable files and copying (`glamdb_io`). |
 | `core/storage/` | FileIO, Parquet writer, Iceberg staging, publication/recovery and capacity checks (`glamdb_storage`). |
 | `apps/cli/`, `apps/client/` | Standalone `glamdb-cli`: network database management and HTTP/HTTPS requests, without engine dependencies. |
-| `apps/admin/` | Optional offline `glamdb-admin` store creation/inspection utility. |
+| `apps/admin/` | Optional `glamdb-admin` store creation, offline data/inspection facade commands, and HTTP mode. |
 | `apps/server/`, `apps/transport/` | `glamdb`: Asio HTTP server, shared precise codecs and native outcome serialization. |
 | `cmake/` | Build options, sanitizers, quality targets, and dependency recipes. |
 | `tests/` | Native unit/recovery/SqlCatalog/VFS/consumer suites, `vertical/` public-API storage tests, `mock/` in-memory scan tests, verification and actual SDK HTTP/HTTPS tests. |
@@ -257,6 +266,17 @@ check script runs real HTTP/HTTPS tests and Chromium, not only transport doubles
 Node API tests also open localhost sockets to exercise Fetch gzip/Brotli decoding
 and Arrow cancellation. Session-isolation browser tests delay responses across
 collection, snapshot and connection changes.
+Client conformance uses `GLAMDB_TEST_BACKEND=mock|native`; native requires an
+executable `GLAMDB_NATIVE_SERVER` and fails on setup/identity/storage errors.
+The same SDK TCP/TLS scenarios and `shared-contract.spec.mjs` run against both;
+native checks inspect catalog-selected JSON/Avro/Parquet after closing storage.
+`GLAMDB_TEST_BACKEND=static` runs only the browser demo, without an API server.
+See [client conformance](docs/development/CLIENT_CONFORMANCE.md) for commands,
+documented response differences and separate evidence. Normal native acceptance
+runs the shared SDK suite before Chromium and propagates either failure.
+Retain native browser child ownership through bounded shutdown and reaping;
+`tests/integration/test_browser_lifecycle.py` covers interrupts, child exit
+statuses and failed-startup cleanup.
 The check script also packages/serves the public demo under /glamdb/ and verifies no API
 requests, token prompt, cross-visitor state or credential files are introduced.
 See [validation](docs/development/WORKBENCH_VALIDATION.md) for exact evidence and
@@ -354,6 +374,14 @@ strace evidence; passing cases without strace remain incomplete. Recovery path
 deduplication uses a bounded temporary SQLite database, separate from the catalog.
 See [qualification preparation](docs/development/QUALIFICATION.md) for commands,
 temporary-workspace prerequisites and the remaining qualification boundaries.
+
+`glamdb_capacity_bench` and `benchmarks/capacity.py` measure native aggregate
+ingestion, retained history/outcomes, physical orphan space, retained slices and
+fresh-process reopen. The default campaign budgets 5,000 attempts of 1,000 rows
+and records every 100 successes without raising caps; short real-engine checks
+run as `glamdb.capacity_campaign`. See [the campaign guide](docs/development/CAPACITY_CAMPAIGN.md)
+for profiles, counters, evidence and cache/qualification limits. Keep full
+measurement runs manual and separate external-file sync counters from SQLite.
 
 After configuring `local`, check project C++ sources and headers with:
 
@@ -515,6 +543,10 @@ the network CLI and codecs. `GLAMDB_BUILD_ADMIN=ON` additionally builds the offl
 `glamdb-admin`; it is not required to initialize or operate a server. Run native browser checks with `GLAMDB_NATIVE_SERVER`
 pointing to the built server; `GLAMDB_E2E_PYTHON` can select
 the workbench Python environment. See the native HTTP guide for exact commands.
+`glamdb.cli_data` (storage and admin enabled) runs real local/remote command parity,
+restart/retry, precise scalar, pagination/bound and ownership tests. Run
+`ctest --preset local -R 'glamdb\.(cli_data|cli_network|admin)' --output-on-failure`.
+Literal wire outcome tests in `glamdb.cli_network` are separate protocol evidence.
 
 SIGINT/SIGTERM close socket and scan admission and mark active scans cancelled
 before worker draining. Cancellation never waits on a scan's session lock; retain
