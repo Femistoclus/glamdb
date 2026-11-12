@@ -140,3 +140,14 @@ def test_invalid_clean_state_json_fails_before_mutation(endpoint, tmp_path, monk
     assert capsys.readouterr().out == ""
     assert requests == []
     assert state.read_text() == body
+
+
+def test_clean_refuses_an_active_benchmark_run_before_remote_drop(endpoint, tmp_path, monkeypatch, capsys):
+    from glamdb_workload.tpch_state import run_lock
+    url, requests, _ = endpoint
+    state = state_file(tmp_path, url)
+    monkeypatch.setenv('GLAMDB_TOKEN', 'environment-only-secret')
+    with run_lock(state):
+        assert clean(state) == 2
+    assert requests == []
+    assert 'locked' in capsys.readouterr().err

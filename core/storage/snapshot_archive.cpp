@@ -9,6 +9,7 @@
 
 #include <iceberg/file_io.h>
 #include <iceberg/manifest/manifest_list.h>
+#include <iceberg/manifest/manifest_reader.h>
 #include <iceberg/snapshot.h>
 
 #include <algorithm>

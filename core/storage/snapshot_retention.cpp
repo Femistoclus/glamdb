@@ -2,6 +2,7 @@
 
 #include "core/storage/format_registry.h"
 #include "core/storage/format_verifier.h"
+#include "core/storage/table_profile.h"
 
 #include <iceberg/file_io.h>
 #include <iceberg/manifest/manifest_list.h>
@@ -48,6 +49,13 @@ iceberg::Status CheckRetentionPolicy(const TRetentionPolicy& policy)
 
 iceberg::Status StripRetentionProperties(std::unordered_map<std::string, std::string>& properties)
 {
+    const auto mode = properties.find("glamdb.collection-mode");
+    if (mode != properties.end() && mode->second == "kv1" && std::ranges::any_of(properties, [](const auto& entry) {
+            return entry.first.starts_with("glamdb.retention.");
+        }))
+    {
+        return iceberg::ValidationFailed("Snapshot retention properties are unsupported for KV collections.");
+    }
     const bool enabled = properties.contains(RetentionVersionKey);
     if (enabled && properties.at(RetentionVersionKey) != "1") {
         return iceberg::ValidationFailed("Unsupported snapshot retention version.");
@@ -74,6 +82,9 @@ iceberg::Status StripRetentionProperties(std::unordered_map<std::string, std::st
 
 iceberg::Result<TRetentionPolicy> ReadRetentionPolicy(const iceberg::TableMetadata& metadata)
 {
+    if (IsKVMetadata(metadata)) {
+        return iceberg::ValidationFailed("Snapshot retention is unsupported for KV collections.");
+    }
     auto properties = metadata.properties.configs();
     ICEBERG_RETURN_UNEXPECTED(StripRetentionProperties(properties));
     ICEBERG_ASSIGN_OR_RAISE(auto keep, ReadInteger(metadata.properties.configs(), RetentionKeepKey, 0));
@@ -83,6 +94,13 @@ iceberg::Result<TRetentionPolicy> ReadRetentionPolicy(const iceberg::TableMetada
 
 iceberg::Result<std::int64_t> ExpiredSequence(const iceberg::TableMetadata& metadata)
 {
+    if (IsKVMetadata(metadata)) {
+        // Shared history readers may ask for the watermark of a clean KV
+        // root. Only complete retained KV history has a supported value.
+        auto properties = metadata.properties.configs();
+        ICEBERG_RETURN_UNEXPECTED(StripRetentionProperties(properties));
+        return 0;
+    }
     ICEBERG_RETURN_UNEXPECTED(ReadRetentionPolicy(metadata));
     return ReadInteger(metadata.properties.configs(), ExpiredSequenceKey, 0);
 }
@@ -90,6 +108,9 @@ iceberg::Result<std::int64_t> ExpiredSequence(const iceberg::TableMetadata& meta
 iceberg::Status
 WriteRetentionPolicy(iceberg::TableMetadata& metadata, const TRetentionPolicy& policy, std::int64_t expiredSequence)
 {
+    if (IsKVMetadata(metadata)) {
+        return iceberg::ValidationFailed("Snapshot retention is unsupported for KV collections.");
+    }
     ICEBERG_RETURN_UNEXPECTED(CheckRetentionPolicy(policy));
     if (expiredSequence < 0 || (expiredSequence >= metadata.last_sequence_number && expiredSequence != 0)) {
         return iceberg::ValidationFailed("Expiration cannot remove the current snapshot.");
@@ -109,6 +130,9 @@ WriteRetentionPolicy(iceberg::TableMetadata& metadata, const TRetentionPolicy& p
 iceberg::Result<std::size_t>
 ExpirationPrefix(const iceberg::TableMetadata& metadata, const TRetentionPolicy& policy, std::int64_t nowMs)
 {
+    if (IsKVMetadata(metadata)) {
+        return iceberg::ValidationFailed("Snapshot retention is unsupported for KV collections.");
+    }
     ICEBERG_RETURN_UNEXPECTED(CheckRetentionPolicy(policy));
     if ((!policy.KeepLast && policy.MinAgeMs == 0) || metadata.snapshots.empty()) {
         return 0;
@@ -132,6 +156,9 @@ iceberg::Result<TExpirationPlan> PlanExpiration(const iceberg::TableMetadata& me
     const TRetentionPolicy& policy,
     std::int64_t nowMs)
 {
+    if (IsKVMetadata(metadata)) {
+        return iceberg::ValidationFailed("Snapshot retention is unsupported for KV collections.");
+    }
     ICEBERG_RETURN_UNEXPECTED(CheckRetentionPolicy(policy));
     TExpirationPlan plan;
     if ((!policy.KeepLast && policy.MinAgeMs == 0) || metadata.snapshots.empty() || archived.size() > archivedTotal ||
@@ -166,6 +193,9 @@ iceberg::Result<TMetadataRetirement> FindExpiredMetadata(const std::shared_ptr<i
     std::span<const TArchivedList> expiredArchive,
     const TArchivedList* remainingArchive)
 {
+    if (IsKVMetadata(metadata)) {
+        return iceberg::ValidationFailed("Snapshot retention is unsupported for KV collections.");
+    }
     if (!fileIO || limits.ManifestListBytes > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
         limits.Store.Manifests > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
     {

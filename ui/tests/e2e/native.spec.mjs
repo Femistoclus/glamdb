@@ -576,3 +576,141 @@ test('native decimal and date creation, exact write and typed filters survive re
             .filter({ hasText: 'amount' }),
     ).toContainText('decimal(38,4)');
 });
+
+test('native KV controls replace full rows, preserve misses and omit no-op snapshots', async ({
+    page,
+}) => {
+    const errors = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    await connect(page);
+    await page.getByLabel('Database name').fill('browser_kv_database');
+    await page.getByRole('button', { name: 'Create database', exact: true }).click();
+    await page.getByRole('button', { name: 'New collection', exact: true }).first().click();
+    await page.getByLabel('Collection name').fill('browser_keys');
+    await page.getByLabel('Collection mode', { exact: true }).selectOption('kv');
+    await page.getByRole('button', { name: 'Create collection', exact: true }).click();
+    await expect(page.getByRole('dialog')).not.toBeVisible();
+    await expect(page.locator('.page-footer')).toContainText('KV mode');
+    await navigate(page, 'Data studio');
+    await expect(
+        page.locator('#write-form').getByRole('button', { name: 'Upsert rows', exact: true }),
+    ).toBeVisible();
+    const batch = async (rows) => {
+        await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
+        const dialog = page.getByRole('dialog');
+        await dialog.getByLabel('Rows · JSON array', { exact: true }).fill(JSON.stringify(rows));
+        await dialog.getByRole('button', { name: 'Upsert rows', exact: true }).click();
+        await expect(dialog.getByText('Upsert committed', { exact: true })).toBeVisible();
+        await page.getByRole('button', { name: 'Close dialog' }).click();
+    };
+    await batch([
+        { key: 'same', label: 'first', amount: '1' },
+        { key: 'same', label: 'last', amount: '9007199254740993' },
+    ]);
+    await expect(page.locator('#snapshot-selector option')).toHaveCount(3);
+    const snapshot = await page.locator('#snapshot-selector option').last().getAttribute('value');
+    await page.getByRole('button', { name: 'Lookup keys', exact: true }).click();
+    const lookup = page.getByRole('dialog');
+    await lookup.getByLabel('Keys · JSON array', { exact: true }).fill('["same","missing","same"]');
+    await lookup.getByRole('button', { name: 'Lookup keys', exact: true }).click();
+    await expect(lookup.locator('#lookup-result')).toContainText('9007199254740993');
+    const result = JSON.parse(await lookup.locator('#lookup-result').textContent());
+    expect(result.rows.map((row) => row?.key ?? null)).toEqual(['same', null, 'same']);
+    expect(result.rows[0].label).toBe('last');
+    await page.getByRole('button', { name: 'Close dialog' }).click();
+    await page.getByRole('button', { name: 'Delete keys', exact: true }).click();
+    const deletion = page.getByRole('dialog');
+    await deletion.getByLabel('Keys · JSON array', { exact: true }).fill('["missing","missing"]');
+    await deletion.getByRole('button', { name: 'Delete keys', exact: true }).click();
+    await expect(deletion.getByText('Delete committed', { exact: true })).toBeVisible();
+    await expect(deletion.locator('#append-outcome')).toContainText('No new snapshot');
+    await page.getByRole('button', { name: 'Close dialog' }).click();
+    await expect(page.locator('#snapshot-selector option')).toHaveCount(3);
+    await page.getByRole('button', { name: 'Compact files', exact: true }).click();
+    const compact = page.getByRole('dialog');
+    await compact.getByRole('button', { name: 'Compact files', exact: true }).click();
+    await expect(compact.getByText('Compaction committed', { exact: true })).toBeVisible();
+    await expect(compact.locator('#append-outcome')).toContainText('No new snapshot');
+    await page.getByRole('button', { name: 'Close dialog' }).click();
+    await batch([{ key: 'same', label: 'replacement' }]);
+    await page.locator('#run-query').click();
+    const current = page.getByRole('table', { name: 'Query results' });
+    await expect(current.locator('tbody tr')).toHaveCount(1);
+    await expect(current).toContainText('replacement');
+    await expect(current).toContainText('NULL');
+    await page.getByLabel('Snapshot', { exact: true }).selectOption(snapshot);
+    await page.locator('#run-query').click();
+    await expect(page.getByRole('table', { name: 'Query results' })).toContainText('last');
+    await navigate(page, 'Snapshots');
+    await page.getByLabel('Snapshot', { exact: true }).selectOption('latest');
+    await expect(
+        page.getByRole('table', { name: 'Snapshot history' }).locator('tbody tr'),
+    ).toHaveCount(2);
+    await expect(page.getByRole('table', { name: 'Snapshot history' })).toContainText('written /');
+    expect(errors).toEqual([]);
+});
+
+test('native KV no-op receipt exports, imports and retries after reload without a new snapshot', async ({
+    page,
+}) => {
+    await connect(page);
+    await page.getByLabel('Database name').fill('browser_kv_recovery');
+    await page.getByRole('button', { name: 'Create database', exact: true }).click();
+    await page.getByRole('button', { name: 'New collection', exact: true }).first().click();
+    await page.getByLabel('Collection name').fill('recover_keys');
+    await page.getByLabel('Collection mode', { exact: true }).selectOption('kv');
+    await page.getByRole('button', { name: 'Create collection', exact: true }).click();
+    await expect(page.getByRole('dialog')).not.toBeVisible();
+    const bodies = [];
+    page.on('request', (request) => {
+        if (new URL(request.url()).pathname.endsWith('/delete'))
+            bodies.push(request.postDataJSON());
+    });
+    await page.route('**/databases/*/collections/*/delete', async (route) => {
+        const response = await route.fetch();
+        const outcome = await response.json();
+        expect(outcome.result.snapshot_created).toBe(false);
+        await route.abort('failed');
+    });
+    await page.getByRole('button', { name: 'Delete keys', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel('Keys · JSON array', { exact: true }).fill('["absent","absent"]');
+    await dialog.getByRole('button', { name: 'Delete keys', exact: true }).click();
+    await expect(dialog.getByText('Outcome unresolved · keep this operation ID')).toBeVisible();
+    const download = page.waitForEvent('download');
+    await dialog.getByRole('button', { name: 'Export pending request', exact: true }).click();
+    const recovery = await readFile(await (await download).path());
+    const exported = JSON.parse(recovery);
+    expect(exported.request.action).toBe('delete');
+    expect(exported.request.body.keys).toEqual(['absent', 'absent']);
+    expect(exported.request.operation_id).toBe(bodies[0].operation_id);
+    expect(recovery.toString()).not.toContain(token);
+    await page.unrouteAll({ behavior: 'wait' });
+    await page.reload();
+    await page.getByLabel('Access token').fill(token);
+    await page.getByRole('button', { name: 'Open my workspace' }).click();
+    await useDatabase(page, 'browser_kv_recovery');
+    await page.getByRole('button', { name: 'Pending requests', exact: true }).click();
+    await page
+        .getByLabel('Recovery JSON file')
+        .setInputFiles({ name: 'kv-pending.json', mimeType: 'application/json', buffer: recovery });
+    await page.getByRole('button', { name: 'Import pending request', exact: true }).click();
+    await expect(page.getByRole('dialog')).not.toBeVisible();
+    expect(bodies).toHaveLength(1);
+    await page.getByRole('button', { name: 'Review or retry same operation', exact: true }).click();
+    await dialog.getByRole('button', { name: 'Retry same operation', exact: true }).click();
+    await expect(dialog.getByText('Delete committed', { exact: true })).toBeVisible();
+    await expect(dialog.locator('#append-outcome')).toContainText('No new snapshot');
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).toEqual(bodies[0]);
+    await page.getByRole('button', { name: 'Close dialog' }).click();
+    await navigate(page, 'Snapshots');
+    await expect(
+        page.getByRole('table', { name: 'Snapshot history' }).locator('tbody tr'),
+    ).toHaveCount(0);
+    await navigate(page, 'Operations');
+    await expect(page.locator('.operations-card')).toContainText('No new snapshot');
+    await expect(
+        page.getByRole('table', { name: 'Published snapshot operations' }).locator('tbody tr'),
+    ).toHaveCount(0);
+});

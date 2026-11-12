@@ -37,6 +37,11 @@ TAttemptLimits TAttemptLimits::BulkAppend()
     return {.NewFileBytes = bytes, .IoBytes = 4 * bytes, .DataFiles = 256};
 }
 
+TAttemptLimits TAttemptLimits::KeyValue()
+{
+    return {.NewFileBytes = 8ULL << 30, .IoBytes = 8ULL << 30, .DataFiles = 256};
+}
+
 TWriteReservation::TWriteReservation(std::shared_ptr<TIOAttempt> attempt, std::string path, std::uint64_t requested)
     : Attempt_(std::move(attempt))
     , Path_(std::move(path))

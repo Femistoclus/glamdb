@@ -14,6 +14,7 @@ class MemoryPool;
 namespace glamdb::detail {
 
 struct TBulkInput;
+struct TKvInput;
 
 struct NormalizedInput
 {
@@ -28,6 +29,7 @@ struct NormalizedInput
     // Built during backend admission and retained until this append finishes.
     std::shared_ptr<arrow::RecordBatch> writer_batch;
     std::shared_ptr<TBulkInput> bulk{};
+    std::shared_ptr<TKvInput> kv{};
 
     size_t GetRowCount() const;
 };

@@ -472,7 +472,16 @@ TEST_F(TWriteSettingsTest, NewerCatalogVersionsFailClosed)
     {
         detail::Database database;
         database.Open(Root_ / "catalog.sqlite", SQLITE_OPEN_READWRITE, {});
-        database.Execute("PRAGMA user_version=4");
+        database.Execute("PRAGMA user_version=5");
+    }
+    // Version 5 also requires the KV and snapshot archive tables.
+    opened = detail::EngineFactory::OpenWith({Root_.string(), test::store_id}, THookBackend::Factory(Backend_));
+    ASSERT_FALSE(opened);
+    EXPECT_EQ(opened.error().code, "CORRUPTION");
+    {
+        detail::Database database;
+        database.Open(Root_ / "catalog.sqlite", SQLITE_OPEN_READWRITE, {});
+        database.Execute("PRAGMA user_version=6");
     }
     opened = detail::EngineFactory::OpenWith({Root_.string(), test::store_id}, THookBackend::Factory(Backend_));
     ASSERT_FALSE(opened);

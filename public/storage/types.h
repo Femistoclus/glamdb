@@ -187,6 +187,10 @@ enum class CommitPhase : uint8_t {
     Complete
 };
 
+enum class CollectionMode : uint8_t { Append = 1, KeyValue = 2 };
+enum class MutationKind : uint8_t { None = 0, Upsert = 1, Delete = 2, Compact = 3 };
+enum class DuplicatePolicy : uint8_t { Unspecified = 0, Reject = 1, FirstWins = 2, LastWins = 3 };
+
 struct AppendResult
 {
     std::string collection_id;
@@ -201,6 +205,15 @@ struct AppendResult
     int64_t snapshot_created_at_us = 0;
     std::string durability_profile;
     int32_t receipt_version = 1;
+    // Version 3 only. Versions 1/2 retain their original serialized bytes.
+    MutationKind mutation_kind = MutationKind::None;
+    bool snapshot_created = true;
+    int64_t input_rows = 0;
+    int64_t rows_affected = 0;
+    int64_t rows_written = 0;
+    int64_t rows_removed = 0;
+    int64_t data_files_removed = 0;
+    int64_t compressed_data_bytes_removed = 0;
     bool operator==(const AppendResult&) const = default;
 };
 
@@ -246,9 +259,10 @@ struct CollectionInfo
     // Current canonical settings; version 0 means never set (engine defaults).
     WriteSettings write_settings{};
     int64_t write_settings_version = 0;
+    CollectionMode mode = CollectionMode::Append;
     // Newest snapshots kept in the Iceberg root; older ones move to the
     // catalog snapshot archive and stay readable. Absent keeps every retained
-    // snapshot in the root.
+    // snapshot in the root. Append collections only.
     std::optional<int64_t> hot_snapshots{};
     bool operator==(const CollectionInfo&) const = default;
 };
@@ -260,6 +274,7 @@ struct CreateCollectionRequest
     SchemaSpec schema;
     // Part of the definition: a repeated creation must request the same settings.
     WriteSettings write_settings{};
+    CollectionMode mode = CollectionMode::Append;
     // Also part of the definition; 1..2^40 when present.
     std::optional<int64_t> hot_snapshots{};
 };

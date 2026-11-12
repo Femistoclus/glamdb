@@ -5,6 +5,7 @@
 #include <arrow/util/utf8.h>
 #include <iceberg/schema.h>
 #include <iceberg/schema_field.h>
+#include <iceberg/table_metadata.h>
 #include <iceberg/type.h>
 
 #include <algorithm>
@@ -96,6 +97,26 @@ iceberg::Result<TTableProfile> MakeTableProfile(const TSchemaSpec& spec)
     });
 }
 
+iceberg::Result<TTableProfile> MakeKVTableProfile(const TSchemaSpec& spec)
+{
+    ICEBERG_ASSIGN_OR_RAISE(auto profile, MakeTableProfile(spec));
+    if (!std::ranges::any_of(spec.Fields, [](const auto& field) {
+            return field.Name == "key";
+        }))
+    {
+        return iceberg::InvalidArgument("KV collections require a required string key.");
+    }
+    profile.Properties.emplace("glamdb.collection-mode", "kv1");
+    return profile;
+}
+
+bool IsKVMetadata(const iceberg::TableMetadata& metadata)
+{
+    const auto& properties = metadata.properties.configs();
+    const auto mode = properties.find("glamdb.collection-mode");
+    return mode != properties.end() && mode->second == "kv1";
+}
+
 iceberg::Status CheckTableProfile(const TTableProfile& profile)
 {
     return CatchIcebergExceptions([&]() -> iceberg::Status {
@@ -140,7 +161,12 @@ iceberg::Status CheckTableProfile(const TTableProfile& profile)
             }
             spec.Fields.push_back(std::move(specField));
         }
-        ICEBERG_ASSIGN_OR_RAISE(auto expected, MakeTableProfile(spec));
+        const auto mode = profile.Properties.find("glamdb.collection-mode");
+        const bool kv = mode != profile.Properties.end();
+        if (kv && mode->second != "kv1") {
+            return iceberg::ValidationFailed("Unsupported collection mode.");
+        }
+        ICEBERG_ASSIGN_OR_RAISE(auto expected, kv ? MakeKVTableProfile(spec) : MakeTableProfile(spec));
         auto properties = profile.Properties;
         ICEBERG_RETURN_UNEXPECTED(StripRetentionProperties(properties));
         if (*profile.Schema != *expected.Schema || properties != expected.Properties) {

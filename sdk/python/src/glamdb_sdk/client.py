@@ -17,9 +17,10 @@ from .bulk import BulkAppendRequest
 from .codec import Schema, decode_rows, int64, timestamp_us
 from .errors import (AuthenticationError, ErrorDetail, HTTPError, OutcomeUnknownError, ProtocolError,
                      TransportError, ValidationError)
-from .models import ANY, AppendOutcome, CreateOutcome, OperationInProgress, Page, ScanResult
+from .models import ANY, AppendOutcome, CreateOutcome, LookupResult, OperationInProgress, Page, ScanResult
+from .kv import validate_mutation_receipt
 from .predicates import Predicate
-from .request import AppendRequest, _check_request_size, json_bytes, schema_fingerprint, uuid_string
+from .request import AppendRequest, MutationRequest, _check_request_size, bounded_keys, json_bytes, schema_fingerprint, uuid_string
 from .recovery import validate_append_recovery, validate_create_recovery
 from .transport import JSON_ACCEPT_ENCODING, Deadline, read_json, translate_transport
 from .write_settings import canonical_write_settings, request_write_settings, write_settings_version
@@ -494,7 +495,7 @@ class Client:
         return self._metadata(self._read(path, params=self._selector(snapshot_id), deadline=deadline, collection_id=cid), cid, snapshot_id)
 
     def create_collection(self, name: str, schema: Schema | Mapping[str, Any], *, collection_id: str | UUID,
-                          write_settings: Mapping[str, Any] | None = None,
+                          write_settings: Mapping[str, Any] | None = None, mode: str = "append",
                           deadline: float | None = None) -> CreateOutcome:
         """Create or confirm one collection definition.
 
@@ -507,7 +508,11 @@ class Client:
         if not isinstance(name, str) or not name:
             raise ValidationError("exact collection name is required")
         requested = None if write_settings is None else canonical_write_settings(write_settings, schema)
+        if mode not in ("append", "kv"):
+            raise ValidationError("mode must be append or kv")
         body = {"collection_id": cid, "name": name, "schema": schema.to_dict()}
+        if mode != "append":
+            body["mode"] = mode
         if requested is not None:
             body["write_settings"] = request_write_settings(requested)
         budget = Deadline(deadline, collection_id=cid)
@@ -521,7 +526,7 @@ class Client:
             if kind == "committed":
                 if status not in (200, 201) or not isinstance(info, dict) or "error" in value:
                     raise ProtocolError("invalid committed create outcome", raw=value)
-                self._verify_created(info, cid, name, schema, requested, authoritative=True)
+                self._verify_created(info, cid, name, schema, requested, authoritative=True, mode=mode)
                 self._schemas[cid] = schema
             elif kind == "definitely_not_committed":
                 if (not isinstance(value.get("error"), dict) or info is not None or not 400 <= status <= 599
@@ -543,7 +548,7 @@ class Client:
 
     @staticmethod
     def _verify_created(info: Mapping[str, Any], cid: str, name: str, schema: Schema,
-                        write_settings: dict[str, Any] | None = None, *, authoritative: bool = True) -> bool:
+                        write_settings: dict[str, Any] | None = None, *, authoritative: bool = True, mode: str = "append") -> bool:
         """Check a created or resolved collection against the original create.
 
         ``authoritative`` responses come from the create POST itself: the
@@ -557,6 +562,8 @@ class Client:
             same = info.get("collection_id") == cid and info.get("name") == name and schema_fingerprint(actual_schema) == schema_fingerprint(schema)
         except (KeyError, ValidationError) as exc:
             raise ProtocolError("created collection has missing or invalid identity/schema", raw=info) from exc
+        if info.get("mode", "append") != mode:
+            raise ProtocolError("resolved collection mode differs from the original create", raw=info)
         if not same:
             raise ProtocolError("resolved collection UUID, exact name, or schema does not match original create", raw=info)
         if "write_settings" not in info and "write_settings_version" not in info:
@@ -586,7 +593,7 @@ class Client:
         return True
 
     def resolve_create(self, name: str, schema: Schema | Mapping[str, Any], *, collection_id: str | UUID,
-                       write_settings: Mapping[str, Any] | None = None,
+                       write_settings: Mapping[str, Any] | None = None, mode: str = "append",
                        deadline: float | None = None) -> dict[str, Any]:
         """Resolve a lost create without guessing its write settings.
 
@@ -599,13 +606,13 @@ class Client:
         schema = self._schema(schema)
         requested = None if write_settings is None else canonical_write_settings(write_settings, schema)
         info = self.resolve_collection(name, deadline=deadline)
-        if self._verify_created(info, cid, name, schema, requested, authoritative=False):
+        if self._verify_created(info, cid, name, schema, requested, authoritative=False, mode=mode):
             return info
-        outcome = self.create_collection(name, schema, collection_id=cid, write_settings=requested, deadline=deadline)
+        outcome = self.create_collection(name, schema, collection_id=cid, write_settings=requested, mode=mode, deadline=deadline)
         if outcome.outcome == "committed":
             return outcome.info
         code = outcome.error.code if outcome.error else None
-        if code in ("WRITE_SETTINGS_MISMATCH", "SCHEMA_MISMATCH", "ALREADY_EXISTS"):
+        if code in ("WRITE_SETTINGS_MISMATCH", "SCHEMA_MISMATCH", "ALREADY_EXISTS", "COLLECTION_MODE_MISMATCH"):
             raise ProtocolError("resolved collection write settings do not match original create",
                                 raw=outcome.raw, collection_id=cid)
         # Recovery or admission refused the confirmation; the create stays unresolved.
@@ -687,7 +694,131 @@ class Client:
             request = self.prepare_append(cid, rows, operation_id=op, schema=schema,
                                           expected_snapshot=expected_snapshot, deadline=remaining)
         status, value = self._json("POST", f"collections/{request.collection_id}/append", budget, body=request.body, write=True)
-        return self._append_outcome(status, value, budget, expected_payload_hash=request.payload_hash)
+        outcome = self._append_outcome(status, value, budget, expected_payload_hash=request.payload_hash)
+        if outcome.result is not None and outcome.result.get("receipt_version") == 3:
+            raise ProtocolError("append returned a KV mutation receipt", raw=value,
+                                collection_id=request.collection_id, operation_id=request.operation_id)
+        return outcome
+
+    def _mutation_schema(self, collection_id, operation_id, schema, deadline):
+        cid = uuid_string(collection_id, "collection_id")
+        op = uuid_string(operation_id, "operation_id")
+        selected = self._schema(schema) if schema is not None else self._schemas.get(cid)
+        if selected is None:
+            try:
+                selected = self.get_schema(cid, deadline=deadline)
+            except (TransportError, ProtocolError, HTTPError) as exc:
+                exc.collection_id, exc.operation_id = cid, op
+                raise
+        return cid, op, selected
+
+    def prepare_upsert(self, collection_id, rows, *, operation_id, schema=None, expected_snapshot=ANY,
+                       deadline=None) -> MutationRequest:
+        cid, op, selected = self._mutation_schema(collection_id, operation_id, schema, deadline)
+        return MutationRequest.prepare("upsert", cid, op, selected, rows=rows, expected_snapshot=expected_snapshot)
+
+    def prepare_delete(self, collection_id, keys, *, operation_id, schema=None, expected_snapshot=ANY,
+                       deadline=None) -> MutationRequest:
+        # Bound a generator before a schema request or any write is sent.
+        keys = bounded_keys(keys, 10000)
+        cid, op, selected = self._mutation_schema(collection_id, operation_id, schema, deadline)
+        return MutationRequest.prepare("delete", cid, op, selected, keys=keys, expected_snapshot=expected_snapshot)
+
+    def prepare_compact(self, collection_id, *, operation_id, schema=None, expected_snapshot=ANY,
+                        max_files=64, target_file_bytes=8 * 1024**2, deadline=None) -> MutationRequest:
+        if type(max_files) is not int or not 1 <= max_files <= 256:
+            raise ValidationError("max_files must be an integer in 1..256")
+        if type(target_file_bytes) is not int or not 1024 <= target_file_bytes <= 16 * 1024**2:
+            raise ValidationError("target_file_bytes must be an integer in 1024..16777216")
+        cid, op, selected = self._mutation_schema(collection_id, operation_id, schema, deadline)
+        return MutationRequest.prepare("compact", cid, op, selected, expected_snapshot=expected_snapshot,
+                                       max_files=max_files, target_file_bytes=target_file_bytes)
+
+    def _send_mutation(self, request, deadline):
+        budget = Deadline(deadline, collection_id=request.collection_id, operation_id=request.operation_id)
+        status, value = self._json("POST", f"collections/{request.collection_id}/{request.kind}", budget,
+                                   body=request.body, write=True)
+        outcome = self._append_outcome(status, value, budget, expected_payload_hash=request.payload_hash)
+        if outcome.result is not None and (outcome.result.get("receipt_version") != 3
+                                          or outcome.result.get("mutation_kind") != request.kind):
+            raise ProtocolError("mutation receipt kind differs from the original request", raw=value,
+                                collection_id=request.collection_id, operation_id=request.operation_id)
+        if outcome.result is not None:
+            body = request.to_dict()
+            count = len(body.get("rows", [])) if request.kind == "upsert" else len(body.get("keys", [])) if request.kind == "delete" else 0
+            if outcome.result.get("input_rows") != str(count):
+                raise ProtocolError("mutation receipt input_rows differs from the original request", raw=value,
+                                    collection_id=request.collection_id, operation_id=request.operation_id)
+        return outcome
+
+    def upsert(self, collection_id, rows=None, *, operation_id=None, schema=None, expected_snapshot=ANY,
+               deadline=None) -> AppendOutcome:
+        if isinstance(collection_id, MutationRequest):
+            request = collection_id
+            if request.kind != "upsert" or rows is not None or operation_id is not None or schema is not None or expected_snapshot is not ANY:
+                raise ValidationError("prepared upsert already owns its identity, rows and precondition")
+        else:
+            budget = Deadline(deadline, collection_id=uuid_string(collection_id, "collection_id"),
+                              operation_id=uuid_string(operation_id, "operation_id"))
+            request = self.prepare_upsert(collection_id, rows, operation_id=operation_id, schema=schema,
+                                          expected_snapshot=expected_snapshot, deadline=budget.check())
+            deadline = budget.check()
+        return self._send_mutation(request, deadline)
+
+    def delete(self, collection_id, keys=None, *, operation_id=None, schema=None, expected_snapshot=ANY,
+               deadline=None) -> AppendOutcome:
+        if isinstance(collection_id, MutationRequest):
+            request = collection_id
+            if request.kind != "delete" or keys is not None or operation_id is not None or schema is not None or expected_snapshot is not ANY:
+                raise ValidationError("prepared delete already owns its identity, keys and precondition")
+        else:
+            budget = Deadline(deadline, collection_id=uuid_string(collection_id, "collection_id"),
+                              operation_id=uuid_string(operation_id, "operation_id"))
+            request = self.prepare_delete(collection_id, keys, operation_id=operation_id, schema=schema,
+                                          expected_snapshot=expected_snapshot, deadline=budget.check())
+            deadline = budget.check()
+        return self._send_mutation(request, deadline)
+
+    def compact(self, collection_id, *, operation_id=None, schema=None, expected_snapshot=ANY,
+                max_files=64, target_file_bytes=8 * 1024**2, deadline=None) -> AppendOutcome:
+        if isinstance(collection_id, MutationRequest):
+            request = collection_id
+            if request.kind != "compact" or operation_id is not None or schema is not None or expected_snapshot is not ANY or max_files != 64 or target_file_bytes != 8 * 1024**2:
+                raise ValidationError("prepared compaction already owns its identity, options and precondition")
+        else:
+            budget = Deadline(deadline, collection_id=uuid_string(collection_id, "collection_id"),
+                              operation_id=uuid_string(operation_id, "operation_id"))
+            request = self.prepare_compact(collection_id, operation_id=operation_id, schema=schema,
+                                           expected_snapshot=expected_snapshot, max_files=max_files,
+                                           target_file_bytes=target_file_bytes, deadline=budget.check())
+            deadline = budget.check()
+        return self._send_mutation(request, deadline)
+
+    def lookup(self, collection_id, keys, *, snapshot_id=ANY, deadline=None) -> LookupResult:
+        requested = bounded_keys(keys, 4096)
+        cid, path = self._path(collection_id, "lookup")
+        body = {"keys": requested}
+        if snapshot_id is not ANY:
+            body["snapshot_id"] = None if snapshot_id is None else str(int64(snapshot_id))
+        budget = Deadline(deadline, collection_id=cid)
+        status, value = self._json("POST", path, budget, body=json_bytes(body))
+        if status != 200:
+            self._http_error(status, value, budget)
+        try:
+            selected = value["snapshot_id"]
+            if selected is not None and (not isinstance(selected, str) or str(int64(selected)) != selected):
+                raise ValidationError("lookup snapshot must be a decimal string or null")
+            if snapshot_id is not ANY and selected != body["snapshot_id"]:
+                raise ValidationError("lookup snapshot differs from the requested fixed view")
+            schema = Schema.from_dict(value["schema"])
+            if value.get("collection_id") != cid or not isinstance(value["rows"], list) or len(value["rows"]) != len(requested):
+                raise ValidationError("lookup identity or result count differs from the request")
+            rows = [None if row is None else decode_rows(schema, [row])[0] for row in value["rows"]]
+            if (selected is None and any(row is not None for row in rows)) or any(row is not None and row.get("key") != key for key, row in zip(requested, rows)):
+                raise ValidationError("lookup result order differs from the requested keys")
+            return LookupResult(schema, selected, rows, value)
+        except (KeyError, TypeError, ValidationError) as exc:
+            raise ProtocolError("invalid lookup response", collection_id=cid, raw=value) from exc
 
     def prepare_bulk_append(self, collection_id: str | UUID, batches: Iterable[Iterable[Mapping[str, Any]]], *,
                             rows: int, operation_id: str | UUID, schema: Schema | Mapping[str, Any] | None = None,
@@ -727,7 +858,11 @@ class Client:
         try:
             status, value = self._json("POST", f"collections/{request.collection_id}/bulk-append", budget,
                                        bulk=request, write=True)
-            return self._append_outcome(status, value, budget, expected_payload_hash=request.payload_hash)
+            outcome = self._append_outcome(status, value, budget, expected_payload_hash=request.payload_hash)
+            if outcome.result is not None and outcome.result.get("receipt_version") == 3:
+                raise ProtocolError("bulk append returned a KV mutation receipt", raw=value,
+                                    collection_id=request.collection_id, operation_id=request.operation_id)
+            return outcome
         finally:
             if owned:
                 request.close()
@@ -742,8 +877,11 @@ class Client:
         if expected_payload_hash is not None and not hmac.compare_digest(digest.lower(), expected_payload_hash.lower()):
             raise ProtocolError("append receipt payload_hash differs from the original request")
         version = result.get("receipt_version")
-        if type(version) is not int or version not in (1, 2):
-            raise ProtocolError("append receipt requires supported receipt_version 1 or 2")
+        if type(version) is not int or version not in (1, 2, 3):
+            raise ProtocolError("receipt requires supported receipt_version 1, 2 or 3")
+        if version == 3:
+            validate_mutation_receipt(result)
+            return
         rows = int64(result.get("rows_appended"))
         if not 1 <= rows <= (10000 if version == 1 else 25600000):
             raise ProtocolError("append receipt rows_appended is outside the v0 append profile")
@@ -798,6 +936,9 @@ class Client:
                 int64(result["snapshot_id"])
                 self._validate_receipt(result, expected_payload_hash,
                                        mock=value.get("mock") is True or result.get("mock") is True)
+                if result.get("receipt_version") == 3 and (value.get("phase") != "complete"
+                        or value.get("recovery_required", False) is not False or "recovery" in value):
+                    raise ProtocolError("invalid committed KV mutation envelope", raw=value)
             elif kind == "definitely_not_committed":
                 if (not isinstance(error_value, dict) or result is not None or not 400 <= status <= 599
                         or value.get("recovery_required", False) is not False or "recovery" in value):

@@ -21,6 +21,13 @@ constexpr std::string_view write_settings_table =
     "CREATE TABLE collection_write_settings(collection_id TEXT PRIMARY KEY REFERENCES "
     "collections(collection_id),version INTEGER NOT NULL CHECK(version>=1),created_blob BLOB NOT NULL "
     "CHECK(length(created_blob)<=16384),current_blob BLOB NOT NULL CHECK(length(current_blob)<=16384))";
+constexpr std::string_view kv_modes_table = "CREATE TABLE collection_modes(collection_id TEXT PRIMARY KEY REFERENCES "
+                                            "collections(collection_id),mode INTEGER NOT NULL CHECK(mode=2))";
+constexpr std::string_view migration_targets_table =
+    "CREATE TABLE migration_targets(collection_id TEXT PRIMARY KEY REFERENCES "
+    "collections(collection_id),identity TEXT NOT NULL CHECK(length(identity)=64),"
+    "operation_id TEXT NOT NULL CHECK(length(operation_id)=36),"
+    "population_hash TEXT CHECK(population_hash IS NULL OR length(population_hash)=64))";
 constexpr std::string_view operation_columns = "collection_id,operation_id,payload_hash,hash_version,base_identity,"
                                                "attempt_id,state,receipt_version,outcome_blob";
 constexpr std::string_view expired_snapshots_table =
@@ -32,9 +39,10 @@ constexpr std::string_view expired_snapshots_table =
 constexpr std::string_view metadata_cleanup_table =
     "CREATE TABLE metadata_cleanup(collection_id TEXT NOT NULL REFERENCES collections(collection_id),"
     "path TEXT NOT NULL CHECK(length(path)<=2048),PRIMARY KEY(collection_id,path))";
-// Created with catalog version 4 by the first transaction that stores a
-// hot_snapshots setting; older binaries reject version 4, so they cannot
-// misread a root whose oldest snapshots live in the archive.
+// Created with catalog version 5 (after the version 4 KV tables) by the first
+// transaction that stores a hot_snapshots setting; older binaries reject
+// version 5, so they cannot misread a root whose oldest snapshots live in the
+// archive.
 constexpr std::string_view archive_settings_table =
     "CREATE TABLE collection_snapshot_archive(collection_id TEXT PRIMARY KEY REFERENCES collections(collection_id),"
     "created_hot_snapshots INTEGER CHECK(created_hot_snapshots IS NULL OR created_hot_snapshots BETWEEN 1 AND "
@@ -171,7 +179,7 @@ void DurableSqliteCatalogStore::OpenConnection(bool create)
                 "UNSUPPORTED_STORE_VERSION",
                 "unexpected SQLite journal mode");
             const auto version = preflight.Integer("PRAGMA user_version");
-            Require(version >= 1 && version <= 4, "UNSUPPORTED_STORE_VERSION", "unknown catalog version");
+            Require(version >= 1 && version <= 5, "UNSUPPORTED_STORE_VERSION", "unknown catalog version");
             const auto rows = preflight.Query("SELECT store_id,format_major,profile_id FROM "
                                               "store_header WHERE singleton=1");
             Require(rows.size() == 1 && Required(rows[0], 0) == info_.store_id && Required(rows[0], 1) == "1" &&
@@ -265,13 +273,22 @@ void DurableSqliteCatalogStore::Configure()
 void DurableSqliteCatalogStore::ValidateHeader()
 {
     const auto version = database_.Integer("PRAGMA user_version");
-    Require(version >= 1 && version <= 4 && database_.Integer("PRAGMA application_id") == 1196179789,
+    Require(version >= 1 && version <= 5 && database_.Integer("PRAGMA application_id") == 1196179789,
         "UNSUPPORTED_STORE_VERSION",
         "unsupported catalog format");
     const auto tables = database_.Query("SELECT sql FROM sqlite_master WHERE name='collection_write_settings'");
     Require(version == 1 ? tables.empty() : tables.size() == 1 && tables[0][0] == std::string(write_settings_table),
         "CORRUPTION",
         "write settings table does not match the catalog version");
+    const auto modes = database_.Query("SELECT sql FROM sqlite_master WHERE name='collection_modes'");
+    Require(version < 4 ? modes.empty() : modes.size() == 1 && modes[0][0] == std::string(kv_modes_table),
+        "CORRUPTION",
+        "KV mode table does not match the catalog version");
+    const auto migrations = database_.Query("SELECT sql FROM sqlite_master WHERE name='migration_targets'");
+    Require(version < 4 ? migrations.empty()
+                        : migrations.size() == 1 && migrations[0][0] == std::string(migration_targets_table),
+        "CORRUPTION",
+        "migration ownership table does not match the catalog version");
     for (const auto& [name, definition] : {std::pair{"expired_snapshots", expired_snapshots_table},
              std::pair{"metadata_cleanup", metadata_cleanup_table}})
     {
@@ -284,7 +301,7 @@ void DurableSqliteCatalogStore::ValidateHeader()
              std::pair{"archived_snapshots", archived_snapshots_table}})
     {
         const auto found = database_.Query("SELECT sql FROM sqlite_master WHERE name=?", {std::string(name)});
-        Require(version < 4 ? found.empty() : found.size() == 1 && found[0][0] == std::string(definition),
+        Require(version < 5 ? found.empty() : found.size() == 1 && found[0][0] == std::string(definition),
             "CORRUPTION",
             "snapshot archive tables do not match the catalog version");
     }
@@ -420,13 +437,28 @@ CollectionInfo DurableSqliteCatalogStore::ReadCollection(const SqlRow& row)
             Require(info.write_settings_version >= 1, "CORRUPTION", "invalid write settings version");
         }
     }
+    if (database_.Integer("PRAGMA user_version") >= 4) {
+        const auto modes =
+            database_.Query("SELECT mode FROM collection_modes WHERE collection_id=?", {info.collection_id});
+        if (!modes.empty()) {
+            Require(modes.size() == 1 && Required(modes[0], 0) == "2", "CORRUPTION", "invalid collection mode");
+            info.mode = CollectionMode::KeyValue;
+            Require(std::ranges::any_of(info.schema.fields,
+                        [](const auto& field) {
+                            return field.name == "key" && field.type == FieldType::String && !field.nullable;
+                        }),
+                "CORRUPTION",
+                "KV collection has no required string key");
+        }
+    }
     if (HasArchive()) {
         const auto archive =
             database_.Query("SELECT hot_snapshots FROM collection_snapshot_archive WHERE collection_id=?",
                 {info.collection_id});
         if (!archive.empty() && archive[0][0]) {
             info.hot_snapshots = ParseInteger(Required(archive[0], 0));
-            Require(*info.hot_snapshots >= 1 && *info.hot_snapshots <= max_hot_snapshots,
+            Require(*info.hot_snapshots >= 1 && *info.hot_snapshots <= max_hot_snapshots &&
+                    info.mode == CollectionMode::Append,
                 "CORRUPTION",
                 "invalid hot_snapshots setting");
         }
@@ -436,17 +468,17 @@ CollectionInfo DurableSqliteCatalogStore::ReadCollection(const SqlRow& row)
 
 bool DurableSqliteCatalogStore::HasArchive()
 {
-    return database_.Integer("PRAGMA user_version") >= 4;
+    return database_.Integer("PRAGMA user_version") >= 5;
 }
 
 void DurableSqliteCatalogStore::EnsureArchive()
 {
     Require(transaction_, "INTERNAL", "the snapshot archive requires the outer transaction");
-    EnsureRetention();
+    EnsureKVModes();
     if (!HasArchive()) {
         database_.Execute(archive_settings_table);
         database_.Execute(archived_snapshots_table);
-        database_.Execute("PRAGMA user_version=4");
+        database_.Execute("PRAGMA user_version=5");
     }
 }
 
@@ -474,6 +506,10 @@ CollectionInfo DurableSqliteCatalogStore::UpdateHotSnapshots(std::string_view id
     Require(publication_ == nullptr, "INTERNAL", "the archive setting cannot change during a publication");
     CheckHotSnapshots(hot);
     auto collection = Collection(id);
+    if (hot && collection.mode != CollectionMode::Append) {
+        throw Failure(
+            {"COLLECTION_MODE_MISMATCH", "hot_snapshots requires an append collection", RetryHint::FixInput});
+    }
     if (collection.hot_snapshots == hot) {
         // Also a repeated request whose response was lost: applied once.
         return collection;
@@ -696,6 +732,65 @@ void DurableSqliteCatalogStore::EnsureWriteSettings()
         database_.Execute(write_settings_table);
         database_.Execute("PRAGMA user_version=2");
     }
+}
+
+void DurableSqliteCatalogStore::EnsureKVModes()
+{
+    Require(transaction_, "INTERNAL", "KV mode requires the outer transaction");
+    EnsureRetention();
+    if (database_.Integer("PRAGMA user_version") < 4) {
+        database_.Execute(kv_modes_table);
+        database_.Execute(migration_targets_table);
+        database_.Execute("PRAGMA user_version=4");
+    }
+}
+
+std::optional<std::string> DurableSqliteCatalogStore::MigrationIdentity(std::string_view id)
+{
+    std::lock_guard lock(mutex_);
+    Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
+    if (database_.Integer("PRAGMA user_version") < 4) {
+        return std::nullopt;
+    }
+    const auto rows =
+        database_.Query("SELECT identity,operation_id,population_hash FROM migration_targets WHERE collection_id=?",
+            {std::string(id)});
+    if (rows.empty()) {
+        return std::nullopt;
+    }
+    Require(rows.size() == 1 && ValidDigest(Required(rows[0], 0)) && ValidUuid(Required(rows[0], 1)) &&
+            Collection(id).mode == CollectionMode::KeyValue,
+        "CORRUPTION",
+        "invalid migration target ownership");
+    const auto record = FindOperation(id, Required(rows[0], 1));
+    const auto& population = rows[0][2];
+    Require(population ? ValidDigest(*population) && record && record->binding.payload_hash == *population : !record,
+        "CORRUPTION",
+        "migration population does not match its durable ownership");
+    return Required(rows[0], 0);
+}
+
+std::optional<std::pair<CollectionInfo, std::optional<OperationRecord>>> DurableSqliteCatalogStore::TryMigrationReplay(
+    std::string_view id,
+    // The operation UUID and ownership SHA-256 are validated positional identities.
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+    std::string_view operation,
+    std::string_view identity)
+{
+    std::unique_lock lock(mutex_, std::try_to_lock);
+    Require(lock.owns_lock() && !transaction_ && publication_ == nullptr,
+        "OPERATION_IN_PROGRESS",
+        "catalog publication is still executing");
+    const auto owner = MigrationIdentity(id);
+    if (!owner) {
+        return std::nullopt;
+    }
+    Require(*owner == identity, "COLLECTION_EXISTS", "migration target belongs to a different creation or source");
+    const auto rows =
+        database_.Query("SELECT operation_id FROM migration_targets WHERE collection_id=?", {std::string(id)});
+    Require(Required(rows[0], 0) == operation, "COLLECTION_EXISTS", "migration population operation differs");
+    auto record = FindOperation(id, operation);
+    return std::pair(Collection(id), std::move(record));
 }
 
 WriteSettings DurableSqliteCatalogStore::CreatedWriteSettings(std::string_view id)
@@ -960,15 +1055,34 @@ void DurableSqliteCatalogStore::CheckFreeBytes()
     Require(free >= 24576, "RESOURCE_EXHAUSTED", "catalog cannot reserve a binding and terminal receipt");
 }
 
-void DurableSqliteCatalogStore::BindOperation(const BoundOperation& binding)
+void DurableSqliteCatalogStore::BindOperation(const BoundOperation& binding, std::string_view migrationOwner)
 {
     std::lock_guard lock(mutex_);
     Require(ValidUuid(binding.operation_id) && ValidUuid(binding.attempt_id) && ValidDigest(binding.payload_hash) &&
             binding.hash_version == 1 && binding.base == Base(binding.collection_id),
         "INVALID_ARGUMENT",
         "invalid prepared binding");
+    const auto owner = MigrationIdentity(binding.collection_id);
+    bool population = false;
+    if (owner) {
+        const auto rows = database_.Query("SELECT operation_id FROM migration_targets WHERE collection_id=?",
+            {binding.collection_id});
+        population = Required(rows[0], 0) == binding.operation_id;
+        Require(!population || migrationOwner == *owner,
+            "OPERATION_CONFLICT",
+            "operation ID is reserved for migration population");
+    }
+    Require(migrationOwner.empty() || (owner && population && migrationOwner == *owner),
+        "OPERATION_CONFLICT",
+        "migration population does not match target ownership");
     Transaction([&] {
         CheckCapacity(true);
+        if (population) {
+            database_.Execute("UPDATE migration_targets SET population_hash=? WHERE collection_id=? "
+                              "AND operation_id=? AND population_hash IS NULL",
+                {binding.payload_hash, binding.collection_id, binding.operation_id});
+            Require(database_.Changes() == 1, "CORRUPTION", "migration population identity is already bound");
+        }
         database_.Execute("INSERT INTO "
                           "operations(collection_id,operation_id,payload_hash,"
                           "hash_version,state,base_identity,attempt_id,receipt_"
@@ -1017,7 +1131,11 @@ void DurableSqliteCatalogStore::RecordFailure(const BoundOperation& binding, con
     });
 }
 
-CollectionInfo DurableSqliteCatalogStore::PublishCreate(CollectionInfo collection, const Guard& guard, const Body& body)
+CollectionInfo DurableSqliteCatalogStore::PublishCreate(CollectionInfo collection,
+    const Guard& guard,
+    const Body& body,
+    std::string_view migrationIdentity,
+    std::string_view migrationOperation)
 {
     std::lock_guard lock(mutex_);
     Require(guard && body && publication_ == nullptr,
@@ -1031,7 +1149,20 @@ CollectionInfo DurableSqliteCatalogStore::PublishCreate(CollectionInfo collectio
             ValidUtf8(collection.name) && collection.name.find('\0') == std::string::npos,
         "INVALID_ARGUMENT",
         "invalid collection definition");
+    Require(collection.mode == CollectionMode::Append || collection.mode == CollectionMode::KeyValue,
+        "INVALID_ARGUMENT",
+        "invalid collection mode");
+    Require((migrationIdentity.empty() && migrationOperation.empty()) ||
+            (collection.mode == CollectionMode::KeyValue && ValidDigest(migrationIdentity) &&
+                ValidUuid(migrationOperation)),
+        "INVALID_ARGUMENT",
+        "invalid migration ownership identity");
     CheckHotSnapshots(collection.hot_snapshots);
+    if (collection.hot_snapshots && collection.mode != CollectionMode::Append) {
+        throw Failure({"COLLECTION_MODE_MISMATCH",
+            "hot_snapshots requires an append collection",
+            RetryHint::FixInput});
+    }
     Publication scope{true, collection.name, std::nullopt, guard, {}, 0};
     publication_ = &scope;
     try {
@@ -1063,6 +1194,14 @@ CollectionInfo DurableSqliteCatalogStore::PublishCreate(CollectionInfo collectio
                     Blob{*schema},
                     Sha256(*schema),
                     collection.creation_sequence});
+            if (collection.mode == CollectionMode::KeyValue) {
+                EnsureKVModes();
+                database_.Execute("INSERT INTO collection_modes VALUES(?,2)", {collection.collection_id});
+                if (!migrationIdentity.empty()) {
+                    database_.Execute("INSERT INTO migration_targets VALUES(?,?,?,NULL)",
+                        {collection.collection_id, std::string(migrationIdentity), std::string(migrationOperation)});
+                }
+            }
             if (!IsDefault(collection.write_settings)) {
                 EnsureWriteSettings();
                 database_.Execute("INSERT INTO collection_write_settings VALUES(?,1,?,?)",
@@ -1094,6 +1233,9 @@ void DurableSqliteCatalogStore::PublishAppend(const BoundOperation& binding,
         "INVALID_ARGUMENT",
         "publication requires a closure guard and synchronous body");
     const auto collection = Collection(binding.collection_id);
+    Require((collection.mode == CollectionMode::KeyValue) == (result.receipt_version == 3) && result.snapshot_created,
+        "INVALID_ARGUMENT",
+        "receipt does not match collection mode or publication kind");
     Publication scope{false, collection.name, binding.base, guard, {}, 0};
     publication_ = &scope;
     try {
@@ -1149,6 +1291,39 @@ void DurableSqliteCatalogStore::PublishAppend(const BoundOperation& binding,
         publication_ = nullptr;
         throw;
     }
+}
+
+void DurableSqliteCatalogStore::PublishNoOp(const BoundOperation& binding,
+    const AppendResult& result,
+    const Guard& guard)
+{
+    std::lock_guard lock(mutex_);
+    const AppendOutcome outcome{binding.operation_id,
+        CommitDisposition::Committed,
+        CommitPhase::Complete,
+        result,
+        std::nullopt,
+        std::nullopt};
+    Require(guard && publication_ == nullptr && result.receipt_version == 3 && !result.snapshot_created &&
+            ValidateOutcome(outcome).has_value() && result.collection_id == binding.collection_id &&
+            result.operation_id == binding.operation_id && result.payload_hash == binding.payload_hash &&
+            result.parent_snapshot_id == binding.base.current_snapshot_id &&
+            result.snapshot_id == binding.base.current_snapshot_id.value_or(0) &&
+            result.durability_profile == info_.profile_id,
+        "INVALID_ARGUMENT",
+        "invalid no-op publication");
+    Transaction([&] {
+        CheckBinding(binding);
+        Require(Collection(binding.collection_id).mode == CollectionMode::KeyValue,
+            "INVALID_ARGUMENT",
+            "no-op requires KV mode");
+        Require(Base(binding.collection_id) == binding.base, "STALE_BASE", "exact prepared base changed");
+        const auto checked = guard(binding.base.metadata_location);
+        if (!checked) {
+            throw Failure(checked.error());
+        }
+        Complete(binding, outcome);
+    });
 }
 
 void DurableSqliteCatalogStore::EnsureRetention()
@@ -1263,6 +1438,9 @@ void DurableSqliteCatalogStore::PublishExpiration(const BaseIdentity& base,
         "INVALID_ARGUMENT",
         "invalid archived expiration prefix");
     const auto collection = Collection(base.collection_id);
+    Require(collection.mode == CollectionMode::Append,
+        "COLLECTION_MODE_MISMATCH",
+        "snapshot expiration requires append mode");
     Publication scope{false, collection.name, base, guard, {}, 0};
     publication_ = &scope;
     try {
@@ -1397,6 +1575,13 @@ void DurableSqliteCatalogStore::ValidateInventory()
         "internal namespace is missing or modified");
     for (const auto& collection : collections) {
         (void)Base(collection.collection_id);
+        (void)MigrationIdentity(collection.collection_id);
+        if (collection.mode == CollectionMode::KeyValue) {
+            Require(ExpiredSnapshots(collection.collection_id).empty() &&
+                    PendingMetadataCount(collection.collection_id) == 0,
+                "CORRUPTION",
+                "KV collections cannot have expiration or cleanup records");
+        }
     }
     ForEachOperation([&](const auto& record) {
         const auto base = Base(record.binding.collection_id);

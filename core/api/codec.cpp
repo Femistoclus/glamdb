@@ -20,6 +20,16 @@ void WriteResult(Encoder& out, const AppendResult& result)
     out.Number(result.snapshot_created_at_us);
     out.Text(result.durability_profile);
     out.Number(result.receipt_version);
+    if (result.receipt_version == 3) {
+        out.Number(static_cast<uint8_t>(result.mutation_kind));
+        out.Number<uint8_t>(result.snapshot_created ? 1 : 0);
+        out.Number(result.input_rows);
+        out.Number(result.rows_affected);
+        out.Number(result.rows_written);
+        out.Number(result.rows_removed);
+        out.Number(result.data_files_removed);
+        out.Number(result.compressed_data_bytes_removed);
+    }
 }
 
 AppendResult ReadResult(Decoder& in)
@@ -37,7 +47,71 @@ AppendResult ReadResult(Decoder& in)
     result.snapshot_created_at_us = in.Number<int64_t>();
     result.durability_profile = in.Text();
     result.receipt_version = in.Number<int32_t>();
+    if (result.receipt_version == 3) {
+        result.mutation_kind = static_cast<MutationKind>(in.Number<uint8_t>());
+        result.snapshot_created = in.Boolean();
+        result.input_rows = in.Number<int64_t>();
+        result.rows_affected = in.Number<int64_t>();
+        result.rows_written = in.Number<int64_t>();
+        result.rows_removed = in.Number<int64_t>();
+        result.data_files_removed = in.Number<int64_t>();
+        result.compressed_data_bytes_removed = in.Number<int64_t>();
+    }
     return result;
+}
+
+bool ValidKVResult(const AppendResult& result)
+{
+    const auto validCount = [](int64_t value, int64_t maximum) {
+        return value >= 0 && value <= maximum;
+    };
+    if (!ValidUuid(result.collection_id) || !ValidUuid(result.operation_id) || !ValidDigest(result.payload_hash) ||
+        result.hash_version != 1 || result.mutation_kind < MutationKind::Upsert ||
+        result.mutation_kind > MutationKind::Compact || result.rows_appended != 0 ||
+        !validCount(result.input_rows, BulkAppendLimits::MaxRows) ||
+        !validCount(result.rows_affected, result.input_rows) ||
+        !validCount(result.rows_written, BulkAppendLimits::MaxRows) ||
+        !validCount(result.rows_removed, BulkAppendLimits::MaxRows) ||
+        !validCount(result.data_files_added, BulkAppendLimits::MaxFiles) ||
+        !validCount(result.data_files_removed, BulkAppendLimits::MaxFiles) ||
+        !validCount(result.compressed_data_bytes_added, result.data_files_added * (32LL << 20)) ||
+        !validCount(result.compressed_data_bytes_removed, result.data_files_removed * (32LL << 20)) ||
+        result.durability_profile.empty() || result.durability_profile.size() > 128 ||
+        !ValidUtf8(result.durability_profile))
+    {
+        return false;
+    }
+    if (result.mutation_kind == MutationKind::Compact && result.input_rows != 0) {
+        return false;
+    }
+    if (!result.snapshot_created) {
+        return result.snapshot_id == result.parent_snapshot_id.value_or(0) && result.snapshot_created_at_us == 0 &&
+            result.rows_affected == 0 && result.rows_written == 0 && result.rows_removed == 0 &&
+            result.data_files_added == 0 && result.data_files_removed == 0 && result.compressed_data_bytes_added == 0 &&
+            result.compressed_data_bytes_removed == 0;
+    }
+    if (result.snapshot_id == 0 || result.parent_snapshot_id == result.snapshot_id ||
+        result.snapshot_created_at_us < -62135596800000000LL || result.snapshot_created_at_us > 253402300799999999LL ||
+        result.snapshot_created_at_us % 1000 != 0 || (result.data_files_added == 0 && result.data_files_removed == 0) ||
+        (result.data_files_added == 0) != (result.rows_written == 0) ||
+        (result.data_files_added == 0) != (result.compressed_data_bytes_added == 0) ||
+        (result.data_files_removed == 0) != (result.rows_removed == 0) ||
+        (result.data_files_removed == 0) != (result.compressed_data_bytes_removed == 0) ||
+        result.rows_written > result.data_files_added * BulkAppendLimits::MaxFileRows ||
+        result.rows_removed > result.data_files_removed * BulkAppendLimits::MaxFileRows)
+    {
+        return false;
+    }
+    if (result.mutation_kind == MutationKind::Compact) {
+        return result.input_rows == 0 && result.rows_affected == 0 && result.rows_written == result.rows_removed &&
+            result.data_files_added >= 1 && result.data_files_removed >= result.data_files_added * 4;
+    }
+    return result.input_rows > 0 && result.rows_affected > 0 &&
+        (result.mutation_kind != MutationKind::Delete ||
+            result.rows_removed - result.rows_written == result.rows_affected) &&
+        (result.mutation_kind != MutationKind::Upsert ||
+            (result.rows_written >= result.rows_removed &&
+                result.rows_written - result.rows_removed <= result.rows_affected));
 }
 
 } // namespace
@@ -62,6 +136,15 @@ Status ValidateOutcome(const AppendOutcome& outcome)
             return invalid();
         }
         const auto& result = *outcome.result;
+        if (result.receipt_version == 3) {
+            return result.operation_id == outcome.operation_id && ValidKVResult(result) ? Status{} : invalid();
+        }
+        if (result.mutation_kind != MutationKind::None || !result.snapshot_created || result.input_rows != 0 ||
+            result.rows_affected != 0 || result.rows_written != 0 || result.rows_removed != 0 ||
+            result.data_files_removed != 0 || result.compressed_data_bytes_removed != 0)
+        {
+            return invalid();
+        }
         if (!ValidUuid(result.collection_id) || result.operation_id != outcome.operation_id ||
             !ValidDigest(result.payload_hash) || result.hash_version != 1 ||
             (result.receipt_version != 1 && result.receipt_version != 2) || result.rows_appended < 1 ||

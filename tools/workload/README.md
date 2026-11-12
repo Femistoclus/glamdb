@@ -6,10 +6,13 @@ For the complete-width hits ingestion and size adapter, see
 `glamdb-cli generate` creates reproducible bounded datasets. `bench write` and
 `bench read` run the existing Python SDK through Locust. `bench verify` checks
 the rows actually committed; `bench resolve` looks up uncertain operations.
-These commands use the running native server. They never create or open a
-database implicitly, reconcile it, or switch to a mock backend.
-`bench tpch clean` drops the dedicated database identified by an explicit saved
-run-state file; TPC-H generation and loading commands are not implemented.
+These commands use the running native server and require an explicitly prepared
+target. `bench tpch` adds reference eight-table generation, explicit target
+creation, resumable loading, verification, Q1–Q22 scan access patterns, complete
+Q1/Q6 client reductions, status, outcome resolution and exact database cleanup.
+No command silently reconciles a database or switches to a mock backend.
+See [the TPC-H guide](../../docs/development/TPC_H.md) for provenance, capacity,
+recovery and the separate validation status of this workload.
 
 ## Install
 
@@ -110,7 +113,8 @@ including precisions above 2^53, without binary float conversion. Default
 decimal bounds span the full declared precision. Date bounds use strict ISO
 calendar text; generation samples whole days. Normalized manifest generation
 bounds store decimal coefficients and date epoch-day counts as integers.
-This is the existing scalar workload generator; no TPC-H adapter is provided.
+This scalar generator is independent of the reference DBGEN adapter used by
+`bench tpch generate`.
 For duplicate keys use `{"profile":"duplicates","distinct":100,"prefix":"key-"}`;
 all duplicates are intended append rows, not replacements.
 
@@ -163,10 +167,11 @@ stops the Python process and returns 130. The bridge escalates termination
 after five seconds and reaps the child. A forced kill can leave an unfinished
 report; its durable pre-send operations remain available for resolve.
 
-The current scan query supports `projection`, one typed `predicate`, `limit`,
-and `snapshot_id`, following the SDK contract and advertised capabilities.
-Arbitrary SQL/AND/OR and unavailable stats/files/snapshots/explain scenarios are
-not offered. Every read mode consumes **all** pages of every scan. Each Arrow
+The scan query supports `projection`, typed comparisons, IN, NULL checks and
+compound AND/OR/NOT predicates, `limit`, and `snapshot_id`, following the SDK
+contract and advertised capabilities. SQL joins, grouping and arbitrary
+expressions are not engine scan operations. Every read mode consumes **all**
+pages of every scan. Each Arrow
 page is a complete independent IPC stream; the SDK/PyArrow decode each page and
 validate its identity and integrity. No byte-concatenated IPC export is used.
 `--consume` selects how the client consumes the data, recorded as
@@ -190,7 +195,73 @@ Only loopback HTTP is permitted. Other endpoints require verified HTTPS.
 `--ca-file CA.pem` adds the test/private CA; certificate verification cannot be
 disabled. Redirects follow the SDK's rejection policy.
 
-## TPC-H database cleanup
+## TPC-H lifecycle
+
+TPC-H uses all eight reference tables and all 61 columns. It requires a local
+TPC-H Tools 3.0.1 DBGEN executable and matching distributions; Mimesis does not
+generate these datasets. Select the physical type profile explicitly:
+`native` uses DECIMAL(15,2)/DATE, while `legacy-scaled` uses exact decimal
+coefficients ×100 and UTC-midnight timestamp dates. Neither profile converts
+decimal values through binary floating point. Manifests retain generator
+provenance, exact scale, schemas, partition plan and every part's size/hash.
+
+```sh
+glamdb-cli bench tpch generate --scale-factor 0.01 --dbgen /path/to/dbgen \
+  --distributions /path/to/dists.dss --type-profile native --output tpch-data/
+glamdb-cli bench tpch init --url http://127.0.0.1:8080 --dataset tpch-data/ \
+  --name tpch-small --state tpch-run.json
+glamdb-cli bench tpch load --state tpch-run.json --batch-rows 10000 --workers 2
+glamdb-cli bench tpch status --state tpch-run.json
+glamdb-cli bench tpch verify --state tpch-run.json --format arrow --level full
+glamdb-cli bench tpch scan --state tpch-run.json --queries all --mode scan \
+  --format arrow --consume batches --users 1 --repeat 5 --report tpch-scans/
+glamdb-cli bench tpch scan --state tpch-run.json --queries 1,6 --mode reduce \
+  --format arrow --consume batches --report tpch-reduce/
+```
+
+Fractional scales are development profiles. SF=1/SF=10 full command-family HTTP
+acceptance is **NOT RUN**; the earlier
+[retained-history campaign](../../docs/development/SCALABLE_HISTORY_VALIDATION.md)
+is separate evidence. See [executed small native acceptance and independent review](../../docs/development/TPC_H_VALIDATION.md).
+This workload does not claim official TPC-H compliance
+or publish QphH results.
+
+| Command | Controls beyond required `--state` |
+| --- | --- |
+| `generate` | Requires `--scale-factor`, `--output`, `--dbgen`, `--type-profile`; accepts `--generator-parts`, `--part-rows`, `--part-bytes`, `--distributions`, `--dbgen-sha256`. No state file. |
+| `init` | Requires `--url`, `--dataset`, `--name`; optional `--limits FILE` JSON object and `--table-prefix`. |
+| `load` | `--batch-rows 10000`, `--batch-bytes 8388608`, `--workers 1`, explicit `--resume`. |
+| `resolve` | Lookup only by default; explicit `--retry` may resend verified original requests. |
+| `verify` | `--format arrow\|json`, `--level full\|rows` (defaults `arrow`, `full`). |
+| `scan` | Required `--report`; `--queries all\|1,6,...`, `--mode scan\|reduce`, `--format arrow\|json`, `--consume batches\|rows`, `--users 1`, `--processes 1`, `--warmup 1`, `--repeat 5`. |
+| `status` | Original identities, load progress, unresolved operations, fixed snapshots and target limits. |
+| `clean` | Delete the exact saved database identity; preserve local data and reports. |
+
+Network commands accept `--ca-file` and positive finite `--timeout` seconds
+(30 by default; 300 for verify/scan). Generation defaults to one global DBGEN
+partition, 10,000 rows and 8 MiB per dataset part. All parts are checked before
+load planning. `init` explicitly creates a dedicated database and eight
+collections; a complete load uses immutable chunks and disjoint worker
+assignments. Effective writer concurrency remains one. Unlike generic
+`bench write`, workers never each append a full copy of the dataset.
+
+Keep the generated data, run state and adjacent journal together through
+recovery. A resumed load must retain the original dataset, target, chunk
+boundaries, worker assignment and exact prepared UUID/body/hash. Use
+`bench tpch resolve --state tpch-run.json` to inspect uncertainty, then
+`--retry` only when intentionally resending an authoritative not-found request.
+`bench tpch load --state tpch-run.json --resume` continues the same plan.
+No command silently changes resource limits or expires history.
+
+Load performs full verification before setting `load_complete`. Subsequent
+verification/scans use the saved vector of eight table snapshots. Both
+verification levels compare full row multisets and receipts; `full` also checks
+primary/composite keys and foreign keys. `scan` reports source access patterns
+with residual relational work and `result_verified=false`. `reduce` supports
+complete Q1/Q6 answers using explicit client grouping/arithmetic; selecting any
+other reducer, including `reduce --queries all`, is unsupported.
+
+### Exact TPC-H database cleanup
 
 Save the server URL and both original UUIDs when creating a dedicated benchmark
 database. The minimal run-state JSON format is:
@@ -219,8 +290,8 @@ It validates the saved state before sending one authenticated
 `POST /databases/{database_id}/drop` with only `store_id` in its body. It prints
 `dropped: true` only after the response contains the same saved identities and
 confirms completed deletion. The entire database, including all eight TPC-H
-tables and history, is removed. It does not perform row deletion, RF2,
-`TRUNCATE`, or benchmark generation/loading.
+tables and history, is removed. It does not perform row deletion, RF2 or
+`TRUNCATE`; generated datasets, run state, journals and reports are retained.
 
 A timeout or lost reply is ambiguous. The command leaves the state file
 unchanged after every outcome, and sends no automatic retry. Run the same

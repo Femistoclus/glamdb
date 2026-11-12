@@ -229,7 +229,8 @@ export function sessionSnapshots(operations, collectionId) {
         if (
             operation.collectionId !== collectionId ||
             operation.outcome !== 'committed' ||
-            !operation.result?.snapshot_id
+            !operation.result?.snapshot_id ||
+            operation.result.snapshot_created === false
         )
             continue;
         const result = operation.result;
@@ -237,6 +238,13 @@ export function sessionSnapshots(operations, collectionId) {
             snapshot_id: result.snapshot_id,
             parent_snapshot_id: result.parent_snapshot_id ?? null,
             rows_added: result.rows_appended,
+            ...(result.receipt_version === 3
+                ? {
+                      mutation_kind: result.mutation_kind,
+                      rows_written: result.rows_written,
+                      rows_removed: result.rows_removed,
+                  }
+                : {}),
         });
     }
     return [...snapshots.values()];
@@ -247,9 +255,19 @@ export function sessionRowCount(operations, collectionId, snapshotId) {
     const decimal = (value) => (/^(?:0|[1-9]\d{0,18})$/.test(String(value)) ? BigInt(value) : null);
     for (const op of operations) {
         const result = op.result;
-        if (op.collectionId !== collectionId || op.outcome !== 'committed' || !result?.snapshot_id)
+        if (
+            op.collectionId !== collectionId ||
+            op.outcome !== 'committed' ||
+            !result?.snapshot_id ||
+            result.snapshot_created === false
+        )
             continue;
-        const added = decimal(result.rows_appended);
+        let added = decimal(result.rows_appended);
+        if (result.receipt_version === 3) {
+            const written = decimal(result.rows_written),
+                removed = decimal(result.rows_removed);
+            added = written === null || removed === null ? null : written - removed;
+        }
         if (added === null) continue;
         if (Object.hasOwn(result, 'parent_snapshot_id') && result.parent_snapshot_id === null)
             counts.set(result.snapshot_id, added);
@@ -713,6 +731,7 @@ export function verifyCreatedCollection(created, body, { authoritative = true } 
     if (
         created?.collection_id !== body.collection_id ||
         created.name !== body.name ||
+        (created.mode ?? 'append') !== (body.mode ?? 'append') ||
         !Array.isArray(created.schema?.fields) ||
         schemaSignature(created.schema) !== schemaSignature(body.schema)
     )
@@ -762,6 +781,7 @@ export const creationFingerprint = (body) =>
     JSON.stringify({
         name: body.name,
         schema: body.schema,
+        ...(body.mode === undefined || body.mode === 'append' ? {} : { mode: body.mode }),
         ...(body.write_settings === undefined ? {} : { write_settings: body.write_settings }),
     });
 
@@ -854,7 +874,7 @@ function validatePending(value) {
     requirePending(value.format === 'glamdb-pending-request' && value.version === 1);
     const scope = pendingScope(value.scope),
         request = value.request;
-    pendingObject(request, ['kind', 'collection_id', 'operation_id', 'schema', 'body']);
+    pendingObject(request, ['kind', 'collection_id', 'operation_id', 'schema', 'body', 'action']);
     requirePending(typeof request.collection_id === 'string' && UUID.test(request.collection_id));
     requirePending(['append', 'create'].includes(request.kind));
     const body = request.body;
@@ -862,19 +882,30 @@ function validatePending(value) {
         requirePending(
             !Object.hasOwn(request, 'operation_id') && !Object.hasOwn(request, 'schema'),
         );
-        pendingObject(body, ['collection_id', 'name', 'schema', 'write_settings']);
+        pendingObject(body, ['collection_id', 'name', 'schema', 'write_settings', 'mode']);
         requirePending(
             body.collection_id === request.collection_id &&
                 typeof body.name === 'string' &&
                 /^[a-z][a-z0-9_]{0,62}$/.test(body.name),
         );
         pendingSchema(body.schema);
+        requirePending(['append', 'kv'].includes(body.mode ?? 'append'));
         if (Object.hasOwn(body, 'write_settings')) pendingWriteSettings(body);
     } else {
         requirePending(typeof request.operation_id === 'string' && UUID.test(request.operation_id));
         pendingSchema(request.schema);
-        pendingObject(body, ['rows', 'expected_snapshot']);
-        wireRows(request.schema, body.rows);
+        const action = request.action ?? 'append';
+        requirePending(['append', 'upsert', 'delete', 'compact'].includes(action));
+        if (action === 'delete') {
+            pendingObject(body, ['keys', 'expected_snapshot']);
+            mutationKeys(body.keys, 10000);
+        } else if (action === 'compact') {
+            pendingObject(body, ['max_files', 'target_file_bytes', 'expected_snapshot']);
+            compactionOptions(body);
+        } else {
+            pendingObject(body, ['rows', 'expected_snapshot']);
+            wireRows(request.schema, body.rows);
+        }
         if (Object.hasOwn(body, 'expected_snapshot') && body.expected_snapshot !== null) {
             const snapshot = body.expected_snapshot;
             requirePending(typeof snapshot === 'string' && INTEGER.test(snapshot));
@@ -891,6 +922,7 @@ export function exportPending(scope, kind, draft) {
             ? { kind, collection_id: draft.body.collection_id, body: structuredClone(draft.body) }
             : {
                   kind,
+                  ...(draft.action ? { action: draft.action } : {}),
                   collection_id: draft.collectionId,
                   operation_id: draft.operationId,
                   schema: structuredClone(draft.schema),
@@ -924,6 +956,7 @@ export function importPending(value, currentScope) {
         kind: 'append',
         draft: {
             operationId: request.operation_id,
+            action: request.action ?? 'append',
             collectionId: request.collection_id,
             schema: structuredClone(request.schema),
             body,
@@ -955,4 +988,66 @@ export async function readPendingFile(file, currentScope) {
     const text = await file.text();
     checkPendingFileSize(new TextEncoder().encode(text).byteLength);
     return importPending(JSON.parse(text), currentScope);
+}
+
+export function mutationKeys(value, maximum = 10000) {
+    if (
+        !Array.isArray(value) ||
+        value.length > maximum ||
+        value.some(
+            (key) =>
+                typeof key !== 'string' ||
+                new TextEncoder().encode(key).length > 1024 ||
+                /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(key),
+        )
+    )
+        throw new Error(`Use an array of at most ${maximum} UTF-8 keys, each within 1024 bytes`);
+    return [...value];
+}
+
+export function compactionOptions(value) {
+    if (
+        !value ||
+        typeof value !== 'object' ||
+        Array.isArray(value) ||
+        Object.keys(value).some(
+            (name) => !['max_files', 'target_file_bytes', 'expected_snapshot'].includes(name),
+        )
+    )
+        throw new Error(
+            'Use a compaction options object with max_files, target_file_bytes and optional expected_snapshot',
+        );
+    if (Object.hasOwn(value, 'expected_snapshot') && value.expected_snapshot !== null) {
+        const snapshot = value.expected_snapshot;
+        if (
+            typeof snapshot !== 'string' ||
+            !/^(0|-[1-9][0-9]*|[1-9][0-9]*)$/.test(snapshot) ||
+            BigInt(snapshot) < -(1n << 63n) ||
+            BigInt(snapshot) >= 1n << 63n
+        )
+            throw new Error('expected_snapshot must be null or a canonical decimal int64 string');
+    }
+    const files = value.max_files ?? '64',
+        target = value.target_file_bytes ?? '8388608';
+    const valid = (number) =>
+        (typeof number === 'string' && /^[1-9][0-9]*$/.test(number)) ||
+        Number.isSafeInteger(number);
+    if (
+        !valid(files) ||
+        BigInt(files) < 1n ||
+        BigInt(files) > 256n ||
+        !valid(target) ||
+        BigInt(target) < 1024n ||
+        BigInt(target) > 16777216n
+    )
+        throw new Error(
+            'Compaction requires max_files 1..256 and target_file_bytes 1024..16777216',
+        );
+    return {
+        max_files: String(files),
+        target_file_bytes: String(target),
+        ...(Object.hasOwn(value, 'expected_snapshot')
+            ? { expected_snapshot: value.expected_snapshot }
+            : {}),
+    };
 }

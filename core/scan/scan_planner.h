@@ -50,9 +50,11 @@ struct TScanManifests
     std::vector<std::shared_ptr<iceberg::PartitionSpec>> Specs;
     std::vector<iceberg::ManifestFile> Manifests;
     // An indexed plan selects a prefix without copying its descriptors. Files
-    // are consumed in reverse order to match Iceberg fast-append manifests.
+    // are consumed newest-first by default; migration can consume oldest-first.
     std::shared_ptr<const NGlamDB::NStorage::TScanMembership> Index{};
     size_t FileCount = 0;
+    // Selected sequence orders append provenance and selects half-open KV lifetimes.
+    std::optional<int64_t> SequenceNumber{};
 };
 
 // Resolves the selector once against the committed root of `base` and reads

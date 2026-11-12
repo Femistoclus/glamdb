@@ -1,5 +1,6 @@
 #include "core/catalog/sqlite.h"
 
+#include <atomic>
 #include <charconv>
 #include <limits>
 
@@ -82,8 +83,40 @@ sqlite3_stmt* Database::Prepare(std::string_view sql, std::initializer_list<SqlV
     return statement;
 }
 
+namespace {
+
+std::atomic<uint64_t> RowsReturned{0};
+std::atomic<uint64_t> RowsChanged{0};
+std::atomic<uint64_t> FullscanSteps{0};
+std::atomic<uint64_t> VmSteps{0};
+std::atomic<uint64_t> Statements{0};
+
+void CountStatement(sqlite3* connection, sqlite3_stmt* statement, size_t rows, int64_t changesBefore)
+{
+    RowsReturned.fetch_add(rows, std::memory_order_relaxed);
+    const auto changes = sqlite3_total_changes64(connection) - changesBefore;
+    RowsChanged.fetch_add(changes > 0 ? static_cast<uint64_t>(changes) : 0, std::memory_order_relaxed);
+    FullscanSteps.fetch_add(static_cast<uint64_t>(sqlite3_stmt_status(statement, SQLITE_STMTSTATUS_FULLSCAN_STEP, 0)),
+        std::memory_order_relaxed);
+    VmSteps.fetch_add(static_cast<uint64_t>(sqlite3_stmt_status(statement, SQLITE_STMTSTATUS_VM_STEP, 0)),
+        std::memory_order_relaxed);
+    Statements.fetch_add(1, std::memory_order_relaxed);
+}
+
+} // namespace
+
+CatalogWork ReadCatalogWork() noexcept
+{
+    return {RowsReturned.load(std::memory_order_relaxed),
+        RowsChanged.load(std::memory_order_relaxed),
+        FullscanSteps.load(std::memory_order_relaxed),
+        VmSteps.load(std::memory_order_relaxed),
+        Statements.load(std::memory_order_relaxed)};
+}
+
 std::vector<SqlRow> Database::Query(std::string_view sql, std::initializer_list<SqlValue> values)
 {
+    const auto changesBefore = connection_ != nullptr ? sqlite3_total_changes64(connection_) : 0;
     auto* statement = Prepare(sql, values);
     std::vector<SqlRow> rows;
     size_t total = 0;
@@ -107,6 +140,7 @@ std::vector<SqlRow> Database::Query(std::string_view sql, std::initializer_list<
         }
         rows.push_back(std::move(row));
     }
+    CountStatement(connection_, statement, rows.size(), changesBefore);
     const auto finalized = sqlite3_finalize(statement);
     if (result != SQLITE_DONE) {
         Throw(result);

@@ -7,6 +7,7 @@
 namespace glamdb::NTransport {
 // Native metadata encoders shared by HTTP and offline administration.
 TJson OptionalInteger(std::optional<int64_t> value);
+TJson Snapshot(SnapshotSelector selector);
 TJson Value(const Metric& metric);
 std::string MetricKindName(const Metric& metric);
 TJson Footprint(const StorageFootprint& footprint);

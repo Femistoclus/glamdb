@@ -38,6 +38,29 @@ test('public demo has isolated state and honest capabilities', async () => {
     assert.equal(caps.browser_demo, true);
     assert.equal(caps.durable, false);
     assert.equal(caps.arrow_ipc, false);
+    assert.deepEqual(caps.collection_modes, ['append']);
+    for (const feature of [
+        'key_value',
+        'upsert',
+        'delete',
+        'lookup',
+        'compact',
+        'bulk_upsert',
+        'migration',
+    ])
+        assert.equal(caps.features[feature], false);
+    await assert.rejects(
+        api.json('/collections', {
+            method: 'POST',
+            body: {
+                collection_id: crypto.randomUUID(),
+                name: 'unsupported_kv',
+                schema,
+                mode: 'kv',
+            },
+        }),
+        /Only append mode/,
+    );
 });
 test('duplicates, int64 beyond 2^53 and timestamp microseconds survive', async () => {
     const api = await fresh();

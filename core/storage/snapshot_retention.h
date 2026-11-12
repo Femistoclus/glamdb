@@ -77,6 +77,7 @@ inline constexpr char ExpiredSequenceKey[] = "glamdb.retention.expired-through-s
 
 iceberg::Status CheckRetentionPolicy(const TRetentionPolicy& policy);
 iceberg::Result<TRetentionPolicy> ReadRetentionPolicy(const iceberg::TableMetadata& metadata);
+// Clean KV roots report zero for shared history readers; KV retention properties are rejected.
 iceberg::Result<std::int64_t> ExpiredSequence(const iceberg::TableMetadata& metadata);
 iceberg::Status
 WriteRetentionPolicy(iceberg::TableMetadata& metadata, const TRetentionPolicy& policy, std::int64_t expiredSequence);

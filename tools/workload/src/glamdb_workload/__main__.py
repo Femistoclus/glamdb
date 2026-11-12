@@ -7,6 +7,7 @@ import math
 import os
 import platform
 import re
+import signal
 import sys
 from importlib.metadata import version
 from pathlib import Path
@@ -20,12 +21,69 @@ def positive(value):
     return result
 
 
+def nonnegative(value):
+    result = int(value)
+    if result < 0:
+        raise argparse.ArgumentTypeError("must be nonnegative")
+    return result
+
+
+def deadline(value):
+    result = float(value)
+    if not math.isfinite(result) or result <= 0:
+        raise argparse.ArgumentTypeError("timeout must be positive finite seconds")
+    return result
+
+
 def duration(value):
     if re.fullmatch(r"[1-9][0-9]*[smh]", value) is None:
         raise argparse.ArgumentTypeError(
             "use a positive whole duration, such as 60s, 5m or 1h"
         )
     return value
+
+
+def _tpch_arguments(benches):
+    tpch = benches.add_parser("tpch").add_subparsers(dest="tpch_command", required=True)
+    generate = tpch.add_parser("generate")
+    for name in ("scale-factor", "output", "dbgen"):
+        generate.add_argument("--" + name, required=True)
+    generate.add_argument("--type-profile", choices=["native", "legacy-scaled"], required=True)
+    generate.add_argument("--generator-parts", type=positive, default=1)
+    generate.add_argument("--part-rows", type=positive, default=10000)
+    generate.add_argument("--part-bytes", type=positive, default=8 * 1024**2)
+    generate.add_argument("--distributions")
+    generate.add_argument("--dbgen-sha256")
+    for name in ("init", "load", "resolve", "verify", "scan", "status", "clean"):
+        command = tpch.add_parser(name)
+        command.add_argument("--state", required=True)
+        command.add_argument("--ca-file")
+        command.add_argument("--timeout", type=deadline, default=300.0 if name in {"verify", "scan"} else 30.0)
+        if name == "init":
+            for option in ("url", "dataset", "name"):
+                command.add_argument("--" + option, required=True)
+            command.add_argument("--limits")
+            command.add_argument("--table-prefix", default="")
+        elif name == "load":
+            command.add_argument("--batch-rows", type=positive, default=10000)
+            command.add_argument("--batch-bytes", type=positive, default=8 * 1024**2)
+            command.add_argument("--workers", type=positive, default=1)
+            command.add_argument("--resume", action="store_true")
+        elif name == "resolve":
+            command.add_argument("--retry", action="store_true")
+        elif name == "verify":
+            command.add_argument("--format", choices=["json", "arrow"], default="arrow")
+            command.add_argument("--level", choices=["full", "rows"], default="full")
+        elif name == "scan":
+            command.add_argument("--queries", default="all")
+            command.add_argument("--mode", dest="scan_mode", choices=["scan", "reduce"], default="scan")
+            command.add_argument("--format", choices=["json", "arrow"], default="arrow")
+            command.add_argument("--consume", choices=["rows", "batches"], default="batches")
+            command.add_argument("--users", type=positive, default=1)
+            command.add_argument("--processes", type=positive, default=1)
+            command.add_argument("--warmup", type=nonnegative, default=1)
+            command.add_argument("--repeat", type=positive, default=5)
+            command.add_argument("--report", required=True)
 
 
 def parser():
@@ -43,11 +101,7 @@ def parser():
     from .clickbench.commands import add_parser as add_clickbench
 
     add_clickbench(benches)
-    tpch = benches.add_parser("tpch").add_subparsers(dest="tpch_command", required=True)
-    clean = tpch.add_parser("clean")
-    clean.add_argument("--state", required=True)
-    clean.add_argument("--ca-file")
-    clean.add_argument("--timeout", type=float, default=30.0)
+    _tpch_arguments(benches)
     for mode in ("write", "read", "verify", "resolve"):
         command = benches.add_parser(mode)
         command.add_argument("--url", required=True)
@@ -96,17 +150,85 @@ def _extra(name, package):
         )
 
 
+def _limits(path):
+    def object_value(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("limits contain duplicate JSON keys")
+            value[key] = item
+        return value
+
+    def invalid_number(value):
+        raise ValueError("limits must contain finite JSON values")
+
+    value = json.loads(Path(path).read_bytes(), object_pairs_hook=object_value,
+                       parse_constant=invalid_number)
+    if not isinstance(value, dict):
+        raise ValueError("limits must be a JSON object")
+    return value
+
+
+def _tpch(args):
+    name = args.tpch_command
+    if name == "generate":
+        from .tpch_dataset import generate
+
+        result = generate(
+            scale_factor=args.scale_factor, output=args.output, dbgen=args.dbgen,
+            type_profile=args.type_profile, generator_parts=args.generator_parts,
+            part_rows=args.part_rows, part_bytes=args.part_bytes,
+            distributions=args.distributions, dbgen_sha256=args.dbgen_sha256,
+        )
+    elif name == "clean":
+        from .tpch import clean
+
+        result = clean(args.state, timeout=args.timeout, ca_file=args.ca_file)
+    elif name == "scan":
+        from .tpch_scan import run
+
+        result = run(
+            args.state, queries=args.queries, mode=args.scan_mode, format=args.format,
+            consume=args.consume, users=args.users, processes=args.processes,
+            warmup=args.warmup, repeat=args.repeat, report=args.report,
+            timeout=args.timeout, ca_file=args.ca_file,
+        )
+    else:
+        from . import tpch_lifecycle
+
+        connection = {"timeout": args.timeout, "ca_file": args.ca_file}
+        if name == "init":
+            result = tpch_lifecycle.initialize(
+                url=args.url, dataset=args.dataset, name=args.name, state=args.state,
+                limits=_limits(args.limits) if args.limits else None,
+                table_prefix=args.table_prefix, **connection,
+            )
+        elif name == "load":
+            result = tpch_lifecycle.load(
+                args.state, batch_rows=args.batch_rows, batch_bytes=args.batch_bytes,
+                workers=args.workers, resume=args.resume, **connection,
+            )
+        elif name == "resolve":
+            result = tpch_lifecycle.resolve(args.state, retry=args.retry, **connection)
+        elif name == "verify":
+            result = tpch_lifecycle.verify(args.state, format=args.format, level=args.level, **connection)
+        else:
+            result = tpch_lifecycle.status(args.state, **connection)
+    print(json.dumps(result, ensure_ascii=False))
+    if name in {"generate", "clean"}:
+        return 0
+    from .runtime import status_code
+
+    return status_code(result["status"])
+
+
 def _bench(args):
     if args.mode == "clickbench":
         from .clickbench.commands import run
 
         return run(args)
     if args.mode == "tpch":
-        from .tpch import clean
-
-        result = clean(args.state, timeout=args.timeout, ca_file=args.ca_file)
-        print(json.dumps(result, ensure_ascii=False))
-        return 0
+        return _tpch(args)
     from glamdb_sdk import Schema
     from glamdb_sdk.request import uuid_string
     from .dataset import Dataset, write_json
@@ -262,7 +384,21 @@ def _bench(args):
     )
 
 
+def _terminated(signum, frame):
+    # The native bridge forwards termination to this interpreter. Unwind owned
+    # subprocess contexts so generators and Locust workers are also stopped.
+    raise SystemExit(128 + signum)
+
+
 def main(argv=None):
+    previous = signal.signal(signal.SIGTERM, _terminated)
+    try:
+        return _main(argv)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _main(argv=None):
     args = parser().parse_args(argv)
     try:
         if args.command == "generate":

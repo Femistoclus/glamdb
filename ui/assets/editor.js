@@ -1,10 +1,11 @@
 import { escapeHTML as e, formRows } from './model.js';
 
-export function writeEditor(schema, draft, operation, collectionId, labels = {}) {
+export function writeEditor(schema, draft, operation, collectionId, labels = {}, mode = 'append') {
     const frozen = Boolean(operation);
+    const action = mode === 'kv' ? 'Upsert' : 'Append';
     const rows = operation?.body.rows ?? draft ?? [{}];
     const fields = schema.fields;
-    return `<section class="panel write-panel" aria-labelledby="write-title"><div class="panel-header"><div><h2 id="write-title" data-label="write_title">${e(labels.write_title ?? 'Write rows')}</h2><p data-label="write_copy">${e(labels.write_copy ?? 'Fill the fields. JSON is created for you.')}</p></div><button class="text-button" data-action="append" data-label="advanced_batch">${e(labels.advanced_batch ?? 'Batch editor')}</button></div><div class="panel-body"><form id="write-form" data-collection-id="${e(collectionId)}" ${operation ? `data-operation-id="${e(operation.operationId)}"` : ''}>
+    return `<section class="panel write-panel" aria-labelledby="write-title"><div class="panel-header"><div><h2 id="write-title" data-label="write_title">${e(labels.write_title ?? 'Write rows')}</h2><p data-label="write_copy">${e(mode === 'kv' ? 'Replace full rows by key. Last input occurrence wins; omitted nullable values become NULL.' : (labels.write_copy ?? 'Fill the fields. JSON is created for you.'))}</p></div><button class="text-button" data-action="append" data-label="advanced_batch">${e(labels.advanced_batch ?? 'Batch editor')}</button></div><div class="panel-body"><form id="write-form" data-collection-id="${e(collectionId)}" ${operation ? `data-operation-id="${e(operation.operationId)}"` : ''}>
     <div class="write-rows">${rows
         .map(
             (row, index) =>
@@ -23,9 +24,9 @@ export function writeEditor(schema, draft, operation, collectionId, labels = {})
                     .join('')}</fieldset>`,
         )
         .join('')}</div>
-    <div class="write-actions"><button type="button" class="text-button" data-action="add-write-row" ${frozen || rows.length >= 100 ? 'disabled' : ''}>+ Add row</button><button class="button primary" type="submit" ${operation?.terminal ? 'disabled' : ''}>${operation?.terminal ? (operation.outcome === 'committed' ? 'Committed' : 'Not committed') : operation ? 'Retry same operation' : 'Append rows'}</button></div>
+    <div class="write-actions"><button type="button" class="text-button" data-action="add-write-row" ${frozen || rows.length >= 100 ? 'disabled' : ''}>+ Add row</button><button class="button primary" type="submit" ${operation?.terminal ? 'disabled' : ''}>${operation?.terminal ? (operation.outcome === 'committed' ? 'Committed' : 'Not committed') : operation ? 'Retry same operation' : `${action} rows`}</button></div>
     <details class="editor-json"><summary>Generated JSON</summary><pre id="write-json" class="json-block">${e(previewRows(schema, rows))}</pre></details>
-    <div id="write-outcome" role="status">${operation ? `<div class="op-outcome"><strong>${operation.outcome === 'committed' ? 'Append committed' : operation.outcome === 'definitely_not_committed' ? 'Definitely not committed' : 'Outcome unresolved · keep this operation ID'}</strong><code>${e(operation.operationId)}</code></div>` : ''}</div><p id="write-error" class="modal-error" role="alert"></p>
+    <div id="write-outcome" role="status">${operation ? `<div class="op-outcome"><strong>${operation.outcome === 'committed' ? `${action} committed` : operation.outcome === 'definitely_not_committed' ? 'Definitely not committed' : 'Outcome unresolved · keep this operation ID'}</strong><code>${e(operation.operationId)}</code></div>` : ''}</div><p id="write-error" class="modal-error" role="alert"></p>
     ${operation && !operation.terminal ? '<button type="button" class="button small" data-action="resolve-operation" data-id="' + e(operation.operationId) + '">Check outcome</button>' : ''}${operation?.terminal ? '<button type="button" class="button small" data-action="new-write">New rows</button>' : ''}
     </form></div></section>`;
 }

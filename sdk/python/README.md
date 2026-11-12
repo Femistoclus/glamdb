@@ -55,9 +55,11 @@ schema caches and open streams belong to that client's selection. Omitting the
 argument preserves legacy single-store/mock behavior. Database creation never
 accepts a local filesystem path; after a lost response repeat the same name/UUID.
 
-Append preserves duplicates, including duplicate `key` values. There is no
-upsert, delete, compaction, or asynchronous job API here. Inspect
-`client.capabilities()` before relying on a service feature.
+Append collections preserve duplicates, including duplicate `key` values.
+Create an immutable KV collection with `mode="kv"` to replace full rows by key.
+Inspect `client.capabilities()` before using a service feature. Native HTTP,
+SDK, and CLI support streaming bulk append for append collections. Bulk upsert
+and append-to-KV migration are available only in the native C++ facade.
 
 Use `examples/quickstart.py COLLECTION_UUID OPERATION_UUID` with
 `GLAMDB_URL` and `GLAMDB_TOKEN` set for a runnable version of this flow. The
@@ -600,3 +602,52 @@ each batch remains within ordinary row/canonical limits and 16 MiB wire. The
 [native bulk guide](../../docs/development/BULK_INGESTION.md#native-http-sdk-and-cli)
 specifies framing, memory/disk ownership, interrupted upload and retry semantics.
 The mock, UI import and organization gateway do not expose this upload route.
+
+## Explicit KV collections
+
+The native service advertises `collection_modes: ["append", "kv"]` and
+`features.key_value`, `upsert`, `delete`, `lookup`, and `compact`. The disposable
+mock and static demo advertise these features as false. Mode is part of the
+immutable create definition and lost-create confirmation:
+
+```python
+created = client.create_collection("users", schema, collection_id=collection_id, mode="kv")
+request = client.prepare_upsert(collection_id, [
+    {"key": "alice", "n": 1},
+    {"key": "alice", "n": 2},
+], operation_id=operation_id, schema=schema)
+outcome = client.upsert(request)
+# The last input occurrence wins; omitted nullable fields become NULL.
+found = client.lookup(collection_id, ["alice", "absent", "alice"])
+assert found.rows[1] is None
+```
+
+A KV schema requires a nonnullable string `key`, at any column position.
+`prepare_delete(..., keys, operation_id=..., schema=...)` retains key order and
+duplicates even though duplicate and absent keys change nothing. Submit with
+`delete(prepared)`. `prepare_compact(..., operation_id=..., max_files=64,
+target_file_bytes=8388608)` creates a bounded compaction request; submit with
+`compact(prepared)`. Convenience `upsert`, `delete`, and `compact` accept the
+same arguments directly. Every call sends one mutation POST, without automatic
+retry. Prepared `MutationRequest` values own immutable body bytes and their
+kind-specific canonical hash; reuse the original value after uncertain delivery.
+`expected_snapshot=ANY` is the default, `None` requires an initial empty view,
+and a decimal ID requires that snapshot. A matching retry returns the original
+terminal result before evaluating a changed current view.
+
+Lookup accepts at most 4,096 UTF-8 keys and returns a `LookupResult` with a
+resolved `snapshot_id`, typed schema, and one row or `None` per requested key.
+Repeated keys repeat their hits. `snapshot_id=ANY` selects latest once, `None`
+selects the permanent initial-empty view, and an exact ID selects retained
+history. Native lookup bounds the complete result to 16 MiB; request fewer keys
+when it refuses capacity. Upsert and delete accept at most 10,000 input rows or
+keys per ordinary request, under the existing 16 MiB body/decoded limits.
+
+KV receipts use `receipt_version=3` and `rows_appended="0"`. Read
+`mutation_kind`, `input_rows`, `rows_affected`, `rows_written`, `rows_removed`,
+`data_files_added`, `data_files_removed`, and compressed byte counters instead.
+A committed no-op has `snapshot_created=false`, zero changed counters and time,
+and an effective `snapshot_id` equal to its base (or `"0"` for initial empty).
+It creates no snapshot. `find_append_outcome` reads all three receipt versions,
+including KV outcomes, using the permanent collection-scoped operation ID.
+Failures and `commit_unknown` retain the same three-outcome/recovery contract.

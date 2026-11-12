@@ -46,6 +46,10 @@ class StagedAppend
 public:
     virtual ~StagedAppend() = default;
     virtual AppendResult Receipt() const = 0;
+    virtual bool IsNoOp() const
+    {
+        return false;
+    }
     // This call runs inside the coordinator's owned outer transaction. It must
     // use a fresh Iceberg table with retries=0 and metadata deletion disabled,
     // the same catalog instance, and the exact durable prepared binding.

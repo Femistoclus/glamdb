@@ -36,6 +36,8 @@ import {
     reconcileColumnDictionary,
     describeColumnEffect,
     wireWriteSettings,
+    mutationKeys,
+    compactionOptions,
 } from './model.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -78,6 +80,19 @@ const viewQuery = () =>
     state.snapshotId === null ? '' : `?snapshot_id=${encodeURIComponent(state.snapshotId)}`;
 const currentCollection = () =>
     state.collections.find((item) => item.collection_id === state.collectionId);
+const isKV = () => (state.collection?.mode ?? currentCollection()?.mode) === 'kv';
+const mutationAction = () => (isKV() ? 'upsert' : 'append');
+const receiptTitle = (action) =>
+    ({ append: 'Append', upsert: 'Upsert', delete: 'Delete', compact: 'Compaction' })[action] ??
+    'Write';
+const actionTitle = (action) =>
+    ({
+        append: 'Append rows',
+        upsert: 'Upsert rows',
+        delete: 'Delete keys',
+        compact: 'Compact files',
+    })[action] ?? 'Write';
+const kvEnabled = (action) => isKV() && state.capabilities?.features?.[action] === true;
 const number = (value) =>
     value === null || value === undefined
         ? '—'
@@ -265,7 +280,9 @@ function download(name, bytes, type) {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 function countSnapshotRows(snapshot) {
-    return snapshot.rows_added ?? snapshot.rows_appended ?? '—';
+    return snapshot.receipt?.receipt_version === 3 || snapshot.mutation_kind
+        ? `${snapshot.rows_written ?? snapshot.receipt?.rows_written ?? '0'} written / ${snapshot.rows_removed ?? snapshot.receipt?.rows_removed ?? '0'} removed`
+        : (snapshot.rows_added ?? snapshot.rows_appended ?? '—');
 }
 
 function syncQueryLimit() {
@@ -623,7 +640,7 @@ function chrome() {
     <div class="workspace"><header class="topbar"><div class="breadcrumb"><button class="icon-button menu-toggle" data-action="menu" aria-label="Toggle navigation">${icon('menu')}</button><span>Workspace</span>${icon('chevron')}<strong>${e(currentCollection()?.name ?? 'Your collections')}</strong></div>
     <div class="top-actions">${state.managed ? '<button class="text-button" data-action="databases">Databases</button>' : ''}${publicDemo ? '' : '<button class="text-button" data-action="pending-requests">Pending requests</button>'}<button class="text-button docs-button" data-action="about">Quick guide</button><button class="icon-button" data-action="refresh" aria-label="Refresh workspace">${icon('refresh')}</button>${accessGateway ? `<a class="text-button" href="${e(state.access.account_url)}">Account</a>` : ''}<button class="text-button" data-action="${accessGateway ? 'sign-out' : 'disconnect'}">${accessGateway ? 'Sign out' : publicDemo ? 'Reset demo' : 'Disconnect'}</button><span class="avatar" aria-label="Workspace avatar">${state.theme.brand.mark ? `<img data-brand-logo="mark" class="brand-mark" src="${e(brandAsset(state.theme, 'mark'))}" alt="">` : 'G'}</span></div></header>
     <main id="main-content" class="main">${state.capabilities?.mock ? `<div class="mock-banner">${icon('sparkle')}<span data-label="${publicDemo ? 'public_demo_notice' : 'mock_notice'}">${e(labels(publicDemo ? 'public_demo_notice' : 'mock_notice'))}</span></div>` : ''}<div id="view"></div>
-    <footer class="page-footer"><span>GlamDB · <span data-brand="tagline">${e(state.theme.brand.tagline)}</span></span><span>Append mode · duplicate keys preserved ${icon('sparkle', 'decor-sparkle')}</span></footer></main></div></div>`;
+    <footer class="page-footer"><span>GlamDB · <span data-brand="tagline">${e(state.theme.brand.tagline)}</span></span><span>${isKV() ? 'KV mode · one full row per key' : 'Append mode · duplicate keys preserved'} ${icon('sparkle', 'decor-sparkle')}</span></footer></main></div></div>`;
     renderView();
 }
 function availableSnapshots() {
@@ -705,7 +722,7 @@ function snapshotList(max = 100) {
                   .slice(0, max)
                   .map(
                       (s) =>
-                          `<div class="snapshot-item"><span class="snapshot-marker"></span><div><strong>Append snapshot</strong><p><code>${e(s.snapshot_id)}</code></p></div>${badge(`+${countSnapshotRows(s)} rows`)}</div>`,
+                          `<div class="snapshot-item"><span class="snapshot-marker"></span><div><strong>${e(s.mutation_kind ?? 'append')} snapshot</strong><p><code>${e(s.snapshot_id)}</code></p></div>${badge(`+${countSnapshotRows(s)} rows`)}</div>`,
                   )
                   .join('')
             : `<p class="muted small">${observed ? 'No committed appends observed in this session.' : 'No snapshot yet. Your initial view is empty.'}</p>`
@@ -804,13 +821,14 @@ function writePanel() {
             (op) =>
                 op.operationId === state.writeOperationId && op.collectionId === state.collectionId,
         );
-    return writeEditor(
-        state.schema,
-        state.writeDraft,
-        operation,
-        state.collectionId,
-        state.theme.labels,
-    );
+    const controls = isKV()
+        ? `<div class="button-row" style="margin:12px 0">${kvEnabled('lookup') ? '<button class="button small" data-action="lookup-keys">Lookup keys</button>' : ''}${kvEnabled('delete') ? '<button class="button small" data-action="delete-keys">Delete keys</button>' : ''}${kvEnabled('compact') ? '<button class="button small" data-action="compact-files">Compact files</button>' : ''}</div>`
+        : '';
+    if (operation && ['delete', 'compact'].includes(operation.action))
+        return `<section class="panel write-panel"><div class="panel-body"><h2>${e(actionTitle(operation.action))}</h2><p>A mutation is pending. Keep its original ID and payload.</p><code>${e(operation.operationId)}</code><div class="button-row"><button class="button" data-action="append">Review or retry same operation</button><button class="button" data-action="resolve-operation" data-id="${e(operation.operationId)}">Check outcome</button></div>${controls}</div></section>`;
+    if (isKV() && !kvEnabled('upsert'))
+        return '<section class="panel"><p class="notice">This connection does not advertise KV upsert.</p></section>';
+    return `<div>${controls}${writeEditor(state.schema, state.writeDraft, operation, state.collectionId, state.theme.labels, isKV() ? 'kv' : 'append')}</div>`;
 }
 function draftWrite() {
     const form = $('#write-form');
@@ -866,7 +884,7 @@ function schemaView() {
         )
         .join(
             '',
-        )}</tbody></table></div></section>${writeSettingsPanel()}<div class="notice" style="margin-top:20px">Append mode preserves duplicate keys. A field called key does not imply uniqueness. Schema evolution is not enabled.</div>`;
+        )}</tbody></table></div></section>${writeSettingsPanel()}<div class="notice" style="margin-top:20px">${isKV() ? 'KV mode keeps one full row per key. Upsert replaces the row; omitted nullable values become NULL. Mode is immutable.' : 'Append mode preserves duplicate keys. A field called key does not imply uniqueness.'} Schema evolution is not enabled.</div>`;
 }
 function writeSettingsPanel() {
     const parquet = parquetSettings();
@@ -897,7 +915,7 @@ function writeSettingsPanel() {
 function snapshotsView() {
     const observed = !supportsFeature(state.capabilities, 'snapshots');
     const snapshots = availableSnapshots();
-    return `${heading('Every version has a story.', observed ? 'Observed in this session. Complete history requires server metadata support.' : 'Read an immutable view. Keep your latest data untouched.')}<section class="panel"><div class="panel-header"><h2>${observed ? 'Observed in this session' : 'Snapshot history'}</h2>${badge(`${snapshots.length} ${observed ? 'observed' : 'retained'}`)}</div><div class="table-wrap"><table aria-label="Snapshot history"><thead><tr><th>Snapshot ID</th><th>Parent</th><th>Rows added</th><th></th></tr></thead><tbody>${snapshots
+    return `${heading('Every version has a story.', observed ? 'Observed in this session. Complete history requires server metadata support.' : 'Read an immutable view. Keep your latest data untouched.')}<section class="panel"><div class="panel-header"><h2>${observed ? 'Observed in this session' : 'Snapshot history'}</h2>${badge(`${snapshots.length} ${observed ? 'observed' : 'retained'}`)}</div><div class="table-wrap"><table aria-label="Snapshot history"><thead><tr><th>Snapshot ID</th><th>Parent</th><th>Rows written / removed</th><th></th></tr></thead><tbody>${snapshots
         .slice()
         .reverse()
         .map(
@@ -906,7 +924,7 @@ function snapshotsView() {
         )
         .join(
             '',
-        )}</tbody></table></div>${!snapshots.length ? `<p class="result-empty">${observed ? 'No committed appends observed in this session.' : 'No append has been published yet.'}</p>` : ''}</section>`;
+        )}</tbody></table></div>${!snapshots.length ? `<p class="result-empty">${observed ? 'No committed appends observed in this session.' : 'No snapshot has been published yet.'}</p>` : ''}</section>`;
 }
 function storageView() {
     if (!supportsFeature(state.capabilities, 'files'))
@@ -924,7 +942,7 @@ function storageView() {
             .join(
                 '',
             )}</tbody></table></div></section><div class="notice">File paths, total storage size and row-group details require server metadata support. Unknown values remain unknown.</div>`;
-    return `${heading('A place for every file.', 'File membership belongs to the selected snapshot.')}<div class="notice" style="margin-bottom:20px">${state.capabilities?.mock ? 'These are synthetic descriptors for the mock adapter. No physical Parquet files are written.' : 'Immutable files; metadata is available where supported.'}</div><section class="panel"><div class="panel-header"><h2>Data files</h2>${badge(`${state.files.length} files`)}</div><div class="table-wrap"><table aria-label="Data files"><thead><tr><th>File</th><th>Rows</th><th>Bytes</th><th></th></tr></thead><tbody>${state.files.map((f, i) => `<tr><td><strong>Data file ${i + 1}</strong><p class="muted small mono">${e(f.file_id)}</p></td><td>${number(f.record_count)}</td><td>${f.compressed_bytes === null ? 'Unknown' : number(f.compressed_bytes)}</td><td><button class="button small" data-action="file" data-id="${e(f.file_id)}">Inspect${icon('arrow')}</button></td></tr>`).join('')}</tbody></table></div>${!state.files.length ? '<p class="result-empty">No files in this view.</p>' : ''}</section><div class="notice" style="margin-top:20px">Compaction, expiration and garbage collection are unavailable in append v0. Optional index presence does not imply execution support.</div>`;
+    return `${heading('A place for every file.', 'File membership belongs to the selected snapshot.')}<div class="notice" style="margin-bottom:20px">${state.capabilities?.mock ? 'These are synthetic descriptors for the mock adapter. No physical Parquet files are written.' : 'Immutable files; metadata is available where supported.'}</div><section class="panel"><div class="panel-header"><h2>Data files</h2>${badge(`${state.files.length} files`)}</div><div class="table-wrap"><table aria-label="Data files"><thead><tr><th>File</th><th>Rows</th><th>Bytes</th><th></th></tr></thead><tbody>${state.files.map((f, i) => `<tr><td><strong>Data file ${i + 1}</strong><p class="muted small mono">${e(f.file_id)}</p></td><td>${number(f.record_count)}</td><td>${f.compressed_bytes === null ? 'Unknown' : number(f.compressed_bytes)}</td><td><button class="button small" data-action="file" data-id="${e(f.file_id)}">Inspect${icon('arrow')}</button></td></tr>`).join('')}</tbody></table></div>${!state.files.length ? '<p class="result-empty">No files in this view.</p>' : ''}</section><div class="notice" style="margin-top:20px">${isKV() ? 'KV compaction rewrites a bounded group while retaining historical files.' : 'Compaction is unavailable in append mode.'} Expiration and garbage collection are unavailable. Optional index presence does not imply execution support.</div>`;
 }
 function explainView() {
     if (!supportsFeature(state.capabilities, 'explain'))
@@ -953,17 +971,17 @@ function operationsView() {
         state.capabilities?.mock === false && supportsFeature(state.capabilities, 'snapshots')
             ? state.snapshots.filter((snapshot) => typeof snapshot.operation_id === 'string')
             : null;
-    return `${heading('Keep your operations close.', 'An unknown outcome is unresolved. A timeout is not a rollback.')}${state.managed ? '<p><button class="button" data-action="reconcile-workspace">Reconcile database</button></p>' : ''}<section class="panel"><div class="panel-header"><h2>This session's appends</h2>${badge('Synchronous API')}</div>${
+    return `${heading('Keep your operations close.', 'An unknown outcome is unresolved. A timeout is not a rollback.')}${state.managed ? '<p><button class="button" data-action="reconcile-workspace">Reconcile database</button></p>' : ''}<section class="panel"><div class="panel-header"><h2>This session's mutations</h2>${badge('Synchronous API')}</div>${
         ops.length
             ? ops
                   .slice()
                   .reverse()
                   .map(
                       (op) =>
-                          `<div class="operations-card">${icon('activity')}<div><strong>${e(op.outcome ?? 'Unresolved')}</strong><p class="mono">${e(op.operationId)}</p><p>Snapshot ${e(op.result?.snapshot_id ?? 'not yet confirmed')}</p></div><button class="button small" data-action="resolve-operation" data-id="${e(op.operationId)}">Check outcome</button></div>`,
+                          `<div class="operations-card">${icon('activity')}<div><strong>${e(op.outcome ?? 'Unresolved')}</strong>${isKV() ? `<p>${e(receiptTitle(op.action ?? op.result?.mutation_kind))}</p>` : ''}<p class="mono">${e(op.operationId)}</p><p>${op.result?.snapshot_created === false ? 'No new snapshot · effective view' : 'Snapshot'} ${e(op.result?.snapshot_id === '0' && op.result?.snapshot_created === false ? 'initial empty' : (op.result?.snapshot_id ?? 'not yet confirmed'))}</p></div><button class="button small" data-action="resolve-operation" data-id="${e(op.operationId)}">Check outcome</button></div>`,
                   )
                   .join('')
-            : '<p class="result-empty">No appends submitted in this browser session. Server outcomes are queried by operation ID.</p>'
+            : `<p class="result-empty">${isKV() ? 'No mutations' : 'No appends'} submitted in this browser session. Server outcomes are queried by operation ID.</p>`
     }</section>${
         published
             ? `<section class="panel"><div class="panel-header"><h2>Published snapshot operations</h2>${badge('Server history')}</div><p class="panel-body small muted">Original operation IDs from retained server snapshots. Look up the authoritative outcome without submitting a write.</p><div class="table-wrap"><table aria-label="Published snapshot operations"><thead><tr><th>Operation ID</th><th>Snapshot</th><th></th></tr></thead><tbody>${published
@@ -975,7 +993,7 @@ function operationsView() {
                   )
                   .join(
                       '',
-                  )}</tbody></table></div>${published.length ? '' : '<p class="result-empty">No append has been published yet.</p>'}</section>`
+                  )}</tbody></table></div>${published.length ? '' : '<p class="result-empty">No snapshot has been published yet.</p>'}</section>`
             : ''
     }<section class="panel"><div class="panel-body"><form id="operation-lookup-form" class="button-row"><label class="field">Operation ID<input name="operation" required autocomplete="off" placeholder="Original operation UUID"></label><button class="button" type="submit" ${state.collectionId ? '' : 'disabled'}>Look up operation</button></form><p class="small muted">Look up an original ID in this collection. This does not submit or retry a write.</p></div></section>`;
 }
@@ -1316,11 +1334,13 @@ function openCreate() {
           ];
     showModal(
         'A new collection, just for you.',
-        `<form id="create-form"><label class="field">Collection name<input name="name" placeholder="my_collection" pattern="[a-z][a-z0-9_]{0,62}" required autofocus><small>Lowercase letters, numbers and underscores. Schema stays fixed.</small></label>${creationParquetControls(parquetSettings(), frozenSettings)}<div style="margin-top:20px"><label>Columns</label><div id="schema-editor"></div><button type="button" class="text-button" data-action="add-field">+ Add column</button></div><div id="create-outcome" role="status"></div><p class="modal-error" id="modal-error" role="alert"></p><div class="modal-actions"><button type="button" class="button" data-action="close-modal">Cancel</button>${state.creation ? '<button type="button" class="button" data-action="export-pending" data-kind="create">Export pending request</button>' : ''}<button class="button primary" type="submit">Create collection${icon('arrow')}</button></div></form>`,
+        `<form id="create-form"><label class="field">Collection name<input name="name" placeholder="my_collection" pattern="[a-z][a-z0-9_]{0,62}" required autofocus><small>Lowercase letters, numbers and underscores. Schema stays fixed.</small></label>${state.capabilities?.features?.key_value === true ? '<label class="field">Collection mode<select name="mode" aria-label="Collection mode"><option value="append">Append · preserve duplicate keys</option><option value="kv">KV · replace full rows by key</option></select><small>Mode is immutable. KV requires a nonnullable string key field.</small></label>' : ''}${creationParquetControls(parquetSettings(), frozenSettings)}<div style="margin-top:20px"><label>Columns</label><div id="schema-editor"></div><button type="button" class="text-button" data-action="add-field">+ Add column</button></div><div id="create-outcome" role="status"></div><p class="modal-error" id="modal-error" role="alert"></p><div class="modal-actions"><button type="button" class="button" data-action="close-modal">Cancel</button>${state.creation ? '<button type="button" class="button" data-action="export-pending" data-kind="create">Export pending request</button>' : ''}<button class="button primary" type="submit">Create collection${icon('arrow')}</button></div></form>`,
     );
     renderCreationFields();
     if (state.creation) {
         $('#create-form').elements.name.value = state.creation.body.name;
+        if ($('#create-form').elements.mode)
+            $('#create-form').elements.mode.value = state.creation.body.mode ?? 'append';
         freezeCreationForm($('#create-form'));
         $('#modal-error').textContent =
             'Creation is unresolved. Retry keeps the original UUID and exact schema.';
@@ -1364,11 +1384,20 @@ async function createForm(form) {
                 })),
                 state.capabilities,
             );
+            const mode = form.elements.mode?.value ?? 'append';
+            if (
+                mode === 'kv' &&
+                !schema.fields.some(
+                    (field) => field.name === 'key' && field.type === 'string' && !field.nullable,
+                )
+            )
+                throw new Error('KV mode requires a nonnullable string key field');
             const writeSettings = creationWriteSettings(form, rows, schema);
             const body = {
                 collection_id: crypto.randomUUID(),
                 name: form.elements.name.value,
                 schema,
+                ...(mode === 'kv' ? { mode } : {}),
                 ...(writeSettings ? { write_settings: wireWriteSettings(writeSettings) } : {}),
             };
             draft = { fingerprint: creationFingerprint(body), body, scope: recoveryScope() };
@@ -1613,7 +1642,7 @@ function openRecovery(disconnecting = false) {
         `
         <p>Export unresolved requests before reload or disconnect. After reconnecting to the same database, import the file, then check its outcome or retry the original request.</p>
         <p class="small muted">Recovery files contain the original schema and row data, without the access token. Export and import allow up to 32 MiB per file. Importing does not submit a write.</p>
-        ${entries.length ? entries.map(({ kind, draft }) => `<div class="operations-card"><div><strong>${kind === 'create' ? 'Create collection' : 'Append rows'}</strong><p class="mono">${e(kind === 'create' ? draft.body.collection_id : draft.operationId)}</p></div><button class="button small" data-action="export-pending" data-kind="${kind}" data-id="${e(kind === 'create' ? draft.body.collection_id : draft.operationId)}">Export pending request</button></div>`).join('') : '<p class="result-empty">No unresolved requests in this database.</p>'}
+        ${entries.length ? entries.map(({ kind, draft }) => `<div class="operations-card"><div><strong>${kind === 'create' ? 'Create collection' : actionTitle(draft.action ?? 'append')}</strong><p class="mono">${e(kind === 'create' ? draft.body.collection_id : draft.operationId)}</p></div><button class="button small" data-action="export-pending" data-kind="${kind}" data-id="${e(kind === 'create' ? draft.body.collection_id : draft.operationId)}">Export pending request</button></div>`).join('') : '<p class="result-empty">No unresolved requests in this database.</p>'}
         <form id="recovery-form"><label class="field">Recovery JSON file<input type="file" name="recovery" accept="application/json,.json" required></label><p id="modal-error" class="modal-error" role="alert"></p><div class="modal-actions"><button class="button" type="submit">Import pending request</button>${disconnecting ? '<button class="button" type="button" data-action="disconnect-clear">Disconnect and clear</button>' : ''}</div></form>`,
     );
 }
@@ -1629,9 +1658,12 @@ async function importRecovery(form) {
         draft.scope = scope;
         if (kind === 'append') {
             const schema = await api.json(
-                `/collections/${encodeURIComponent(draft.collectionId)}/schema`,
+                `/collections/${encodeURIComponent(draft.collectionId)}`,
                 { signal: connectionController?.signal },
             );
+            const expectedMode = (draft.action ?? 'append') === 'append' ? 'append' : 'kv';
+            if ((schema.mode ?? 'append') !== expectedMode)
+                throw new Error('Collection mode differs from the original pending request');
             if (schemaSignature(schema.schema ?? schema) !== schemaSignature(draft.schema))
                 throw new Error('Collection schema differs from the original pending request');
             if (api !== state.api || epoch !== state.epoch) return;
@@ -1644,7 +1676,8 @@ async function importRecovery(form) {
             if (
                 (existing &&
                     (existing.fingerprint !== draft.fingerprint ||
-                        existing.collectionId !== draft.collectionId)) ||
+                        existing.collectionId !== draft.collectionId ||
+                        (existing.action ?? 'append') !== (draft.action ?? 'append'))) ||
                 (pending && pending.operationId !== draft.operationId)
             )
                 throw new Error(
@@ -1714,23 +1747,76 @@ function pendingForCollection(id) {
         (state.mutation?.collectionId === id && !state.mutation.terminal ? state.mutation : null)
     );
 }
-function openAppend() {
-    if (!state.collectionId) {
-        openCreate();
-        return;
-    }
+function openAppend(requestedAction = null) {
+    if (!state.collectionId) return;
     const frozen = pendingForCollection(state.collectionId);
+    const action = frozen?.action ?? requestedAction ?? mutationAction();
+    if (action !== 'append' && !kvEnabled(action))
+        throw new Error('This connection does not advertise this KV operation');
+    const initial =
+        action === 'delete'
+            ? ['key_to_delete']
+            : action === 'compact'
+              ? { max_files: '64', target_file_bytes: '8388608' }
+              : [sampleRow()];
+    const content = frozen
+        ? action === 'delete'
+            ? frozen.body.keys
+            : action === 'compact'
+              ? frozen.body
+              : frozen.body.rows
+        : initial;
+    const copy =
+        action === 'upsert'
+            ? 'Upsert replaces full rows. Last input occurrence wins; omitted nullable fields become NULL.'
+            : action === 'delete'
+              ? 'Delete ignores duplicate and missing keys. Historical snapshots keep their original rows.'
+              : action === 'compact'
+                ? 'Compact a bounded contiguous file group. A group without a useful reduction commits a durable no-op.'
+                : 'Append preserves every row, including duplicate keys. Int64 values should be quoted decimal strings.';
     showModal(
-        'JSON batch editor',
-        `<p class="muted small">Append preserves every row, including duplicate keys. Int64 values should be quoted decimal strings.</p><form id="append-form"><label class="field">Rows · JSON array<textarea name="rows" rows="9" spellcheck="false" ${frozen ? 'readonly' : ''}>${e(JSON.stringify(frozen ? frozen.body.rows : [sampleRow()], null, 2))}</textarea></label><p class="small muted" style="margin-top:10px">${frozen ? 'This unresolved request is frozen. Retry keeps its original operation ID.' : 'Up to 10,000 rows per batch. Input is validated against this fixed schema.'}</p><div id="append-outcome" style="margin-top:12px"></div><p class="modal-error" id="modal-error" role="alert"></p><div class="modal-actions"><button type="button" class="button" data-action="close-modal">Close</button>${frozen ? '<button type="button" class="button" data-action="resolve-pending">Check outcome</button>' : ''}<button class="button primary" type="submit">${frozen ? 'Retry same operation' : 'Append rows'}${icon('arrow')}</button></div></form>`,
+        actionTitle(action),
+        `<p class="muted small">${e(copy)}</p><form id="append-form"><label class="field">${action === 'delete' ? 'Keys · JSON array' : action === 'compact' ? 'Compaction options · JSON object' : 'Rows · JSON array'}<textarea name="rows" aria-label="${action === 'delete' ? 'Keys · JSON array' : action === 'compact' ? 'Compaction options · JSON object' : 'Rows · JSON array'}" rows="9" spellcheck="false" ${frozen ? 'readonly' : ''}>${e(JSON.stringify(content, null, 2))}</textarea></label><p class="small muted">${frozen ? 'This unresolved request is frozen. Retry keeps its original operation ID.' : 'The operation is synchronous and bounded.'}</p><div id="append-outcome" role="status"></div><p class="modal-error" id="modal-error" role="alert"></p><div class="modal-actions"><button type="button" class="button" data-action="close-modal">Close</button>${frozen ? '<button type="button" class="button" data-action="resolve-pending">Check outcome</button>' : ''}<button class="button primary" type="submit">${frozen ? 'Retry same operation' : actionTitle(action)}</button></div></form>`,
     );
     $('#append-form').dataset.collectionId = state.collectionId;
+    $('#append-form').dataset.actionKind = action;
     if (frozen) {
         $('#append-form').dataset.operationId = frozen.operationId;
-        $('#append-outcome').innerHTML =
-            `<div class="op-outcome">Unresolved operation<code>${e(frozen.operationId)}</code></div>`;
+        showAppendOutcome(frozen, frozen);
     }
 }
+
+function openLookup() {
+    if (!kvEnabled('lookup')) return;
+    showModal(
+        'Lookup keys',
+        '<form id="lookup-form"><label class="field">Keys · JSON array<textarea name="keys" aria-label="Keys · JSON array" rows="5">["key_to_find", "missing_key"]</textarea></label><p>Results follow input order, including repeated keys and explicit misses.</p><p class="modal-error" id="modal-error" role="alert"></p><button class="button primary" type="submit">Lookup keys</button><pre id="lookup-result" class="json-block"></pre></form>',
+    );
+}
+
+async function lookupKeys(form) {
+    const api = state.api,
+        epoch = state.epoch;
+    try {
+        const keys = mutationKeys(JSON.parse(form.elements.keys.value), 4096);
+        const snapshot_id = state.snapshotId === 'initial' ? null : state.snapshotId;
+        const body = { keys, ...(state.snapshotId === null ? {} : { snapshot_id }) };
+        const result = await api.json(`${collectionPath()}/lookup`, { method: 'POST', body });
+        if (state.api !== api || state.epoch !== epoch || !form.isConnected) return;
+        if (
+            result.collection_id !== state.collectionId ||
+            !Array.isArray(result.rows) ||
+            result.rows.length !== keys.length ||
+            result.rows.some((row, index) => row !== null && row.key !== keys[index])
+        )
+            throw new Error('Invalid lookup response');
+        form.querySelector('#lookup-result').textContent = JSON.stringify(result, null, 2);
+    } catch (error) {
+        if (state.api === api && form.isConnected)
+            form.querySelector('#modal-error').textContent = error.message;
+    }
+}
+
 function saveOutcome(operation, outcome) {
     if (operation.terminal) {
         return { outcome: operation.outcome, result: operation.result, error: operation.error };
@@ -1759,11 +1845,11 @@ function showAppendOutcome(operation, payload) {
         const node = form.querySelector('#append-outcome, #write-outcome');
         const title =
             payload.outcome === 'committed'
-                ? 'Append committed'
+                ? `${receiptTitle(operation.action ?? 'append')} committed`
                 : payload.outcome === 'definitely_not_committed'
                   ? 'Definitely not committed'
                   : 'Outcome unresolved · keep this operation ID';
-        node.innerHTML = `<div class="op-outcome"><strong>${e(title)}</strong><code>${e(operation.operationId)}</code>${payload.result ? `<p>Snapshot ${e(payload.result.snapshot_id)}</p>` : ''}<p class="small muted">${e(payload.error?.message ?? (payload.recovery_required ? 'Recovery is required before a new mutation.' : ''))}</p></div>`;
+        node.innerHTML = `<div class="op-outcome"><strong>${e(title)}</strong><code>${e(operation.operationId)}</code>${payload.result ? `<p>${payload.result.snapshot_created === false ? 'No new snapshot · effective view' : 'Snapshot'} ${e(payload.result.snapshot_id === '0' && payload.result.snapshot_created === false ? 'initial empty' : payload.result.snapshot_id)}</p>` : ''}<p class="small muted">${e(payload.error?.message ?? (payload.recovery_required ? 'Recovery is required before a new mutation.' : ''))}</p></div>`;
         if (!operation.terminal) ensurePendingExport(form, 'append', operation.operationId);
         else form.querySelector('[data-action="export-pending"]')?.remove();
         if (form.id === 'write-form') {
@@ -1800,6 +1886,7 @@ async function appendForm(form) {
     let operation;
     try {
         const previous = pendingForCollection(collectionId);
+        const action = previous?.action ?? form.dataset.actionKind ?? mutationAction();
         const rows =
             form.id === 'write-form' &&
             previous &&
@@ -1807,8 +1894,17 @@ async function appendForm(form) {
                 ? previous.body.rows
                 : form.id === 'write-form'
                   ? formRows(state.schema, readEditorRows(form))
-                  : wireRows(state.schema, JSON.parse(form.elements.rows.value));
-        operation = previous ?? prepareMutation(null, { rows });
+                  : ['delete', 'compact'].includes(action)
+                    ? JSON.parse(form.elements.rows.value)
+                    : wireRows(state.schema, JSON.parse(form.elements.rows.value));
+        const body =
+            action === 'delete'
+                ? { keys: mutationKeys(rows) }
+                : action === 'compact'
+                  ? compactionOptions(rows)
+                  : { rows };
+        operation = previous ?? prepareMutation(null, body);
+        operation.action ??= action;
         operation.collectionId = collectionId;
         operation.schema ??= structuredClone(state.schema);
         operation.scope ??= recoveryScope();
@@ -1819,11 +1915,14 @@ async function appendForm(form) {
         }
         form.dataset.operationId = operation.operationId;
         saveOutcome(operation, { outcome: 'in_flight' });
-        const received = await api.json(`/collections/${encodeURIComponent(collectionId)}/append`, {
-            method: 'POST',
-            body: { ...operation.body, operation_id: operation.operationId },
-            allowOutcome: true,
-        });
+        const received = await api.json(
+            `/collections/${encodeURIComponent(collectionId)}/${operation.action}`,
+            {
+                method: 'POST',
+                body: { ...operation.body, operation_id: operation.operationId },
+                allowOutcome: true,
+            },
+        );
         if (state.api !== api) return;
         const payload = saveOutcome(operation, received);
         showAppendOutcome(operation, payload);
@@ -1833,7 +1932,11 @@ async function appendForm(form) {
             if (form.elements.rows) form.elements.rows.readOnly = true;
             else lockWriteForm(form);
             if (state.collectionId === collectionId) await refreshSelection();
-            toast('Append committed. Every row added.');
+            toast(
+                payload.result?.snapshot_created === false
+                    ? 'Mutation committed. No new snapshot.'
+                    : `${actionTitle(operation.action)} committed.`,
+            );
         } else if (!operation.terminal) {
             button.textContent = 'Retry same operation';
             if (form.elements.rows) form.elements.rows.readOnly = true;
@@ -1957,6 +2060,7 @@ document.addEventListener('submit', async (event) => {
             'append-form',
             'write-form',
             'operation-lookup-form',
+            'lookup-form',
             'recovery-form',
             'write-settings-form',
         ].includes(event.target.id)
@@ -1998,6 +2102,7 @@ document.addEventListener('submit', async (event) => {
             else await createDatabase(form);
         } else if (form.id === 'query-form') await runQuery();
         else if (form.id === 'append-form' || form.id === 'write-form') await appendForm(form);
+        else if (form.id === 'lookup-form') await lookupKeys(form);
         else if (form.id === 'create-form') await createForm(form);
         else if (form.id === 'recovery-form') await importRecovery(form);
         else if (form.id === 'write-settings-form') await saveWriteSettings(form);
@@ -2058,6 +2163,9 @@ document.addEventListener('click', async (event) => {
         else if (action === 'create') openCreate();
         else if (action === 'close-modal') $('#modal').close();
         else if (action === 'append') openAppend();
+        else if (action === 'delete-keys') openAppend('delete');
+        else if (action === 'compact-files') openAppend('compact');
+        else if (action === 'lookup-keys') openLookup();
         else if (action === 'count-rows') await countRows();
         else if (action === 'cancel-count') countController?.abort();
         else if (action === 'add-write-row' || action === 'remove-write-row') {

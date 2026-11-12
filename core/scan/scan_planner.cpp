@@ -10,6 +10,8 @@
 #include "core/storage/capacity.h"
 #include "core/storage/format_registry.h"
 #include "core/storage/format_verifier.h"
+#include "core/storage/snapshot_retention.h"
+#include "core/storage/table_profile.h"
 
 #include <iceberg/constants.h>
 #include <iceberg/file_format.h>
@@ -111,6 +113,14 @@ void CheckRoot(const iceberg::TableMetadata& metadata, const BaseIdentity& base)
             metadata.default_spec_id == base.spec_id,
         "UNSUPPORTED_TABLE_FEATURE",
         "only the initial unpartitioned Iceberg v2 schema is supported");
+    if (NGlamDB::NStorage::IsKVMetadata(metadata)) {
+        const auto expired = NGlamDB::NStorage::ExpiredSequence(metadata);
+        Require(expired.has_value() && *expired == 0 && metadata.last_sequence_number >= 0 &&
+                static_cast<uint64_t>(metadata.last_sequence_number) == metadata.snapshots.size() &&
+                metadata.snapshots.size() == metadata.snapshot_log.size(),
+            "CORRUPTION",
+            "KV scans require complete retained snapshot history");
+    }
 }
 
 std::shared_ptr<const std::vector<std::shared_ptr<const iceberg::DataFile>>> ReadDataFiles(const TScanManifests& plan,
@@ -237,6 +247,7 @@ Result<TScanManifests> PlanManifests(const std::shared_ptr<iceberg::FileIO>& io,
                 "NOT_FOUND",
                 "snapshot is not retained by this view");
             plan.SnapshotID = archived->snapshot_id;
+            plan.SequenceNumber = archived->sequence_number;
             listPath = archived->manifest_list;
         } else {
             const auto snapshot = SelectSnapshot(*metadata, selector);
@@ -244,6 +255,7 @@ Result<TScanManifests> PlanManifests(const std::shared_ptr<iceberg::FileIO>& io,
                 return plan;
             }
             plan.SnapshotID = snapshot->snapshot_id;
+            plan.SequenceNumber = snapshot->sequence_number;
             listPath = snapshot->manifest_list;
             archived = nullptr;
         }
@@ -301,6 +313,12 @@ Result<TScanManifests> PlanVerifiedScan(const NGlamDB::NStorage::TBaseState& sta
             "CORRUPTION",
             "scan index does not match the confirmed root");
         CheckRoot(*state.Metadata, base);
+        Require(!state.ScanIndex->KeyValue || state.ExpiredSnapshotIDs.empty(),
+            "CORRUPTION",
+            "KV scan membership cannot contain expired snapshot history");
+        Require(state.ScanIndex->KeyValue == NGlamDB::NStorage::IsKVMetadata(*state.Metadata),
+            "CORRUPTION",
+            "scan membership mode differs from its confirmed root");
         TScanManifests plan;
         plan.Index = state.ScanIndex;
         switch (selector.kind) {
@@ -321,7 +339,7 @@ Result<TScanManifests> PlanVerifiedScan(const NGlamDB::NStorage::TBaseState& sta
                 {},
                 &NGlamDB::NStorage::TSnapshotBoundary::SnapshotID);
             const bool hot = boundary != plan.Index->Snapshots.end() && boundary->SnapshotID == *plan.SnapshotID;
-            if (!hot && archived != nullptr && selector.kind == SnapshotSelectorKind::Id &&
+            if (!hot && archived != nullptr && !plan.Index->KeyValue && selector.kind == SnapshotSelectorKind::Id &&
                 archived->snapshot_id == *plan.SnapshotID)
             {
                 const auto& snapshots = state.Metadata->snapshots;
@@ -342,7 +360,13 @@ Result<TScanManifests> PlanVerifiedScan(const NGlamDB::NStorage::TBaseState& sta
             Require(boundary->FileCount <= plan.Index->Files.size(),
                 "CORRUPTION",
                 "selected snapshot has an invalid membership boundary");
-            plan.FileCount = boundary->FileCount;
+            if (plan.Index->KeyValue) {
+                Require(boundary->SequenceNumber > 0, "CORRUPTION", "KV snapshot has no membership sequence");
+                plan.SequenceNumber = boundary->SequenceNumber;
+                plan.FileCount = plan.Index->Files.size();
+            } else {
+                plan.FileCount = boundary->FileCount;
+            }
         }
         return plan;
     } catch (const Failure& error) {

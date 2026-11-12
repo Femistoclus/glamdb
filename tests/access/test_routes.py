@@ -46,6 +46,19 @@ def test_write_settings_uses_database_write_policy_without_append_identity():
     assert route.kind is None
 
 
+@pytest.mark.parametrize('action', ['upsert', 'delete', 'compact'])
+def test_kv_mutations_share_permanent_write_admission(action):
+    route = classify('POST', f'/collections/{uuid4()}/{action}')
+    assert route.action == 'write' and route.kind == 'append'
+    with pytest.raises(ValueError):
+        classify('GET', f'/collections/{uuid4()}/{action}')
+
+
+def test_kv_lookup_uses_read_policy_without_write_admission():
+    route = classify('POST', f'/collections/{uuid4()}/lookup')
+    assert route.action == 'read' and route.kind is None
+
+
 def test_storage_inventory_uses_metadata_policy_and_rejects_other_methods():
     route = classify("GET", "/storage")
     assert route.action == "metadata" and route.metric == "storage" and route.kind is None

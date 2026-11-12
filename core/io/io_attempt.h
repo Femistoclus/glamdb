@@ -33,6 +33,7 @@ struct TAttemptLimits
     // Explicit finite profile for one multi-file append. Ordinary attempts
     // retain the one-file declaration and registration limit.
     static TAttemptLimits BulkAppend();
+    static TAttemptLimits KeyValue();
 };
 
 struct TDurableFileReceipt

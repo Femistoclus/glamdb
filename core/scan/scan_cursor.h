@@ -52,6 +52,8 @@ struct TScanContext
     std::function<void(const ErrorDetail&)> OnError;
     std::shared_ptr<const NGlamDB::NStorage::TBaseState> VerifiedState{};
     int64_t RootBytes = HistoryLimits{}.max_root_file_bytes;
+    // Internal migration source order: oldest append files first, preserving rows.
+    bool ChronologicalFiles = false;
     // The engine's indexed catalog lookup of a selected snapshot that left
     // the root for the archive; planning reads it instead of the root entry.
     std::shared_ptr<const ArchivedSnapshotRecord> Archived{};

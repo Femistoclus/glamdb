@@ -157,6 +157,17 @@ std::string Receipt(const AppendResult& result)
     out.Integer("snapshot_created_at_us", result.snapshot_created_at_us);
     out.String("durability_profile", result.durability_profile);
     out.Add("receipt_version", std::to_string(result.receipt_version));
+    if (result.receipt_version == 3) {
+        constexpr std::array<std::string_view, 4> kinds{"none", "upsert", "delete", "compact"};
+        out.String("mutation_kind", kinds.at(static_cast<size_t>(result.mutation_kind)));
+        out.Add("snapshot_created", result.snapshot_created ? "true" : "false");
+        out.Integer("input_rows", result.input_rows);
+        out.Integer("rows_affected", result.rows_affected);
+        out.Integer("rows_written", result.rows_written);
+        out.Integer("rows_removed", result.rows_removed);
+        out.Integer("data_files_removed", result.data_files_removed);
+        out.Integer("compressed_data_bytes_removed", result.compressed_data_bytes_removed);
+    }
     return out.Finish();
 }
 
@@ -205,7 +216,7 @@ std::string Collection(const CollectionInfo& collection)
     out.String("collection_id", collection.collection_id);
     out.String("name", collection.name);
     out.String("table_uuid", collection.table_uuid);
-    out.String("mode", "append");
+    out.String("mode", collection.mode == CollectionMode::KeyValue ? "kv" : "append");
     out.Integer("creation_sequence", collection.creation_sequence);
     out.OptionalInteger("current_snapshot_id", collection.current_snapshot_id);
     std::string fields = "[";

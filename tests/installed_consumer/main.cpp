@@ -188,8 +188,9 @@ void CheckViews(glamdb::Engine& engine, int64_t snapshotA, int64_t snapshotB)
             firstPage.identity == secondPage.identity && secondPage.NextPageToken.empty(),
         "paged history preserves ancestry and root identity");
     const auto collectionPage = Take(engine.ListCollectionsPage({.PageSize = 1}), "collection page");
-    Check(collectionPage.CreationHighWaterMark == 1 && collectionPage.Collections.size() == 1 &&
-            collectionPage.NextPageToken.empty(),
+    const auto collectionCount = Take(engine.ListCollections(), "collection count").size();
+    Check(collectionPage.CreationHighWaterMark == static_cast<int64_t>(collectionCount) &&
+            collectionPage.Collections.size() == 1 && collectionPage.NextPageToken.empty() == (collectionCount == 1),
         "collection page reports its creation high-water mark");
     for (const auto& [selector, rows, files] : {std::tuple{glamdb::SnapshotSelector::Latest(), 5, 2},
              std::tuple{glamdb::SnapshotSelector::Id(snapshotA), 3, 1},
@@ -274,7 +275,7 @@ void Reopen(glamdb::Engine& engine, const std::string& receiptPath)
     Check(!stale && stale.error().code == "INVALID_CURSOR", "restart explicitly invalidates metadata cursors");
     const auto collection = Take(engine.GetCollection(CollectionId), "get reopened collection");
     Check(collection.schema == Schema && collection.name == "events", "persisted collection schema and name");
-    Check(Take(engine.ListCollections(), "list reopened collections").size() == 1, "persisted collection count");
+    Check(Take(engine.ListCollections(), "list reopened collections").size() == 2, "persisted collection count");
     const auto a = Take(engine.FindAppendOutcome(CollectionId, OperationA), "find receipt A");
     const auto b = Take(engine.FindAppendOutcome(CollectionId, OperationB), "find receipt B");
     if (!a || !b) {
@@ -299,6 +300,53 @@ void Reopen(glamdb::Engine& engine, const std::string& receiptPath)
         {CollectionId, OperationB, {glamdb::SnapshotPreconditionKind::NoSnapshot, 0}, {MakeBatch(RowsB)}});
     Check(retryA == *a && retryB == *b, "retries return original outcomes despite stale preconditions");
     CheckViews(engine, receiptA.snapshot_id, receiptB.snapshot_id);
+}
+
+constexpr char KVCollectionId[] = "00112233-4455-6677-8899-aabbccddee00";
+void WriteKV(glamdb::Engine& engine)
+{
+    glamdb::CreateCollectionRequest request{KVCollectionId, "keys", Schema};
+    request.mode = glamdb::CollectionMode::KeyValue;
+    Check(engine.GetCapabilities().key_value, "installed KV capability");
+    Check(engine.CreateCollection(request).disposition == glamdb::CommitDisposition::Committed, "create installed KV");
+    const auto upsert =
+        engine.UpsertDurable({KVCollectionId, OperationA, {}, {MakeBatch({{"a", 1}, {"a", 9}, {"b", 2}})}});
+    Check(upsert.disposition == glamdb::CommitDisposition::Committed && upsert.result &&
+            upsert.result->receipt_version == 3 && upsert.result->rows_affected == 2,
+        "installed full-row upsert");
+    const auto removed = engine.DeleteDurable({KVCollectionId, OperationB, {}, {"b", "b", "missing"}});
+    Check(removed.disposition == glamdb::CommitDisposition::Committed && removed.result &&
+            removed.result->rows_affected == 1,
+        "installed safe delete");
+    const auto noOp = engine.DeleteDurable({KVCollectionId, UnknownOperation, {}, {"absent"}});
+    Check(noOp.disposition == glamdb::CommitDisposition::Committed && noOp.result && !noOp.result->snapshot_created,
+        "installed durable no-op");
+}
+
+void ReopenKV(glamdb::Engine& engine)
+{
+    const auto collection = Take(engine.GetCollection(KVCollectionId), "installed KV collection");
+    Check(collection.mode == glamdb::CollectionMode::KeyValue, "KV mode survives fresh-process reopen");
+    const auto upsert = Take(engine.FindAppendOutcome(KVCollectionId, OperationA), "find KV upsert");
+    if (!upsert || !upsert->result) {
+        throw std::runtime_error("KV receipt missing after reopen");
+    }
+    Check(upsert->result->receipt_version == 3, "KV receipt survives reopen");
+    const auto latest = Take(engine.Lookup({KVCollectionId, {"a", "b", "a"}}), "installed latest lookup");
+    Check(latest.rows.size() == 3, "installed lookup result count");
+    const auto& firstHit = latest.rows.at(0);
+    Check(firstHit && !latest.rows[1] && latest.rows[2] == firstHit && std::get<int64_t>((*firstHit)[1]) == 9,
+        "installed ordered hits and misses");
+    const auto historical =
+        Take(engine.Lookup({KVCollectionId, {"b"}, glamdb::SnapshotSelector::Id(upsert->result->snapshot_id)}),
+            "installed historical lookup");
+    const auto& oldHit = historical.rows.at(0);
+    Check(oldHit && std::get<int64_t>((*oldHit)[1]) == 2, "installed retained row survives delete");
+    const auto noOp = engine.DeleteDurable({KVCollectionId, UnknownOperation, {}, {"absent"}});
+    Check(noOp.disposition == glamdb::CommitDisposition::Committed && noOp.result && !noOp.result->snapshot_created,
+        "installed original no-op retry");
+    Check(Take(engine.ListSnapshots(KVCollectionId), "installed KV history").snapshots.size() == 2,
+        "no-op excluded from installed history");
 }
 
 void CheckUnavailable(glamdb::Engine& engine)
@@ -360,8 +408,10 @@ try {
     } else if (mode == "write") {
         Check(Take(engine->ListCollections(), "list initial collections").empty(), "new store is empty");
         Write(*engine, argv[3]);
+        WriteKV(*engine);
     } else {
         Reopen(*engine, argv[3]);
+        ReopenKV(*engine);
     }
     const auto shutdown = engine->Shutdown(std::chrono::milliseconds(1000));
     Check(shutdown.has_value(), "shutdown");
