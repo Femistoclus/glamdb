@@ -177,6 +177,7 @@ try {
 #endif
     CLI::App app{"GlamDB network client"};
     app.require_subcommand(1);
+    app.set_help_all_flag("--help-all", "Expand help to include subcommand options");
     std::optional<int> workloadExitCode;
     glamdb::NClient::AddWorkloadCommands(app, workloadExitCode);
     auto* request = app.add_subcommand("request", "Call any server API route; write exact response bytes");
@@ -192,9 +193,11 @@ try {
     uint16_t port = 8080;
     int64_t maxCollections = 8;
     for (auto* command : commands) {
-        command->add_option("--url", url, "Full http(s) URL (create-store: server base URL)");
-        command->add_option("--host", host, "Loopback HTTP hostname; use --url for HTTPS");
-        command->add_option("--port", port, "HTTP port");
+        command->add_option("--url",
+            url,
+            command == request ? "Full http(s) URL or server base URL with --path" : "Server base http(s) URL");
+        command->add_option("--host", host, "Loopback HTTP hostname (default 127.0.0.1); use --url for HTTPS");
+        command->add_option("--port", port, "HTTP port (default 8080)");
         command->add_option("--ca-file", input.CaFile, "Additional PEM certificate authority");
         command->add_option("--timeout", input.TimeoutSeconds, "Whole request deadline in seconds");
         command->add_option("--output,-o", output, "Response file; default stdout; binary-safe");
@@ -209,6 +212,22 @@ try {
     create->add_option("--max-collections", maxCollections, "Per-database collection limit (default 8)");
     drop->add_option("--database", database, "Original saved database UUID; never a name")->required();
     drop->add_option("--store-id", store, "Original saved store UUID; must match --database")->required();
+    app.footer("Connection and authentication:\n"
+               "  Each network command connects to the server for that invocation.\n"
+               "  Set GLAMDB_TOKEN in the environment for bearer authentication.\n"
+               "  Pass --url https://HOST:PORT for a remote server (verified TLS).\n"
+               "  Use --ca-file CA.pem to trust an additional certificate authority.\n"
+               "  For local HTTP, use --host HOST --port PORT (defaults: 127.0.0.1:8080).\n"
+               "  --url cannot be combined with --host or --port; HTTP is loopback-only.\n"
+               "  Data commands select a managed database with --database-id UUID\n"
+               "  or --url https://HOST:PORT/databases/UUID.\n"
+               "\n"
+               "Examples:\n"
+               "  glamdb-cli request --host localhost --port 8080 --path /databases\n"
+               "  glamdb-cli request --url https://db.example.test --path /databases\n"
+               "  glamdb-cli collections --url https://db.example.test --database-id DATABASE_UUID\n"
+               "\n"
+               "Run glamdb-cli COMMAND --help for command options; add --help-all to expand subcommands.");
     if (argc == 1) {
         std::cout << app.help();
         return 0;

@@ -239,8 +239,17 @@ void AddWorkloadCommands(CLI::App& app, std::optional<int>& exitCode)
     Value(*prepare, *preparation, "--part-bytes", "Maximum part bytes (default 4194304)");
     Value(*prepare, *preparation, "--max-source-bytes", "Source download/read budget (default 34359738368)");
     Value(*prepare, *preparation, "--max-converted-bytes", "Converted dataset budget (default 8589934592)");
+    const std::map<std::string_view, const char*> clickbenchDescriptions{
+        {"init", "Create a dedicated database and collection for the prepared dataset"},
+        {"load", "Append the prepared dataset using saved immutable requests"},
+        {"status", "Show saved target identity, progress and unresolved operations"},
+        {"resolve", "Look up saved operation outcomes; resend only with --retry"},
+        {"verify", "Compare stored rows with the prepared source dataset"},
+        {"size", "Report logical data, committed file sizes and optional footer details"},
+        {"clean", "Drop the exact database identity saved in the run state"},
+    };
     for (const auto* mode : {"init", "load", "status", "resolve", "verify", "size", "clean"}) {
-        auto* command = clickbench->add_subcommand(mode);
+        auto* command = clickbench->add_subcommand(mode, clickbenchDescriptions.at(mode));
         auto args = Command(*command, {"bench", "clickbench", mode}, exitCode);
         Value(*command,
             *args,
@@ -292,8 +301,14 @@ void AddWorkloadCommands(CLI::App& app, std::optional<int>& exitCode)
             Flag(*command, *args, "--include-footers", "Read column-chunk sizes for each committed Parquet file");
         }
     }
+    const std::map<std::string_view, const char*> workloadDescriptions{
+        {"write", "Benchmark dataset appends with Locust and record operation outcomes"},
+        {"read", "Benchmark JSON or Arrow scans with Locust"},
+        {"verify", "Verify stored rows and receipts against an existing workload run"},
+        {"resolve", "Look up journaled operation outcomes; resend only with --retry"},
+    };
     for (const auto* mode : {"write", "read", "verify", "resolve"}) {
-        auto* command = bench->add_subcommand(mode);
+        auto* command = bench->add_subcommand(mode, workloadDescriptions.at(mode));
         auto args = Command(*command, {"bench", mode}, exitCode);
         Value(*command, *args, "--url", "Server URL; HTTPS required outside loopback", true);
         Value(*command, *args, "--ca-file", "Additional PEM certificate authority");

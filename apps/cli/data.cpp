@@ -5,6 +5,7 @@
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <set>
+#include <utility>
 
 namespace glamdb::NClient {
 namespace {
@@ -48,25 +49,27 @@ private:
 std::vector<CLI::App*> AddDataCommands(CLI::App& app, TDataCommand& data)
 {
     std::vector<CLI::App*> commands;
-    for (const auto* name : {"create-collection",
-             "collections",
-             "resolve-collection",
-             "collection",
-             "schema",
-             "append",
-             "bulk-append",
-             "upsert",
-             "delete",
-             "lookup",
-             "compact",
-             "scan",
-             "operation",
-             "snapshots",
-             "files",
-             "file",
-             "write-settings"})
-    {
-        auto* command = app.add_subcommand(name, "Operate on collection data through the native API");
+    const std::pair<const char*, const char*> commandHelp[] = {
+        {"create-collection", "Create an append or KV collection with a fixed schema"},
+        {"collections", "List collections in the selected database"},
+        {"resolve-collection", "Find a collection by its exact name"},
+        {"collection", "Show collection identity, schema and settings"},
+        {"schema", "Show the fixed collection schema and field IDs"},
+        {"append", "Append rows without replacing duplicate keys; return the write outcome"},
+        {"bulk-append", "Stream a replayable NDJSON file as one atomic append"},
+        {"upsert", "Insert or replace rows by key in a KV collection"},
+        {"delete", "Delete keys from a KV collection"},
+        {"lookup", "Read rows by key from a KV collection"},
+        {"compact", "Merge KV data files while preserving current values"},
+        {"scan", "Read bounded JSON rows with optional snapshot, predicate and projection"},
+        {"operation", "Look up the original mutation outcome by operation UUID"},
+        {"snapshots", "List receipt-backed snapshot history"},
+        {"files", "List committed Parquet files in a selected snapshot"},
+        {"file", "Inspect a committed Parquet file's footer, statistics and row groups"},
+        {"write-settings", "Update Parquet settings for later writes using an expected version"},
+    };
+    for (const auto& [name, description] : commandHelp) {
+        auto* command = app.add_subcommand(name, description);
         commands.push_back(command);
         const std::string action(name);
         command->callback([&data, name]() noexcept {

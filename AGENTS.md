@@ -90,7 +90,9 @@ Command grammar in `apps/cli/data.*` has no core dependency; metadata JSON in
 `apps/transport/metadata.*` is shared with HTTP. Named JSON scans complete remote
 pages within 10,000 rows/16 MiB, cancel unfinished cursors, and distinguish
 unresolved outcomes (exit 3) from definite failures (exit 1). See the
-[CLI guide](apps/cli/README.md). `glamdb serve` aliases existing server startup.
+[CLI guide](apps/cli/README.md). Top-level client help includes connection and
+authentication examples; `COMMAND --help` shows options and `--help-all` expands
+immediate subcommands. `glamdb serve` aliases existing server startup.
 Collection routes are scoped by `/databases/{id}`; optional legacy
 `--root/--store-id` mode retains unscoped routes. A
 separate, explicitly disposable in-memory mock remains a development profile. The architecture and

@@ -13,6 +13,15 @@ cmake -S apps/cli -B build/client -G Ninja -DCMAKE_CXX_COMPILER=clang++-18
 cmake --build build/client
 ```
 
+Run `glamdb-cli` or `glamdb-cli --help` for command descriptions, connection
+examples and authentication guidance. Use `glamdb-cli COMMAND --help` for one
+command's options. `--help-all` expands the immediate subcommands, for example
+`glamdb-cli --help-all` or `glamdb-cli bench tpch --help-all`.
+The client connects separately for each network command; select the endpoint with
+`--url` or local `--host`/`--port` options after the command name. Data commands
+select a managed database with `--database-id UUID` or a base URL ending in
+`/databases/UUID`.
+
 Set `GLAMDB_TOKEN` in the environment. Bearer tokens may contain up to 8192
 printable bytes, including organization-scoped OIDC JWTs; control characters
 are rejected before connecting. Keep tokens out of command-line arguments.
