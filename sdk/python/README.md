@@ -337,14 +337,22 @@ or canonical decimal strings, finite floats, bools, strings, and UTC timestamps.
 An omitted nullable field becomes NULL; required, unknown or mismatched fields
 are rejected. Empty scan projections preserve an empty output schema and every
 matching row. The SDK enforces the v0 10,000-row/16-MiB decoded append ceiling
-during normalization, plus row and string limits.
+during normalization, plus row and string limits. The serialized JSON request
+also has an independent 16-MiB ceiling, including escaped strings, repeated
+field names, framing and the optional snapshot precondition. Preparation raises
+`ValidationError` locally when it exceeds that wire limit; it does not split
+the operation or replace its IDs. Explicitly constructed prepared bodies are
+checked again before transport. `max_json_bytes` bounds responses only.
 
 Append preparation validates each row once against a cached per-schema plan
 (keyed by the fields' values, never by caller data). The same pass yields the
 wire object, the row's canonical hash bytes and its decoded size, and converts
 each timestamp to microseconds once. Sized inputs (lists, tuples) are hashed as
 they are read; for other iterables the canonical rows (bounded by the 16-MiB
-ceiling) are kept until the row count is known. Generators are consumed only up
+ceiling) are kept until the row count is known. A conservative wire-size bound
+keeps the fast whole-body encoder for requests guaranteed to fit; larger bounds
+switch preparation to bounded row serialization. Admitted inputs preserve the
+exact original JSON bytes and canonical hash. Generators are consumed only up
 to the first limit or invalid row. To measure preparation alone:
 `python sdk/python/benchmarks/prepare_bench.py` (compares against the frozen
 pre-plan implementation in `sdk/python/tests/legacy_prepare.py`).

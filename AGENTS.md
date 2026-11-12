@@ -301,6 +301,9 @@ Shared literal outcome/scalar vectors live in `fixtures/http/outcomes-v0.json`;
 see [the fixture guide](fixtures/http/README.md) for their native, SDK, mock and UI
 consumers. Keep complete recovery contexts in test doubles. Missing recovery
 fields are protocol errors; supported extension fields remain in client responses.
+SDK append preparation bounds canonical decoded bytes and serialized JSON bytes
+independently. Requests above the native 16 MiB wire ceiling fail locally,
+including explicitly constructed prepared bodies; response limits are separate.
 For branding/static hosting read [PUBLIC_DEMO.md](docs/development/PUBLIC_DEMO.md).
 Preserve the supplied PNGs unchanged. Brand paths must be local assets; sizes
 belong in theme.json. Asset URLs must support both / and /glamdb/.

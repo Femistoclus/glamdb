@@ -18,7 +18,7 @@ from .errors import (AuthenticationError, ErrorDetail, HTTPError, OutcomeUnknown
                      TransportError, ValidationError)
 from .models import ANY, AppendOutcome, CreateOutcome, OperationInProgress, Page, ScanResult
 from .predicates import Predicate
-from .request import AppendRequest, json_bytes, schema_fingerprint, uuid_string
+from .request import AppendRequest, _check_request_size, json_bytes, schema_fingerprint, uuid_string
 from .recovery import validate_append_recovery, validate_create_recovery
 from .transport import JSON_ACCEPT_ENCODING, Deadline, read_json, translate_transport
 from .write_settings import canonical_write_settings, request_write_settings, write_settings_version
@@ -182,6 +182,8 @@ class Client:
               body: bytes | None = None, accept: str = "application/json") -> httpx.Response:
         if self._closed:
             raise TransportError("client is closed", collection_id=budget.collection_id, operation_id=budget.operation_id)
+        if body is not None:
+            _check_request_size(len(body))
         self._cleanup.drain()
         budget.check()
         headers = {"Accept": accept, "Accept-Encoding": JSON_ACCEPT_ENCODING}
