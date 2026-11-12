@@ -74,6 +74,12 @@ contract. Static selects only `public-demo.spec.mjs` and starts only the static
 server. A missing native executable, wrong identity, process failure or absent
 physical artifact is a test failure.
 
+The native browser wrapper retains ownership through shutdown. SIGINT/SIGTERM
+enter cleanup, allow five seconds for an orderly child exit, then force termination
+and reap it before removing the state marker and temporary storage. Repeated
+signals cannot interrupt cleanup. Startup failures also remove the marker, and
+ordinary child exit codes remain visible to the test runner.
+
 `scripts/check-native-http.sh` runs native CLI, workload, shared SDK conformance
 and browser tests in sequence. SDK JUnit evidence is written separately to
 `artifacts/native-normal/sdk-conformance-junit.xml`; browser results use

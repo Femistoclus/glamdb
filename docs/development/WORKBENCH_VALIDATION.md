@@ -1,5 +1,40 @@
 # Workbench validation record
 
+## Native browser process lifecycle — 2026-11-12
+
+Follow-up to the #53 conformance implementation merged in PR #144, based on
+official `main` at `09fa09e`. The native browser wrapper could remain in
+`wait()` after forwarding SIGINT/SIGTERM; killing that wrapper could leave its
+native child alive. A failed child launch also left a stale state marker.
+Focused regressions failed on that base before the fix.
+
+Signals now enter bounded TERM/KILL cleanup and reap the child before removing
+its marker and disposable storage. Repeated signals cannot interrupt cleanup;
+ordinary child exit codes are preserved. The independent review confirmed these
+invariants with a TERM-resistant child and repeated mixed signals. Its remaining
+test-readiness race was fixed by publishing the PID marker atomically. The
+existing shared-backend design was retained; no alternative backend or process
+manager was added.
+
+Executed with Linux x86-64, Python 3.13.18, Node 24.13.0 and Chromium 1194:
+
+- **PASS — 883 repository Python tests**, explicit mock profile, including five
+  lifecycle cases covering SIGINT/SIGTERM, successful/failed child exits and
+  failed startup. The focused five-case run also passed after the PID fix.
+- **PASS — 23 native SDK/setup/lifecycle tests**: the existing eight shared
+  TCP/TLS cases, ten backend setup cases and five lifecycle cases.
+- **PASS — 136 Node tests, 40 mock/static Chromium scenarios, six native
+  Chromium scenarios and five independently selected static scenarios.**
+- **PASS — UI formatting, actionlint, offline zizmor and whitespace checks.**
+
+Commands: `GLAMDB_TEST_BACKEND=mock .venv/bin/python -m pytest -q` and the native
+SDK/browser commands in [CLIENT_CONFORMANCE.md](CLIENT_CONFORMANCE.md), adding
+`tests/integration/test_browser_lifecycle.py` to the native pytest invocation.
+Raw output is in ignored `artifacts/issue-53/followup-*.log`; browser reports
+retain separate backend directories. Python emits the existing Starlette/httpx
+deprecation warning. No native runtime, dependencies or persistent formats
+changed, and no durability qualification is claimed.
+
 ## Shared client conformance — 2026-11-12
 
 Executed on Linux x86-64 (Ubuntu 24.04), Python 3.13.18, Node 24.13.0 and pinned

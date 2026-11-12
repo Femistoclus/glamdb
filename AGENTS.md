@@ -257,6 +257,9 @@ native checks inspect catalog-selected JSON/Avro/Parquet after closing storage.
 See [client conformance](docs/development/CLIENT_CONFORMANCE.md) for commands,
 documented response differences and separate evidence. Normal native acceptance
 runs the shared SDK suite before Chromium and propagates either failure.
+Retain native browser child ownership through bounded shutdown and reaping;
+`tests/integration/test_browser_lifecycle.py` covers interrupts, child exit
+statuses and failed-startup cleanup.
 The check script also packages/serves the public demo under /glamdb/ and verifies no API
 requests, token prompt, cross-visitor state or credential files are introduced.
 See [validation](docs/development/WORKBENCH_VALIDATION.md) for exact evidence and
