@@ -111,6 +111,13 @@ checks levels before the file is created; collection write settings need them.
 Upstream has no equivalent yet. Every written footer is checked against the
 requested codecs, so a pin bump that silently drops the patch fails appends
 instead of writing other codecs.
+`iceberg-cpp/0003-parquet-dictionary-and-encodings.patch` adds
+`write.parquet.dict-enabled[.column.<name>]`, Iceberg's
+`write.parquet.dict-size-bytes` and `write.parquet.encoding.column.<name>`,
+checks encodings against physical types, and rejects an explicit encoding on a
+column whose dictionary stays enabled (the pinned Arrow writer would ignore
+it). The written footers are checked for dictionary pages and data page
+encodings in the same way.
 
 After pulling changes to dependency recipes or patches, rerun the `deps-local`
 configure and build commands above before rebuilding the application. Building

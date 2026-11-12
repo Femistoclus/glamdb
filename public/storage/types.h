@@ -77,12 +77,37 @@ struct ParquetCompression
     bool operator==(const ParquetCompression&) const = default;
 };
 
+// Auto: dictionary-encode every type that supports it (all but bool) and
+// fall back to plain pages when the dictionary page outgrows its limit.
+// Enabled: the same, but rejected for bool columns instead of ignored.
+// Disabled: values use the column's encoding (plain unless one is set).
+enum class DictionaryPolicy : uint8_t { Auto = 1, Enabled, Disabled };
+
+// Parquet value encodings of non-dictionary pages. Wire/footer names: plain,
+// delta_binary_packed, delta_length_byte_array, delta_byte_array,
+// byte_stream_split, rle. Valid types: plain all; delta_binary_packed int64
+// and timestamp; delta_length_byte_array and delta_byte_array string;
+// byte_stream_split int64, float64 and timestamp; rle bool.
+enum class ParquetEncoding : uint8_t {
+    Plain = 1,
+    DeltaBinaryPacked,
+    DeltaLengthByteArray,
+    DeltaByteArray,
+    ByteStreamSplit,
+    Rle
+};
+
 struct ColumnWriteSettings
 {
     // Exact name of a schema field.
     std::string field;
     // Absent: the collection default.
     std::optional<ParquetCompression> compression{};
+    // Absent: the collection policy, unless an encoding is set (an explicit
+    // encoding disables the column's dictionary; Enabled with an encoding is
+    // a conflict).
+    std::optional<DictionaryPolicy> dictionary{};
+    std::optional<ParquetEncoding> encoding{};
     bool operator==(const ColumnWriteSettings&) const = default;
 };
 
@@ -94,6 +119,11 @@ struct WriteSettings
 {
     // Absent: the engine default (EngineCapabilities::default_parquet_compression).
     std::optional<ParquetCompression> compression{};
+    // Absent: Auto.
+    std::optional<DictionaryPolicy> dictionary{};
+    // Bytes of one column chunk's dictionary before it falls back to plain
+    // pages; checked after every 1,024 values. Absent: the engine default.
+    std::optional<int64_t> dictionary_page_size_limit{};
     std::vector<ColumnWriteSettings> columns{};
     bool operator==(const WriteSettings&) const = default;
 };

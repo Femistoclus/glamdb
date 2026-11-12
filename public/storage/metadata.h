@@ -17,6 +17,13 @@ struct ParquetCodecCapability
     bool operator==(const ParquetCodecCapability&) const = default;
 };
 
+struct ParquetEncodingCapability
+{
+    ParquetEncoding encoding = ParquetEncoding::Plain;
+    std::vector<FieldType> types{};
+    bool operator==(const ParquetEncodingCapability&) const = default;
+};
+
 // Supported operations, independent of current admission (GetHealth).
 // Selecting local storage does not qualify power-loss durability.
 struct EngineCapabilities
@@ -33,6 +40,13 @@ struct EngineCapabilities
     bool write_settings = false;
     std::vector<ParquetCodecCapability> parquet_codecs{};
     ParquetCompression default_parquet_compression{};
+    // Explicit value encodings and the field types each accepts, the types
+    // that can use a dictionary, and the dictionary page size limit range.
+    std::vector<ParquetEncodingCapability> parquet_encodings{};
+    std::vector<FieldType> dictionary_types{};
+    int64_t min_dictionary_page_size_limit = 0;
+    int64_t max_dictionary_page_size_limit = 0;
+    int64_t default_dictionary_page_size_limit = 0;
 };
 
 struct TMetadataPageRequest
@@ -117,6 +131,15 @@ struct TFileListing
     std::string NextPageToken{};
 };
 
+struct TPageEncodingCount
+{
+    // data_page, data_page_v2 or dictionary_page.
+    std::string PageType{};
+    std::string Encoding{};
+    int32_t Count = 0;
+    bool operator==(const TPageEncodingCount&) const = default;
+};
+
 struct TColumnChunkMetadata
 {
     int32_t FieldID = 0;
@@ -126,6 +149,12 @@ struct TColumnChunkMetadata
     int64_t DataPageOffset = 0;
     std::optional<int64_t> DictionaryPageOffset{};
     std::string Compression{};
+    // Every encoding the chunk uses, including level and dictionary page
+    // encodings (plain, rle, rle_dictionary, ...), as the footer records them.
+    std::vector<std::string> Encodings{};
+    // Pages per page type and encoding; a dictionary that overflowed shows
+    // both rle_dictionary and plain data pages. Empty when not recorded.
+    std::vector<TPageEncodingCount> EncodingStats{};
     std::optional<int64_t> NullCount{};
     // Parquet plain encoding, independent of the manifest's Iceberg bounds.
     std::optional<std::vector<uint8_t>> LowerBound{};

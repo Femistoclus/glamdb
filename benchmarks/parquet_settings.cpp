@@ -86,16 +86,39 @@ const SchemaSpec Schema{{
 }};
 
 // "default" keeps the engine defaults; "mixed" keeps zstd but stores the
-// incompressible random integers uncompressed; anything else is codec[:level].
+// incompressible random integers uncompressed; "nodict" disables
+// dictionaries; "tuned" picks per-column encodings for the data shapes below;
+// anything else is codec[:level].
 WriteSettings Settings(std::string_view config)
 {
+    WriteSettings settings;
     if (config == "default") {
-        return {};
+        return settings;
     }
     if (config == "mixed") {
-        return {std::nullopt, {{"rand_i64", ParquetCompression{ParquetCodec::Uncompressed, std::nullopt}}}};
+        settings.columns = {{"rand_i64", ParquetCompression{ParquetCodec::Uncompressed, std::nullopt}}};
+        return settings;
     }
-    return {Compression(config), {}};
+    if (config == "nodict") {
+        settings.dictionary = DictionaryPolicy::Disabled;
+        return settings;
+    }
+    if (config == "tuned") {
+        const auto encoding = [](std::string field, ParquetEncoding value) {
+            return ColumnWriteSettings{std::move(field), std::nullopt, std::nullopt, value};
+        };
+        settings.columns = {encoding("key", ParquetEncoding::DeltaByteArray),
+            encoding("uuid", ParquetEncoding::DeltaLengthByteArray),
+            encoding("text", ParquetEncoding::DeltaLengthByteArray),
+            encoding("seq", ParquetEncoding::DeltaBinaryPacked),
+            {"rand_i64", ParquetCompression{ParquetCodec::Uncompressed, std::nullopt}, DictionaryPolicy::Disabled},
+            {"sensor", std::nullopt, DictionaryPolicy::Disabled},
+            {"price", std::nullopt, DictionaryPolicy::Disabled},
+            encoding("ts", ParquetEncoding::DeltaBinaryPacked)};
+        return settings;
+    }
+    settings.compression = Compression(config);
+    return settings;
 }
 
 // The same shapes as .audit estimates: sorted KV keys, random hex IDs, a
@@ -200,7 +223,7 @@ int main(int argc, char** argv)
 {
     try {
         Require(argc >= 2 && argc <= 3,
-            "usage: glamdb_parquet_settings_bench <default|mixed|codec[:level]> [appends=5]");
+            "usage: glamdb_parquet_settings_bench <default|mixed|nodict|tuned|codec[:level]> [appends=5]");
         const std::string config = argv[1];
         const int appends = argc == 3 ? Number(argv[2], 1, 100) : 5;
         test::TempDir temporary;

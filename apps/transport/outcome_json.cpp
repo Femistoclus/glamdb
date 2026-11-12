@@ -178,14 +178,19 @@ std::string WriteSettingsJson(const WriteSettings& settings)
         if (i != 0) {
             columns += ',';
         }
+        const auto& item = settings.columns[i];
         Object column;
-        column.String("field", settings.columns[i].field);
-        column.Add("compression", Compression(settings.columns[i].compression));
+        column.String("field", item.field);
+        column.Add("compression", Compression(item.compression));
+        column.Add("dictionary", item.dictionary ? Quote(detail::PolicyName(*item.dictionary)) : "null");
+        column.Add("encoding", item.encoding ? Quote(detail::EncodingName(*item.encoding)) : "null");
         columns += column.Finish();
     }
     columns += ']';
     Object parquet;
     parquet.Add("compression", Compression(settings.compression));
+    parquet.Add("dictionary", settings.dictionary ? Quote(detail::PolicyName(*settings.dictionary)) : "null");
+    parquet.OptionalInteger("dictionary_page_size_limit", settings.dictionary_page_size_limit);
     parquet.Add("columns", columns);
     Object out;
     out.Add("parquet", parquet.Finish());

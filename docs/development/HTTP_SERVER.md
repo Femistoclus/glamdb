@@ -276,6 +276,26 @@ entries, levels outside the range or for codecs without levels are rejected
 before anything is bound. Collections return the canonical (schema-ordered)
 `write_settings` and `write_settings_version` (decimal string; `"0"` = never set).
 
+The same object chooses **Parquet value encodings**, independent of both
+compression codecs and HTTP coding: `parquet.dictionary` and a column's
+`dictionary` are `auto` (default: dictionary pages for every type but `bool`),
+`enabled` (the same, but rejected for `bool` columns) or `disabled`;
+`parquet.dictionary_page_size_limit` (decimal string, 4 KiB–8 MiB, default
+1 MiB) bounds each column chunk's dictionary, checked after every 1,024 values.
+A dictionary that outgrows it is written as the dictionary page and the
+remaining data pages fall back to `plain`, so one column chunk can then hold
+both `rle_dictionary` and `plain` data pages. A column's `encoding` selects its
+non-dictionary value encoding: `plain` for every type; `delta_binary_packed`
+for `int64`/`timestamp_us_utc`; `delta_length_byte_array` and
+`delta_byte_array` for `string`; `byte_stream_split` for `int64`, `float64`
+and `timestamp_us_utc`; `rle` for `bool`. An explicit encoding turns that
+column's dictionary off and overrides the collection policy; combining it with
+`enabled` (or with `auto` on a non-`bool` column) is rejected, because the
+pinned writer would ignore it. `parquet.encodings` and `parquet.dictionary` in
+capabilities publish these combinations. File details report the actual
+`encodings` of every column chunk and `encoding_stats` (pages per page type
+and encoding), lower-case like the settings.
+
 `POST /collections/{id}/write-settings` takes
 `{expected_version:"N",write_settings:{...}}` and returns the collection. It
 applies only when `N` is the current version and yields `N+1`; repeating an

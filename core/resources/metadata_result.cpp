@@ -175,6 +175,15 @@ Status RetainMetadata(const std::shared_ptr<ResourceOwner>& owner, TFileDetails&
         capacity.Allocation(group.Columns.capacity(), sizeof(TColumnChunkMetadata));
         for (const auto& column : group.Columns) {
             capacity.Add(column.Compression);
+            capacity.Allocation(column.Encodings.capacity(), sizeof(std::string));
+            for (const auto& encoding : column.Encodings) {
+                capacity.Add(encoding);
+            }
+            capacity.Allocation(column.EncodingStats.capacity(), sizeof(TPageEncodingCount));
+            for (const auto& stats : column.EncodingStats) {
+                capacity.Add(stats.PageType);
+                capacity.Add(stats.Encoding);
+            }
             capacity.Add(column.LowerBound);
             capacity.Add(column.UpperBound);
         }

@@ -86,12 +86,14 @@ std::string Token()
 EngineCapabilities InstalledCapabilities()
 {
 #if GLAMDB_HTTP_STORAGE
-    return {.backend = BackendKind::LocalStorage,
+    EngineCapabilities capabilities{.backend = BackendKind::LocalStorage,
         .append = true,
         .scan = true,
         .metadata = true,
         .write_settings = true,
         .parquet_codecs = detail::ParquetCodecCapabilities()};
+    detail::AddEncodingCapabilities(capabilities);
+    return capabilities;
 #else
     return {};
 #endif
@@ -118,8 +120,31 @@ TJson ParquetJson(const EngineCapabilities& capabilities)
         }
         codecs.push_back({{"codec", detail::CodecName(codec.codec)}, {"level", std::move(level)}});
     }
+    constexpr std::array<std::string_view, 5> types{"string", "bool", "int64", "float64", "timestamp_us_utc"};
+    const auto typeNames = [&](const std::vector<FieldType>& fields) {
+        auto names = TJson::array();
+        for (const auto field : fields) {
+            names.push_back(types.at(static_cast<size_t>(field) - 1));
+        }
+        return names;
+    };
+    TJson encodings = TJson::array();
+    for (const auto& encoding : capabilities.parquet_encodings) {
+        encodings.push_back(
+            {{"encoding", detail::EncodingName(encoding.encoding)}, {"types", typeNames(encoding.types)}});
+    }
     return {{"default_compression", CompressionJson(capabilities.default_parquet_compression)},
-        {"codecs", std::move(codecs)}};
+        {"codecs", std::move(codecs)},
+        {"encodings", std::move(encodings)},
+        {"dictionary",
+            {{"policies", {"auto", "enabled", "disabled"}},
+                {"default_policy", "auto"},
+                {"types", typeNames(capabilities.dictionary_types)},
+                {"fallback_encoding", "plain"},
+                {"page_size_limit",
+                    {{"min", capabilities.min_dictionary_page_size_limit},
+                        {"max", capabilities.max_dictionary_page_size_limit},
+                        {"default", capabilities.default_dictionary_page_size_limit}}}}}};
 }
 } // namespace
 

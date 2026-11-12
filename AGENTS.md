@@ -100,7 +100,8 @@ Append preserves every input row, including duplicate keys. It provides neither
 key uniqueness nor replacement semantics.
 
 Collections carry Parquet write settings (collection-default compression codec
-and level, per-column overrides) that apply to data files of later appends.
+and level, dictionary policy and page limit; per-column codec, dictionary and
+value-encoding overrides) that apply to data files of later appends.
 They live in the SQLite catalog (version 2, created lazily by the first stored
 settings), change by compare-and-set under the writer and are checked against
 every written footer; see [the coordinator guide](docs/development/COORDINATOR.md#collection-write-settings).

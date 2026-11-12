@@ -132,7 +132,8 @@ separate reservations. Conservative upstream envelopes require RSS calibration.
 ## Collection write settings
 
 `CreateCollectionRequest::write_settings` and `Engine::UpdateWriteSettings`
-choose the Parquet compression of data files written by later appends. The
+choose the Parquet compression, dictionary policy and value encodings of data
+files written by later appends (see the HTTP contract for the type matrix). The
 canonical settings (schema-ordered, at most one entry per field, each entry
 with an option) are part of the collection definition: a repeated creation
 compares the settings it was created with, and a mismatch is

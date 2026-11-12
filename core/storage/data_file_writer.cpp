@@ -257,6 +257,35 @@ iceberg::Status AddCompression(std::unordered_map<std::string, std::string>& pro
     return {};
 }
 
+iceberg::Result<std::string> EncodingName(parquet::Encoding::type encoding)
+{
+    switch (encoding) {
+        case parquet::Encoding::PLAIN:
+            return "plain";
+        case parquet::Encoding::DELTA_BINARY_PACKED:
+            return "delta_binary_packed";
+        case parquet::Encoding::DELTA_LENGTH_BYTE_ARRAY:
+            return "delta_length_byte_array";
+        case parquet::Encoding::DELTA_BYTE_ARRAY:
+            return "delta_byte_array";
+        case parquet::Encoding::BYTE_STREAM_SPLIT:
+            return "byte_stream_split";
+        case parquet::Encoding::RLE:
+            return "rle";
+        default:
+            return iceberg::InvalidArgument("Unsupported Parquet value encoding.");
+    }
+}
+
+const iceberg::SchemaField* FindField(const iceberg::Schema& schema, std::string_view name)
+{
+    const auto fields = schema.fields();
+    const auto field = std::ranges::find_if(fields, [&](const auto& item) {
+        return item.name() == name;
+    });
+    return field == fields.end() ? nullptr : &*field;
+}
+
 iceberg::Result<std::unordered_map<std::string, std::string>>
 WriterProperties(const TInputShape& shape, const iceberg::Schema& schema, const TParquetWriteSpec& spec)
 {
@@ -265,41 +294,91 @@ WriterProperties(const TInputShape& shape, const iceberg::Schema& schema, const 
     if (spec.Compression) {
         ICEBERG_RETURN_UNEXPECTED(AddCompression(properties, *spec.Compression, ""));
     }
-    for (const auto& [name, compression] : spec.Columns) {
-        if (std::ranges::none_of(schema.fields(), [&](const auto& field) {
-                return field.name() == name;
-            }))
-        {
+    if (spec.Dictionary) {
+        properties.emplace("write.parquet.dict-enabled", *spec.Dictionary ? "true" : "false");
+    }
+    if (spec.DictionaryPageSizeLimit) {
+        properties.emplace("write.parquet.dict-size-bytes", std::to_string(*spec.DictionaryPageSizeLimit));
+    }
+    for (const auto& column : spec.Columns) {
+        if (FindField(schema, column.Name) == nullptr) {
             return iceberg::InvalidArgument("Parquet column settings name an unknown column.");
         }
-        ICEBERG_RETURN_UNEXPECTED(AddCompression(properties, compression, ".column." + name));
+        if (column.Compression) {
+            ICEBERG_RETURN_UNEXPECTED(AddCompression(properties, *column.Compression, ".column." + column.Name));
+        }
+        if (column.Dictionary) {
+            properties.emplace("write.parquet.dict-enabled.column." + column.Name,
+                *column.Dictionary ? "true" : "false");
+        }
+        if (column.Encoding) {
+            ICEBERG_ASSIGN_OR_RAISE(auto name, EncodingName(*column.Encoding));
+            properties.emplace("write.parquet.encoding.column." + column.Name, std::move(name));
+        }
     }
     return properties;
 }
 
-// The writer ignores settings for paths it does not know, so the footer is the
-// proof: every column chunk must use the effective codec of its column.
+struct TExpectedColumn
+{
+    arrow::Compression::type Codec = arrow::Compression::ZSTD;
+    bool Dictionary = true;
+    parquet::Encoding::type Values = parquet::Encoding::PLAIN;
+};
+
+// The writer ignores settings for paths it does not know and silently uses
+// plain values while a dictionary is on, so the footer is the proof: every
+// column chunk must use the effective codec, have a dictionary page exactly
+// when its dictionary is on, and encode data pages with the dictionary (or
+// its plain fallback) or the configured value encoding.
 iceberg::Status
-CheckColumnCodecs(const parquet::FileMetaData& footer, const iceberg::Schema& schema, const TParquetWriteSpec& spec)
+CheckColumnChunks(const parquet::FileMetaData& footer, const iceberg::Schema& schema, const TParquetWriteSpec& spec)
 {
     const auto fields = schema.fields();
-    std::vector<arrow::Compression::type> expected(fields.size(),
-        spec.Compression ? spec.Compression->Codec : arrow::Compression::ZSTD);
-    for (const auto& [name, compression] : spec.Columns) {
-        const auto field = std::ranges::find_if(fields, [&](const auto& item) {
-            return item.name() == name;
-        });
-        expected[static_cast<std::size_t>(field - fields.begin())] = compression.Codec;
-    }
     if (footer.num_columns() != static_cast<int>(fields.size())) {
         return iceberg::Invalid("Parquet footer does not match the table schema.");
     }
+    std::vector<TExpectedColumn> expected(fields.size());
+    for (std::size_t index = 0; index < fields.size(); ++index) {
+        auto& column = expected[index];
+        column.Codec = spec.Compression ? spec.Compression->Codec : arrow::Compression::ZSTD;
+        column.Dictionary = spec.Dictionary.value_or(true);
+        const auto own = std::ranges::find(spec.Columns, std::string(fields[index].name()), &TParquetColumnSpec::Name);
+        if (own != spec.Columns.end()) {
+            column.Codec = own->Compression ? own->Compression->Codec : column.Codec;
+            column.Dictionary = own->Dictionary.value_or(column.Dictionary);
+            column.Values = own->Encoding.value_or(column.Values);
+        }
+        column.Dictionary = column.Dictionary && fields[index].type()->type_id() != iceberg::TypeId::kBoolean;
+    }
     for (int group = 0; group < footer.num_row_groups(); ++group) {
         const auto rowGroup = footer.RowGroup(group);
-        for (int column = 0; column < footer.num_columns(); ++column) {
-            if (rowGroup->ColumnChunk(column)->compression() != expected[static_cast<std::size_t>(column)]) {
-                return iceberg::Invalid("Parquet writer did not apply the configured compression of column {}.",
-                    fields[static_cast<std::size_t>(column)].name());
+        for (int index = 0; index < footer.num_columns(); ++index) {
+            const auto& column = expected[static_cast<std::size_t>(index)];
+            const auto chunk = rowGroup->ColumnChunk(index);
+            const auto name = fields[static_cast<std::size_t>(index)].name();
+            if (chunk->compression() != column.Codec) {
+                return iceberg::Invalid("Parquet writer did not apply the configured compression of column {}.", name);
+            }
+            if (chunk->has_dictionary_page() != column.Dictionary) {
+                return iceberg::Invalid("Parquet writer did not apply the dictionary policy of column {}.", name);
+            }
+            bool dataPages = false;
+            for (const auto& stats : chunk->encoding_stats()) {
+                if (stats.page_type == parquet::PageType::DICTIONARY_PAGE || stats.count == 0) {
+                    continue;
+                }
+                dataPages = true;
+                const bool allowed = column.Dictionary ? stats.encoding == parquet::Encoding::RLE_DICTIONARY ||
+                        stats.encoding == parquet::Encoding::PLAIN_DICTIONARY ||
+                        stats.encoding == parquet::Encoding::PLAIN
+                                                       : stats.encoding == column.Values;
+                if (!allowed) {
+                    return iceberg::Invalid("Parquet writer did not apply the configured encoding of column {}.", name);
+                }
+            }
+            if (!dataPages) {
+                return iceberg::Invalid("Parquet footer records no data page encodings for column {}.", name);
             }
         }
     }
@@ -398,7 +477,7 @@ iceberg::Result<TDataWriteResult> WriteDataFile(std::shared_ptr<iceberg::FileIO>
                 *schema,
                 {static_cast<std::int64_t>(receipt.Length), shape.Rows},
                 {limits.MaxFileBytes}));
-        ICEBERG_RETURN_UNEXPECTED(CheckColumnCodecs(*footer, *schema, writeSpec));
+        ICEBERG_RETURN_UNEXPECTED(CheckColumnChunks(*footer, *schema, writeSpec));
         if (auto error = attempt->MarkFormatVerified(path)) {
             return iceberg::IOError(error.message());
         }
