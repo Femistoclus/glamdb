@@ -137,3 +137,7 @@ required in the reported native run. A separate system-Python negative control
 confirmed the ordinary optional-SDK guard; it is not native SDK evidence.
 Full-tree clang-tidy, sanitizer profiles and physical power-loss tests were not run
 for this change.
+
+Bulk HTTP cases in `v0.json` use `request_records`, LF-terminated NDJSON encoded
+with the route's `content_type`, and corresponding `record_schemas` in
+`v0.schema.json`. They share the ordinary `appendOutcome` response contract.

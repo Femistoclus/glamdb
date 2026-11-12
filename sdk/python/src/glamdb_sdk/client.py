@@ -13,6 +13,7 @@ from uuid import UUID
 import httpx
 
 from .cleanup import CleanupQueue
+from .bulk import BulkAppendRequest
 from .codec import Schema, decode_rows, int64, timestamp_us
 from .errors import (AuthenticationError, ErrorDetail, HTTPError, OutcomeUnknownError, ProtocolError,
                      TransportError, ValidationError)
@@ -179,7 +180,8 @@ class Client:
             raise first_error
 
     def _send(self, method: str, path: str, budget: Deadline, *, params: Mapping[str, Any] | None = None,
-              body: bytes | None = None, accept: str = "application/json") -> httpx.Response:
+              body: bytes | None = None, accept: str = "application/json",
+              bulk: BulkAppendRequest | None = None) -> httpx.Response:
         if self._closed:
             raise TransportError("client is closed", collection_id=budget.collection_id, operation_id=budget.operation_id)
         if body is not None:
@@ -204,11 +206,24 @@ class Client:
             headers["Accept-Encoding"] = "identity"
         if body is not None:
             headers["Content-Type"] = "application/json"
+        if bulk is not None:
+            headers["Content-Type"] = "application/x-ndjson"
+            headers["Content-Length"] = str(bulk.content_length)
         try:
             if self._database_prefix and not path.startswith("databases"):
                 path = self._database_prefix + path.removeprefix("./")
-            request = self._http.build_request(method, path, params=params, content=body, headers=headers, timeout=timeout)
-            response = self._http.send(request, stream=True)
+            if bulk is None:
+                request = self._http.build_request(method, path, params=params, content=body, headers=headers, timeout=timeout)
+                response = self._http.send(request, stream=True)
+            else:
+                with bulk.open_body() as chunks:
+                    def checked_chunks():
+                        for chunk in chunks:
+                            budget.check()
+                            yield chunk
+                    request = self._http.build_request(method, path, params=params, content=checked_chunks(),
+                                                       headers=headers, timeout=timeout)
+                    response = self._http.send(request, stream=True)
             try:
                 budget.check()
             except BaseException:
@@ -220,11 +235,17 @@ class Client:
             return response
         except httpx.HTTPError as exc:
             raise translate_transport(exc, budget) from exc
+        except OSError:
+            if bulk is None:
+                raise
+            raise TransportError("bulk upload source failed; no authoritative write outcome inferred",
+                                 collection_id=budget.collection_id, operation_id=budget.operation_id) from None
 
     def _json(self, method: str, path: str, budget: Deadline, *, params: Mapping[str, Any] | None = None,
-              body: bytes | None = None, write: bool = False) -> tuple[int, dict[str, Any]]:
+              body: bytes | None = None, write: bool = False,
+              bulk: BulkAppendRequest | None = None) -> tuple[int, dict[str, Any]]:
         try:
-            response = self._send(method, path, budget, params=params, body=body)
+            response = self._send(method, path, budget, params=params, body=body, bulk=bulk)
             status = response.status_code
             try:
                 value = read_json(response, budget, self._max_json_bytes)
@@ -650,6 +671,49 @@ class Client:
                                           expected_snapshot=expected_snapshot, deadline=remaining)
         status, value = self._json("POST", f"collections/{request.collection_id}/append", budget, body=request.body, write=True)
         return self._append_outcome(status, value, budget, expected_payload_hash=request.payload_hash)
+
+    def prepare_bulk_append(self, collection_id: str | UUID, batches: Iterable[Iterable[Mapping[str, Any]]], *,
+                            rows: int, operation_id: str | UUID, schema: Schema | Mapping[str, Any] | None = None,
+                            expected_snapshot: Any = ANY, deadline: float | None = None) -> BulkAppendRequest:
+        cid = uuid_string(collection_id, "collection_id")
+        op = uuid_string(operation_id, "operation_id")
+        budget = Deadline(deadline, collection_id=cid, operation_id=op)
+        selected = self._schema(schema) if schema is not None else self._schemas.get(cid)
+        if selected is None:
+            try:
+                selected = self.get_schema(cid, deadline=budget.check())
+            except (TransportError, ProtocolError, HTTPError) as exc:
+                exc.collection_id, exc.operation_id = cid, op
+                raise
+        return BulkAppendRequest.prepare(cid, op, selected, batches, rows=rows,
+                                         expected_snapshot=expected_snapshot, _check=budget.check)
+
+    def bulk_append(self, collection_id: str | UUID | BulkAppendRequest,
+                    batches: Iterable[Iterable[Mapping[str, Any]]] | None = None, *, rows: int | None = None,
+                    operation_id: str | UUID | None = None, schema: Schema | Mapping[str, Any] | None = None,
+                    expected_snapshot: Any = ANY, deadline: float | None = None) -> AppendOutcome:
+        owned = not isinstance(collection_id, BulkAppendRequest)
+        if not owned:
+            if (batches is not None or rows is not None or operation_id is not None or schema is not None
+                    or expected_snapshot is not ANY):
+                raise ValidationError("prepared bulk append already owns input, IDs, schema, and precondition")
+            request = collection_id
+            budget = Deadline(deadline, collection_id=request.collection_id, operation_id=request.operation_id)
+        else:
+            cid = uuid_string(collection_id, "collection_id")
+            op = uuid_string(operation_id, "operation_id")
+            budget = Deadline(deadline, collection_id=cid, operation_id=op)
+            if batches is None or rows is None:
+                raise ValidationError("bulk append requires batches and declared rows")
+            request = self.prepare_bulk_append(cid, batches, rows=rows, operation_id=op, schema=schema,
+                                               expected_snapshot=expected_snapshot, deadline=budget.check())
+        try:
+            status, value = self._json("POST", f"collections/{request.collection_id}/bulk-append", budget,
+                                       bulk=request, write=True)
+            return self._append_outcome(status, value, budget, expected_payload_hash=request.payload_hash)
+        finally:
+            if owned:
+                request.close()
 
     @staticmethod
     def _validate_receipt(result: Mapping[str, Any], expected_payload_hash: str | None, *, mock: bool = False) -> None:

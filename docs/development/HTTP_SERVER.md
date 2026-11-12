@@ -199,6 +199,7 @@ separate, broader development profile.
 | `GET /collections/{id}` | `GetCollection` | Identity and current schema |
 | `GET /collections/{id}/schema` | `GetCollection` / `Schema` | Stable field IDs |
 | `POST /collections/{id}/append` | `AppendDurable` | Synchronous native receipt |
+| `POST /collections/{id}/bulk-append` | `BulkAppendDurable` | Bounded NDJSON, anonymous disk replay, one atomic receipt |
 | `POST /collections/{id}/write-settings` | `UpdateWriteSettings` | Compare-and-set of Parquet settings for later appends |
 | `GET /collections/{id}/operations/{op}` | `FindAppendOutcome` | Original result or authoritative absence |
 | `POST /collections/{id}/scan/open` | `Scan` | Resolve a fixed view and return a cursor without consuming rows |
@@ -506,7 +507,13 @@ is acknowledged after authentication and body admission. Oversized headers retur
 431, malformed line endings 400, and read timeouts 408. JSON Content-Type accepts
 case-insensitive media names and UTF-8 charset parameters. Scan Accept supports
 media lists, wildcards and quality weights.
-Use ordinary buffered JSON requests. The server defaults to 127.0.0.1:8080.
+Ordinary routes use buffered JSON requests. The [native bulk route](BULK_INGESTION.md#native-http-sdk-and-cli)
+streams LF-terminated NDJSON with Content-Length through anonymous disk scratch:
+4 GiB total wire, 16 MiB per batch, ten-minute upload deadline, two global/one
+per-database spool permits retained through publisher completion. It uses separate
+spill workers and shared disk/memory reservations; partial uploads never enter
+core. Ordinary request and queue deadlines retain their existing values.
+The server defaults to 127.0.0.1:8080.
 `--listen` is explicit; terminate TLS and apply deployment limits at a trusted
 reverse proxy for remote access. There is one bearer identity, no user/RBAC layer.
 The token comes only from `GLAMDB_TOKEN`, never a URL, log, config response or UI

@@ -63,6 +63,7 @@ try {
         Require(!remote.Url.empty() || data.DatabaseID.empty(), "--database-id is remote only");
         Require(remote.Url.empty() || app.get_subcommand(std::string(data.Command))->count("--max-collections") == 0,
             "--max-collections configures offline stores only");
+        Require(data.Command != "bulk-append" || !remote.Url.empty(), "bulk-append requires --url");
         auto request = glamdb::NClient::BuildDataRequest(data);
         glamdb::NClient::TResponse response;
         glamdb::Status shutdown;

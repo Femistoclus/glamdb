@@ -210,6 +210,37 @@
     },
     {
       "method": "POST",
+      "path": "/databases/{database_id}/collections/{collection_id}/bulk-append",
+      "core": "Engine::BulkAppendDurable",
+      "status": 200,
+      "content_type": "application/x-ndjson",
+      "request_records": [
+        {
+          "operation_id": "00000000-0000-0000-0000-000000000192",
+          "rows": "1"
+        },
+        {
+          "rows": [
+            {
+              "key": "bulk-fixture"
+            }
+          ]
+        }
+      ],
+      "record_schemas": [
+        "bulkHeader",
+        "bulkBatch"
+      ],
+      "response_schema": "appendOutcome",
+      "response_fields": {
+        "outcome": "string",
+        "phase": "string",
+        "operation_id": "string",
+        "result": "object"
+      }
+    },
+    {
+      "method": "POST",
       "path": "/databases/{database_id}/collections/{collection_id}/write-settings",
       "core": "Engine::UpdateWriteSettings",
       "status": 200,

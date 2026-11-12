@@ -1,4 +1,5 @@
 #include "apps/server/routes.h"
+#include "apps/server/bulk.h"
 #include "apps/server/databases.h"
 #include "apps/server/metadata.h"
 #include "apps/server/scans.h"
@@ -246,6 +247,11 @@ TJson TRoutes::DescribeCapabilities(const EngineCapabilities& capabilities,
 {
     auto value = CapabilitiesJson(capabilities, health, databaseManagement, storeID, Scans_->GetLimits(), limits);
     value["features"]["database_drop"] = static_cast<bool>(Databases_);
+    value["features"]["bulk_append"] = true;
+    value["limits"]["bulk_request_bytes"] = 4ULL << 30;
+    value["limits"]["bulk_batch_bytes"] = MaxRequestBytes;
+    value["limits"]["bulk_uploads"] = 2;
+    value["limits"]["bulk_uploads_per_database"] = 1;
     value["scan_sessions"] = Scans_->GetStatistics(storeID);
     const auto usage = Resources_->GetUsage();
     value["shared_resources"] = {{"memory_limits_bytes", Resources_->GetLimits().memory_bytes},
@@ -344,6 +350,11 @@ TResponse TRoutes::Route(const TRequest& request) const
     TJsonRows rows;
     if (request.Method == "POST") {
         const auto type = request.Headers.find("content-type");
+        if (IsBulkUpload(request)) {
+            Require(HasBulkContentType(request), "Content-Type must be application/x-ndjson", "UNSUPPORTED_MEDIA_TYPE");
+            body = ReadBulkHeader(request);
+            return RoutePrepared(request, path, query, body);
+        }
         if (type == request.Headers.end() || !IsJsonContentType(type->second)) {
             return ErrorResponse(415, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json");
         }
@@ -507,6 +518,9 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
         return OutcomeResponse(json_adapter::ToJson(*outcome));
     }
     const std::string action = parts.size() >= 3 ? parts[2] : "";
+    if (request.Method == "POST" && parts.size() == 3 && action == "bulk-append") {
+        return BulkAppend(*Engine_, id, request, body);
+    }
     if (request.Method == "POST" && parts.size() == 4 && action == "scan" && parts[3] == "cancel") {
         // Releasing a scoped cursor must remain possible when an unrelated
         // core failure has fenced catalog reads pending reconciliation.

@@ -1,5 +1,7 @@
 #include "apps/server/server.h"
 #include "apps/server/admission.h"
+#include "apps/server/upload_job.h"
+#include "apps/transport/bulk_upload.h"
 
 #include "storage/resources.h"
 
@@ -53,7 +55,7 @@ ELogOperation ClassifyOperation(const TRequest& request) noexcept
             if (suffix.find("/operations/") != std::string::npos) {
                 return ELogOperation::Operation;
             }
-            if (suffix.ends_with("/append")) {
+            if (suffix.ends_with("/append") || suffix.ends_with("/bulk-append")) {
                 return ELogOperation::Append;
             }
             if (suffix.ends_with("/scan/open")) {
@@ -108,6 +110,8 @@ struct TState
     TCallQueue Writers{4, 1};
     TCallQueue Control{2, 1};
     TCallQueue Lifecycle{4, 1};
+    asio::thread_pool Uploads{2};
+    std::set<std::string> UploadDatabases;
     TRoutes& Routes;
     std::set<std::shared_ptr<TSession>> Sessions;
     std::map<std::string, size_t> HeaderPeers;
@@ -127,6 +131,7 @@ public:
         : DescriptorMemory_(Unwrap(state.Routes.GetResourceOwner()->Reserve(ResourceClass::Completion, 256ULL << 10)))
         , Socket_(std::move(socket))
         , Timer_(state.IO)
+        , SpillTimer_(state.IO)
         , State_(state)
         , Metrics_(nullptr)
         , RequestID_(state.Logger ? state.Logger->NewRequestID() : 0)
@@ -301,6 +306,9 @@ private:
             if (Active_ && WorkerDone_.load()) {
                 CompleteCall();
             }
+            if (!Active_ && CleanupUpload()) {
+                State_.Sessions.erase(shared_from_this());
+            }
             return;
         }
         Closed_ = true;
@@ -328,7 +336,9 @@ private:
             return;
         }
         ReleaseCall();
-        State_.Sessions.erase(shared_from_this());
+        if (CleanupUpload()) {
+            State_.Sessions.erase(shared_from_this());
+        }
     }
     void Busy()
     {
@@ -346,10 +356,28 @@ private:
             Write(ErrorResponse(401, "UNAUTHORIZED", "bearer token required"));
             return;
         }
+        Bulk_ = IsBulkUpload(Request_);
+        if (Bulk_) {
+            Require(HasBulkContentType(Request_),
+                "Content-Type must be application/x-ndjson",
+                "UNSUPPORTED_MEDIA_TYPE");
+            Require(Request_.ContentLength > 0, "bulk upload requires a nonempty body");
+            const auto [path, query] = ParseTarget(Request_.Target);
+            (void)query;
+            const auto split = path.starts_with("/databases/") ? path.find('/', 11) : std::string::npos;
+            Database_ = split == std::string::npos ? std::string("legacy") : path.substr(11, split - 11);
+            if (State_.UploadDatabases.size() >= 2 || State_.UploadDatabases.contains(Database_)) {
+                Busy();
+                return;
+            }
+            State_.UploadDatabases.insert(Database_);
+            BulkAdmitted_ = true;
+            ReadExpires_ = std::chrono::steady_clock::now() + std::chrono::minutes(10);
+        }
         const bool protectedCall = UsesProtectedAdmission(Request_) && Request_.ContentLength <= (64ULL << 10);
         BodyMemory_ = Unwrap(
             State_.Routes.GetResourceOwner()->Reserve(protectedCall ? ResourceClass::Completion : ResourceClass::Data,
-                static_cast<uint64_t>(Request_.ContentLength) * 2 + (64ULL << 10)));
+                Bulk_ ? 256ULL << 10 : static_cast<uint64_t>(Request_.ContentLength) * 2 + (64ULL << 10)));
         ReleaseHeaders();
         HeaderProbe_ = false;
         Input_.erase(0, size);
@@ -419,6 +447,10 @@ private:
         if (Closed_ || Processing_) {
             return;
         }
+        if (Bulk_) {
+            ReadBulk();
+            return;
+        }
         const auto remaining = Request_.ContentLength - Input_.size();
         if (remaining == 0) {
             Dispatch();
@@ -437,6 +469,139 @@ private:
                     } else {
                         self->Dispatch();
                     }
+                });
+            });
+    }
+    void ReleaseBulk() noexcept
+    {
+        if (BulkAdmitted_) {
+            State_.UploadDatabases.erase(Database_);
+            BulkAdmitted_ = false;
+        }
+    }
+    void WatchSpill(const std::shared_ptr<TUploadJob>& job)
+    {
+        SpillTimer_.expires_after(std::chrono::milliseconds(100));
+        SpillTimer_.async_wait([self = shared_from_this(), job](const std::error_code& error) {
+            self->Guard([&] {
+                if (error || self->SpillJob_ != job) {
+                    return;
+                }
+                if (job->Done.load()) {
+                    self->CompleteSpill(job);
+                } else {
+                    self->WatchSpill(job);
+                }
+            });
+        });
+    }
+    void StartSpill(bool cleanup = false)
+    {
+        auto job = std::make_shared<TUploadJob>();
+        job->Resources = State_.Routes.GetResourceOwner();
+        job->Length = Request_.ContentLength;
+        job->Cleanup = cleanup;
+        if (!cleanup) {
+            job->Bytes = std::move(Input_);
+            job->Complete = BulkReceived_ + job->Bytes.size() == Request_.ContentLength;
+        }
+        QueueUpload(SpillJob_, Request_.BulkUpload, job, [&] {
+            WatchSpill(job);
+            asio::post(State_.Uploads, [self = shared_from_this(), guard = asio::make_work_guard(State_.IO), job] {
+                job->Run([&] {
+                    asio::post(self->State_.IO, [self, job] {
+                        self->Guard([&] {
+                            self->CompleteSpill(job);
+                        });
+                    });
+                });
+            });
+        });
+    }
+    bool CleanupUpload() noexcept
+    {
+        if (SpillJob_) {
+            return false;
+        }
+        if (!Request_.BulkUpload) {
+            ReleaseBulk();
+            return true;
+        }
+        try {
+            StartSpill(true);
+        } catch (...) {
+            // Retain scratch and its permit if scheduling fails. New accepts,
+            // shutdown reaping and this independent timer retry without closing
+            // a file on the listener or allowing the exception to escape.
+            try {
+                SpillTimer_.expires_after(std::chrono::milliseconds(100));
+                SpillTimer_.async_wait([self = shared_from_this()](const std::error_code& error) {
+                    if (!error) {
+                        self->Guard([&] {
+                            if (self->CleanupUpload() && self->Closed_) {
+                                self->Finish();
+                            }
+                        });
+                    }
+                });
+            } catch (...) {
+                std::fputs("upload cleanup dispatch failed\n", stderr);
+            }
+        }
+        return false;
+    }
+    void CompleteSpill(const std::shared_ptr<TUploadJob>& job)
+    {
+        if (SpillJob_ != job || !job->Done.load()) {
+            return;
+        }
+        Request_.BulkUpload = std::move(job->Upload);
+        SpillJob_.reset();
+        SpillTimer_.cancel();
+        if (job->Cleanup) {
+            ReleaseBulk();
+            if (Closed_) {
+                Finish();
+            }
+            return;
+        }
+        if (Closed_) {
+            Finish();
+            return;
+        }
+        if (Writing_) {
+            CleanupUpload();
+            return;
+        }
+        if (job->Failure) {
+            std::rethrow_exception(job->Failure);
+        }
+        BulkReceived_ += job->Bytes.size();
+        if (job->Complete) {
+            Dispatch();
+        } else {
+            ReadBulk();
+        }
+    }
+    void ReadBulk()
+    {
+        if (!Request_.BulkUpload || !Input_.empty()) {
+            StartSpill();
+            return;
+        }
+        Socket_.async_read_some(
+            asio::buffer(ReadBuffer_.data(), std::min(ReadBuffer_.size(), Request_.ContentLength - BulkReceived_)),
+            [self = shared_from_this()](const std::error_code& error, size_t count) {
+                self->Guard([&] {
+                    if (self->Closed_ || self->Writing_) {
+                        return;
+                    }
+                    if (error) {
+                        self->Finish();
+                        return;
+                    }
+                    self->Input_.assign(self->ReadBuffer_.data(), count);
+                    self->ReadBulk();
                 });
             });
     }
@@ -463,7 +628,7 @@ private:
     void CompleteCall() noexcept
     {
         ReleaseCall();
-        if (Closed_) {
+        if (CleanupUpload() && Closed_) {
             State_.Sessions.erase(shared_from_this());
         }
     }
@@ -628,13 +793,16 @@ private:
     std::shared_ptr<ResourceReservation> DescriptorMemory_, BodyMemory_;
     std::shared_ptr<const void> OutputMemory_;
     TTcp::socket Socket_;
-    asio::steady_timer Timer_;
+    asio::steady_timer Timer_, SpillTimer_;
     TState& State_;
     THttpScope Metrics_;
     TRequest Request_;
-    std::array<char, 4096> ReadBuffer_{};
+    std::array<char, 65536> ReadBuffer_{};
     std::string Input_, Header_, Output_, Peer_, Database_;
     size_t Checked_ = 0, Generation_ = 0, Drained_ = 0;
+    size_t BulkReceived_ = 0;
+    bool Bulk_ = false, BulkAdmitted_ = false;
+    std::shared_ptr<TUploadJob> SpillJob_;
     TCallQueue* Queue_ = nullptr;
     std::chrono::steady_clock::time_point ReadExpires_, QueueExpires_;
     std::atomic<bool> WorkerFailed_{false}, WorkerDone_{false};
@@ -654,14 +822,22 @@ void TState::ReapWorkers()
     std::array<std::shared_ptr<TSession>, 96> finished;
     size_t count = 0;
     for (const auto& session : Sessions) {
-        if (session->Active_ && session->WorkerDone_.load() && (session->Closed_ || session->WorkerFailed_.load())) {
+        if ((session->Active_ && session->WorkerDone_.load() && (session->Closed_ || session->WorkerFailed_.load())) ||
+            (session->SpillJob_ && session->SpillJob_->Done.load()) ||
+            (session->Closed_ && !session->Active_ && !session->SpillJob_ && session->Request_.BulkUpload))
+        {
             finished[count++] = session;
         }
     }
     for (size_t i = 0; i < count; ++i) {
         finished[i]->Guard([&] {
-            finished[i]->CompleteCall();
-            finished[i]->Finish();
+            if (finished[i]->SpillJob_ && finished[i]->SpillJob_->Done.load()) {
+                const auto job = finished[i]->SpillJob_;
+                finished[i]->CompleteSpill(job);
+            } else {
+                finished[i]->CompleteCall();
+                finished[i]->Finish();
+            }
         });
     }
 }
@@ -852,6 +1028,7 @@ void RunServer(TRoutes& routes,
     state.Writers.Pool.join();
     state.Control.Pool.join();
     state.Lifecycle.Pool.join();
+    state.Uploads.join();
     state.ReapWorkers();
     if (ownedRuntime) {
         ownedRuntime->SetResult(true);

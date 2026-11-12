@@ -1,5 +1,5 @@
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
-add_library(glamdb_routes STATIC routes.cpp databases.cpp drop_store.cpp scans.cpp metadata.cpp)
+add_library(glamdb_routes STATIC routes.cpp bulk.cpp upload_job.cpp databases.cpp drop_store.cpp scans.cpp metadata.cpp)
 target_link_libraries(glamdb_routes PUBLIC glamdb_transport glamdb_logging
     PRIVATE glamdb_build_options SQLite::SQLite3 OpenSSL::Crypto)
 target_compile_definitions(glamdb_routes PRIVATE GLAMDB_HTTP_STORAGE=$<BOOL:${GLAMDB_BUILD_STORAGE}>)

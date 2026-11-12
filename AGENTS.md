@@ -129,7 +129,11 @@ under one atomic snapshot/receipt; ordinary append retains its old limits. Read
 [bulk ingestion](docs/development/BULK_INGESTION.md) for source lifetime, cancellation,
 explicit bulk I/O attempts, result receipt version 2, conservative device reservations
 and measured limits. Keep unmarked ordinary one-file guards strict and change
-publication/recovery bounds together. No bulk HTTP upload endpoint is provided.
+publication/recovery bounds together. Native `POST /collections/{id}/bulk-append` accepts bounded NDJSON through an anonymous
+transport spool; the SDK prepares replayable disk-backed requests and the standalone CLI
+streams regular files. Uploads are capped at 4 GiB wire bytes, two globally and one per
+database; shared disk/memory admission lasts through execution. See the bulk guide for
+framing, deadlines, retry, native-only availability and validation.
 
 Native append preparation retains one schema mapping per traversal and reuses
 inspected string sizes for its owned columns. Full validation remains per batch,

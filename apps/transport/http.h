@@ -6,6 +6,7 @@
 #include <utility>
 
 namespace glamdb::NTransport {
+class TBulkUpload;
 struct TRequest
 {
     std::string Method;
@@ -13,6 +14,7 @@ struct TRequest
     std::map<std::string, std::string> Headers;
     std::string Body;
     size_t ContentLength = 0;
+    std::shared_ptr<TBulkUpload> BulkUpload{};
 };
 // Base ownership is destroyed after response payloads.
 struct TResponseResources
@@ -50,6 +52,8 @@ struct TResponse : TResponseResources
 };
 
 bool UsesProtectedAdmission(const TRequest& request);
+bool IsBulkUpload(const TRequest& request);
+bool HasBulkContentType(const TRequest& request);
 TResponse ReadinessResponse(const StoreHealth& health);
 TRequest ParseHeaders(std::string_view bytes);
 std::string SerializeResponseHead(const TResponse& response);

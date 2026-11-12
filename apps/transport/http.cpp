@@ -1,4 +1,5 @@
 #include "apps/transport/http.h"
+#include "apps/transport/bulk_upload.h"
 
 #include <charconv>
 #include <cstdlib>
@@ -39,6 +40,23 @@ bool IsToken(std::string_view text)
     });
 }
 } // namespace
+
+bool IsBulkUpload(const TRequest& request)
+{
+    const auto [path, query] = ParseTarget(request.Target);
+    const auto split = path.starts_with("/databases/") ? path.find('/', 11) : std::string::npos;
+    const auto suffix = split == std::string::npos ? path : path.substr(split);
+    constexpr std::string_view prefix = "/collections/", ending = "/bulk-append";
+    return request.Method == "POST" && query.empty() && suffix.starts_with(prefix) && suffix.ends_with(ending) &&
+        suffix.size() > prefix.size() + ending.size() &&
+        suffix.find('/', prefix.size()) == suffix.size() - ending.size();
+}
+
+bool HasBulkContentType(const TRequest& request)
+{
+    const auto type = request.Headers.find("content-type");
+    return type != request.Headers.end() && Lower(Trim(type->second)) == "application/x-ndjson";
+}
 
 bool UsesProtectedAdmission(const TRequest& request)
 {
@@ -96,7 +114,9 @@ TRequest ParseHeaders(std::string_view bytes)
     if (result.Headers.contains("content-length")) {
         result.ContentLength = ParseSize(result.Headers.at("content-length"));
     }
-    Require(result.ContentLength <= MaxRequestBytes, "request body is too large", "PAYLOAD_TOO_LARGE");
+    Require(result.ContentLength <= (IsBulkUpload(result) ? MaxBulkRequestBytes : MaxRequestBytes),
+        "request body is too large",
+        "PAYLOAD_TOO_LARGE");
     Require(result.Method != "POST" || result.Headers.contains("content-length"), "POST requires Content-Length");
     Require(result.Method == "POST" || result.ContentLength == 0, "body only allowed for POST");
     return result;

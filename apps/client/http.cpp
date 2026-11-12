@@ -5,6 +5,8 @@
 #include <cctype>
 #include <charconv>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <openssl/sha.h>
 #include <sstream>
 #include <stdexcept>
@@ -149,6 +151,20 @@ TResponse SendRequest(const TRequest& request)
     Check(request.Method == "GET" || request.Method == "POST", "unsupported method; use GET or POST");
     Check(Clean(request.Accept) && Clean(request.ContentType), "invalid media type");
     Check(request.Body.size() <= size_t{16} * 1024 * 1024, "request body too large");
+    std::ifstream bodyFile;
+    size_t bodyLength = request.Body.size();
+    if (!request.BodyFile.empty()) {
+        Check(request.Method == "POST" && request.Body.empty() && request.ContentType == "application/x-ndjson",
+            "file uploads require a bulk POST");
+        Check(std::filesystem::is_regular_file(request.BodyFile), "bulk input must be a regular file");
+        bodyFile.open(request.BodyFile, std::ios::binary | std::ios::ate);
+        Check(static_cast<bool>(bodyFile), "cannot open bulk input file");
+        const auto length = bodyFile.tellg();
+        Check(length > 0 && static_cast<uint64_t>(length) <= (4ULL << 30), "bulk input must be 1 byte..4 GiB");
+        bodyLength = static_cast<size_t>(length);
+        bodyFile.seekg(0);
+        Check(static_cast<bool>(bodyFile), "cannot rewind bulk input file");
+    }
     Check(request.TimeoutSeconds > 0 && request.TimeoutSeconds <= 3600, "timeout must be 1..3600 seconds");
     const char* token = std::getenv("GLAMDB_TOKEN");
     Check(token && *token && std::string_view(token).size() <= 256 && Clean(token),
@@ -156,7 +172,7 @@ TResponse SendRequest(const TRequest& request)
     std::ostringstream output;
     output << request.Method << ' ' << url.Target << " HTTP/1.1\r\nHost: " << url.Authority
            << "\r\nAuthorization: Bearer " << token << "\r\nAccept: " << request.Accept
-           << "\r\nContent-Type: " << request.ContentType << "\r\nContent-Length: " << request.Body.size()
+           << "\r\nContent-Type: " << request.ContentType << "\r\nContent-Length: " << bodyLength
            << "\r\nConnection: close\r\n\r\n"
            << request.Body;
     const auto bytes = output.str();
@@ -190,6 +206,9 @@ TResponse SendRequest(const TRequest& request)
     TResponse response;
     std::exception_ptr failure;
     std::string wire;
+    std::array<char, 65536> uploadBuffer{};
+    size_t uploaded = 0;
+    std::function<void()> uploadNext;
     auto finish = [&](const std::error_code& error) {
         try {
             Check(!error || error == asio::error::eof || error == asio::ssl::error::stream_truncated,
@@ -202,47 +221,76 @@ TResponse SendRequest(const TRequest& request)
         std::error_code ignored;
         stream.next_layer().close(ignored);
     };
-    auto exchange = [&](auto& connection) {
-        // Once transmission starts, a failed write can leave a partial request at
-        // the peer. Resolution, connection, policy and TLS failures precede this.
-        requestStarted = true;
-        asio::async_write(connection,
-            asio::buffer(bytes),
-            [&, connectionPtr = &connection](const std::error_code& error, size_t) {
-                if (error) {
-                    finish(error);
+    auto readResponse = [&](auto& connection) {
+        // An early refusal may already be readable after a request write fails.
+        // Only a complete, valid response resolves the outcome in that case.
+        auto* connectionPtr = &connection;
+        asio::async_read_until(*connectionPtr,
+            asio::dynamic_buffer(wire, 16384),
+            "\r\n\r\n",
+            [&, connectionPtr](const std::error_code& headerError, size_t) {
+                if (headerError) {
+                    finish(headerError);
                     return;
                 }
-                asio::async_read_until(*connectionPtr,
-                    asio::dynamic_buffer(wire, 16384),
-                    "\r\n\r\n",
-                    [&, connectionPtr](const std::error_code& headerError, size_t) {
-                        if (headerError) {
-                            finish(headerError);
-                            return;
-                        }
-                        try {
-                            const auto frame = ParseResponse(wire, false);
-                            const auto length = Number(frame.Headers.at("content-length").front());
-                            const auto remaining = length - (wire.size() - wire.find("\r\n\r\n") - 4);
-                            if (remaining == 0) {
-                                finish({});
-                                return;
-                            }
-                            asio::async_read(*connectionPtr,
-                                asio::dynamic_buffer(wire, size_t{64} * 1024 * 1024 + 16384),
-                                asio::transfer_exactly(remaining),
-                                [&](const std::error_code& bodyError, size_t) {
-                                    finish(bodyError);
-                                });
-                        } catch (...) {
-                            failure = std::current_exception();
-                            timer.cancel();
-                            std::error_code ignored;
-                            stream.next_layer().close(ignored);
+                try {
+                    const auto frame = ParseResponse(wire, false);
+                    const auto length = Number(frame.Headers.at("content-length").front());
+                    const auto remaining = length - (wire.size() - wire.find("\r\n\r\n") - 4);
+                    if (remaining == 0) {
+                        finish({});
+                        return;
+                    }
+                    asio::async_read(*connectionPtr,
+                        asio::dynamic_buffer(wire, size_t{64} * 1024 * 1024 + 16384),
+                        asio::transfer_exactly(remaining),
+                        [&](const std::error_code& bodyError, size_t) {
+                            finish(bodyError);
+                        });
+                } catch (...) {
+                    failure = std::current_exception();
+                    timer.cancel();
+                    std::error_code ignored;
+                    stream.next_layer().close(ignored);
+                }
+            });
+    };
+    auto exchange = [&](auto& connection) {
+        requestStarted = true;
+        uploadNext = [&, connectionPtr = &connection] {
+            if (!bodyFile.is_open() || uploaded == bodyLength) {
+                readResponse(*connectionPtr);
+                return;
+            }
+            try {
+                const auto count = std::min(uploadBuffer.size(), bodyLength - uploaded);
+                bodyFile.read(uploadBuffer.data(), static_cast<std::streamsize>(count));
+                Check(bodyFile.gcount() == static_cast<std::streamsize>(count), "bulk input changed or read failed");
+                uploaded += count;
+                asio::async_write(*connectionPtr,
+                    asio::buffer(uploadBuffer.data(), count),
+                    [&](const std::error_code& error, size_t) {
+                        if (error) {
+                            readResponse(*connectionPtr);
+                        } else {
+                            uploadNext();
                         }
                     });
-            });
+            } catch (...) {
+                failure = std::current_exception();
+                timer.cancel();
+                std::error_code ignored;
+                stream.next_layer().close(ignored);
+            }
+        };
+        // Once transmission starts, partial sends have an unresolved outcome.
+        asio::async_write(connection, asio::buffer(bytes), [&](const std::error_code& error, size_t) {
+            if (error) {
+                readResponse(connection);
+            } else {
+                uploadNext();
+            }
+        });
     };
     resolver.async_resolve(url.Host,
         url.Port,

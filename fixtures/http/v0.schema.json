@@ -3568,6 +3568,51 @@
           "$ref": "#/$defs/dateLiteral"
         }
       ]
+    },
+    "bulkHeader": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "rows": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$",
+          "maxLength": 8
+        },
+        "expected_snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operation_id",
+        "rows"
+      ],
+      "additionalProperties": false
+    },
+    "bulkBatch": {
+      "type": "object",
+      "properties": {
+        "rows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/row"
+          },
+          "minItems": 1,
+          "maxItems": 10000
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "additionalProperties": false
     }
   }
 }

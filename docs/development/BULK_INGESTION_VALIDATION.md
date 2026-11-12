@@ -213,3 +213,133 @@ considered for later work:
 
 Those are future extensions. The append-only scope, replayable source and finite
 development profile are deliberate choices for this implementation.
+
+
+## Remote bulk follow-up (#172)
+
+The native HTTP adapter, Python SDK and standalone CLI now upload one bulk
+operation with declared total rows and bounded LF-terminated NDJSON batches.
+The transport stages replay in anonymous disk-backed scratch; the core keeps its
+existing two-pass hash, exact retry, publication and recovery protocol. No new
+persistent format, source replay during recovery or automatic retry is introduced.
+The organization gateway masks the native bulk feature until it has a compatible
+streaming write-admission adapter; browser import remains outside this change.
+
+Independent review checked framing, scalar/hash identity, pre-binding failure,
+publication, resource ownership, admission, cleanup and caller ambiguity. It
+confirmed the anonymous spool fits the existing source protocol, and found:
+
+- Scheduling allocation failures could terminate a spill worker or retain a
+  session. Enqueue now restores ownership on failure; atomic completion remains
+  observable if notification fails. Dedicated fault tests cover both boundaries.
+- Final scratch close could execute on the listener. Cleanup now runs on spill
+  workers with reservations and permits retained through acknowledgement; a
+  blocked-close test checks health progress and resource release.
+- SDK scratch seek/read and schema-lookup errors omitted the original identity.
+  Regressions fail before the fix, then verify both UUIDs, unlocked replay,
+  sanitized errors and failures after the final transmitted block.
+- Gateway capabilities advertised an unavailable route. Its capability response
+  now masks the feature and upload limits, with a before/after regression.
+- Memory-backed temporary storage could charge the operation size outside fixed
+  memory admission. The Linux server rejects tmpfs/ramfs scratch; a real native
+  test verifies refusal before binding and continued process health.
+
+The design critique compared server scratch with in-memory buffering, client
+resend phases, persistent upload sessions and an Arrow IPC transport. In-memory
+buffering violates the operation-size-independent envelope; resend phases would
+couple the writer to a second network exchange; durable upload sessions add a
+new recovery/cleanup authority. NDJSON reuses the strict precise row codec and
+requires no new client dependency. Arrow IPC could be a separate future encoding;
+it does not remove replay or lifecycle requirements.
+
+The measured profile is Linux x86-64 with Clang/libc++ 18 and the pinned native
+prefix, on a shared development filesystem. The native tests cover 12,001 exact
+rows including duplicates, chunk-independent retries, changed-input conflict,
+initial snapshot and fresh-process receipt/retry, invalid tail and interrupted
+upload without a binding, a deliberately unconsumed committed POST reply,
+SDK/CLI uploads beyond ordinary append, verified TLS, global/per-database upload
+limits and available lifecycle/readiness controls. A 42,320,552-byte body is
+streamed while the last record is withheld; outcome lookup remains absent and
+statistics remain zero before execution. Staging RSS is sampled separately from
+core execution. The Python preparation test also spills over 16 MiB while
+keeping traced preparation heap below 8 MiB.
+
+The initial remote validation used official `ad898d7`; recorded checks on 2026-11-12:
+
+| Check | Executed result |
+| --- | --- |
+| Debug native server, standalone CLI, admin, transport/routes tests and native fault driver | Build passed |
+| `python -m pytest -q` with the hash-pinned development packages | 1,499 passed, 31 skipped, 12 subtests passed; two external deprecation warnings |
+| CTest routes/transport/native HTTP, bulk, TLS security, scalars, CLI and native fault suites | 152/152 passed |
+| `format-check`, `quality-negative-check` | 294 project files checked; intentional violations rejected |
+| LLVM 18 clang-tidy | All 11 changed translation units passed |
+| 42,320,552-byte native upload before final record/core entry | Staging RSS growth 757,760 bytes; no operation binding or visible rows |
+| ASan/UBSan upload job faults, including blocked cleanup, with leak detection | 3/3 passed with the compatibility setting below |
+| ASan/UBSan SDK/CLI bulk, verified TLS, admission, media type and tmpfs refusal | 5/5 passed with the same setting |
+
+Reproduce the ordinary native contour after configuring/building the requested
+targets (the native fault test also requires `glamdb_native_fault_driver`):
+
+```sh
+python -m pytest -q
+GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 \
+  ctest --test-dir build/local --output-on-failure -j 4 \
+  -R '^(glamdb\.(bulk_http|native_http|http_review|http_security|native_scalar_types|cli_network|cli_data)|glamdb\.routes\.|glamdb\.transport\.)'
+```
+
+The local ASan/UBSan build reuses ordinary pinned dependencies and the existing
+Clang/libc++ 18 toolchain. It needed `detect_container_overflow=0` because
+instrumented libc++ container headers coexist with uninstrumented upstream code;
+GoogleTest discovery itself otherwise reports container poisoning. Heap/lifetime,
+undefined-behavior and leak checks remain enabled. The three upload job cases
+pass with `ASAN_OPTIONS=detect_container_overflow=0:detect_leaks=1:halt_on_error=1`
+and `UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1`.
+
+The complete local native bulk sanitizer attempt is **not qualified**: an
+eight-case attempt completed five cases but could not complete three exception
+paths because of an allocation/deallocation mismatch in the reused
+libc++/libc++abi runtime. An independent exception-only program, with no GlamDB
+code, reproduces `operator new` versus `free` when throwing a
+`std::runtime_error(std::string(...))` with this runtime/library combination.
+That check was not disabled. The production RSS case is a separate unsanitized
+measurement; no ASan RSS or complete local sanitizer campaign is claimed.
+Required clean CI sanitizer profiles remain separate evidence.
+
+This evidence does not qualify maximum-size decode RSS, disk-controller behavior,
+physical power loss, a 1 TiB load or a universal cgroup memory governor. Source
+callbacks remain cooperative, and CLI callers must preserve their input file and
+UUID for exact retries.
+
+A further independent review before merge found that the standalone CLI discarded
+an available early HTTP refusal when sending a bulk body larger than the server's
+32 MiB rejection-drain ceiling. It reported an unknown outcome instead of the
+complete pre-execution admission or authentication refusal. The client now attempts
+its existing bounded response read after a socket write failure. Only a complete,
+valid response resolves the outcome; absent or malformed replies remain uncertain.
+The native regression first failed all four HTTP/verified-TLS and
+admission/authentication combinations, then passed after the fix, with no operation
+binding or visible rows. It also passed with the CLI under ASan/UBSan and leak
+detection using the compatibility setting above. A follow-up independent inspection
+confirmed the callback lifetimes and unchanged response/deadline validation.
+Official `6adb50c` was incorporated without conflicts before the final checks.
+
+On that combined revision, the native build, full Python suite (1,499 passed,
+31 skipped, 12 subtests; two external deprecation warnings), and the 152-case
+native contour above all passed. LLVM 18 formatting checked 298 project files,
+and clang-tidy passed for the changed client translation unit. The new four-case
+early-refusal regression passed with the ordinary CLI and with the instrumented
+CLI; this focused sanitizer result does not expand the earlier broad sanitizer
+qualification.
+
+Before merging, official `8677619` added shared SHA acceleration and manifest
+merging. The roadmap conflict was resolved preserving both upstream evidence and
+remote bulk coverage; independent review confirmed unchanged canonical preimages,
+bulk receipt counters, membership and publication/recovery checks. A post-conflict
+run exposed a test assuming that a malformed-upload reply implied cleanup had
+released its permit. That loop now retries its exact request for at most five
+seconds only on `503 SERVER_BUSY` with `execution_started: false`; parsing errors
+and operation-absence checks remain strict. This test correction was independently
+reviewed. The final affected contour passed 75 tests, with one child-process helper
+skipped and two manual capacity tests disabled. It includes native HTTP/CLI, bulk
+publication/recovery, canonical hashes, forced SHA paths and manifest closure.
+The final native build and formatting check (300 project files) passed.

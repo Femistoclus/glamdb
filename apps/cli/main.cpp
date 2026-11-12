@@ -234,6 +234,8 @@ try {
         path = std::move(prepared.Url);
         input.Method = std::move(prepared.Method);
         input.Body = std::move(prepared.Body);
+        input.BodyFile = std::move(prepared.BodyFile);
+        input.ContentType = std::move(prepared.ContentType);
     } else if (create->parsed()) {
         path = "/databases";
         input.Method = "POST";

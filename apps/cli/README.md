@@ -247,3 +247,21 @@ The same executable also offers `generate` and `bench write/read/verify/resolve`
 through an optional Python environment. See the
 [workload guide](../../tools/workload/README.md) for installation, exact outcome
 journals, Locust reports and native E2E. Ordinary requests do not require Python.
+
+## Native bulk upload
+
+```sh
+glamdb-cli bulk-append --url https://db.example.test --database-id DATABASE_UUID \
+  --collection-id COLLECTION_UUID --body upload.ndjson --timeout 700
+```
+
+This command streams a regular replayable file in 64 KiB blocks, up to 4 GiB.
+Its first LF-terminated NDJSON record declares `operation_id`, total `rows` and an
+optional `expected_snapshot`; later `{"rows":[...]}` records hold bounded batches.
+Preserve the exact file and operation UUID for explicit retries and do not mutate
+the file while uploading. Stdin is unsupported. The named append outcome exit
+codes and HTTPS verification apply. `glamdb-admin bulk-append --url ...` is also
+available; offline bulk upload is unsupported. The generic buffered `request`
+command keeps its 16 MiB limit. See the [bulk contract](../../docs/development/BULK_INGESTION.md#native-http-sdk-and-cli)
+for per-record limits, deadlines and interrupted-upload behavior. UI import and
+the organization gateway upload adapter remain outside this native route.

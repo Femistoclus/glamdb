@@ -54,6 +54,7 @@ std::vector<CLI::App*> AddDataCommands(CLI::App& app, TDataCommand& data)
              "collection",
              "schema",
              "append",
+             "bulk-append",
              "scan",
              "operation",
              "snapshots",
@@ -94,6 +95,9 @@ std::vector<CLI::App*> AddDataCommands(CLI::App& app, TDataCommand& data)
             if (action == "append") {
                 body->required();
             }
+        }
+        if (action == "bulk-append") {
+            command->add_option("--body", data.BodyFile, "Replayable NDJSON bulk request file")->required();
         }
         if (action == "operation") {
             command->add_option("--operation-id", data.OperationID, "Original append UUID")->required();
@@ -174,6 +178,11 @@ TRequest BuildDataRequest(const TDataCommand& data)
             request.Method = "POST";
             request.Body = "{\"expected_version\":" + TJson(data.ExpectedVersion).dump() +
                 ",\"write_settings\":" + ReadDataFile(data.WriteSettingsFile) + "}";
+        } else if (data.Command == "bulk-append") {
+            Require(data.BodyFile != "-", "bulk append requires a regular replayable file");
+            request.Method = "POST";
+            request.ContentType = "application/x-ndjson";
+            request.BodyFile = data.BodyFile;
         } else if (data.Command == "append" || data.Command == "scan") {
             request.Method = "POST";
             request.Body = data.BodyFile.empty() ? "{}" : ReadDataFile(data.BodyFile);

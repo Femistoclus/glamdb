@@ -638,3 +638,21 @@ def test_write_settings_preserves_body_and_checks_current_database_policy(setup)
             catalog.apply(operation("database.update", id=own, enabled=False))
         assert client.post(route, headers={"Authorization": "Bearer valid"}, json=payload).status_code == 404
         assert len(seen) == 1
+
+
+def test_capabilities_mask_native_bulk_upload_unsupported_by_gateway(setup):
+    app, path, first, second, own, policy, seen = setup
+    advertised = {'features': {'append': True, 'bulk_append': True},
+                  'limits': {'append_rows': 10000, 'bulk_request_bytes': 4 * 1024**3,
+                             'bulk_batch_bytes': 16 * 1024**2, 'bulk_uploads': 2,
+                             'bulk_uploads_per_database': 1}}
+    async def backend(request):
+        return httpx.Response(200, json=advertised)
+    app.app.state.gateway.backend_transport = httpx.MockTransport(backend)
+    with TestClient(app, base_url='https://testserver') as client:
+        response = client.get(f'/databases/{own}/capabilities', headers={'Authorization': 'Bearer valid'})
+        assert response.status_code == 200
+        value = response.json()
+        assert value['features']['bulk_append'] is False
+        assert value['features']['append'] is True
+        assert value['limits'] == {'append_rows': 10000}

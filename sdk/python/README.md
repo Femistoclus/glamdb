@@ -585,3 +585,18 @@ while True:
 
 See [collection profiles](../../docs/development/COLLECTION_PROFILES.md) for the
 native restart, refusal, inventory and measured larger-profile evidence.
+
+## Native streaming bulk append
+
+`prepare_bulk_append(collection_id, batches, rows=..., operation_id=..., schema=...)`
+validates and hashes bounded batches into an anonymous local temporary file.
+`bulk_append(prepared, deadline=...)` streams that file in 64 KiB blocks, preserving
+one operation and receipt across explicit retries. Use the prepared request as a
+context manager or call `close()`. There is no automatic retry or reconciliation.
+Set `Client(..., timeout=650)` when the server may use its ten-minute execution
+budget. Ordinary append keeps its 10,000-row/16 MiB limits. Bulk permits declared
+totals up to 25,600,000 rows, subject to 4 GiB wire/canonical, file and device limits;
+each batch remains within ordinary row/canonical limits and 16 MiB wire. The
+[native bulk guide](../../docs/development/BULK_INGESTION.md#native-http-sdk-and-cli)
+specifies framing, memory/disk ownership, interrupted upload and retry semantics.
+The mock, UI import and organization gateway do not expose this upload route.

@@ -66,7 +66,7 @@ class NativeHTTP(unittest.TestCase):
         if extra_headers:
             headers.update(extra_headers)
         conn.request(method or ('POST' if body is not None else 'GET'), path,
-                     None if body is None else json.dumps(body), headers)
+                     None if body is None else (body if isinstance(body, bytes) else json.dumps(body)), headers)
         response = conn.getresponse()
         data = response.read()
         status, received = response.status, dict(response.getheaders())
@@ -572,7 +572,15 @@ class NativeHTTP(unittest.TestCase):
             with self.subTest(path=path, method=route['method']):
                 if validator and 'request_schema' in route:
                     validator(dict(wire_schema, **{'$ref': '#/$defs/' + route['request_schema']})).validate(request)
-                status, headers, data = self.request(path, request, method=route['method'], accept=route.get('accept', 'application/json'))
+                if 'request_records' in route:
+                    records = route['request_records']
+                    if validator:
+                        for record, schema_name in zip(records, route['record_schemas']):
+                            validator(dict(wire_schema, **{'$ref': '#/$defs/' + schema_name})).validate(record)
+                    request = ''.join(json.dumps(record) + '\n' for record in records).encode()
+                extra = {'Content-Type': route['content_type']} if 'content_type' in route else None
+                status, headers, data = self.request(path, request, method=route['method'],
+                    accept=route.get('accept', 'application/json'), extra_headers=extra)
                 self.assertEqual(status, route['status'], data)
                 if route.get('accept'):
                     self.assertEqual(headers['Content-Type'], route['accept'])

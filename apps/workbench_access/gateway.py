@@ -722,7 +722,7 @@ class Gateway:
                     "x-glamdb-snapshot-id",
                 )
             }
-            if write:
+            if write or route.metric == "capabilities":
                 chunks = bytearray()
                 async for chunk in upstream.aiter_bytes():
                     if len(chunks) + len(chunk) > 16 * 1024 * 1024:
@@ -731,6 +731,29 @@ class Gateway:
                         )
                     chunks.extend(chunk)
                 await upstream.aclose()
+                if route.metric == "capabilities" and upstream.status_code == 200:
+                    try:
+                        capabilities = json.loads(chunks)
+                        if isinstance(capabilities.get("features"), dict):
+                            capabilities["features"]["bulk_append"] = False
+                        if isinstance(capabilities.get("limits"), dict):
+                            for name in (
+                                "bulk_request_bytes",
+                                "bulk_batch_bytes",
+                                "bulk_uploads",
+                                "bulk_uploads_per_database",
+                            ):
+                                capabilities["limits"].pop(name, None)
+                        chunks = bytearray(json.dumps(capabilities, separators=(",", ":")).encode())
+                    except (ValueError, TypeError, AttributeError):
+                        raise CatalogError("BACKEND_UNAVAILABLE", "invalid backend capabilities") from None
+                    for name in ("content-length", "content-encoding", "x-content-sha256"):
+                        output_headers.pop(name, None)
+                    await release()
+                    return Response(bytes(chunks), status_code=200, headers=output_headers)
+                if not write:
+                    await release()
+                    return Response(bytes(chunks), status_code=upstream.status_code, headers=output_headers)
                 try:
                     outcome = json.loads(chunks)
                     identity_key = (

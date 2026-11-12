@@ -14,6 +14,8 @@ struct TRequest
     std::string ContentType = "application/json";
     std::string CaFile;
     unsigned TimeoutSeconds = 65;
+    // Stream a regular NDJSON file without retaining the whole bulk body.
+    std::string BodyFile;
 };
 struct TResponse
 {
