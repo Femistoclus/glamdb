@@ -22,11 +22,21 @@ from glamdb_sdk import Schema
 from glamdb_workload.dataset import Dataset, write_json
 from glamdb_workload.ledger import Ledger
 from glamdb_workload.runtime import (
+    add_stage,
     append_once,
     client_for,
+    consume_scan,
+    cpu_report,
     error_code,
+    failure_kind,
+    latency_report,
+    merge_counts,
+    read_mode,
+    scan_request_name,
+    stage_report,
     status_code,
     summarize,
+    throughput_report,
 )
 
 STATE = None
@@ -83,14 +93,23 @@ class RunState:
         self.cpu_peak = None
         self.payload_bytes = 0
         self.counts = dict(
+            offered_scans=0,
             completed_scans=0,
             completed_pages=0,
             consumed_rows=0,
             arrow_bytes=0,
+            arrow_batches=0,
+            arrow_batch_bytes=0,
             failed_scans=0,
+            rejected_scans=0,
             cancelled_scans=0,
             partial_rows=0,
+            offered_appends=0,
+            rejected_appends=0,
             errors=0,
+            rejections_by_code={},
+            errors_by_code={},
+            write_stages={},
         )
         self.fatal = None
         self.observed_workers = set()
@@ -128,6 +147,18 @@ class RunState:
             "rss_peak_bytes": self.rss_peak,
             "operations": self.log.summary() if self.log else None,
         }
+
+    def controller_cpu(self):
+        elapsed = max(0.000001, (self.ended or time.perf_counter()) - self.started)
+        cpu = psutil.Process().cpu_times()
+        seconds = cpu.user + cpu.system - self.cpu_start.user - self.cpu_start.system
+        return {"cpu_seconds": seconds, "cpu_percent_one_core": seconds / elapsed * 100}
+
+    def failed(self, code):
+        kind = failure_kind(code)
+        key = "rejections_by_code" if kind == "REFUSED" else "errors_by_code"
+        self.counts[key][code] = self.counts[key].get(code, 0) + 1
+        return kind
 
     def finish(self):
         if self.ended is None:
@@ -219,10 +250,14 @@ def on_quitting(environment, **kwargs):
     ]
     operations = summarize(state.run)
     expected = state.config["expect_workers"] if state.master else 1
-    counts = dict.fromkeys(state.counts, 0)
+    counts = {}
     for worker in workers:
-        for key, value in worker["counts"].items():
-            counts[key] += value
+        merge_counts(counts, worker["counts"])
+    for key, value in state.counts.items():
+        counts.setdefault(key, {} if isinstance(value, dict) else 0)
+    stages = counts.pop("write_stages")
+    rejections = counts.pop("rejections_by_code")
+    failures = counts.pop("errors_by_code")
     complete = (
         len(workers) == expected
         and len(operations["journals"]) == expected
@@ -261,6 +296,20 @@ def on_quitting(environment, **kwargs):
             else None
         ),
         "measurement": state.config["measurement"],
+        "read_mode": (
+            read_mode(state.config) if state.config["mode"] == "read" else None
+        ),
+        "processes": state.config.get("processes"),
+        "throughput": throughput_report(
+            state.config["mode"], counts, operations, elapsed
+        ),
+        "rejections_by_code": rejections,
+        "errors_by_code": failures,
+        "latency_ms": latency_report(environment.stats),
+        "write_stages": stage_report(stages),
+        "client_cpu": cpu_report(
+            workers, state.controller_cpu() if state.master else None
+        ),
     }
     # Locust's SIGTERM shutdown skips its normal HTML-save path. Render using
     # the same upstream report implementation, including very short runs.
@@ -309,6 +358,7 @@ class GlamDBUser(User):
 
     def write(self):
         state = STATE
+        began = time.perf_counter()
         try:
             rows = next(state.parts)
         except StopIteration:
@@ -320,6 +370,7 @@ class GlamDBUser(User):
             state.stopping = True
             state.quit_when_drained()
             raise StopUser()
+        loaded = time.perf_counter()
         part = state.claimed
         state.claimed += 1
         operation = str(
@@ -333,22 +384,34 @@ class GlamDBUser(User):
                 operation_id=operation,
                 schema=state.schema,
             )
+            prepared = time.perf_counter()
             if (
                 state.payload_bytes + len(request.body)
                 > state.config["max_journal_bytes"]
             ):
                 raise ValueError("JOURNAL_BUDGET_EXCEEDED")
             state.payload_bytes += len(request.body)
+            state.counts["offered_appends"] += 1
             result = append_once(
                 self.client, state.log, request, deadline=state.config["timeout"]
             )
+            stages = state.counts["write_stages"]
+            add_stage(stages, "input_load", loaded - began)
+            add_stage(stages, "sdk_prepare", prepared - loaded)
+            add_stage(stages, "journal", result["journal_ms"] / 1000)
+            add_stage(stages, "http_send", result["response_time_ms"] / 1000)
+            add_stage(stages, "end_to_end", time.perf_counter() - began)
             failed = result["state"] != "committed"
+            kind = "SDK"
             if failed:
                 state.counts["errors"] += 1
+                kind = state.failed(result["error_code"] or result["state"])
+                if kind == "REFUSED":
+                    state.counts["rejected_appends"] += 1
                 if result["state"] != "definitely_not_committed":
                     state.stopping = True
             self.environment.events.request.fire(
-                request_type="SDK",
+                request_type=kind,
                 name="append",
                 response_time=result["response_time_ms"],
                 response_length=0,
@@ -368,46 +431,39 @@ class GlamDBUser(User):
     def read(self):
         state = STATE
         config = state.config
-        rows = pages = bytes_read = 0
+        progress = dict(rows=0, pages=0, bytes=0, batches=0, batch_bytes=0)
         failed = None
+        kind = "SDK"
+        state.counts["offered_scans"] += 1
         began = time.perf_counter()
-        first_page = self.counter.pages if self.counter else 0
         try:
-            if config.get("format") == "arrow":
-                with self.client.scan_batches(
-                    config["collection"], **config["query"], deadline=config["timeout"]
-                ) as stream:
-                    for batch in stream:
-                        rows += len(batch.to_pylist())
-                    bytes_read = stream.bytes_read
-                pages = self.counter.pages - first_page
-            else:
-                with self.client.scan_pages(
-                    config["collection"], **config["query"], deadline=config["timeout"]
-                ) as stream:
-                    for page in stream:
-                        rows += len(page.rows)
-                        pages += 1
+            consume_scan(self.client, config, progress, page_counter=self.counter)
         except Exception as error:
-            failed = RuntimeError(error_code(error))
+            code = error_code(error)
+            failed = RuntimeError(code)
+            kind = state.failed(code)
             state.counts["errors"] += 1
             state.counts["failed_scans"] += 1
-            state.counts["partial_rows"] += rows
+            if kind == "REFUSED":
+                state.counts["rejected_scans"] += 1
+            state.counts["partial_rows"] += progress["rows"]
         except BaseException:
             state.counts["cancelled_scans"] += 1
-            state.counts["partial_rows"] += rows
+            state.counts["partial_rows"] += progress["rows"]
             raise
         finally:
             elapsed = (time.perf_counter() - began) * 1000
         if failed is None:
             state.counts["completed_scans"] += 1
-            state.counts["completed_pages"] += pages
-            state.counts["consumed_rows"] += rows
-            state.counts["arrow_bytes"] += bytes_read
+            state.counts["completed_pages"] += progress["pages"]
+            state.counts["consumed_rows"] += progress["rows"]
+            state.counts["arrow_bytes"] += progress["bytes"]
+            state.counts["arrow_batches"] += progress["batches"]
+            state.counts["arrow_batch_bytes"] += progress["batch_bytes"]
         self.environment.events.request.fire(
-            request_type="SDK",
-            name="scan/" + config.get("format", "json") + "/decoded",
+            request_type=kind,
+            name=scan_request_name(config),
             response_time=elapsed,
-            response_length=bytes_read,
+            response_length=progress["bytes"],
             exception=failed,
         )

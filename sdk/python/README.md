@@ -142,6 +142,16 @@ are rejected. Empty scan projections preserve an empty output schema and every
 matching row. The SDK enforces the v0 10,000-row/16-MiB decoded append ceiling
 during normalization, plus row and string limits.
 
+Append preparation validates each row once against a cached per-schema plan
+(keyed by the fields' values, never by caller data). The same pass yields the
+wire object, the row's canonical hash bytes and its decoded size, and converts
+each timestamp to microseconds once. Sized inputs (lists, tuples) are hashed as
+they are read; for other iterables the canonical rows (bounded by the 16-MiB
+ceiling) are kept until the row count is known. Generators are consumed only up
+to the first limit or invalid row. To measure preparation alone:
+`python sdk/python/benchmarks/prepare_bench.py` (compares against the frozen
+pre-plan implementation in `sdk/python/tests/legacy_prepare.py`).
+
 Timestamps accept timezone-aware `datetime`, RFC3339 text with a required
 timezone and up to six fractional digits, or exact integer microseconds as an
 `int`. Text is always parsed as RFC3339: digit-only text such as `"20260101"`
@@ -241,13 +251,16 @@ passed incrementally: 42 codec tests; 81 codec/client/predicate/request tests;
 copying, canonical output scalars, identity on schema-fetch timeout, and closing
 all streams after a close error. Receipt-validation regressions first exposed
 39 failures for invalid hashes, versions and receipt fields before the fix.
-The current SDK unit suite has 263 tests, including cursor abandonment, sticky
+The current SDK unit suite has 523 tests, including cursor abandonment, sticky
 iteration failures, first-page replay, distinct operation absence and uncertain
 5xx write failures. Transport doubles isolate the HTTP boundary; codec, HTTP
 client logic, canonical hash and PyArrow IPC encoding/decoding are real. Native
 HTTP and browser suites separately exercise the C++ server. The
 canonical append hash is independently checked against fixed single-type and
-all-type golden vectors.
+all-type golden vectors. `test_prepare_plan.py` differentially checks payload
+hashes, bodies and error type/message/order against that frozen pre-plan
+implementation (all types, NULL/missing fields, UTF-8, int64 and timestamp
+bounds, -0.0, permuted field IDs, generators, mutation after preparation).
 Repository-level actual HTTP integration is maintained separately from these
 isolated SDK tests:
 
