@@ -134,9 +134,32 @@ one larger than its file-kind limit. See
 Ordinary and bulk appends use the pinned Iceberg C++ `NewMergeAppend` inside
 the existing append transaction. The upstream defaults target 8 MiB manifests
 and merge a bin containing the newest manifest at 100 manifests. Full bins can
-merge earlier. No separate maintenance commit, data rewrite, table-property
-change or storage-format migration is required. Existing FastAppend histories
-are still accepted, and a subsequent append can merge their small manifests.
+merge earlier. No separate maintenance commit, data rewrite, persisted
+table-property change or storage-format migration is required. Existing
+FastAppend histories are still accepted, and a subsequent append can merge
+their small manifests.
+
+Iceberg packs merge bins by *encoded* (deflate) manifest length, while the
+verifier caps every manifest's *decoded* Avro bytes at the same 8 MiB. With the
+upstream target a single merged manifest therefore outgrew the decoded cap at
+about 29,500 one-row files (the bin still held under 8 MiB compressed), and the
+next append failed with `Avro container exceeds its decoded byte limit`: a
+collection's live files were bounded by one manifest. The verifier now records
+each current manifest's decoded bytes (`TBaseState::CurrentManifestDecodedBytes`,
+measured on publication, full open and checkpoint open), and every append passes
+`ManifestMergeTarget` to the stager: the largest encoded target such that any
+merged bin (at least two inputs, encoded sum within the target) stays within 7/8
+of the decoded cap, using the largest measured decoded/encoded ratio among the
+inputs, 40 bytes of rewrite growth per entry (EXISTING entries carry their
+snapshot and sequence numbers explicitly) and a reserve of twice the widest
+average entry per new data file. A smaller target is set as the transaction's
+`commit.manifest.target-size-bytes` only while `NewMergeAppend` is created and is
+removed in the same Iceberg transaction, so the staged root's properties and
+fixed profile are unchanged. When the measured ratios allow 8 MiB the upstream
+default is used unchanged. Merging then produces several bounded manifests and
+the manifest list grows instead; the number of live files is bounded by the
+configured budgets (`max_data_files`, `max_manifests`, list and commit bytes),
+not by one manifest. Every verifier limit is unchanged.
 
 The shared closure verifier matches unchanged manifest descriptors exactly,
 then checks removed parent manifests against the new manifests. Every old live
@@ -158,7 +181,8 @@ through history. Unreferenced staging files remain charged to physical capacity.
 The latest list is bounded by target-sized bins and fewer than 100 small
 manifests under the finite metadata profile. For the default capacity workload,
 the current membership fits one target bin, so the latest list cycles from
-one through 99 manifests. With every snapshot retained, merging every K appends
+one through 99 manifests; beyond roughly 20,000 one-row files per collection
+(two-column schema) frozen bins accumulate, one per bin. With every snapshot retained, merging every K appends
 retains O(N²/K) file descriptors in merged manifests in this single-bin regime,
 while retained manifest-list entries become O(KN). Root JSON still rewrites
 retained history; snapshot expiration and #168 remain separate work. See

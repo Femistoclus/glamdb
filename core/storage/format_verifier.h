@@ -53,6 +53,8 @@ struct TAvroContainerInfo
 {
     std::int64_t RecordCount = 0;
     std::int64_t BlockCount = 0;
+    // Decoded block bytes, the quantity MaxDecodedBytes bounds.
+    std::int64_t DecodedBytes = 0;
 };
 
 iceberg::Result<TParquetFileInfo> CheckParquet(iceberg::InputFile& file,

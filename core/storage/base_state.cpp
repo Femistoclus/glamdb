@@ -28,6 +28,7 @@
 #include <set>
 #include <span>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace NGlamDB::NStorage {
@@ -162,7 +163,8 @@ iceberg::Result<std::uint64_t> CheckAvro(iceberg::FileIO& fileIO,
     NIO::EFileKind kind,
     std::uint64_t limit,
     std::uint64_t maxRecords,
-    const std::shared_ptr<NIO::TIOAttempt>& attempt)
+    const std::shared_ptr<NIO::TIOAttempt>& attempt,
+    std::uint64_t* decoded = nullptr)
 {
     if (limit > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
         maxRecords > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
@@ -175,9 +177,15 @@ iceberg::Result<std::uint64_t> CheckAvro(iceberg::FileIO& fileIO,
     }
     ICEBERG_ASSIGN_OR_RAISE(auto actual, (*input)->Size());
     ICEBERG_RETURN_UNEXPECTED(CheckReceipt(attempt, path, kind, actual));
-    ICEBERG_RETURN_UNEXPECTED(CheckAvroContainer(**input,
-        actual,
-        {static_cast<std::int64_t>(limit), static_cast<std::int64_t>(maxRecords), static_cast<std::int64_t>(limit)}));
+    ICEBERG_ASSIGN_OR_RAISE(auto info,
+        CheckAvroContainer(**input,
+            actual,
+            {static_cast<std::int64_t>(limit),
+                static_cast<std::int64_t>(maxRecords),
+                static_cast<std::int64_t>(limit)}));
+    if (decoded) {
+        *decoded = static_cast<std::uint64_t>(info.DecodedBytes);
+    }
     return static_cast<std::uint64_t>(actual);
 }
 
@@ -313,7 +321,8 @@ iceberg::Result<TStorageUsage> CheckManifest(const std::shared_ptr<iceberg::File
     TScanMembership* scanIndex,
     bool bulk,
     TAppendCounts& counts,
-    TRewrittenEntries& rewritten)
+    TRewrittenEntries& rewritten,
+    std::uint64_t& decoded)
 {
     if (manifest.content != iceberg::ManifestContent::kData || manifest.partition_spec_id != metadata.default_spec_id ||
         manifest.added_snapshot_id != snapshot.snapshot_id || manifest.sequence_number != snapshot.sequence_number ||
@@ -331,7 +340,8 @@ iceberg::Result<TStorageUsage> CheckManifest(const std::shared_ptr<iceberg::File
             NIO::EFileKind::Manifest,
             limits.ManifestBytes,
             maxEntries,
-            attempt));
+            attempt,
+            &decoded));
     ICEBERG_ASSIGN_OR_RAISE(auto schema, metadata.Schema());
     ICEBERG_ASSIGN_OR_RAISE(auto spec, metadata.PartitionSpec());
     ICEBERG_ASSIGN_OR_RAISE(auto reader, iceberg::ManifestReader::Make(manifest, fileIO, schema, spec));
@@ -502,7 +512,9 @@ iceberg::Status SeedRetainedHistory(const std::shared_ptr<iceberg::FileIO>& file
     std::vector<std::uint64_t> manifestCounts(history.size(), 0), manifestBytes(history.size(), 0);
     std::set<std::string> paths;
     TStorageUsage delta{.ManifestListBytes = listBytes};
-    for (const auto& manifest : manifests) {
+    std::vector<std::uint64_t> decodedBytes(manifests.size());
+    for (std::size_t index = 0; index < manifests.size(); ++index) {
+        const auto& manifest = manifests[index];
         const auto sequence = manifest.sequence_number;
         if (sequence <= 0 || sequence > first->sequence_number || manifest.content != iceberg::ManifestContent::kData ||
             manifest.partition_spec_id != metadata.default_spec_id ||
@@ -521,7 +533,8 @@ iceberg::Status SeedRetainedHistory(const std::shared_ptr<iceberg::FileIO>& file
                 NIO::EFileKind::Manifest,
                 limits.ManifestBytes,
                 limits.Store.DataFiles,
-                {}));
+                {},
+                &decodedBytes[index]));
         const auto writer = static_cast<std::size_t>(sequence - 1);
         if (++manifestCounts[writer] > limits.NewManifests || bytes > limits.CommitBytes - manifestBytes[writer]) {
             return iceberg::ValidationFailed("CAPACITY: Retained checkpoint manifest output exceeds its commit.");
@@ -606,6 +619,7 @@ iceberg::Status SeedRetainedHistory(const std::shared_ptr<iceberg::FileIO>& file
     state.Usage = usage.Value();
     state.RetainedManifestPaths.assign(paths.begin(), paths.end());
     state.CurrentManifests = std::move(manifests);
+    state.CurrentManifestDecodedBytes = std::move(decodedBytes);
     if (expiredCount > expired.size()) {
         return iceberg::ValidationFailed("Invalid expiration ledger size.");
     }
@@ -695,7 +709,16 @@ iceberg::Result<TBaseState> CheckAppendClosureImpl(const std::shared_ptr<iceberg
         TStorageUsage delta;
         TAppendCounts counts;
         delta.ManifestListBytes = listBytes;
+        std::unordered_map<std::string_view, std::uint64_t> decodedBytes;
+        decodedBytes.reserve(manifests.size());
+        if (candidate.CurrentManifestDecodedBytes.size() == previousManifests.size()) {
+            for (std::size_t index = 0; index < previousManifests.size(); ++index) {
+                decodedBytes.emplace(previousManifests[index].manifest_path,
+                    candidate.CurrentManifestDecodedBytes[index]);
+            }
+        }
         for (const auto* manifest : changes.Added) {
+            std::uint64_t decoded = 0;
             ICEBERG_ASSIGN_OR_RAISE(auto fileUsage,
                 CheckManifest(fileIO,
                     *manifest,
@@ -708,7 +731,9 @@ iceberg::Result<TBaseState> CheckAppendClosureImpl(const std::shared_ptr<iceberg
                     scanIndex,
                     bulk,
                     counts,
-                    rewritten));
+                    rewritten,
+                    decoded));
+            decodedBytes.insert_or_assign(manifest->manifest_path, decoded);
             auto total = ReplaceUsage(delta, {.Next = fileUsage});
             if (!total) {
                 return iceberg::ValidationFailed("Manifest usage overflows.");
@@ -743,7 +768,20 @@ iceberg::Result<TBaseState> CheckAppendClosureImpl(const std::shared_ptr<iceberg
         for (const auto* manifest : changes.Added) {
             candidate.RetainedManifestPaths.Insert(manifest->manifest_path);
         }
+        // Every current manifest was measured when it was verified; an
+        // unmeasured one (a state built without sizes) leaves them unknown.
+        std::vector<std::uint64_t> currentDecoded;
+        currentDecoded.reserve(manifests.size());
+        for (const auto& manifest : manifests) {
+            const auto found = decodedBytes.find(manifest.manifest_path);
+            if (found == decodedBytes.end()) {
+                currentDecoded.clear();
+                break;
+            }
+            currentDecoded.push_back(found->second);
+        }
         candidate.CurrentManifests = std::move(manifests);
+        candidate.CurrentManifestDecodedBytes = std::move(currentDecoded);
         ICEBERG_RETURN_UNEXPECTED(MarkVerified(attempt, snapshot->manifest_list));
         if (scanIndex) {
             const auto boundary = std::ranges::lower_bound(scanIndex->Snapshots,
@@ -1126,7 +1164,9 @@ iceberg::Result<TBaseState> RebuildFromCheckpoint(const std::shared_ptr<iceberg:
         std::map<std::int64_t, std::vector<TScanDataFile>> groups;
         std::unordered_set<std::string_view> filePaths;
         const auto& manifests = lists.back().Manifests;
-        for (const auto& manifest : manifests) {
+        std::vector<std::uint64_t> decodedBytes(manifests.size());
+        for (std::size_t index = 0; index < manifests.size(); ++index) {
+            const auto& manifest = manifests[index];
             const auto sequence = manifest.sequence_number;
             const auto* writer = rootSnapshot(sequence);
             if (sequence <= 0 || sequence > expected.Sequence || manifest.content != iceberg::ManifestContent::kData ||
@@ -1145,7 +1185,8 @@ iceberg::Result<TBaseState> RebuildFromCheckpoint(const std::shared_ptr<iceberg:
                 NIO::EFileKind::Manifest,
                 limits.ManifestBytes,
                 limits.Store.DataFiles,
-                {}));
+                {},
+                &decodedBytes[index]));
             ICEBERG_ASSIGN_OR_RAISE(auto reader, iceberg::ManifestReader::Make(manifest, fileIO, schema, spec));
             ICEBERG_ASSIGN_OR_RAISE(auto entries, reader->Entries());
             if (entries.empty() || entries.size() > limits.Store.DataFiles) {
@@ -1238,6 +1279,7 @@ iceberg::Result<TBaseState> RebuildFromCheckpoint(const std::shared_ptr<iceberg:
         }
         state.CurrentCommitMetadataBytes = commitBytes;
         state.CurrentManifests = std::move(lists.back().Manifests);
+        state.CurrentManifestDecodedBytes = std::move(decodedBytes);
         state.RetainedManifestPaths.assign(retained.begin(), retained.end());
         state.ExpiredSnapshotIDs = TSortedSnapshotIDs(std::move(expiredIDs));
         state.ScanIndex = std::move(scanIndex);

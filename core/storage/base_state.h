@@ -37,6 +37,10 @@ struct TBaseState
     // The latest data publication's list and manifest inputs/outputs, excluding
     // the root. Maintenance preserves this conservative recovery byte charge.
     std::uint64_t CurrentCommitMetadataBytes = 0;
+    // Decoded Avro bytes of each current manifest (CurrentManifests order) as
+    // the verifier measured them; they size the next manifest merge. Empty
+    // when a current manifest was not measured.
+    std::vector<std::uint64_t> CurrentManifestDecodedBytes{};
 };
 
 iceberg::Result<TBaseState> CheckAppendClosure(const std::shared_ptr<iceberg::FileIO>& fileIO,

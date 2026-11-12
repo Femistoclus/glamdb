@@ -684,6 +684,7 @@ CheckAvroContainer(iceberg::InputFile& file, std::int64_t expectedLength, TAvroL
             info.RecordCount += count;
             ++info.BlockCount;
         }
+        info.DecodedBytes = decodedBytes;
         return info;
     });
 }

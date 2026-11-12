@@ -1638,11 +1638,12 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
         if (input.bulk) {
             summary.emplace(BulkVersionKey, "1");
         }
-        auto staged =
-            TakeIceberg(input.bulk ? NStorage::StageBulkAppend(std::move(table), dataFiles, summary, attempt)
-                                   : NStorage::StageAppend(std::move(table), dataFiles.front(), summary, attempt),
-                "IO_ERROR",
-                "stage append");
+        const auto mergeTarget = NStorage::ManifestMergeTarget(*base, dataFiles.size(), Options_.Storage);
+        auto staged = TakeIceberg(input.bulk
+                ? NStorage::StageBulkAppend(std::move(table), dataFiles, summary, attempt, mergeTarget)
+                : NStorage::StageAppend(std::move(table), dataFiles.front(), summary, attempt, mergeTarget),
+            "IO_ERROR",
+            "stage append");
         auto root = MetadataLocation(location, MetadataVersion(base->MetadataLocation) + 1, binding.attempt_id);
         // Serialize the staged root once, exactly as TableMetadataUtil::Write
         // does, and hand both forms to the guard, which compares the durable
