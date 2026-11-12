@@ -226,7 +226,10 @@ verification on any mismatch (`Reconcile`, `Engine::VerifyStoreFull` and
 `OpenStoreRequest::verify_full` always verify fully). See
 [the snapshot archive tier](docs/development/SNAPSHOT_ARCHIVE.md). Native HTTP
 (`features.snapshot_archive`, `.../snapshot-archive` routes), the SDK and both
-CLIs expose the setting, status and maintenance; the mock refuses them.
+CLIs expose the setting, status and maintenance; the mock refuses them. On the
+wire an omitted create value is the default, `"0"` the opt-out, and collections
+report the effective value plus `hot_snapshots_defaulted`. `glamdb-admin
+verify-store` opens a store with full verification; HTTP reconcile re-verifies.
 General garbage collection, asynchronous admission, replication,
 multiple writers, and schema evolution are outside the initial append scope. Consult
 [docs/ROADMAP.md](docs/ROADMAP.md) when assessing feature scope; its current

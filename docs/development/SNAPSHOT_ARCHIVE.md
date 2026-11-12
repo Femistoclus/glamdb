@@ -54,22 +54,31 @@ them, an explicit value and archive maintenance return
 ## HTTP, SDK and CLI
 
 The native server advertises `features.snapshot_archive`. `POST .../collections`
-accepts `hot_snapshots` (decimal string or null) and collections report it
-(`null` when unset). `GET .../collections/{id}/snapshot-archive` returns the
+maps the tri-state onto the wire: an omitted (or `null`) `hot_snapshots` is the
+default, `"0"` the explicit opt-out and `"1"`..`"1099511627776"` an explicit
+value. Collections report the effective value as a decimal string (`"0"`
+without an archive) and `hot_snapshots_defaulted`.
+`GET .../collections/{id}/snapshot-archive` returns the
 `GetSnapshotArchive` counts, `POST` on the same route with
-`{"hot_snapshots":"N"|null}` calls `UpdateSnapshotArchive` and returns the
-collection, and `POST .../snapshot-archive/maintenance` with `{}` runs one
-`ArchiveSnapshots` call and adds `snapshots_archived`. A repeated creation with
-another value is 409 `SNAPSHOT_ARCHIVE_MISMATCH`, KV refusal 409
+`{"hot_snapshots":"N"|"0"|null}` calls `UpdateSnapshotArchive` (`"0"` and `null`
+stop archiving) and returns the collection, and `POST
+.../snapshot-archive/maintenance` with `{}` runs one `ArchiveSnapshots` call and
+adds `snapshots_archived`. A repeated creation with another effective value is
+409 `SNAPSHOT_ARCHIVE_MISMATCH`, KV refusal 409
 `COLLECTION_MODE_MISMATCH`, and an uncertain COMMIT 503 `RECOVERY_REQUIRED`
 (reconcile, then repeat the same request). History, statistics, files, file
 details, explain, scans and outcome lookups need no new routes: archived
 snapshots answer through them exactly as while hot. The Python SDK adds
-`create_collection(..., hot_snapshots=)`, `snapshot_archive`,
-`update_snapshot_archive` and `archive_snapshots`; `glamdb-cli` and offline
-`glamdb-admin` add `create-collection --hot-snapshots N`, `snapshot-archive
-[--hot-snapshots N | --unset]` and `archive-snapshots`. The disposable mock does
-not implement the archive and refuses the setting. See the
+`create_collection(..., hot_snapshots=None|0|N)` (`KEEP_ALL_SNAPSHOTS_IN_ROOT`),
+`snapshot_archive`, `update_snapshot_archive` and `archive_snapshots`;
+`resolve_create` accepts a resolved collection without repeating the create
+only when it proves the effective creation value (still defaulted for a create
+that omitted the value, KV without a value, or a server without the archive).
+`glamdb-cli` and offline `glamdb-admin` add `create-collection [--hot-snapshots
+N|0]`, `snapshot-archive [--hot-snapshots N|0 | --unset]` and
+`archive-snapshots`; `glamdb-admin verify-store` opens a store with
+`verify_full`, and `POST /databases/{id}/reconcile` re-verifies an open one.
+The disposable mock does not implement the archive and refuses the setting. See the
 [HTTP contract](HTTP_SERVER.md#snapshot-archive) for the exact shapes.
 
 ## Appends and maintenance
