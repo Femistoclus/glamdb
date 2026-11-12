@@ -51,6 +51,8 @@ are implemented. They can use the native Asio HTTP server over the public Engine
 `--data-dir` starts with no databases; authenticated API/UI operations create,
 list, open, close and reconcile databases. Authenticated native operators can
 explicitly drop an initialized database with its original store identity;
+managed cleanup recognizes canonical file ordinals 00000–00255 from KV/bulk
+writes while refusing malformed or out-of-profile filenames;
 the SDK/CLI expose exact retries and `bench tpch clean --state`. The standalone
 CLI also routes the complete TPC-H generation/init/load/resolve/verify/scan/status
 lifecycle through the optional workload package. See
@@ -77,7 +79,9 @@ HTTP body admission reserves four of sixteen readers from ordinary uploads for
 authenticated database lifecycle and scan cancellation, including through a TLS
 proxy; public/static POSTs cannot spend that reserve. Excess bodies wait within
 the connection ceiling and their original read deadline.
-The network CLI also builds independently with OpenSSL; optional offline commands
+The network CLI also builds independently with OpenSSL; printable bearer tokens
+accept up to 8 KiB for organization-scoped OIDC JWTs, with control characters
+rejected before connecting. Optional offline commands
 are in `apps/admin` and never required for server initialization. Both expose
 named collection/schema, append, scan, operation, snapshot and file commands.
 The admin tool's `--url` mode calls HTTP without opening an engine; offline
@@ -86,13 +90,20 @@ Command grammar in `apps/cli/data.*` has no core dependency; metadata JSON in
 `apps/transport/metadata.*` is shared with HTTP. Named JSON scans complete remote
 pages within 10,000 rows/16 MiB, cancel unfinished cursors, and distinguish
 unresolved outcomes (exit 3) from definite failures (exit 1). See the
-[CLI guide](apps/cli/README.md). `glamdb serve` aliases existing server startup.
+[CLI guide](apps/cli/README.md). Top-level client help includes connection and
+authentication examples; `COMMAND --help` shows options and `--help-all` expands
+immediate subcommands. `glamdb serve` aliases existing server startup.
 Collection routes are scoped by `/databases/{id}`; optional legacy
 `--root/--store-id` mode retains unscoped routes. A
 separate, explicitly disposable in-memory mock remains a development profile. The architecture and
 invariants below describe the intended engine, not qualified guarantees.
 
-Data studio separates compact read and schema-driven write panels. Native
+Data studio keeps schema, compact reading and nested row editing together;
+results stay inside Read rows. Light/dark appearance and sidebar preferences are
+local display settings. Runtime design remains configurable through theme JSON.
+Existing Keycloak realms use the client-only migration in
+[compact workbench operations](docs/development/COMPACT_WORKBENCH.md); custom or
+shared authentication flows require explicit review before migration. Native
 Overview, Snapshots, Storage and Explain use public-facade HTTP metadata;
 reload/restart restore these views from the server. Storage IDs derive from
 selected committed manifest membership; details verify actual Parquet footers,
@@ -694,7 +705,13 @@ TPC-H generation requires explicit `--type-profile native|legacy-scaled` and
 reference TPC-H Tools 3.0.1 provenance. Preserve all eight tables/61 columns and
 exact decimal/date values. Bound both row buffers and metadata; the initial
 profile admits at most 65,536 parts and refuses oversized layouts without
-truncating data. `init` explicitly creates a dedicated managed target;
+truncating data. `init --mode append|kv` explicitly creates a dedicated managed
+target (new runs default to append; omitted mode keeps an existing run). KV adds
+a required string key from ordered, fixed-width int64 primary-key components;
+source datasets and all 61 fields stay unchanged. Persist collection mode and
+mutation kind through plan/journal/retry; missing legacy modes mean append.
+Require insert-only KV receipts (net live rows equal input), report COW counters
+separately, and verify derived keys as well as original fields;
 `load` assigns disjoint immutable chunks while publication remains serialized.
 Keep state, dataset hashes, original UUID/body/hash and receipts through resume;
 never replace a pending request or silently change the plan/limits. Full
@@ -741,12 +758,21 @@ Prometheus and Loki dashboard queries with their respective engines.
 Telegram summaries use bounded, escaped native Alertmanager HTML groups; run
 `tools/alerting/check.py` for template rendering and loopback delivery checks.
 
-ClickBench preparation/loading/verification supports native DATE or explicit
-legacy-date profiles and preserves all 105 columns and exact append identities.
-Query campaigns validate all 43 scan/reduce readings. See
-[ClickBench](tools/workload/CLICKBENCH.md) and [physical inventory](docs/development/STORAGE_FOOTPRINT.md).
-The complete hits load remains blocked by the 4096-operation/history profile;
-do not raise constants, drop receipts, or replicate the dataset across workers.
+ClickBench has a complete network CLI lifecycle and all 43 scan/reduce workloads.
+Append is the default; KV adds a source-ordinal key while preserving all 105
+logical fields and duplicate rows. Official UInt16 EventDate uses epoch days;
+physical source types determine conversions. Freeze row/wire-bounded requests,
+worker assignments and original IDs/bodies before writes. Locust schedules
+disjoint writes under one publication gate and finite concurrent query rounds.
+Verify source rows, requests, authoritative receipts and the full pinned multiset
+before completion; failed verification revokes it. Query SQL reductions include
+bounded temporary DuckDB staging and remain labelled GlamDB + DuckDB.
+The adapter accepts persisted scalable operation/history profiles without an
+extra 4096-operation ceiling. Full-source conversion, journals and verification
+need explicit finite client/server disk budgets; do not drop receipts or replicate
+the source across workers. See [ClickBench](tools/workload/CLICKBENCH.md),
+[executed validation](docs/development/CLICKBENCH_VALIDATION.md) and
+[physical inventory](docs/development/STORAGE_FOOTPRINT.md).
 
 ## Validation and reporting
 

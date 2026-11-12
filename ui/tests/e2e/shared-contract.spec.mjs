@@ -116,16 +116,17 @@ async function nav(page, name) {
 async function createCollection(page, name) {
     await page.getByRole('button', { name: 'New collection', exact: true }).first().click();
     await page.getByLabel('Collection name').fill(name);
+    const created = page.waitForRequest(
+        (request) => request.method() === 'POST' && request.url().endsWith('/collections'),
+    );
     await page.getByRole('button', { name: 'Create collection' }).click();
+    collectionId = (await created).postDataJSON().collection_id;
     await expect(page.getByRole('dialog')).not.toBeVisible();
     await expect(page.locator('.breadcrumb strong')).toHaveText(name);
     const scope = native ? `/databases/${databaseId}` : '';
-    const response = await page.request.get(
-        `${scope}/collections:resolve?name=${encodeURIComponent(name)}`,
-        { headers },
-    );
+    const response = await page.request.get(`${scope}/collections/${collectionId}`, { headers });
     expect(response.ok()).toBe(true);
-    collectionId = (await response.json()).collection_id;
+    expect(await response.json()).toMatchObject({ collection_id: collectionId, name });
 }
 async function appendRows(page, rows) {
     await page.getByRole('button', { name: 'Batch editor', exact: true }).click();

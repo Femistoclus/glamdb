@@ -64,6 +64,7 @@ def _tpch_arguments(benches):
                 command.add_argument("--" + option, required=True)
             command.add_argument("--limits")
             command.add_argument("--table-prefix", default="")
+            command.add_argument("--mode", dest="collection_mode", choices=["append", "kv"])
         elif name == "load":
             command.add_argument("--batch-rows", type=positive, default=10000)
             command.add_argument("--batch-bytes", type=positive, default=8 * 1024**2)
@@ -201,7 +202,7 @@ def _tpch(args):
             result = tpch_lifecycle.initialize(
                 url=args.url, dataset=args.dataset, name=args.name, state=args.state,
                 limits=_limits(args.limits) if args.limits else None,
-                table_prefix=args.table_prefix, **connection,
+                table_prefix=args.table_prefix, mode=args.collection_mode, **connection,
             )
         elif name == "load":
             result = tpch_lifecycle.load(

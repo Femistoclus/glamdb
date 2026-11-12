@@ -48,7 +48,7 @@ test('static demo runs independently without any API backend', () => {
     const result = profile('static');
     assert.equal(result.status, 0, result.stderr);
     const config = JSON.parse(result.stdout);
-    assert.equal(config.testMatch, 'public-demo.spec.mjs');
+    assert.deepEqual(config.testMatch, ['public-demo.spec.mjs', 'compact-workbench.spec.mjs']);
     assert.equal(config.webServer.length, 1);
     assert.match(config.webServer[0].command, /start-static.py/);
 });

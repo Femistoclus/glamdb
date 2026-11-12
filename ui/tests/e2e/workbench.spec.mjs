@@ -65,13 +65,13 @@ test('desktop workspace is usable and all metadata views load', async ({ page })
     await expect(
         page.getByText('Demo workspace · mock backend · durability not qualified'),
     ).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Big ideas. Beautiful data.' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'A little overview' })).toBeVisible();
     await mkdir(path.join(root, 'artifacts/e2e'), { recursive: true });
     await page.screenshot({
         path: path.join(root, 'artifacts/e2e/overview-desktop.png'),
         fullPage: true,
     });
-    for (const name of ['Schema', 'Snapshots', 'Storage', 'Operations', 'Style studio']) {
+    for (const name of ['Schema', 'Snapshots', 'Storage', 'Operations']) {
         await nav(page, name);
         await expect(page.locator('#view h1')).toBeVisible();
     }
@@ -82,6 +82,71 @@ test('desktop workspace is usable and all metadata views load', async ({ page })
     await nav(page, 'Explain');
     await page.getByRole('button', { name: 'Refresh plan' }).click();
     await expect(page.getByText('Reference mock scan', { exact: true })).toBeVisible();
+});
+
+test('selecting a collection during connection keeps the active workspace', async ({ page }) => {
+    let release;
+    const released = new Promise((resolve) => (release = resolve));
+    let started;
+    const held = new Promise((resolve) => (started = resolve));
+    let first = true;
+    await page.route(/\/collections\/[^/?]+$/, async (route) => {
+        if (!first) return route.continue();
+        first = false;
+        const response = await route.fetch();
+        started();
+        await released;
+        await route.fulfill({ response });
+    });
+    try {
+        await page.goto('/');
+        await page.getByLabel('Access token').fill(token);
+        await page.getByRole('button', { name: 'Open my workspace' }).click();
+        await held;
+        await page.locator('.collection-list button').filter({ hasText: 'pink_inventory' }).click();
+        release();
+        await expect(page.locator('.breadcrumb strong')).toHaveText('pink_inventory');
+        await expect(page.getByRole('table', { name: 'Overview schema' })).toBeVisible();
+        await expect(page.getByLabel('Access token')).toHaveCount(0);
+    } finally {
+        release();
+    }
+});
+
+test('KV row edits retain a single set of mutation controls', async ({ page }) => {
+    // Explicit protocol fixtures exercise rendering without claiming that the
+    // disposable append-only mock implements native KV storage.
+    await page.route('**/capabilities', async (route) => {
+        const response = await route.fetch();
+        const capabilities = await response.json();
+        Object.assign(capabilities.features, {
+            key_value: true,
+            upsert: true,
+            delete: true,
+            lookup: true,
+            compact: true,
+        });
+        capabilities.collection_modes = ['append', 'kv'];
+        await route.fulfill({ status: response.status(), json: capabilities });
+    });
+    await page.route(/\/collections\/[^/?]+$/, async (route) => {
+        const response = await route.fetch();
+        await route.fulfill({
+            status: response.status(),
+            json: { ...(await response.json()), mode: 'kv' },
+        });
+    });
+    await login(page);
+    await nav(page, 'Data studio');
+    for (let attempt = 0; attempt < 2; attempt++) {
+        await page.getByRole('button', { name: '+ Add row', exact: true }).click();
+        for (const name of ['Lookup keys', 'Delete keys', 'Compact files'])
+            await expect(page.getByRole('button', { name, exact: true })).toHaveCount(1);
+        await page.locator('[data-write-row] summary').nth(1).click();
+        await page.getByRole('button', { name: 'Remove row 2', exact: true }).click();
+        await expect(page.locator('[data-write-row]')).toHaveCount(1);
+        await expect(page.getByRole('button', { name: 'Upsert rows', exact: true })).toHaveCount(1);
+    }
 });
 
 test('changing collection clears stale query and credentials are not persisted', async ({
@@ -225,7 +290,7 @@ test('late pending append response cannot decorate a different collection dialog
     await page.locator('.collection-list button').filter({ hasText: 'pink_inventory' }).click();
     await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
     release();
-    await expect(page.locator('#toast')).toContainText(/Every row added|Append committed/);
+    await expect(page.locator('#toast')).toContainText('Append rows committed');
     await expect(
         page.getByRole('dialog').getByText('Append committed', { exact: true }),
     ).not.toBeVisible();

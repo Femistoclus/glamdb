@@ -36,6 +36,7 @@ UTMSource UTMMedium UTMCampaign UTMContent UTMTerm FromTag
 TIME_COLUMNS = frozenset(("EventTime", "ClientEventTime", "LocalEventTime"))
 assert len(COLUMNS) == len(set(COLUMNS)) == 105
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+DATE_EPOCH = date(1970, 1, 1)
 
 
 def schema_for(profile):
@@ -47,7 +48,11 @@ def schema_for(profile):
                    for name in COLUMNS])
 
 
-def convert_row(row, *, type_profile="legacy-date"):
+def convert_row(row, *, type_profile="legacy-date", date_encoding="yyyymmdd"):
+    if type_profile not in ("legacy-date", "native"):
+        raise ValueError("unknown ClickBench type profile")
+    if date_encoding not in ("epoch-days", "yyyymmdd"):
+        raise ValueError("unknown ClickBench source date encoding")
     result = {}
     for name in COLUMNS:
         value = row[name]
@@ -60,10 +65,17 @@ def convert_row(row, *, type_profile="legacy-date"):
                 raise ValueError("ClickBench text column has an incompatible physical type")
         elif name == "EventDate":
             if type(value) is int:
-                text = str(value)
-                if len(text) != 8:
-                    raise ValueError("EventDate integer must be YYYYMMDD as in the upstream loader")
-                value = date(int(text[:4]), int(text[4:6]), int(text[6:]))
+                if date_encoding == "epoch-days":
+                    # The official compatible Parquet uses UINT16 days since
+                    # 1970, rather than the YYYYMMDD integers in older exports.
+                    if not 0 <= value <= 65535:
+                        raise ValueError("EventDate epoch days require the source UINT16 domain")
+                    value = DATE_EPOCH + timedelta(days=value)
+                else:
+                    text = str(value)
+                    if len(text) != 8:
+                        raise ValueError("EventDate integer must be YYYYMMDD for this source type")
+                    value = date(int(text[:4]), int(text[4:6]), int(text[6:]))
             elif isinstance(value, str):
                 value = date.fromisoformat(value)
             if type(value) is not date:
@@ -72,7 +84,10 @@ def convert_row(row, *, type_profile="legacy-date"):
                 value = datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
         elif name in TIME_COLUMNS:
             if type(value) is int:
-                value = EPOCH + timedelta(seconds=value)
+                try:
+                    value = EPOCH + timedelta(seconds=value)
+                except OverflowError as exc:
+                    raise ValueError("ClickBench timestamp is outside the supported calendar domain") from exc
             if not isinstance(value, datetime):
                 raise ValueError("ClickBench timestamp requires source epoch seconds or a logical timestamp")
             value = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)

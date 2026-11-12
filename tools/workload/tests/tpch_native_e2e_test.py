@@ -238,12 +238,14 @@ class NativeTPCHAcceptance(unittest.TestCase):
                 self.fail("command did not return its JSON result: " + result.stdout[-1000:])
             return {"diagnostic": result.stdout + result.stderr}
 
-    def init(self, profile, url, ca=None, *, label="run", dataset=None, limits=None):
+    def init(self, profile, url, ca=None, *, label="run", dataset=None, limits=None, mode=None):
         directory = self.report / label
         directory.mkdir()
         state = directory / "run.json"
         command = ["init", "--url", url, "--dataset", dataset or self.datasets[profile].path,
                    "--name", "tpch-acceptance-" + uuid4().hex[:10], "--state", state]
+        if mode is not None:
+            command += ["--mode", mode]
         if limits is not None:
             limit_path = directory / "limits.json"
             limit_path.write_text(json.dumps(limits))
@@ -291,6 +293,7 @@ class NativeTPCHAcceptance(unittest.TestCase):
         self.assertEqual(result["counts"]["failed_queries"], 0)
         self.assertEqual(result["result_verified"], mode == "reduce")
         self.assertEqual(result["configuration"]["snapshots"], saved["snapshots"])
+        self.assertEqual(result["collection_mode"], saved.get("collection_mode", "append"))
         if mode == "scan":
             expected_stages = {
                 f"Q{number}/{alias}": count * processes
@@ -316,15 +319,37 @@ class NativeTPCHAcceptance(unittest.TestCase):
         })
         return result
 
-    def lifecycle(self, profile, encrypted):
+    def lifecycle(self, profile, encrypted, mode=None):
         context = tls_proxy(self.port, self.tmp / "tls") if encrypted else nullcontext((None, self.direct, None))
         with context as (proxy, url, ca):
-            state = self.init(profile, url, ca)
+            state = self.init(profile, url, ca, mode=mode)
+            if mode == "kv":
+                saved = read_json(state)
+                self.cli("init", "--url", url, "--dataset", saved["dataset"], "--name", saved["name"],
+                         "--state", state, ca=ca)
+                original = state.read_bytes()
+                self.cli("init", "--url", url, "--dataset", saved["dataset"], "--name", saved["name"],
+                         "--state", state, "--mode", "append", ca=ca, expected=2)
+                self.assertEqual(state.read_bytes(), original, "explicit init changed a saved KV target")
             result = self.load(state, ca)
             self.assertEqual(result["operations"]["confirmed_rows"], ROWS)
             self.details["load_metrics"] = result["metrics"]
             before = journal_snapshot(state)
             self.assert_complete_profile(state, profile)
+            if mode == "kv":
+                saved = read_json(state)
+                with Client(self.direct, self.env["GLAMDB_TOKEN"], database_id=saved["database_id"]) as client:
+                    cid = saved["tables"]["lineitem"]["collection_id"]
+                    key = "09223372036854775809:09223372036854775809"  # order 1, line 1
+                    found = client.lookup(cid, [key, "missing", key], snapshot_id=saved["snapshots"]["lineitem"])
+                    self.assertEqual(found.rows[0]["l_orderkey"], 1)
+                    self.assertEqual(found.rows[0]["l_linenumber"], 1)
+                    self.assertEqual(found.rows[0], found.rows[2])
+                    self.assertIsNone(found.rows[1])
+                    self.assertEqual(len(found.rows[0]), 17)
+                self.assertEqual(result["metrics"]["kv_mutations"]["input_rows"], ROWS)
+                self.assertEqual(result["metrics"]["kv_mutations"]["rows_written"] -
+                                 result["metrics"]["kv_mutations"]["rows_removed"], ROWS)
             for format in ("json", "arrow"):
                 self.verify(state, format, ca)
             if profile == "native":
@@ -351,7 +376,7 @@ class NativeTPCHAcceptance(unittest.TestCase):
                 with self.assertRaises(HTTPError) as missing:
                     root.get_database(old_id)
                 self.assertEqual(missing.exception.status_code, 404)
-            reloaded = self.init(profile, url, ca, label="reload")
+            reloaded = self.init(profile, url, ca, label="reload", mode=mode)
             self.assertNotEqual(read_json(reloaded)["database_id"], old_id)
             self.load(reloaded, ca)
             self.assert_complete_profile(reloaded, profile)
@@ -375,8 +400,23 @@ class NativeTPCHAcceptance(unittest.TestCase):
         self.assertTrue(all(UUID(row["operation_id"]).version == 5 for row in snap["chunks"]))
         self.assertTrue(all(row["state"] == "committed" for row in snap["operations"].values()))
         for name, source in self.datasets[profile].tables.items():
-            self.assertEqual(saved["tables"][name]["schema"], source.schema.to_dict())
+            expected = source.schema.to_dict()
+            if saved.get("collection_mode", "append") == "kv":
+                expected["fields"].append({"name": "key", "type": "string", "field_id": len(source.schema.fields) + 1, "nullable": False})
+            self.assertEqual(saved["tables"][name]["schema"], expected)
         return snap
+
+    def test_http_kv_native_lifecycle(self):
+        self.lifecycle("native", False, "kv")
+
+    def test_tls_kv_legacy_lifecycle(self):
+        self.lifecycle("legacy-scaled", True, "kv")
+
+    def test_tls_kv_lost_committed_reply(self):
+        self.lost_append(before_forward=False, mode="kv")
+
+    def test_tls_kv_not_found_requires_explicit_retry(self):
+        self.lost_append(before_forward=True, mode="kv")
 
     def test_http_native_lifecycle(self):
         self.lifecycle("native", False)
@@ -390,9 +430,9 @@ class NativeTPCHAcceptance(unittest.TestCase):
     def test_tls_legacy_lifecycle(self):
         self.lifecycle("legacy-scaled", True)
 
-    def lost_append(self, *, before_forward):
+    def lost_append(self, *, before_forward, mode=None):
         with tls_proxy(self.port, self.tmp / "tls") as (proxy, url, ca):
-            state = self.init("native", url, ca)
+            state = self.init("native", url, ca, mode=mode)
             if before_forward:
                 proxy.drop_request_once = True
             else:
@@ -504,8 +544,14 @@ class NativeTPCHAcceptance(unittest.TestCase):
                                    "explicit-init-reuses-original-identities-and-schema"]
 
     def test_tls_prebind_refusal_requires_lookup_and_explicit_retry(self):
+        self.prebind_refusal()
+
+    def test_tls_kv_prebind_refusal_requires_lookup_and_explicit_retry(self):
+        self.prebind_refusal(mode="kv")
+
+    def prebind_refusal(self, mode=None):
         with tls_proxy(self.port, self.tmp / "tls") as (proxy, url, ca):
-            state = self.init("native", url, ca, limits={"max_owned_input_bytes": 1})
+            state = self.init("native", url, ca, limits={"max_owned_input_bytes": 1}, mode=mode)
             refused = self.load(state, ca, expected=3)
             self.assertEqual(refused["status"], "INCOMPLETE")
             self.assertEqual(refused["operations"]["failure_lookup_required"], 1)

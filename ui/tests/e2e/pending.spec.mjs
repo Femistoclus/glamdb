@@ -83,6 +83,7 @@ test('typed unresolved append exports and imports after reload with its exact or
         await route.abort('failed');
     });
     const form = page.locator('#write-form');
+    await form.locator('[data-write-row] summary').first().click();
     await form.getByLabel('key row 1', { exact: true }).fill('retained-key');
     await form.getByLabel('label row 1', { exact: true }).fill('original payload');
     await form.getByLabel('amount row 1 NULL', { exact: true }).uncheck();
@@ -130,6 +131,7 @@ test('pretty recovery files above 16 MiB import and export without submitting a 
         await route.abort('failed');
     });
     const form = page.locator('#write-form');
+    await form.locator('[data-write-row] summary').first().click();
     await form.getByLabel('key row 1', { exact: true }).fill('large-recovery');
     await form.getByRole('button', { name: 'Append rows', exact: true }).click();
     await expect(form.getByText('Outcome unresolved · keep this operation ID')).toBeVisible();

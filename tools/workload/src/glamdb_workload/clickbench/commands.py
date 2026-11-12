@@ -17,20 +17,24 @@ def add_parser(benches):
     commands = benches.add_parser("clickbench").add_subparsers(dest="clickbench_command", required=True)
     fetch = commands.add_parser("fetch-queries")
     fetch.add_argument("--output", required=True)
-    query = commands.add_parser("query")
-    for name in ("state", "catalog", "report"):
-        query.add_argument("--" + name, required=True)
-    query.add_argument("--source")
-    query.add_argument("--ids", default="all")
-    query.add_argument("--mode", dest="query_mode", choices=("scan", "reduce", "both"), default="both")
-    query.add_argument("--warmup", type=int, default=1)
-    query.add_argument("--repeats", type=positive, default=3)
-    query.add_argument("--timeout", type=float, default=120)
-    query.add_argument("--ca-file")
-    for name, default in (("memory-bytes", 512*1024**2), ("temp-bytes", 2*1024**3),
-                          ("max-candidate-bytes", 8*1024**3), ("max-result-rows", 100000),
-                          ("max-result-bytes", 64*1024**2)):
-        query.add_argument("--"+name, type=positive, default=default)
+    for action in ("query", "scan"):
+        query = commands.add_parser(action)
+        for name in ("state", "catalog", "report"):
+            query.add_argument("--" + name, required=True)
+        query.add_argument("--source")
+        query.add_argument("--ids", "--queries", dest="ids", default="all")
+        query.add_argument("--mode", dest="query_mode", choices=("scan", "reduce", "both"),
+                           default="both" if action == "query" else "scan")
+        query.add_argument("--warmup", type=int, default=1)
+        query.add_argument("--repeats", "--repeat", dest="repeats", type=positive, default=3)
+        query.add_argument("--users", type=positive, default=1)
+        query.add_argument("--processes", type=positive, default=1)
+        query.add_argument("--timeout", type=float, default=120)
+        query.add_argument("--ca-file")
+        for name, default in (("memory-bytes", 512*1024**2), ("temp-bytes", 2*1024**3),
+                              ("max-candidate-bytes", 8*1024**3), ("max-result-rows", 100000),
+                              ("max-result-bytes", 64*1024**2)):
+            query.add_argument("--"+name, type=positive, default=default)
     prepare = commands.add_parser("prepare")
     prepare.add_argument("--source", required=True)
     prepare.add_argument("--output", required=True)
@@ -50,10 +54,15 @@ def add_parser(benches):
             command.add_argument("--url", required=True)
             command.add_argument("--name", required=True)
             command.add_argument("--limits")
+            command.add_argument("--mode", dest="collection_mode", choices=("append", "kv"))
             command.add_argument("--max-journal-bytes", type=positive, default=1024**3)
             command.add_argument("--test-backend", choices=("mock",))
         elif action == "load":
             command.add_argument("--resume", action="store_true")
+            command.add_argument("--batch-rows", type=positive)
+            command.add_argument("--batch-bytes", type=positive)
+            command.add_argument("--workers", type=positive)
+            command.add_argument("--report")
         elif action == "resolve":
             command.add_argument("--retry", action="store_true")
         elif action == "verify":
@@ -72,11 +81,12 @@ def run(args):
             from .queries import fetch_material
 
             result = fetch_material(args.output)
-        elif args.clickbench_command == "query":
+        elif args.clickbench_command in {"query", "scan"}:
             from .run import campaign
 
             result = campaign(args.state, args.catalog, args.report, source=args.source, ids=args.ids,
                               mode=args.query_mode, warmup=args.warmup, repeats=args.repeats,
+                              users=args.users, processes=args.processes,
                               timeout=args.timeout, ca_file=args.ca_file, memory_bytes=args.memory_bytes,
                               temp_bytes=args.temp_bytes, max_candidate_bytes=args.max_candidate_bytes,
                               max_result_rows=args.max_result_rows, max_result_bytes=args.max_result_bytes)
@@ -97,9 +107,11 @@ def run(args):
                 state = ingest.initialize(
                     args.dataset, args.state, url=args.url, name=args.name,
                     limits=read_json(args.limits) if args.limits else None,
-                    max_journal_bytes=args.max_journal_bytes, test_backend=args.test_backend, **common)
+                    max_journal_bytes=args.max_journal_bytes, test_backend=args.test_backend,
+                    mode=args.collection_mode, **common)
                 result = {"status": "PASS", "phase": state["phase"], "database_id": state["database_id"],
                           "collection_id": state["collection_id"],
+                          "collection_mode": state.get("collection_mode", "append"),
                           "performance_eligible": state["performance_eligible"], "plan": state["plan"]}
             elif args.clickbench_command == "size":
                 from .measure import measure
@@ -109,7 +121,8 @@ def run(args):
             else:
                 extra = {}
                 if args.clickbench_command == "load":
-                    extra["resume"] = args.resume
+                    extra.update(resume=args.resume, batch_rows=args.batch_rows, batch_bytes=args.batch_bytes,
+                                 workers=args.workers, report=args.report)
                 elif args.clickbench_command == "resolve":
                     extra["retry"] = args.retry
                 elif args.clickbench_command == "verify":

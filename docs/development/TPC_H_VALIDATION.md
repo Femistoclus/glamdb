@@ -139,6 +139,93 @@ INCOMPLETE with one offered/cancelled query and zero completed queries; the
 driver requires those summaries to exist. The separate
 `tpch_interrupt_test.py` driver preserves this behavioral regression.
 
+## Append and KV comparison
+
+The [KV evidence](evidence/tpch-kv-2026-11-12.json) covers implementation
+`b8e4fdf` on main baseline `4820b2e`. Seven native scenarios pass on Python
+3.13.18: KV HTTP/native and TLS/legacy lifecycles; lost committed reply;
+authoritative not-found followed by explicit identical retry; pre-binding
+refusal followed by lookup, explicit retry and resume; and both original append
+TLS type profiles. The lifecycles check all source fields and derived keys,
+JSON/Arrow verification, initial/first/final snapshots, exact Q1/Q6, restart,
+unchanged resume, cleanup and reload. KV coverage also checks exact lookup,
+mode reuse/conflict, and COW receipt accounting.
+
+The first KV native run exposed managed cleanup rejecting valid nonzero Parquet
+file ordinals. After fixing that validator, the full case passes in a fresh
+invocation. All other six cases started after the final server rebuild. The
+evidence records both original reports, their hashes and process-start times;
+the preliminary failed report is preserved.
+
+Regression checks pass: 331 workload tests, 11 CLI bridge tests, 106 native route
+tests, native database-drop CTest and seven generic workload/ClickBench native
+cases. The complete Python 3.13 suite reports 1,840 passed, 39 skipped and 12
+subtests passed, with one unchanged baseline failure:
+`test_supplied_logo_paths_and_sizes_load` expects a 196px logo while main's
+theme uses 160px. LLVM 18 formatting of 339 files, targeted tidy for all three
+changed C++ translation units, actionlint and zizmor pass.
+
+The paired comparison uses the same native SF=0.01 dataset (86,805 rows) and
+default server resource/write settings. Each of six runs gets a fresh native
+process and store, in append/KV/KV/append/append/KV order, after acceptance tests
+finish. Loading uses one worker, 10,000 rows/request and an 8 MiB body cap: 15
+unique commits per run. Reads use loopback HTTP, Arrow batches, one user/process,
+one warmup and five measured repetitions per query. The host exposes 48 CPUs
+from an AMD EPYC 7713, with Linux x86-64, ext4 and Python 3.13.18. Filesystem
+caches are uncontrolled and the host is shared.
+
+| Measurement | Append | KV |
+| --- | ---: | ---: |
+| Load loop, s | 7.142 [7.005–7.651] | 10.165 [10.038–10.494] |
+| Load throughput, rows/s | 12,155 [11,346–12,392] | 8,539 [8,272–8,648] |
+| Complete load CLI, s | 34.114 [34.059–36.009] | 39.956 [39.740–40.173] |
+| Retained Parquet, MB | 2.698 | 6.098 |
+| Allocated store, MB | 3.027 | 6.533 |
+| Q1–Q22 source scan round, ms | 1,523.0 [1,499.2–1,599.5] | 1,437.0 [1,424.2–1,507.2] |
+| Q1 full client reduction, ms | 1,506.2 [1,490.1–1,544.1] | 1,484.9 [1,415.0–1,515.0] |
+| Q6 full client reduction, ms | 31.97 [29.94–32.73] | 31.07 [30.57–31.57] |
+
+Values are medians of three independent runs per mode; brackets give the
+observed minimum–maximum. The load loop includes source decoding, SDK request
+preparation, journaling and HTTP publication; the complete CLI command also
+includes planning, preflight and full verification. The Q1–Q22 figure sums the
+mean measured logical latency of each source scan. It does not include full SQL
+joins or aggregation; Q1/Q6 reductions do include exact client computation and
+result checking. Each run completes 110 measured source scans (4,962,680 rows),
+ten verified reductions and managed cleanup.
+
+Append remains the default for new runs: KV takes 42% longer in the load
+loop and retains 2.26 times as much Parquet in this profile. KV source scans
+have a 5.7% lower median, with overlapping observed ranges; the Q1/Q6
+difference is small. Select `init --mode kv` explicitly to measure KV storage
+and mutation semantics. The same 86,805 logical rows require 190,069 rows
+written and 103,264 removed from the live view under COW (2.190 row write
+amplification). Replaced files remain in history; the final live KV Parquet
+is 2,867,322 bytes, compared with 6,097,687 bytes written and retained. MB
+above means 1,000,000 bytes. These observations do not change existing saved
+runs or choose a mode based on scan results automatically.
+
+Reproduce a run with the same dataset, a new state file and a freshly started
+native server/store; repeat the stated mode order for the paired comparison:
+
+```sh
+glamdb-cli bench tpch init --url "$GLAMDB_URL" --dataset "$TPCH_DATASET" \
+  --name tpch-compare --mode "$TPCH_MODE" --state "$TPCH_STATE"
+glamdb-cli bench tpch load --state "$TPCH_STATE" \
+  --batch-rows 10000 --batch-bytes 8388608 --workers 1
+glamdb-cli bench tpch scan --state "$TPCH_STATE" --queries all --mode scan \
+  --format arrow --consume batches --users 1 --processes 1 --warmup 1 --repeat 5 \
+  --report "$TPCH_SCAN_REPORT"
+glamdb-cli bench tpch scan --state "$TPCH_STATE" --queries 1,6 --mode reduce \
+  --format arrow --consume batches --users 1 --processes 1 --warmup 1 --repeat 5 \
+  --report "$TPCH_REDUCE_REPORT"
+glamdb-cli bench tpch clean --state "$TPCH_STATE"
+```
+
+These are development-scale end-to-end observations. They do not establish
+statistical significance, isolated engine throughput, cold-cache physical I/O,
+SF=1/SF=10 behavior or official TPC-H/QphH results.
+
 ## Open qualification gates
 
 - **SF=1 complete command-family campaign: NOT RUN.**

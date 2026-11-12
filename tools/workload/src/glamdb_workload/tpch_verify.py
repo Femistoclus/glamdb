@@ -5,9 +5,10 @@ from pathlib import Path
 import sqlite3
 import tempfile
 
-from glamdb_sdk import AppendOutcome, AppendRequest
+from glamdb_sdk import AppendOutcome
 
 from .verification import _row_key, scan_chunks
+from .tpch_target import collection_mode, prepare_request, target_rows, target_schema
 
 KEYS = {
     'region': ('r_regionkey',), 'nation': ('n_nationkey',),
@@ -90,8 +91,8 @@ def verify_receipts(client, saved, dataset, log, *, deadline):
         request = log.request(record['operation_id'])
         body = request.to_dict()
         source = dataset.tables[record['table_name']]
-        rebuilt = AppendRequest.prepare(request.collection_id, request.operation_id, source.schema,
-                                        body['rows'], body.get('expected_snapshot'))
+        rebuilt = prepare_request(saved, record['table_name'], source.schema, request.operation_id,
+                                  body['rows'], body.get('expected_snapshot'))
         if rebuilt != request or request.payload_hash != record['payload_hash']:
             raise ValueError('saved request identity/body/hash differs from the append plan')
         original = json.loads(record['outcome'])
@@ -140,9 +141,11 @@ def verify_remote(client, saved, dataset, log, directory, *, format='arrow', lev
             for table, source in dataset.tables.items():
                 info = saved['tables'][table]
                 cid = info['collection_id']
-                if client.get_schema(cid, deadline=deadline) != source.schema:
+                mode = collection_mode(saved)
+                schema = target_schema(source.schema, mode)
+                if client.get_schema(cid, deadline=deadline) != schema:
                     raise ValueError('server schema differs from the immutable dataset')
-                current = compare_multiset(source.schema, source.iter_parts(),
+                current = compare_multiset(schema, (target_rows(table, rows, mode) for rows in source.iter_parts()),
                                            scan_chunks(client, cid, format=format,
                                                        query={'snapshot_id': saved['snapshots'][table]}, deadline=deadline), db)
                 first = log.db.execute('SELECT o.operation_id,o.outcome FROM operations o JOIN chunks c '
@@ -156,7 +159,7 @@ def verify_remote(client, saved, dataset, log, directory, *, format='arrow', lev
                     historical = dict(current, snapshot_id=first_id)
                 else:
                     rows = log.request(first['operation_id']).to_dict()['rows']
-                    historical = dict(compare_multiset(source.schema, [rows],
+                    historical = dict(compare_multiset(schema, [rows],
                                                        scan_chunks(client, cid, format=format,
                                                                    query={'snapshot_id': first_id}, deadline=deadline), db),
                                       snapshot_id=first_id)

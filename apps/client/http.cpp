@@ -167,8 +167,8 @@ TResponse SendRequest(const TRequest& request)
     }
     Check(request.TimeoutSeconds > 0 && request.TimeoutSeconds <= 3600, "timeout must be 1..3600 seconds");
     const char* token = std::getenv("GLAMDB_TOKEN");
-    Check(token && *token && std::string_view(token).size() <= 256 && Clean(token),
-        "set GLAMDB_TOKEN to a printable bearer token");
+    Check(token && *token && std::string_view(token).size() <= size_t{8} * 1024 && Clean(token),
+        "set GLAMDB_TOKEN to a printable bearer token (at most 8192 bytes)");
     std::ostringstream output;
     output << request.Method << ' ' << url.Target << " HTTP/1.1\r\nHost: " << url.Authority
            << "\r\nAuthorization: Bearer " << token << "\r\nAccept: " << request.Accept

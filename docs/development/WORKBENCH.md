@@ -99,8 +99,12 @@ isolation after their pinned build dependencies are present.
   Terminal outcomes stay terminal even if an older status reply arrives late.
   Confirmed create and append results remain confirmed if the following metadata
   refresh fails. A definite creation failure releases its frozen form for correction.
-- **Style studio:** preview palette/decoration changes and download JSON.
-  Permanent configuration is an operator edit on disk.
+- **Appearance:** light/dark theme switch at the bottom of the collapsible sidebar.
+  Display preferences persist locally; credentials and row drafts do not.
+  Overview puts schema beside statistics, and Data studio combines schema, reading
+  and nested row editing. Read results stay inside the Read rows panel.
+  See [compact workbench operations](COMPACT_WORKBENCH.md) for the combined
+  Keycloak login screen and deployment steps.
 
 Append preserves duplicate keys and input rows. Quote int64 values in JSON,
 especially those above 2^53. Use RFC3339 timestamps with a timezone and no more
@@ -191,8 +195,8 @@ or a binary rebuild. Old themes without image paths retain text/icon fallbacks.
 CSS custom properties are generated from validated tokens. Colors are hex,
 dimensions use px/rem/em/% or zero, and font values are constrained text.
 Malformed or unsafe configuration shows a warning and preserves the last valid
-theme. Style studio previews suspend disk overrides until **Reset preview**;
-downloaded JSON can replace the configured file. Fine layout rules remain in
+theme. Light colors use the existing color keys; matching `dark_` keys override
+colors in dark mode. Both palettes reload from the configured file. Fine layout rules remain in
 `ui/assets/styles.css`, also served directly and editable without compilation.
 There is no authenticated server-configuration write endpoint in this slice.
 

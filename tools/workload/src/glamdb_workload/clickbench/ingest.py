@@ -5,14 +5,17 @@ from pathlib import Path
 import time
 from uuid import UUID, uuid4, uuid5
 
-from glamdb_sdk import AppendRequest, Schema
+from glamdb_sdk import AppendOutcome, HTTPError, ProtocolError, TransportError
 from glamdb_sdk.request import uuid_string
 
 from ..ledger import Ledger
-from ..runtime import append_once, client_for, resolve_ledger, validate_url
-from ..verification import verify_ledgers
+from ..runtime import client_for, error_code, validate_url
+from ..write_runtime import _send_once, record_outcome
 from .dataset import ClickBenchDataset
 from .model import exclusive_state, read_json, save_json
+from .plan import capacity_preflight, freeze_plan
+from .target import KEY_ENCODING, collection_mode, prepare_request, target_schema
+from .verify import hydrate_legacy_receipts, validate_journal, verify_contents
 
 
 class Blocked(ValueError):
@@ -44,6 +47,8 @@ def read_state(path):
         raise ValueError("benchmark database/store identity differs")
     if state.get("test_backend") not in (None, "mock"):
         raise ValueError("unsupported explicit test backend")
+    collection_mode(state)
+    state.setdefault("request_plan_version", 1)
     return state
 
 
@@ -51,6 +56,8 @@ def _dataset(state):
     data = ClickBenchDataset(state["dataset"])
     if data.digest != state["dataset_hash"] or data.schema.to_dict() != state["schema"]:
         raise ValueError("dataset differs from the immutable run")
+    if state.get("target_schema", data.schema.to_dict()) != target_schema(data.schema, collection_mode(state)).to_dict():
+        raise ValueError("target schema differs from the original source and collection mode")
     return data
 
 
@@ -66,47 +73,43 @@ def _backend(capabilities, selected):
     return True
 
 
-def _request(state, data, ordinal, rows):
-    operation = str(uuid5(UUID(state["load_id"]),
-                          f'{state["collection_id"]}:{data.digest}:{ordinal}'))
-    return AppendRequest.prepare(state["collection_id"], operation, data.schema, rows)
-
-
 def _plan(state, data, capabilities, *, require_management=False):
     limits = capabilities.get("limits", {})
-    if type(limits.get("schema_fields")) is not int or limits["schema_fields"] < len(data.schema.fields):
-        raise Blocked("105-column schema is blocked by issue #161")
+    mode = collection_mode(state)
+    schema = target_schema(data.schema, mode)
+    if type(limits.get("schema_fields")) is not int or limits["schema_fields"] < len(schema.fields):
+        raise Blocked("complete source/target schema is blocked by issue #161")
     features = capabilities.get("features", {})
-    if require_management and features.get("database_management") is not True:
-        raise Blocked("server does not support explicit database management")
-    for feature in ("append", "scan", "scan_pagination", "scan_cancel"):
-        if features.get(feature) is not True:
-            raise Blocked("server is missing a required ClickBench capability")
-    operations = len(data.manifest["parts"]) + 1
-    if state["limits"]["max_operations"] > 4096 or operations > 4096:
-        raise Blocked("current HTTP database profile is bounded to 4096 operations; see #156")
-    if operations > state["limits"]["max_operations"]:
-        raise Blocked(f"operation/history profile is insufficient: need at least {operations}; see #156")
-    row_limit = limits.get("append_rows", min(limits.get("rows", 10000), 10000))
-    byte_limit = limits.get("request_bytes", limits.get("request_body_bytes"))
-    if type(row_limit) is not int or row_limit <= 0 or type(byte_limit) is not int or byte_limit <= 0:
-        raise Blocked("server did not advertise finite append limits")
+    required = ("scan", "scan_pagination", "scan_cancel") + (("key_value", "upsert") if mode == "kv" else ("append",))
+    if require_management:
+        required += ("database_management",)
+    if any(features.get(feature) is not True for feature in required):
+        raise Blocked("server is missing a required ClickBench capability for " + mode)
+    if "schema_types" in capabilities and not {f.type for f in schema.fields} <= set(capabilities["schema_types"]):
+        raise Blocked("server does not support the selected complete type profile")
     total = maximum = 0
+    offset = 0
     for ordinal, rows in data.iter_parts():
-        request = _request(state, data, ordinal, rows)
-        if len(rows) > row_limit or len(request.body) > byte_limit:
-            raise Blocked("immutable dataset parts exceed server row/body limits; prepare a new bounded dataset")
+        operation = str(uuid5(UUID(state["load_id"]), f'{state["collection_id"]}:{data.digest}:{ordinal}'))
+        request = prepare_request(state, data.schema, operation, rows, offset, -9223372036854775808)
+        offset += len(rows)
         total += len(request.body)
         maximum = max(maximum, len(request.body))
-    if total > state["max_journal_bytes"]:
-        raise Blocked(f"journal payload budget is insufficient: need {total} bytes, excluding SQLite overhead")
-    return {"required_operations": operations, "request_body_bytes": total,
-            "max_request_body_bytes": maximum, "storage_history_capacity": "runtime admission"}
+    plan = {"operations": len(data.manifest["parts"]), "wire_bytes": total}
+    try:
+        preflight = capacity_preflight(state["limits"], plan, max_journal_bytes=state["max_journal_bytes"])
+    except ValueError as error:
+        raise Blocked(str(error)) from error
+    return {"required_operations": plan["operations"] + 1, "request_body_bytes": total,
+            "max_request_body_bytes": maximum, "capacity_preflight": preflight,
+            "storage_history_capacity": "server admission under persisted history and device budgets"}
 
 
 @exclusive_state(1)
 def initialize(dataset, path, *, url, name, limits=None, max_journal_bytes=1024**3,
-               timeout=30, ca_file=None, test_backend=None):
+               timeout=30, ca_file=None, test_backend=None, mode=None):
+    if mode is not None:
+        collection_mode({"collection_mode": mode})
     data = ClickBenchDataset(dataset)
     url = validate_url(url)
     _timeout(timeout)
@@ -121,19 +124,23 @@ def initialize(dataset, path, *, url, name, limits=None, max_journal_bytes=1024*
         expected = {"url": url, "name": name, "dataset_hash": data.digest,
                     "limits": selected_limits, "max_journal_bytes": max_journal_bytes,
                     "test_backend": test_backend}
-        if any(state.get(key) != value for key, value in expected.items()):
+        if (any(state.get(key) != value for key, value in expected.items()) or
+                (mode is not None and mode != collection_mode(state))):
             raise ValueError("init parameters differ from the original run")
         if state["phase"] != "initializing":
             return state
     else:
         database = str(uuid4())
+        mode = mode or "append"
         state = {"version": 1, "kind": "clickbench", "url": url, "name": name,
                  "database_id": database, "store_id": database, "collection_id": str(uuid4()),
                  "load_id": str(uuid4()), "dataset": str(data.path), "dataset_hash": data.digest,
                  "schema": data.schema.to_dict(), "limits": selected_limits,
+                 "collection_mode": mode, "target_schema": target_schema(data.schema, mode).to_dict(),
+                 "key_encoding": KEY_ENCODING if mode == "kv" else None, "request_plan_version": 2,
                  "max_journal_bytes": max_journal_bytes, "test_backend": test_backend,
                  "run_dir": str(path.parent / (path.stem + "-artifacts")),
-                 "phase": "initializing", "load_complete": False, "snapshot_id": None}
+                 "phase": "initializing", "load_complete": False, "snapshot_id": None, "confirmed_rows": 0}
     config = _config(state, timeout, ca_file)
     with client_for(config, scoped=False) as root:
         caps = root.capabilities(deadline=timeout)
@@ -150,10 +157,12 @@ def initialize(dataset, path, *, url, name, limits=None, max_journal_bytes=1024*
                 database.get("store", {}).get("store_id") != state["store_id"] or database.get("state") != "open"):
             raise ValueError("server returned a different or unavailable database identity")
     with client_for(config) as client:
-        outcome = client.create_collection("hits", data.schema, collection_id=state["collection_id"], deadline=timeout)
+        schema = target_schema(data.schema, collection_mode(state))
+        outcome = client.create_collection("hits", schema, mode=collection_mode(state),
+                                           collection_id=state["collection_id"], deadline=timeout)
         if outcome.outcome != "committed":
             raise Blocked("collection creation is unresolved; repeat init with the original state")
-        if client.get_schema(state["collection_id"], deadline=timeout) != data.schema:
+        if client.get_schema(state["collection_id"], deadline=timeout) != schema:
             raise ValueError("created collection schema differs from the dataset")
         state["target"] = client.get_collection(state["collection_id"], deadline=timeout)
     state["phase"] = "ready"
@@ -174,111 +183,233 @@ def _summary(state, journal, elapsed=0, confirmed_before=0):
     result["load_complete"] = state["load_complete"]
     result["dataset_hash"] = state["dataset_hash"]
     result["load_id"] = state["load_id"]
+    result["collection_mode"] = collection_mode(state)
+    result["snapshot_id"] = state["snapshot_id"]
     return result
 
 
-def _check_target(client, state, data, journal, timeout):
+def _sync_progress(state, log):
+    last = log.db.execute("SELECT outcome FROM operations WHERE state='committed' ORDER BY rowid DESC LIMIT 1").fetchone()
+    import json
+
+    state["snapshot_id"] = json.loads(last["outcome"])["result"]["snapshot_id"] if last else None
+    state["confirmed_rows"] = log.summary()["confirmed_rows"]
+
+
+def _restore_plan(state, data, journal):
+    options = state.get("append_plan")
+    if options is None:
+        if state["request_plan_version"] != 1:
+            return None
+        # Original runs sent whole source parts within the SDK's 16 MiB wire
+        # ceiling. Rebuild that mapping without splitting or changing bodies.
+        options = {"batch_rows": 10000, "batch_bytes": 16 * 1024**2, "workers": 1}
+    plan = freeze_plan(journal, data, state, batch_rows=options["batch_rows"],
+                       batch_bytes=options["batch_bytes"], workers=options["workers"])
+    state["append_plan"] = plan
+    return plan
+
+
+def _check_target(client, state, data, timeout):
     info = client.get_collection(state["collection_id"], deadline=timeout)
-    if client.get_schema(state["collection_id"], deadline=timeout) != data.schema:
-        raise ValueError("target schema differs from the immutable run")
-    receipts = [row for row in journal.operations() if row["state"] == "committed"]
-    if receipts:
-        last = client.find_append_outcome(state["collection_id"], receipts[-1]["operation_id"], deadline=timeout)
-        if last is None or last.outcome != "committed" or last.result["snapshot_id"] != info["current_snapshot_id"]:
-            raise ValueError("target changed outside the recorded load")
-    elif info.get("current_snapshot_id") is not None:
-        raise ValueError("target must initially be empty")
+    if (client.get_schema(state["collection_id"], deadline=timeout) !=
+            target_schema(data.schema, collection_mode(state)) or
+            info.get("mode", "append") != collection_mode(state)):
+        raise ValueError("target schema or mode differs from the immutable run")
+    if info.get("current_snapshot_id") != state["snapshot_id"]:
+        raise ValueError("foreign writes changed the target outside the recorded load")
+    stats = client.stats(state["collection_id"], snapshot_id=state["snapshot_id"], deadline=timeout)
+    if int(stats["rows"]) != state.get("confirmed_rows", 0):
+        raise ValueError("target row count changed outside the recorded load")
+
+
+def _write_load_report(state, result, report):
+    save_json(Path(state["run_dir"]) / "load.json", result)
+    if report is not None:
+        from .reports import write_report
+
+        write_report(report, result)
+    return result
 
 
 @exclusive_state(0)
-def load(path, *, resume=False, timeout=30, ca_file=None):
+def load(path, *, resume=False, batch_rows=None, batch_bytes=None, workers=None,
+         report=None, timeout=30, ca_file=None):
+    from .loader import execute_load
+
+    overall = time.perf_counter()
     state = read_state(path)
     data = _dataset(state)
-    if state["phase"] not in {"ready", "loading", "loaded"}:
+    if report is not None:
+        from .reports import validate_report
+
+        report = validate_report(report, path, data, state["run_dir"])
+    if state["phase"] not in {"ready", "loading", "loaded", "verification_failed"}:
         raise ValueError("run is not initialized for loading")
+    if "append_plan" in state and not resume:
+        raise ValueError("load already started; use resume with the original plan")
+    original = state.get("append_plan", {})
+    batch_rows = original.get("batch_rows", 10000) if batch_rows is None else batch_rows
+    default_bytes = 16 * 1024**2 if state["request_plan_version"] == 1 else 8 * 1024**2
+    batch_bytes = original.get("batch_bytes", default_bytes) if batch_bytes is None else batch_bytes
+    workers = original.get("workers", 1) if workers is None else workers
     config = _config(state, timeout, ca_file)
-    run = Path(state["run_dir"])
-    with client_for(config, scoped=False) as root:
-        if root.get_database(state["database_id"], deadline=timeout).get("state") != "open":
-            raise Blocked("benchmark database must already be open")
-    with Ledger(run / "worker-000000.sqlite") as journal, client_for(config) as client:
-        caps = client.capabilities(deadline=timeout)
-        _backend(caps, state["test_backend"])
-        _plan(state, data, caps)
-        existing = {row["operation_id"]: dict(row) for row in journal.operations()}
-        if existing and not resume:
-            raise ValueError("load already started; use resume with the original journal")
-        if any(row["attempts"] > 0 and row["state"] not in {"committed", "definitely_not_committed"}
-               for row in existing.values()):
-            return _summary(state, journal)
-        if any(row["state"] == "definitely_not_committed" for row in existing.values()):
-            return _summary(state, journal)
-        _check_target(client, state, data, journal, timeout)
-        state["phase"] = "loading"
+    with Ledger(Path(state["run_dir"]) / "worker-000000.sqlite") as journal:
+        began = time.perf_counter()
+        plan = freeze_plan(journal, data, state, batch_rows=batch_rows, batch_bytes=batch_bytes, workers=workers)
+        state["append_plan"] = plan
         save_json(path, state)
-        confirmed_before = journal.summary()["confirmed_rows"]
-        started = time.perf_counter()
-        for ordinal, rows in data.iter_parts():
-            request = _request(state, data, ordinal, rows)
-            previous = existing.get(request.operation_id)
-            if previous and previous["state"] == "committed":
-                if journal.request(request.operation_id).body != request.body:
-                    raise ValueError("prepared request differs from its original journal")
-                continue
-            result = append_once(client, journal, request, deadline=timeout)
-            if result["state"] != "committed":
-                result = _summary(state, journal, time.perf_counter() - started, confirmed_before)
-                save_json(run / "load.json", result)
-                return result
-        result = _summary(state, journal, time.perf_counter() - started, confirmed_before)
-        if result["confirmed_rows"] != data.manifest["rows"]:
-            raise ValueError("committed journal does not cover the whole dataset")
-        info = client.get_collection(state["collection_id"], deadline=timeout)
-        snapshot = info.get("current_snapshot_id")
-        stats = client.stats(state["collection_id"], snapshot_id=snapshot, deadline=timeout)
-        if int(stats["rows"]) != data.manifest["rows"]:
-            raise ValueError("persisted target row count differs from the recorded dataset")
-        state.update(phase="loaded", load_complete=True, snapshot_id=snapshot)
-        result.update(load_complete=True, snapshot_id=snapshot)
-        save_json(path, state)
-        save_json(run / "load.json", result)
-        return result
+        if state["request_plan_version"] == 1:
+            with client_for(config) as client:
+                hydrate_legacy_receipts(client, journal, data, state, timeout=timeout)
+        validate_journal(journal, data, state)
+        if journal.summary()["pending"] or journal.summary()["definitely_not_committed"]:
+            return _write_load_report(state, _summary(state, journal), report)
+        _sync_progress(state, journal)
+        import shutil
+
+        stored = journal.db.execute("SELECT coalesce(sum(bytes),0) FROM operations").fetchone()[0]
+        remaining = max(0, plan["wire_bytes"] - stored)
+        free = shutil.disk_usage(state["run_dir"]).free
+        # This is a lower bound, not a reservation or a guarantee about SQLite
+        # overhead/concurrent growth. Retain room for the source multiset too.
+        minimum = remaining + data.manifest["converted_bytes"] + 16 * 1024**2
+        if free < minimum:
+            raise Blocked(f"client journal/verification disk needs at least {minimum} free bytes; found {free}")
+        state["client_disk_preflight"] = {"free_bytes": free, "minimum_free_bytes": minimum,
+                                           "journal_payload_remaining_bytes": remaining,
+                                           "verification_source_bytes": data.manifest["converted_bytes"],
+                                           "scope": "lower bound; SQLite/index overhead and external growth need headroom"}
+        with client_for(config, scoped=False) as root:
+            database = root.get_database(state["database_id"], deadline=timeout)
+            if database.get("state") != "open":
+                raise Blocked("benchmark database must already be open")
+            state["effective_limits"] = database["limits"]
+            try:
+                state["capacity_preflight"] = capacity_preflight(
+                    database["limits"], plan, max_journal_bytes=state["max_journal_bytes"])
+            except ValueError as error:
+                raise Blocked(str(error)) from error
+        with client_for(config) as client:
+            caps = client.capabilities(deadline=timeout)
+            _backend(caps, state["test_backend"])
+            if caps.get("store_id", state["store_id"]) != state["store_id"]:
+                raise ValueError("server store identity differs from the original target")
+            _check_target(client, state, data, timeout)
+            state.update(phase="loading", load_complete=False)
+            save_json(path, state)
+            preflight = time.perf_counter() - began
+            confirmed_before = journal.summary()["confirmed_rows"]
+            started, cpu = time.perf_counter(), time.process_time()
+            metrics = execute_load(client, journal, data, state, path, timeout=timeout)
+            elapsed = time.perf_counter() - started
+            result = _summary(state, journal, elapsed, confirmed_before)
+            metrics.update(elapsed_seconds=elapsed, client_cpu_seconds=time.process_time() - cpu,
+                           preflight_seconds=preflight, request_body_bytes=journal.summary()["confirmed_bytes"],
+                           source_file_bytes=data.manifest["source"]["bytes"], converted_bytes=data.manifest["converted_bytes"],
+                           journal_bytes=journal.path.stat().st_size)
+            import json
+
+            kv = {}
+            if collection_mode(state) == "kv":
+                for op in journal.db.execute("SELECT outcome FROM operations WHERE state='committed'"):
+                    receipt = json.loads(op[0])["result"]
+                    for key in ("input_rows", "rows_affected", "rows_written", "rows_removed", "data_files_added", "data_files_removed"):
+                        kv[key] = kv.get(key, 0) + int(receipt[key])
+                metrics["kv_mutations"] = kv
+            result["metrics"] = metrics
+            if journal.summary()["pending"] or journal.summary()["committed"] != plan["operations"]:
+                save_json(path, state)
+                return _write_load_report(state, result, report)
+            _check_target(client, state, data, timeout)
+            verified = time.perf_counter()
+            verification = verify_contents(client, journal, data, state,
+                                            format="json" if state["test_backend"] == "mock" else "arrow", timeout=max(timeout, 120))
+            metrics["verification_seconds"] = time.perf_counter() - verified
+            metrics["command_elapsed_seconds"] = time.perf_counter() - overall
+            state.update(phase="loaded" if verification["status"] == "PASS" else "verification_failed",
+                         load_complete=verification["status"] == "PASS")
+            result.update(status=verification["status"], load_complete=state["load_complete"],
+                          snapshot_id=state["snapshot_id"], verification=verification)
+            save_json(path, state)
+            _save_verification(state, data, verification)
+            return _write_load_report(state, result, report)
+
+
+def _save_verification(state, data, result):
+    result.update(performance_eligible=state["performance_eligible"], collection_mode=collection_mode(state),
+                  dataset_hash=data.digest if data is not None else state["dataset_hash"],
+                  snapshot_id=state["snapshot_id"], load_id=state["load_id"])
+    save_json(Path(state["run_dir"]) / "verify.json", result)
 
 
 @exclusive_state(0)
 def resolve(path, *, retry=False, timeout=30, ca_file=None):
     state = read_state(path)
-    _dataset(state)
+    data = _dataset(state)
     with client_for(_config(state, timeout, ca_file)) as client, \
             Ledger(Path(state["run_dir"]) / "worker-000000.sqlite") as journal:
-        resolve_ledger(client, journal, retry=retry, deadline=timeout)
+        if _restore_plan(state, data, journal) is None:
+            return {"status": "INCOMPLETE", "reason": "no immutable load plan to resolve"}
+        hydrate_legacy_receipts(client, journal, data, state, timeout=timeout)
+        validate_journal(journal, data, state)
+        for op in journal.operations(pending=True):
+            request = journal.request(op["operation_id"])
+            try:
+                outcome = client.find_append_outcome(request.collection_id, request.operation_id, deadline=timeout)
+                if isinstance(outcome, AppendOutcome):
+                    record_outcome(journal, request, outcome, authoritative=True)
+                elif outcome is None:
+                    journal.mark(request.operation_id, "not_found")
+                    if retry:
+                        _send_once(client, journal, request, deadline=timeout)
+                else:
+                    journal.mark(request.operation_id, "in_progress")
+            except (HTTPError, ProtocolError, TransportError) as error:
+                journal.mark(request.operation_id, "transport_error", error_code=error_code(error))
+        _sync_progress(state, journal)
+        save_json(path, state)
         return _summary(state, journal)
 
 
 @exclusive_state(0)
 def verify(path, *, format="arrow", timeout=120, ca_file=None):
     state = read_state(path)
-    data = _dataset(state)
-    if not state["load_complete"]:
+    if not state["load_complete"] and state["phase"] not in {"verification_failed", "verifying"}:
         return {"status": "INCOMPLETE", "reason": "dataset load is not complete"}
-    with client_for(_config(state, timeout, ca_file)) as client:
-        result = verify_ledgers(client, state["run_dir"], data.schema, state["collection_id"],
-                                format=format, deadline=timeout, query={"snapshot_id": state["snapshot_id"]})
-    if result["status"] == "PASS" and result["expected_rows"] != data.manifest["rows"]:
-        result = {"status": "FAIL", "reason": "journal omitted source rows"}
-    result.update(performance_eligible=state["performance_eligible"],
-                  dataset_hash=data.digest, snapshot_id=state["snapshot_id"], load_id=state["load_id"])
-    save_json(Path(state["run_dir"]) / "verify.json", result)
+    # A failed or interrupted recheck must revoke an earlier successful result.
+    state.update(load_complete=False, phase="verifying")
+    save_json(path, state)
+    try:
+        data = _dataset(state)
+        with client_for(_config(state, timeout, ca_file)) as client, \
+                Ledger(Path(state["run_dir"]) / "worker-000000.sqlite") as journal:
+            if _restore_plan(state, data, journal) is None:
+                raise ValueError("complete verification requires the immutable load plan")
+            hydrate_legacy_receipts(client, journal, data, state, timeout=timeout)
+            if state["request_plan_version"] == 1:
+                _sync_progress(state, journal)
+            _check_target(client, state, data, timeout)
+            result = verify_contents(client, journal, data, state, format=format, timeout=timeout)
+    except BaseException as error:
+        state["phase"] = "verification_failed"
+        save_json(path, state)
+        _save_verification(state, None, {"status": "FAIL", "reason": error_code(error)})
+        raise
+    state.update(load_complete=result["status"] == "PASS",
+                 phase="loaded" if result["status"] == "PASS" else "verification_failed")
+    save_json(path, state)
+    _save_verification(state, data, result)
     return result
 
 
 def status(path, *, timeout=30, ca_file=None):
     state = read_state(path)
-    journal = Path(state["run_dir"]) / "worker-000000.sqlite"
     counts = None
-    if journal.exists():
-        with Ledger(journal) as log:
-            counts = log.summary()
+    path = Path(state["run_dir"]) / "worker-000000.sqlite"
+    if path.exists():
+        with Ledger(path, readonly=True) as journal:
+            counts = journal.summary()
     with client_for(_config(state, timeout, ca_file), scoped=False) as client:
         database = client.get_database(state["database_id"], deadline=timeout)
     return {"status": "PASS" if state["load_complete"] and counts is not None and
@@ -286,7 +417,8 @@ def status(path, *, timeout=30, ca_file=None):
             "phase": state["phase"], "load_complete": state["load_complete"],
             "database_id": state["database_id"], "store_id": state["store_id"],
             "collection_id": state["collection_id"], "snapshot_id": state["snapshot_id"],
-            "database_state": database.get("state"), "operations": counts,
+            "collection_mode": collection_mode(state), "database_state": database.get("state"), "operations": counts,
+            "limits": database.get("limits"), "append_plan": state.get("append_plan"),
             "performance_eligible": state["performance_eligible"]}
 
 

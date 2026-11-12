@@ -73,6 +73,7 @@ test('separate read and write panels submit typed rows without a JSON editor', a
     await expect(
         page.locator('#query-form').getByRole('button', { name: 'Append rows' }),
     ).toHaveCount(0);
+    await expandRow(write, 0);
     await write.getByLabel('key row 1', { exact: true }).fill('form-🎀');
     await write.getByLabel('label row 1', { exact: true }).fill('a field value');
     await write.getByLabel('amount row 1 NULL', { exact: true }).uncheck();
@@ -127,6 +128,7 @@ test('form validates before sending and preserves rows while adding and removing
         if (r.url().endsWith('/append')) writes++;
     });
     const write = page.locator('#write-form');
+    await expandRow(write, 0);
     await write.getByLabel('key row 1', { exact: true }).fill('kept');
     await write.getByLabel('amount row 1 NULL', { exact: true }).uncheck();
     await write.getByLabel('amount row 1', { exact: true }).fill('9223372036854775808');
@@ -135,14 +137,18 @@ test('form validates before sending and preserves rows while adding and removing
     expect(writes).toBe(0);
     await write.getByRole('button', { name: '+ Add row', exact: true }).click();
     await expect(write.getByLabel('key row 1', { exact: true })).toHaveValue('kept');
+    await expandRow(write, 0);
+    await expandRow(write, 1);
     await write.getByLabel('key row 2', { exact: true }).fill('removed');
     await write.getByRole('button', { name: 'Remove row 2', exact: true }).click();
     await expect(write.locator('[data-write-row]')).toHaveCount(1);
+    await expandRow(write, 0);
     await write.getByLabel('amount row 1 NULL', { exact: true }).check();
     await write.getByRole('button', { name: 'Append rows', exact: true }).click();
     await expect(write.getByText('Append committed', { exact: true })).toBeVisible();
     expect(writes).toBe(1);
     await write.getByRole('button', { name: 'New rows', exact: true }).click();
+    await expandRow(write, 0);
     await expect(write.getByLabel('key row 1', { exact: true })).toBeEditable();
     await expect(write.getByLabel('key row 1', { exact: true })).toHaveValue('');
     await page.getByRole('button', { name: '+ Add a condition', exact: true }).click();
@@ -168,6 +174,7 @@ test('typed form freezes an unknown write and resolves it without submitting a s
         });
     });
     const write = page.locator('#write-form');
+    await expandRow(write, 0);
     await write.getByLabel('key row 1', { exact: true }).fill('once');
     await write.getByRole('button', { name: 'Append rows', exact: true }).click();
     await expect(
@@ -179,11 +186,13 @@ test('typed form freezes an unknown write and resolves it without submitting a s
     await expect(write.locator('#write-outcome code')).toHaveText(operationId);
     expect(writes).toBe(1);
     await write.getByRole('button', { name: 'New rows', exact: true }).click();
+    await expandRow(write, 0);
     await expect(write.getByLabel('key row 1', { exact: true })).toBeEditable();
 });
 
 test('runtime labels and editor spacing update without losing write drafts', async ({ page }) => {
     await newCollection(page);
+    await expandRow(page.locator('#write-form'), 0);
     await page.getByLabel('key row 1', { exact: true }).fill('retained draft');
     await expect(page.getByLabel('Result limit')).toHaveValue('1000');
     await expect(page.getByLabel('Result limit')).toHaveAttribute('max', '10000');
@@ -246,3 +255,8 @@ test('inline retry preserves the original batch with multiline string values', a
     expect(requests).toHaveLength(2);
     expect(requests[1]).toEqual(requests[0]);
 });
+
+async function expandRow(form, index) {
+    const row = form.locator('[data-write-row]').nth(index);
+    if (!(await row.evaluate((node) => node.open))) await row.locator('summary').click();
+}

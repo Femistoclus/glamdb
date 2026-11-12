@@ -101,6 +101,41 @@ TEST_F(TDropStoreTest, RemovesOwnedLayoutAndKeepsSibling)
     EXPECT_TRUE(std::filesystem::exists(sibling / "keep"));
 }
 
+TEST_F(TDropStoreTest, RemovesAllCanonicalKvAndBulkDataFileOrdinals)
+{
+    const std::string prefix = std::string(DataName).substr(0, 74);
+    for (const auto* ordinal : {"00001", "00009", "00010", "00100", "00255"}) {
+        std::ofstream(Collection_ / "data" / (prefix + ordinal + ".parquet")) << "parquet";
+    }
+    TDropStore store(ServiceRoot_, test::store_id);
+    store.Prepare();
+    store.Remove();
+    EXPECT_FALSE(std::filesystem::exists(Root_));
+}
+
+TEST_F(TDropStoreTest, RejectsMalformedOrOutOfProfileDataFileOrdinalsBeforeRemoval)
+{
+    const std::string prefix = std::string(DataName).substr(0, 74);
+    for (const auto* suffix : {"0001.parquet",
+             "000001.parquet",
+             "0000a.parquet",
+             "-0001.parquet",
+             "00256.parquet",
+             "99999.parquet",
+             "00001.parquet.extra"})
+    {
+        SCOPED_TRACE(suffix);
+        ResetStore();
+        const auto unexpected = Collection_ / "data" / (prefix + suffix);
+        std::ofstream(unexpected) << "retain";
+        const auto count = CountEntries();
+        EXPECT_THROW(TDropStore(ServiceRoot_, test::store_id), NTransport::TFailure);
+        EXPECT_EQ(CountEntries(), count);
+        EXPECT_TRUE(std::filesystem::exists(unexpected));
+        EXPECT_TRUE(std::filesystem::exists(Data_));
+    }
+}
+
 TEST_F(TDropStoreTest, ResumesAfterEveryMutationAndSyncBoundary)
 {
     for (const std::string_view boundary :

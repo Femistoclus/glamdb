@@ -100,3 +100,180 @@ def test_byte_budget_and_source_schema_are_checked(tmp_path):
     pq.write_table(table, source)
     with pytest.raises(ValueError, match="105"):
         prepare(source, tmp_path / "narrow", type_profile="legacy-date")
+
+
+@pytest.mark.parametrize("profile", ["legacy-date", "native"])
+def test_official_uint16_event_date_uses_epoch_days(tmp_path, profile):
+    from glamdb_workload.clickbench.dataset import ClickBenchDataset, prepare
+
+    source = source_table(tmp_path / "hits.parquet", rows=3)
+    table = pq.read_table(source)
+    table = table.set_column(5, "EventDate", pa.array([15901, 0, 65535], type=pa.uint16()))
+    table = table.set_column(9, "UserID", pa.array([-2461439046089301801] * 3, type=pa.int64()))
+    pq.write_table(table, source)
+    output = tmp_path / "dataset"
+    prepare(source, output, type_profile=profile)
+    rows = next(ClickBenchDataset(output).iter_parts())[1]
+    expected = [date(2013, 7, 15), date(1970, 1, 1), date(2149, 6, 6)]
+    if profile == "legacy-date":
+        expected = [datetime(day.year, day.month, day.day, tzinfo=timezone.utc) for day in expected]
+    assert [row["EventDate"] for row in rows] == expected
+    assert rows[0]["UserID"] == -2461439046089301801
+
+
+@pytest.mark.parametrize(("name", "array"), [
+    ("Title", pa.array([17], type=pa.int32())),
+    ("WatchID", pa.array([1.0], type=pa.float64())),
+    ("UserID", pa.array([True], type=pa.bool_())),
+    ("EventDate", pa.array([20130714.0], type=pa.float64())),
+    ("EventTime", pa.array([b"1373805240"], type=pa.binary())),
+])
+def test_empty_prefix_still_checks_source_physical_types(tmp_path, name, array):
+    from glamdb_workload.clickbench.dataset import prepare
+
+    source = source_table(tmp_path / "hits.parquet", rows=1)
+    table = pq.read_table(source)
+    table = table.set_column(table.schema.get_field_index(name), name, array)
+    pq.write_table(table, source)
+    output = tmp_path / "dataset"
+    with pytest.raises(ValueError, match="physical type"):
+        prepare(source, output, type_profile="native", rows=0)
+    assert not (output / "manifest.json").exists()
+
+
+def test_logical_temporal_annotations_preserve_utc_and_exact_microseconds(tmp_path):
+    from glamdb_workload.clickbench.dataset import ClickBenchDataset, prepare
+
+    source = source_table(tmp_path / "hits.parquet", rows=1)
+    table = pq.read_table(source)
+    table = table.set_column(4, "EventTime", pa.array([1373805240123456000],
+                                                    type=pa.timestamp("ns", "Europe/Moscow")))
+    table = table.set_column(5, "EventDate", pa.array([date(2013, 7, 14)], type=pa.date32()))
+    pq.write_table(table, source)
+    output = tmp_path / "exact"
+    prepare(source, output, type_profile="native")
+    row = next(ClickBenchDataset(output).iter_parts())[1][0]
+    assert row["EventTime"] == datetime(2013, 7, 14, 12, 34, 0, 123456, tzinfo=timezone.utc)
+    assert row["EventDate"] == date(2013, 7, 14)
+
+    table = table.set_column(4, "EventTime", pa.array([1373805240123456001], type=pa.timestamp("ns")))
+    pq.write_table(table, source)
+    with pytest.raises(ValueError):
+        prepare(source, tmp_path / "inexact", type_profile="native")
+    assert not (tmp_path / "inexact" / "manifest.json").exists()
+
+
+def test_prefix_keeps_source_order_across_row_groups_and_part_boundaries(tmp_path):
+    from glamdb_workload.clickbench.dataset import ClickBenchDataset, prepare
+
+    source = source_table(tmp_path / "hits.parquet", rows=31)
+    table = pq.read_table(source).set_column(0, "WatchID", pa.array(list(range(31)), type=pa.int64()))
+    pq.write_table(table, source, row_group_size=4)
+    output = tmp_path / "dataset"
+    prepare(source, output, type_profile="native", rows=13, part_rows=3)
+    assert [row["WatchID"] for _, part in ClickBenchDataset(output).iter_parts() for row in part] == list(range(13))
+
+
+def test_read_part_validates_ordinal_and_reads_only_the_requested_part(tmp_path):
+    from glamdb_workload.clickbench.dataset import ClickBenchDataset, prepare
+
+    output = tmp_path / "dataset"
+    prepare(source_table(tmp_path / "hits.parquet", rows=9), output, type_profile="native", part_rows=4)
+    data = ClickBenchDataset(output)
+    (output / data.manifest["parts"][0]["path"]).unlink()
+    assert len(data.read_part(1)) == 4
+    assert len(data.read_part(2)) == 1
+    for ordinal in (-1, 3, True, "1"):
+        with pytest.raises(ValueError, match="ordinal"):
+            data.read_part(ordinal)
+    with pytest.raises(ValueError, match="part"):
+        data.read_part(0)
+
+
+@pytest.mark.parametrize("change", ["disk", "memory"])
+def test_open_dataset_refuses_changed_manifest(tmp_path, change):
+    from glamdb_workload.clickbench.dataset import ClickBenchDataset, prepare
+
+    output = tmp_path / "dataset"
+    prepare(source_table(tmp_path / "hits.parquet", rows=1), output, type_profile="native")
+    data = ClickBenchDataset(output)
+    if change == "disk":
+        manifest = output / "manifest.json"
+        manifest.write_bytes(manifest.read_bytes() + b" ")
+    else:
+        data.manifest["rows"] = 2
+    with pytest.raises(ValueError, match="manifest"):
+        list(data.iter_parts())
+
+
+def test_source_changed_during_conversion_is_not_published(tmp_path, monkeypatch):
+    import glamdb_workload.clickbench.dataset as dataset
+
+    source = source_table(tmp_path / "hits.parquet", rows=1)
+    convert = dataset.convert_row
+
+    def change_source(row, **options):
+        result = convert(row, **options)
+        with source.open("ab") as stream:
+            stream.write(b"changed")
+        return result
+
+    monkeypatch.setattr(dataset, "convert_row", change_source)
+    output = tmp_path / "dataset"
+    with pytest.raises(ValueError, match="source changed"):
+        dataset.prepare(source, output, type_profile="native")
+    assert not (output / "manifest.json").exists()
+
+
+def test_impossible_part_count_fails_before_creating_converted_parts(tmp_path, monkeypatch):
+    import glamdb_workload.clickbench.dataset as dataset
+
+    monkeypatch.setattr(dataset, "MAX_PARTS", 2)
+    output = tmp_path / "dataset"
+    with pytest.raises(ValueError, match="part-count"):
+        dataset.prepare(source_table(tmp_path / "hits.parquet", rows=9), output,
+                        type_profile="native", part_rows=4)
+    assert not list(output.glob("part-*.jsonl"))
+
+
+def test_impossible_converted_byte_budget_fails_before_creating_parts(tmp_path):
+    from glamdb_workload.clickbench.dataset import prepare
+
+    output = tmp_path / "dataset"
+    with pytest.raises(ValueError, match="converted dataset byte budget"):
+        prepare(source_table(tmp_path / "hits.parquet", rows=9), output,
+                type_profile="native", part_rows=1, max_converted_bytes=5000)
+    assert not list(output.glob("part-*.jsonl"))
+
+
+def test_part_byte_limit_counts_toward_preflight_part_budget(tmp_path, monkeypatch):
+    import glamdb_workload.clickbench.dataset as dataset
+
+    monkeypatch.setattr(dataset, "MAX_PARTS", 2)
+    output = tmp_path / "dataset"
+    with pytest.raises(ValueError, match="part-count"):
+        dataset.prepare(source_table(tmp_path / "hits.parquet", rows=9), output,
+                        type_profile="native", part_bytes=5000)
+    assert not list(output.glob("part-*.jsonl"))
+
+
+def test_out_of_calendar_epoch_seconds_are_a_source_validation_error(tmp_path):
+    from glamdb_workload.clickbench.dataset import prepare
+
+    source = source_table(tmp_path / "hits.parquet", rows=1)
+    table = pq.read_table(source).set_column(4, "EventTime", pa.array([2**63], type=pa.uint64()))
+    pq.write_table(table, source)
+    output = tmp_path / "dataset"
+    with pytest.raises(ValueError, match="timestamp"):
+        prepare(source, output, type_profile="native")
+    assert not (output / "manifest.json").exists()
+
+
+def test_source_batch_byte_budget_prevents_python_row_materialization(tmp_path, monkeypatch):
+    import glamdb_workload.clickbench.dataset as dataset
+
+    monkeypatch.setattr(dataset, "MAX_CONVERSION_BATCH_BYTES", 500)
+    output = tmp_path / "dataset"
+    with pytest.raises(ValueError, match="batch.*memory byte budget"):
+        dataset.prepare(source_table(tmp_path / "hits.parquet", rows=1), output, type_profile="native")
+    assert not list(output.glob("part-*.jsonl"))

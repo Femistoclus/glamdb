@@ -13,7 +13,18 @@ cmake -S apps/cli -B build/client -G Ninja -DCMAKE_CXX_COMPILER=clang++-18
 cmake --build build/client
 ```
 
-Set `GLAMDB_TOKEN` in the environment. Keep tokens out of command-line arguments.
+Run `glamdb-cli` or `glamdb-cli --help` for command descriptions, connection
+examples and authentication guidance. Use `glamdb-cli COMMAND --help` for one
+command's options. `--help-all` expands the immediate subcommands, for example
+`glamdb-cli --help-all` or `glamdb-cli bench tpch --help-all`.
+The client connects separately for each network command; select the endpoint with
+`--url` or local `--host`/`--port` options after the command name. Data commands
+select a managed database with `--database-id UUID` or a base URL ending in
+`/databases/UUID`.
+
+Set `GLAMDB_TOKEN` in the environment. Bearer tokens may contain up to 8192
+printable bytes, including organization-scoped OIDC JWTs; control characters
+are rejected before connecting. Keep tokens out of command-line arguments.
 Local HTTP accepts only hostnames whose resolved endpoints are all loopback addresses;
 remote servers require HTTPS. HTTPS verifies the certificate chain and hostname,
 sets SNI for DNS names (not IP literals), and uses system trust with an optional additional `--ca-file CA.pem`.
@@ -253,7 +264,13 @@ See the
 [workload guide](../../tools/workload/README.md) for installation, exact outcome
 journals, Locust reports and native E2E. Ordinary requests do not require Python.
 
-ClickBench commands and examples: [workload adapter](../../tools/workload/CLICKBENCH.md).
+`bench clickbench prepare/init/load/status/resolve/verify/size/scan/query/clean`
+provides the complete hits lifecycle. New runs default to append; `init --mode kv`
+adds a duplicate-safe source-ordinal key. Loading freezes row/byte bounds and
+disjoint worker assignments; scans and client reductions support finite Locust
+users/processes with JSON/CSV/Markdown timing reports. See the
+[ClickBench recipes](../../tools/workload/CLICKBENCH.md) for source preparation,
+all 43 queries, capacity profiles, recovery and exact-identity cleanup.
 
 ## Native bulk upload
 
@@ -293,7 +310,7 @@ migration remain native C++ facade operations. See the
 glamdb-cli bench tpch generate --scale-factor 0.01 --dbgen /path/to/dbgen \
   --type-profile native --output tpch-data/
 glamdb-cli bench tpch init --url http://127.0.0.1:8080 --dataset tpch-data/ \
-  --name tpch-small --state tpch-run.json
+  --name tpch-small --state tpch-run.json --mode kv
 glamdb-cli bench tpch load --state tpch-run.json
 glamdb-cli bench tpch scan --state tpch-run.json --queries all --mode scan \
   --format arrow --consume batches --report tpch-scans/
@@ -301,7 +318,12 @@ glamdb-cli bench tpch clean --state tpch-run.json
 ```
 
 Generation requires explicit `native` or `legacy-scaled` type selection and
-reference TPC-H Tools 3.0.1 provenance. `init --limits FILE` reads an explicit
+reference TPC-H Tools 3.0.1 provenance. `init --mode append|kv` chooses the
+collection mode (new runs default to append). KV targets derive a required
+string key from each table's primary key, retaining all 61 original fields.
+Subsequent commands keep the saved mode, including old append runs; the scan
+subcommand's `--mode scan|reduce` controls query behavior independently.
+`init --limits FILE` reads an explicit
 JSON limits object; commands never raise limits automatically. `load --resume`
 retains the original immutable plan and journal, while `resolve` only looks up
 outcomes unless `--retry` is explicit. Completed loads pin all eight table views.

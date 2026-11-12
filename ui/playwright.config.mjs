@@ -44,7 +44,7 @@ export default defineConfig({
         backend === 'native'
             ? ['native.spec.mjs', 'shared-contract.spec.mjs']
             : backend === 'static'
-              ? 'public-demo.spec.mjs'
+              ? ['public-demo.spec.mjs', 'compact-workbench.spec.mjs']
               : '**/*.spec.mjs',
     testIgnore: backend === 'mock' ? 'native.spec.mjs' : [],
     timeout: 30000,
