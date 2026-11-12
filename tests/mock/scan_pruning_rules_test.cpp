@@ -11,6 +11,9 @@
 #include <parquet/arrow/writer.h>
 #include <parquet/file_reader.h>
 #include <parquet/metadata.h>
+#include <parquet/properties.h>
+#include <parquet/schema.h>
+#include <parquet/statistics.h>
 
 #include <cmath>
 #include <cstring>
@@ -301,6 +304,188 @@ TEST(ScanPruningRules, RowGroupStatisticsAreExactAndNaNAware)
     const auto missing = RowGroupFieldStats(*group, 7, FieldType::Int64, true);
     EXPECT_FALSE(missing.Nulls);
     EXPECT_GT(missing.Rows, 0);
+}
+
+TEST(ScanPruningRules, ContradictoryOrMalformedManifestBoundsPruneNothing)
+{
+    // A one-row file whose bounds are reversed: value 15 may exist.
+    auto ints = File(1);
+    ints.null_value_counts[2] = 0;
+    ints.lower_bounds[2] = Int64Bytes(20);
+    ints.upper_bounds[2] = Int64Bytes(10);
+    for (const auto op : {CompareOp::Eq, CompareOp::Lt, CompareOp::Gt, CompareOp::Ne}) {
+        EXPECT_TRUE(MayMatchFile(Predicate::Compare("value", op, int64_t{15}), ints));
+    }
+    EXPECT_TRUE(MayMatchFile(Predicate::In("value", {Literal{int64_t{15}}}), ints));
+    // The counts of a file with contradictory bounds are not trusted either.
+    EXPECT_TRUE(MayMatchFile(Predicate::IsNull("value"), ints));
+
+    auto doubles = File(1);
+    doubles.nan_value_counts[3] = 0;
+    doubles.lower_bounds[3] = DoubleBytes(2.0);
+    doubles.upper_bounds[3] = DoubleBytes(1.0);
+    EXPECT_TRUE(MayMatchFile(Predicate::Compare("score", CompareOp::Eq, 1.5), doubles));
+
+    auto flags = File(1);
+    flags.lower_bounds[4] = {1};
+    flags.upper_bounds[4] = {0};
+    EXPECT_TRUE(MayMatchFile(Predicate::Compare("flag", CompareOp::Eq, false), flags));
+    EXPECT_TRUE(MayMatchFile(Predicate::Compare("flag", CompareOp::Eq, true), flags));
+
+    auto times = File(1);
+    times.lower_bounds[5] = Int64Bytes(2000);
+    times.upper_bounds[5] = Int64Bytes(1000);
+    EXPECT_TRUE(MayMatchFile(Predicate::Compare("at", CompareOp::Eq, TimestampUs{1500}), times));
+
+    auto strings = File(1);
+    strings.lower_bounds[1] = TextBytes("b");
+    strings.upper_bounds[1] = TextBytes("a");
+    EXPECT_TRUE(MayMatchFile(Predicate::Compare("key", CompareOp::Eq, std::string("ab")), strings));
+
+    // Invalid UTF-8: an upper bound of only 0xC3 must not exclude "\xC3\xA9" (é),
+    // and a malformed lower bound must not exclude anything either.
+    auto badUpper = File(1);
+    badUpper.lower_bounds[1] = TextBytes("a");
+    badUpper.upper_bounds[1] = TextBytes("\xC3");
+    EXPECT_TRUE(MayMatchFile(Predicate::Compare("key", CompareOp::Eq, std::string("\xC3\xA9")), badUpper));
+    EXPECT_TRUE(MayMatchFile(Predicate::Compare("key", CompareOp::Lt, std::string("a")), badUpper));
+    auto badLower = File(1);
+    badLower.lower_bounds[1] = TextBytes("\xFF");
+    badLower.upper_bounds[1] = TextBytes("b");
+    EXPECT_TRUE(MayMatchFile(Predicate::Compare("key", CompareOp::Gt, std::string("c")), badLower));
+    EXPECT_TRUE(MayMatchFile(Predicate::Compare("key", CompareOp::Eq, std::string("a")), badLower));
+
+    // One bound of the wrong width makes the other unusable too.
+    auto wide = File(1);
+    wide.lower_bounds[2] = Int64Bytes(20);
+    wide.upper_bounds[2] = {1, 2, 3};
+    EXPECT_TRUE(MayMatchFile(Predicate::Compare("value", CompareOp::Lt, int64_t{5}), wide));
+    auto wideBool = File(1);
+    wideBool.lower_bounds[4] = {1, 1};
+    wideBool.upper_bounds[4] = {1};
+    EXPECT_TRUE(MayMatchFile(Predicate::Compare("flag", CompareOp::Eq, false), wideBool));
+
+    // Bounds in a column whose null count says every value is NULL contradict it.
+    auto allNull = File(2);
+    allNull.null_value_counts[2] = 2;
+    allNull.lower_bounds[2] = Int64Bytes(1);
+    allNull.upper_bounds[2] = Int64Bytes(1);
+    EXPECT_TRUE(MayMatchFile(Predicate::Compare("value", CompareOp::Eq, int64_t{1}), allNull));
+    EXPECT_TRUE(MayMatchFile(Predicate::IsNotNull("value"), allNull));
+    // Negative and excessive counts are ignored.
+    auto counts = File(2);
+    counts.null_value_counts[2] = -1;
+    EXPECT_TRUE(MayMatchFile(Predicate::IsNull("value"), counts));
+    counts.null_value_counts[2] = 3;
+    EXPECT_TRUE(MayMatchFile(Predicate::IsNotNull("value"), counts));
+    auto nans = File(2);
+    nans.nan_value_counts[3] = -1;
+    nans.lower_bounds[3] = DoubleBytes(0.0);
+    nans.upper_bounds[3] = DoubleBytes(1.0);
+    EXPECT_TRUE(MayMatchFile(Predicate::Compare("score", CompareOp::Gt, 5.0), nans));
+}
+
+// One row group of one column with the given encoded statistics, built with the
+// Parquet metadata builder, so values the writer would never produce reach the
+// reader unchanged (the footer verifier does not order min/max).
+std::shared_ptr<parquet::FileMetaData>
+GroupWithStatistics(parquet::schema::NodePtr node, parquet::EncodedStatistics statistics, int64_t rows)
+{
+    const auto root = parquet::schema::GroupNode::Make("schema", parquet::Repetition::REQUIRED, {std::move(node)});
+    parquet::SchemaDescriptor schema;
+    schema.Init(root);
+    const auto properties = parquet::WriterProperties::Builder().build();
+    auto builder = parquet::FileMetaDataBuilder::Make(&schema, properties);
+    auto* group = builder->AppendRowGroup();
+    auto* column = group->NextColumnChunk();
+    statistics.is_min_value_exact = true;
+    statistics.is_max_value_exact = true;
+    column->SetStatistics(statistics);
+    column->Finish(rows, 0, 0, 4, 100, 100, false, false, {}, {{parquet::Encoding::PLAIN, 1}});
+    group->set_num_rows(rows);
+    group->Finish(100);
+    return builder->Finish();
+}
+
+parquet::EncodedStatistics Encoded(std::string min, std::string max, int64_t nulls = 0)
+{
+    parquet::EncodedStatistics statistics;
+    statistics.set_min(std::move(min));
+    statistics.set_max(std::move(max));
+    statistics.set_null_count(nulls);
+    return statistics;
+}
+
+template <class T>
+std::string Plain(T value)
+{
+    std::string bytes(sizeof(T), '\0');
+    std::memcpy(bytes.data(), &value, sizeof(T));
+    return bytes;
+}
+
+bool MayMatchGroup(const Predicate& predicate, const parquet::FileMetaData& metadata, FieldType type)
+{
+    const auto bound = Bind(predicate);
+    const auto group = metadata.RowGroup(0);
+    const std::vector<TFieldStats> stats{RowGroupFieldStats(*group, 0, type, true)};
+    return MayMatch(bound, stats);
+}
+
+TEST(ScanPruningRules, ContradictoryOrMalformedRowGroupStatisticsPruneNothing)
+{
+    using parquet::schema::PrimitiveNode;
+    const auto int64 = PrimitiveNode::Make("value", parquet::Repetition::OPTIONAL, parquet::Type::INT64);
+    const auto reversed = GroupWithStatistics(int64, Encoded(Plain<int64_t>(20), Plain<int64_t>(10)), 1);
+    EXPECT_FALSE(RowGroupFieldStats(*reversed->RowGroup(0), 0, FieldType::Int64, true).Lower);
+    EXPECT_TRUE(MayMatchGroup(Predicate::Compare("value", CompareOp::Eq, int64_t{15}), *reversed, FieldType::Int64));
+    EXPECT_TRUE(MayMatchGroup(Predicate::Compare("value", CompareOp::Lt, int64_t{5}), *reversed, FieldType::Int64));
+    // Well-ordered statistics of the same shape still prune (control).
+    const auto ordered = GroupWithStatistics(int64, Encoded(Plain<int64_t>(10), Plain<int64_t>(20)), 1);
+    EXPECT_FALSE(MayMatchGroup(Predicate::Compare("value", CompareOp::Eq, int64_t{25}), *ordered, FieldType::Int64));
+
+    const auto timestamp = PrimitiveNode::Make("at",
+        parquet::Repetition::OPTIONAL,
+        parquet::LogicalType::Timestamp(true, parquet::LogicalType::TimeUnit::MICROS),
+        parquet::Type::INT64);
+    const auto times = GroupWithStatistics(timestamp, Encoded(Plain<int64_t>(2000), Plain<int64_t>(1000)), 1);
+    EXPECT_TRUE(
+        MayMatchGroup(Predicate::Compare("at", CompareOp::Eq, TimestampUs{1500}), *times, FieldType::TimestampUsUtc));
+
+    const auto real = PrimitiveNode::Make("score", parquet::Repetition::OPTIONAL, parquet::Type::DOUBLE);
+    const auto doubles = GroupWithStatistics(real, Encoded(Plain(2.0), Plain(1.0)), 1);
+    EXPECT_TRUE(MayMatchGroup(Predicate::Compare("score", CompareOp::Eq, 1.5), *doubles, FieldType::Float64));
+    const auto infinite =
+        GroupWithStatistics(real, Encoded(Plain(0.0), Plain(std::numeric_limits<double>::infinity())), 1);
+    EXPECT_TRUE(MayMatchGroup(Predicate::Compare("score", CompareOp::Lt, -1.0), *infinite, FieldType::Float64));
+
+    const auto boolean = PrimitiveNode::Make("flag", parquet::Repetition::OPTIONAL, parquet::Type::BOOLEAN);
+    const auto flags = GroupWithStatistics(boolean, Encoded(std::string(1, '\1'), std::string(1, '\0')), 1);
+    EXPECT_TRUE(MayMatchGroup(Predicate::Compare("flag", CompareOp::Eq, false), *flags, FieldType::Bool));
+
+    const auto text = PrimitiveNode::Make("key",
+        parquet::Repetition::REQUIRED,
+        parquet::LogicalType::String(),
+        parquet::Type::BYTE_ARRAY);
+    const auto strings = GroupWithStatistics(text, Encoded("b", "a"), 1);
+    EXPECT_TRUE(
+        MayMatchGroup(Predicate::Compare("key", CompareOp::Eq, std::string("ab")), *strings, FieldType::String));
+    const auto badUpper = GroupWithStatistics(text, Encoded("a", "\xC3"), 1);
+    EXPECT_TRUE(
+        MayMatchGroup(Predicate::Compare("key", CompareOp::Eq, std::string("\xC3\xA9")), *badUpper, FieldType::String));
+    const auto badLower = GroupWithStatistics(text, Encoded("\xFF", "b"), 1);
+    EXPECT_TRUE(
+        MayMatchGroup(Predicate::Compare("key", CompareOp::Gt, std::string("c")), *badLower, FieldType::String));
+    const auto validStrings = GroupWithStatistics(text, Encoded("a", "b"), 1);
+    EXPECT_FALSE(
+        MayMatchGroup(Predicate::Compare("key", CompareOp::Gt, std::string("c")), *validStrings, FieldType::String));
+
+    // Bounds in an all-NULL group, and null counts above the row count.
+    const auto allNull = GroupWithStatistics(int64, Encoded(Plain<int64_t>(1), Plain<int64_t>(1), 1), 1);
+    EXPECT_TRUE(MayMatchGroup(Predicate::IsNotNull("value"), *allNull, FieldType::Int64));
+    const auto excessive = GroupWithStatistics(int64, Encoded(Plain<int64_t>(1), Plain<int64_t>(1), 5), 1);
+    EXPECT_FALSE(RowGroupFieldStats(*excessive->RowGroup(0), 0, FieldType::Int64, true).Nulls);
+    EXPECT_TRUE(MayMatchGroup(Predicate::IsNull("value"), *excessive, FieldType::Int64));
 }
 
 } // namespace

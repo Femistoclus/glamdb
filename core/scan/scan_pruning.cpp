@@ -2,6 +2,7 @@
 
 #include "core/storage/scan_index.h"
 
+#include <arrow/util/utf8.h>
 #include <parquet/metadata.h>
 #include <parquet/schema.h>
 #include <parquet/statistics.h>
@@ -174,9 +175,33 @@ std::optional<TStatValue> DecodeBound(std::string_view bytes, FieldType type)
             }
             return std::nullopt;
         case FieldType::String:
+            // A bound that is not valid UTF-8 cannot order valid values.
+            arrow::util::InitializeUTF8();
+            if (!arrow::util::ValidateUTF8(bytes)) {
+                return std::nullopt;
+            }
             return std::string(bytes);
     }
     return std::nullopt;
+}
+
+// Statistics that contradict themselves are malformed: nothing may be
+// concluded from them, so they prune nothing. `malformed` reports a bound that
+// was present but could not be decoded.
+TFieldStats Sanitize(TFieldStats stats, bool malformed)
+{
+    if (malformed) {
+        return {.Rows = std::max<int64_t>(stats.Rows, 1)};
+    }
+    if (stats.Lower && stats.Upper && !std::is_lteq(Order(*stats.Lower, *stats.Upper))) {
+        // Lower above upper (or values of different types).
+        return {.Rows = std::max<int64_t>(stats.Rows, 1)};
+    }
+    if (stats.Nulls && *stats.Nulls >= stats.Rows && (stats.Lower || stats.Upper)) {
+        // Bounds of non-NULL values in an all-NULL column.
+        return {.Rows = std::max<int64_t>(stats.Rows, 1)};
+    }
+    return stats;
 }
 
 int64_t CodePoints(const std::string& bytes)
@@ -188,20 +213,27 @@ int64_t CodePoints(const std::string& bytes)
     return count;
 }
 
+// Returns false when a present value cannot be converted (malformed).
 template <class TStatistics, class TConvert>
-void TypedBounds(const parquet::Statistics& statistics, TFieldStats& stats, TConvert&& convert)
+bool TypedBounds(const parquet::Statistics& statistics, TFieldStats& stats, TConvert&& convert)
 {
     const auto* typed = dynamic_cast<const TStatistics*>(&statistics);
     if (typed == nullptr) {
-        return;
+        return true;
+    }
+    std::optional<TStatValue> lower = convert(typed->min());
+    std::optional<TStatValue> upper = convert(typed->max());
+    if (!lower || !upper) {
+        return false;
     }
     // Truncated (inexact) values are not used even though they still bound.
     if (statistics.is_min_value_exact() != std::optional(false)) {
-        stats.Lower = convert(typed->min());
+        stats.Lower = std::move(lower);
     }
     if (statistics.is_max_value_exact() != std::optional(false)) {
-        stats.Upper = convert(typed->max());
+        stats.Upper = std::move(upper);
     }
+    return true;
 }
 
 } // namespace
@@ -283,18 +315,21 @@ TFieldStats FileFieldStats(const NGlamDB::NStorage::TScanFieldMetrics* metrics,
     if (type == FieldType::Float64 && metrics->NanCount != 0) {
         return stats;
     }
+    bool malformed = false;
     if (metrics->Lower) {
         // A truncated string lower bound is a prefix, still at most every value.
         stats.Lower = DecodeBound(*metrics->Lower, type);
+        malformed = malformed || !stats.Lower;
     }
     if (metrics->Upper) {
         auto value = DecodeBound(*metrics->Upper, type);
+        malformed = malformed || !value;
         if (value && type == FieldType::String && CodePoints(std::get<std::string>(*value)) >= truncateLength) {
             value.reset();
         }
         stats.Upper = std::move(value);
     }
-    return stats;
+    return Sanitize(std::move(stats), malformed);
 }
 
 TFieldStats
@@ -318,41 +353,45 @@ RowGroupFieldStats(const parquet::RowGroupMetaData& group, int column, FieldType
         }
         const auto physical = statistics->physical_type();
         const auto order = statistics->descr()->sort_order();
+        bool converted = true;
         switch (type) {
             case FieldType::Int64:
             case FieldType::TimestampUsUtc:
                 if (physical == parquet::Type::INT64 && order == parquet::SortOrder::SIGNED) {
-                    TypedBounds<parquet::Int64Statistics>(*statistics, stats, [](int64_t value) {
+                    converted = TypedBounds<parquet::Int64Statistics>(*statistics, stats, [](int64_t value) {
                         return TStatValue(value);
                     });
                 }
                 break;
             case FieldType::Float64:
                 if (physical == parquet::Type::DOUBLE && order == parquet::SortOrder::SIGNED && floatsWithoutNaN) {
-                    TypedBounds<parquet::DoubleStatistics>(*statistics, stats, [](double value) {
+                    converted = TypedBounds<parquet::DoubleStatistics>(*statistics, stats, [](double value) {
                         return std::isfinite(value) ? std::optional<TStatValue>(value) : std::nullopt;
                     });
                 }
                 break;
             case FieldType::Bool:
                 if (physical == parquet::Type::BOOLEAN) {
-                    TypedBounds<parquet::BoolStatistics>(*statistics, stats, [](bool value) {
+                    converted = TypedBounds<parquet::BoolStatistics>(*statistics, stats, [](bool value) {
                         return TStatValue(value);
                     });
                 }
                 break;
             case FieldType::String:
                 if (physical == parquet::Type::BYTE_ARRAY && order == parquet::SortOrder::UNSIGNED) {
-                    TypedBounds<parquet::ByteArrayStatistics>(*statistics, stats, [](const parquet::ByteArray& value) {
-                        return TStatValue(std::string(reinterpret_cast<const char*>(value.ptr), value.len));
-                    });
+                    converted = TypedBounds<parquet::ByteArrayStatistics>(*statistics,
+                        stats,
+                        [](const parquet::ByteArray& value) {
+                            return DecodeBound(std::string_view(reinterpret_cast<const char*>(value.ptr), value.len),
+                                FieldType::String);
+                        });
                 }
                 break;
         }
+        return Sanitize(std::move(stats), !converted);
     } catch (const std::exception&) {
         return {.Rows = std::max<int64_t>(stats.Rows, 1)};
     }
-    return stats;
 }
 
 void SetScanPruning(bool enabled)
