@@ -478,7 +478,7 @@ iceberg::Result<TDataWriteResult> WriteDataFile(std::shared_ptr<iceberg::FileIO>
                 *schema,
                 {static_cast<std::int64_t>(receipt.Length), shape.Rows},
                 {limits.MaxFileBytes}));
-        ICEBERG_RETURN_UNEXPECTED(CheckColumnCodecs(*verifiedFooter, *schema, writeSpec));
+        ICEBERG_RETURN_UNEXPECTED(CheckColumnChunks(*verifiedFooter, *schema, writeSpec));
 
         // Upstream iceberg-cpp CollectBounds folds row-group min/max only over row groups
         // where HasMinMax() is true, omitting non-all-NULL row groups whose statistics were
