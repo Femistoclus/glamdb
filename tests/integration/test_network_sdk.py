@@ -215,15 +215,31 @@ def test_runnable_quickstart_uses_actual_http_and_reports_verified_stream(server
     assert_storage(server, collection_id, 2)
 
 
-def test_mock_without_parquet_write_settings_refuses_them_explicitly(server):
-    # Native write settings are covered by native HTTP tests. The mock must not
-    # look as if it applied Parquet compression it does not implement.
+def test_parquet_write_settings_are_applied_or_refused_explicitly(server):
+    # The native backend applies and reports Parquet write settings; the mock
+    # does not implement them and must not look as if it applied them.
     settings = {"parquet": {"compression": {"codec": "zstd", "level": 3}}}
     with Client(server.url, TOKEN) as client:
         capabilities = client.capabilities()
+        cid = str(uuid4())
+        if not server.mock:
+            assert capabilities["features"]["write_settings"] is True
+            assert {item["codec"] for item in capabilities["parquet"]["codecs"]} >= {"uncompressed", "zstd"}
+            created = client.create_collection("parquet_settings", SCHEMA, collection_id=cid,
+                                               write_settings=settings)
+            assert created.outcome == "committed" and created.info["write_settings_version"] == "1"
+            assert created.info["write_settings"]["parquet"]["compression"] == {"codec": "zstd", "level": 3}
+            assert client.resolve_create("parquet_settings", SCHEMA, collection_id=cid,
+                                         write_settings=settings)["collection_id"] == cid
+            updated = client.update_write_settings(cid, "1", {"parquet": {"compression": {"codec": "snappy"}}})
+            assert updated["write_settings_version"] == "2"
+            # A later update never confirms a lost create with other settings.
+            with pytest.raises(ProtocolError):
+                client.resolve_create("parquet_settings", SCHEMA, collection_id=cid,
+                                      write_settings={"parquet": {"compression": {"codec": "gzip"}}})
+            return
         assert capabilities.get("parquet") is None
         assert not capabilities.get("features", {}).get("write_settings")
-        cid = str(uuid4())
         with pytest.raises(HTTPError) as refused:
             client.create_collection("parquet_settings", SCHEMA, collection_id=cid, write_settings=settings)
         assert refused.value.status_code == 422 and refused.value.collection_id == cid
