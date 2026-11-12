@@ -433,4 +433,20 @@ TEST(Transport, EmptyProjectionPreservesRowCardinality)
     const auto batch = arrow::RecordBatch::Make(arrow::schema({}), 3, arrow::ArrayVector{});
     EXPECT_EQ(EncodeRows(*batch), TJson::array({TJson::object(), TJson::object(), TJson::object()}));
 }
+TEST(Transport, JsonLimitIncludesBothArrayBrackets)
+{
+    arrow::StringBuilder builder;
+    // [{"key":"..."}] adds twelve bytes to the value.
+    ASSERT_TRUE(builder.Append(std::string(MaxResponseBytes - 12, 'x')).ok());
+    const auto values = builder.Finish();
+    ASSERT_TRUE(values.ok());
+    const auto schema = arrow::schema({arrow::field("key", arrow::utf8())});
+    const auto batch = arrow::RecordBatch::Make(schema, 1, {*values});
+    EXPECT_EQ(EncodeRows(*batch).dump().size(), MaxResponseBytes);
+
+    ASSERT_TRUE(builder.Append(std::string(MaxResponseBytes - 11, 'x')).ok());
+    const auto oversized = builder.Finish();
+    ASSERT_TRUE(oversized.ok());
+    EXPECT_THROW(EncodeRows(*arrow::RecordBatch::Make(schema, 1, {*oversized})), TFailure);
+}
 } // namespace glamdb::NTransport
