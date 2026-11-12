@@ -59,7 +59,11 @@ metadata root superseded by a confirmed append: the current root carries the
 whole retained history, so recovery and scans never read an older root, and a
 scan that already resolved the old root keeps it until its planning finishes.
 Other automatic cleanup, including orphan removal, is outside the initial
-engine. Store ownership spans creation, recovery, writes, cursors, retained
+engine. While the store is open, warehouse mutations belong exclusively to the
+engine. Linux incremental physical-capacity admission detects ordinary notified
+local mutations but does not promise detection of arbitrary external mmap, alias
+or mount changes; [the inventory contract](development/WAREHOUSE_INVENTORY.md)
+defines strict full-traversal mode and safe fallback. Store ownership spans creation, recovery, writes, cursors, retained
 buffers, and maintenance, including concurrent opens in the same process.
 
 ## Durable publication

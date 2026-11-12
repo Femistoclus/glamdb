@@ -180,10 +180,12 @@ public:
     Status CheckAppendAdmissible(const StoreInfo& store,
         const CollectionInfo& collection,
         const BaseIdentity& base,
-        detail::NormalizedInput& input) override
+        detail::NormalizedInput& input,
+        std::chrono::steady_clock::time_point deadline,
+        const std::function<bool()>& cancelled) override
     {
         const auto start = Clock::now();
-        auto result = Inner_->CheckAppendAdmissible(store, collection, base, input);
+        auto result = Inner_->CheckAppendAdmissible(store, collection, base, input, deadline, cancelled);
         Times.Admissible.push_back(Ms(Clock::now() - start));
         return result;
     }

@@ -76,7 +76,12 @@ public:
     // Pre-binding admission against the exact committed base that the
     // coordinator is about to bind. A rejection consumes no operation ID.
     // Allocate the normalized writer batch here and retain it in input.
-    virtual Status CheckAppendAdmissible(const StoreInfo&, const CollectionInfo&, const BaseIdentity&, NormalizedInput&)
+    virtual Status CheckAppendAdmissible(const StoreInfo&,
+        const CollectionInfo&,
+        const BaseIdentity&,
+        NormalizedInput&,
+        std::chrono::steady_clock::time_point = std::chrono::steady_clock::time_point::max(),
+        const std::function<bool()>& = {})
     {
         return {};
     }

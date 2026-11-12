@@ -63,7 +63,7 @@ struct TCollectionDirBytes
 NIO::TResult<TCollectionDirBytes> MeasureCollectionDirs(const NIO::TStoreDirs& directories,
     std::string_view collectionId);
 
-// A full warehouse measurement taken before an append attempt produced files,
+// A conservative warehouse bound taken before an append attempt produced files,
 // with that collection's directory sizes taken after it.
 struct TWarehouseBaseline
 {

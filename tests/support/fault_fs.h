@@ -21,7 +21,8 @@ enum class EIOOp : std::uint8_t {
     SyncDir,
     Close,
     Publish,
-    Unlink
+    Unlink,
+    TrackTree
 };
 
 struct TIOEvent
@@ -68,6 +69,11 @@ public:
     NIO::TResult<NIO::TFileStat> Stat(const NIO::THandle& handle) override;
     NIO::TResult<NIO::TSpaceInfo> StatFs(const NIO::THandle& directory) override;
     NIO::TResult<std::uint64_t> MeasureTree(const NIO::THandle& directory, std::uint64_t limit) override;
+    NIO::TResult<std::uint64_t> MeasureTree(const NIO::THandle& directory,
+        std::uint64_t limit,
+        std::chrono::steady_clock::time_point deadline,
+        const std::function<bool()>& cancelled = {}) override;
+    NIO::TResult<std::shared_ptr<NIO::ITreeInventory>> TrackTree(const NIO::THandle& directory) override;
     std::error_code SyncFile(const NIO::THandle& file) override;
     std::error_code SyncDir(const NIO::THandle& directory) override;
     std::error_code Close(const NIO::THandle& handle) override;

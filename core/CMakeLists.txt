@@ -4,6 +4,7 @@ endif()
 
 add_library(glamdb_io STATIC
     io/local_fs.cpp
+    io/tree_inventory.cpp
     io/sha256.cpp
     io/store_uri.cpp
     io/store_dirs.cpp

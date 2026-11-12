@@ -120,7 +120,7 @@ case "$stage" in
     ;;
   test)
     # Missing dependencies must fail before CTest can silently omit SDK coverage.
-    "$python" -c 'import glamdb_sdk, httpx, pyarrow, jsonschema'
+    "$python" -c 'import glamdb_sdk, glamdb_workload.tpch, httpx, pyarrow, jsonschema'
     export GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1
     export GLAMDB_E2E_PYTHON="$python"
     result=0

@@ -1579,8 +1579,12 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
         const auto base = impl->catalog->Base(request.collection_id);
         // The store may have been opened by a build without a stored codec.
         impl->CheckSettingsSupported(collection.write_settings);
+        const auto cancelled = [&] {
+            return impl->closing.load() || (bulk && bulk->cancellation && bulk->cancellation->load());
+        };
         if (impl->backend) {
-            const auto admissible = impl->backend->CheckAppendAdmissible(impl->info, collection, base, input);
+            const auto admissible =
+                impl->backend->CheckAppendAdmissible(impl->info, collection, base, input, deadline, cancelled);
             if (!admissible) {
                 throw Failure(admissible.error());
             }
@@ -1589,6 +1593,10 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
             std::lock_guard state_lock(impl->state_mutex);
             impl->CheckHealthy(expected_generation);
         }
+        Require(!cancelled(), "CANCELLED", "append admission was cancelled");
+        Require(std::chrono::steady_clock::now() < deadline,
+            "DEADLINE_EXCEEDED",
+            "append deadline expired before binding");
         binding = BoundOperation{request.collection_id, request.operation_id, input.payload_hash, 1, base, NewUuid()};
         context = Context(*binding,
             {"RECOVERY_REQUIRED", "append outcome is unresolved", RetryHint::SameIdAfterReconcile},

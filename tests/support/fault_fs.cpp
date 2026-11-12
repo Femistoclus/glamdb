@@ -61,6 +61,8 @@ std::string_view Name(EIOOp op)
             return "StatFs";
         case EIOOp::MeasureTree:
             return "MeasureTree";
+        case EIOOp::TrackTree:
+            return "TrackTree";
         case EIOOp::SyncFile:
             return "SyncFile";
         case EIOOp::SyncDir:
@@ -377,6 +379,25 @@ TResult<std::uint64_t> TFaultFS::MeasureTree(const THandle& directory, std::uint
     return State_->WithHandle<std::uint64_t>(directory, EIOOp::MeasureTree, [&](auto& tracked, auto) {
         return State_->Underlying.MeasureTree(tracked.Inner, limit);
     });
+}
+
+TResult<std::uint64_t> TFaultFS::MeasureTree(const THandle& directory,
+    std::uint64_t limit,
+    std::chrono::steady_clock::time_point deadline,
+    const std::function<bool()>& cancelled)
+{
+    return State_->WithHandle<std::uint64_t>(directory, EIOOp::MeasureTree, [&](auto& tracked, auto) {
+        return State_->Underlying.MeasureTree(tracked.Inner, limit, deadline, cancelled);
+    });
+}
+
+TResult<std::shared_ptr<NIO::ITreeInventory>> TFaultFS::TrackTree(const THandle& directory)
+{
+    return State_->WithHandle<std::shared_ptr<NIO::ITreeInventory>>(directory,
+        EIOOp::TrackTree,
+        [&](auto& tracked, auto) {
+            return State_->Underlying.TrackTree(tracked.Inner);
+        });
 }
 
 std::error_code TFaultFS::SyncFile(const THandle& file)

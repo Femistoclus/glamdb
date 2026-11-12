@@ -334,3 +334,8 @@ Report security vulnerabilities privately through the
 ## License
 
 GlamDB is licensed under the [Apache License 2.0](LICENSE).
+
+Physical-capacity admission on supported Linux local filesystems uses a bounded
+[incremental warehouse inventory](docs/development/WAREHOUSE_INVENTORY.md),
+including orphan space, with exact fallback and an explicit exclusive-ownership
+contract. Recovery still inventories all retained physical files.
