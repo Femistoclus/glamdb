@@ -8,6 +8,7 @@
 #include <exception>
 #include <format>
 #include <limits>
+#include <map>
 
 namespace glamdb::detail {
 namespace {
@@ -120,6 +121,7 @@ DurableSqliteCatalogStore::Open(const std::filesystem::path& path, StoreInfo inf
 void DurableSqliteCatalogStore::OpenConnection(bool create)
 {
     operation_count_.reset();
+    inventory_validated_ = false;
     Require(path_.is_absolute() && path_.string().find('\0') == std::string::npos && ValidUuid(info_.store_id) &&
             info_.format_version == 1,
         "INVALID_ARGUMENT",
@@ -269,6 +271,7 @@ void DurableSqliteCatalogStore::Transaction(const std::function<void()>& body)
 {
     Require(!uncertain_, "RECOVERY_REQUIRED", "catalog has an unresolved transaction");
     Require(!transaction_ && database_.Autocommit(), "INTERNAL", "unexpected nested outer transaction");
+    inventory_validated_ = false;
     database_.Execute("BEGIN IMMEDIATE");
     transaction_ = true;
     rollback_only_ = false;
@@ -335,6 +338,7 @@ void DurableSqliteCatalogStore::Close()
     }
     database_.Close();
     operation_count_.reset();
+    inventory_validated_ = false;
 }
 
 CatalogProfile DurableSqliteCatalogStore::Profile()
@@ -1027,6 +1031,7 @@ void DurableSqliteCatalogStore::GuardPointer(PointerTarget target, std::string_v
 void DurableSqliteCatalogStore::ValidateInventory()
 {
     std::lock_guard lock(mutex_);
+    inventory_validated_ = false;
     Require(database_.Text("PRAGMA integrity_check") == "ok", "CORRUPTION", "SQLite integrity check failed");
     Require(database_.Query("PRAGMA foreign_key_check").empty(), "CORRUPTION", "catalog foreign key check failed");
     const auto collections = Collections();
@@ -1039,12 +1044,15 @@ void DurableSqliteCatalogStore::ValidateInventory()
             database_.Integer("SELECT COUNT(*) FROM iceberg_namespace_properties") == 1,
         "CORRUPTION",
         "internal namespace is missing or modified");
+    // Nothing changes under the lock, so each collection's base is read once.
+    std::map<std::string, BaseIdentity, std::less<>> bases;
     for (const auto& collection : collections) {
-        (void)Base(collection.collection_id);
+        bases.emplace(collection.collection_id, Base(collection.collection_id));
     }
     int64_t operations = 0;
     ForEachOperation([&](const auto& record) {
-        const auto base = Base(record.binding.collection_id);
+        const auto known = bases.find(record.binding.collection_id);
+        const auto base = known != bases.end() ? known->second : Base(record.binding.collection_id);
         Require(record.binding.base.table_uuid == base.table_uuid && record.binding.base.schema_id == base.schema_id &&
                 record.binding.base.spec_id == base.spec_id,
             "CORRUPTION",
@@ -1054,6 +1062,15 @@ void DurableSqliteCatalogStore::ValidateInventory()
     if (operations != OperationCount()) {
         operation_count_.reset();
         throw Failure({"INTERNAL", "operation count differs from the catalog", RetryHint::OperatorAction});
+    }
+    inventory_validated_ = true;
+}
+
+void DurableSqliteCatalogStore::ValidateInventoryIfChanged()
+{
+    std::lock_guard lock(mutex_);
+    if (!inventory_validated_) {
+        ValidateInventory();
     }
 }
 

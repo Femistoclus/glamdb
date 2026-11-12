@@ -97,6 +97,9 @@ public:
     void DurabilityFence();
     int64_t FenceValue();
     void ValidateInventory();
+    // ValidateInventory unless this connection has run no transaction since
+    // its last complete validation.
+    void ValidateInventoryIfChanged();
 
     iceberg::Status Initialize() override;
     iceberg::Result<std::vector<std::string>> ListNamespaceNames() override;
@@ -169,6 +172,8 @@ private:
     // count derived on this connection stays exact while committed bindings
     // increment it; it is empty whenever that cannot be proven.
     std::optional<int64_t> operation_count_;
+    // A complete ValidateInventory ran and no transaction has started since.
+    bool inventory_validated_ = false;
 };
 
 } // namespace glamdb::detail
