@@ -332,6 +332,13 @@ catalog; coordinator tests use a separate test backend. With storage enabled,
 `glamdb.durable_storage_catalog` also checks the real file/catalog publication
 boundary and catalog-selected recovery in a fresh process.
 
+`TCombinedStorageFaultTest` composes `TLocalStorageOptions::Fs` with the SQLite
+journal fault VFS through the internal `EngineFactory::CreateWith` seam. It
+checks real file/directory failures followed by lost failure-recording results.
+`TCatalogStorageFaultTest` checks uncertain publication and fresh-process public
+reopen. These controls are test-only; production defaults remain POSIX and the
+default SQLite VFS. See [coordinator fault evidence](docs/development/COORDINATOR.md#combined-storage-faults).
+
 `GLAMDB_BUILD_IO_PROBE=ON` adds the disposable storage fault probe and requires
 `GLAMDB_BUILD_STORAGE=ON`. Its Python runner checks native receipts and optional
 strace evidence; passing cases without strace remain incomplete. Recovery path
