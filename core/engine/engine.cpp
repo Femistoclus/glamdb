@@ -2016,6 +2016,32 @@ EngineCapabilities Engine::GetCapabilities() const
     return impl_->backend ? impl_->backend->GetCapabilities() : EngineCapabilities{};
 }
 
+Result<StorageFootprint> Engine::GetStorageFootprint() const
+{
+    const auto impl = impl_;
+    try {
+        std::unique_lock writer(impl->writer, std::try_to_lock);
+        Require(writer.owns_lock(), "DATABASE_BUSY", "physical inventory requires a quiescent writer");
+        {
+            std::lock_guard lock(impl->state_mutex);
+            impl->CheckReady();
+        }
+        Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "physical inventory requires storage");
+        auto result = impl->backend->GetStorageFootprint();
+        if (!result) {
+            impl->CloseOnCorruption(result.error());
+            return result;
+        }
+        {
+            std::lock_guard lock(impl->state_mutex);
+            impl->CheckReady();
+        }
+        return result;
+    } catch (const Failure& error) {
+        return std::unexpected(error.detail);
+    }
+}
+
 Result<SnapshotHistory> Engine::ListSnapshots(std::string_view id) const
 {
     const auto impl = impl_;

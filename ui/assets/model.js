@@ -1,3 +1,5 @@
+export const MAX_SCHEMA_FIELDS = 128;
+
 const OPERATORS = new Set(['eq', 'ne', 'lt', 'le', 'gt', 'ge', 'in', 'is_null', 'is_not_null']);
 const BOOL_OPERATORS = new Set(['eq', 'ne', 'in', 'is_null', 'is_not_null']);
 const INTEGER = /^-?(?:0|[1-9]\d*)$/;
@@ -416,8 +418,10 @@ export function canonicalWriteSettings(value, schema = null, { reported = false 
     );
     const limit = canonicalPageSizeLimit(parquet.dictionary_page_size_limit);
     const columns = parquet.columns ?? [];
-    if (!Array.isArray(columns) || columns.length > 64)
-        throw new Error('Parquet column settings must be an array of at most 64 entries');
+    if (!Array.isArray(columns) || columns.length > MAX_SCHEMA_FIELDS)
+        throw new Error(
+            `Parquet column settings must be an array of at most ${MAX_SCHEMA_FIELDS} entries`,
+        );
     const order = schema ? schema.fields.map((field) => field.name) : null;
     const seen = new Map();
     for (const item of columns) {
@@ -773,7 +777,9 @@ function pendingObject(value, keys) {
 function pendingSchema(schema) {
     pendingObject(schema, ['fields', 'schema_id']);
     requirePending(
-        Array.isArray(schema.fields) && schema.fields.length > 0 && schema.fields.length <= 64,
+        Array.isArray(schema.fields) &&
+            schema.fields.length > 0 &&
+            schema.fields.length <= MAX_SCHEMA_FIELDS,
     );
     const names = new Set(),
         ids = new Set();

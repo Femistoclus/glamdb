@@ -50,7 +50,7 @@ if(NOT GLAMDB_IO_ONLY)
     if(GLAMDB_BUILD_STORAGE)
         # The production storage backend and scanner. Without them the public
         # factories install no backend and report DEPENDENCY_UNAVAILABLE.
-        target_sources(glamdb_core PRIVATE backend/inert_catalog.cpp backend/local_storage_backend.cpp
+        target_sources(glamdb_core PRIVATE backend/inert_catalog.cpp backend/local_storage_backend.cpp backend/storage_footprint.cpp
             backend/storage_errors.cpp
             scan/parquet_input.cpp scan/pruning.cpp scan/metadata_cache.cpp scan/scan_planner.cpp scan/scan_cursor.cpp
             scan/metadata.cpp scan/file_metadata.cpp)

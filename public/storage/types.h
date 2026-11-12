@@ -1,5 +1,7 @@
 #pragma once
 
+#include "storage/schema.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -15,6 +17,8 @@ class RecordBatch;
 }
 
 namespace glamdb {
+
+inline constexpr std::size_t MaxSchemaFields = NGlamDB::MaxSchemaFields;
 
 class ResourceOwner;
 

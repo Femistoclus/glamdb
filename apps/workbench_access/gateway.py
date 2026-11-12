@@ -48,7 +48,7 @@ def receipt_schema(value):
     if (
         type(schema_id) is not int
         or not isinstance(fields, list)
-        or not 1 <= len(fields) <= 64
+        or not 1 <= len(fields) <= 128
     ):
         raise ValueError()
     normalized = []

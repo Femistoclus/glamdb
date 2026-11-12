@@ -44,3 +44,11 @@ def test_write_settings_uses_database_write_policy_without_append_identity():
     route = classify("POST", f"/collections/{uuid4()}/write-settings")
     assert route.action == "write" and route.metric == "collection"
     assert route.kind is None
+
+
+def test_storage_inventory_uses_metadata_policy_and_rejects_other_methods():
+    route = classify("GET", "/storage")
+    assert route.action == "metadata" and route.metric == "storage" and route.kind is None
+    for method in ("POST", "DELETE"):
+        with pytest.raises(ValueError):
+            classify(method, "/storage")

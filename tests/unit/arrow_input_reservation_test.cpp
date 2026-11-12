@@ -1,4 +1,4 @@
-// A maximum documented append (10,000 rows, 64 fields, at most 16 MiB of
+// A bounded append (10,000 rows, 64 fields, at most 16 MiB of
 // canonical input) fits the default owned-input budget on every supported
 // standard library.
 

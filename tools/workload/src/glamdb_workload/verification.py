@@ -36,7 +36,7 @@ def scan_chunks(client, collection_id, *, format="json", query=None, deadline=No
                 yield batch.to_pylist()
 
 
-def verify_ledgers(client, run, schema, collection_id, *, format="json", deadline=None):
+def verify_ledgers(client, run, schema, collection_id, *, format="json", deadline=None, query=None):
     totals = summarize(run)
     if not totals["journals"] or totals["pending"]:
         return {
@@ -76,7 +76,7 @@ def verify_ledgers(client, run, schema, collection_id, *, format="json", deadlin
                                 )
                                 expected += 1
             for chunk in scan_chunks(
-                client, collection_id, format=format, deadline=deadline
+                client, collection_id, format=format, deadline=deadline, query=query
             ):
                 with db:
                     for row in chunk:

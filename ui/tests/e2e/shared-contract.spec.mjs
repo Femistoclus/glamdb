@@ -96,13 +96,15 @@ async function login(page) {
     await page.getByLabel('Access token').fill(token);
     await page.getByRole('button', { name: 'Open my workspace' }).click();
     if (native) {
-        const created = page.waitForResponse(
-            (response) =>
-                response.request().method() === 'POST' && response.url().endsWith('/databases'),
-        );
-        await page.getByLabel('Database name').fill(`conformance_${Date.now()}`);
+        const name = `conformance_${Date.now()}`;
+        await page.getByLabel('Database name').fill(name);
         await page.getByRole('button', { name: 'Create database', exact: true }).click();
-        databaseId = (await (await created).json()).database_id;
+        await expect(page.getByRole('heading', { name: 'A little overview' })).toBeVisible();
+        const response = await page.request.get('/databases', { headers });
+        expect(response.ok()).toBe(true);
+        const database = (await response.json()).items.find((item) => item.name === name);
+        expect(database?.state).toBe('open');
+        databaseId = database.database_id;
     }
     await expect(page.getByRole('heading', { name: 'A little overview' })).toBeVisible();
     await nav(page, 'Data studio');
@@ -114,14 +116,16 @@ async function nav(page, name) {
 async function createCollection(page, name) {
     await page.getByRole('button', { name: 'New collection', exact: true }).first().click();
     await page.getByLabel('Collection name').fill(name);
-    const created = page.waitForResponse(
-        (response) =>
-            response.request().method() === 'POST' && response.url().endsWith('/collections'),
-    );
     await page.getByRole('button', { name: 'Create collection' }).click();
-    collectionId = (await (await created).json()).collection_id;
     await expect(page.getByRole('dialog')).not.toBeVisible();
     await expect(page.locator('.breadcrumb strong')).toHaveText(name);
+    const scope = native ? `/databases/${databaseId}` : '';
+    const response = await page.request.get(
+        `${scope}/collections:resolve?name=${encodeURIComponent(name)}`,
+        { headers },
+    );
+    expect(response.ok()).toBe(true);
+    collectionId = (await response.json()).collection_id;
 }
 async function appendRows(page, rows) {
     await page.getByRole('button', { name: 'Batch editor', exact: true }).click();

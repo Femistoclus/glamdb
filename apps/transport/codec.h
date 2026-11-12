@@ -10,7 +10,7 @@
 
 namespace glamdb::NTransport {
 using TJson = nlohmann::json;
-inline constexpr size_t MaxJsonEvents = 1300100;
+inline constexpr size_t MaxJsonEvents = 10000 * (2 * MaxSchemaFields + 2) + 100;
 inline constexpr size_t MaxRequestBytes = 16ULL * 1024 * 1024;
 inline constexpr size_t MaxResponseBytes = 16ULL * 1024 * 1024;
 

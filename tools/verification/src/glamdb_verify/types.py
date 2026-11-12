@@ -115,8 +115,8 @@ def normalize_schema(schema: dict) -> dict:
     schema_id = schema.get("schema_id", 0)
     if type(schema_id) is not int or not 0 <= schema_id <= 2147483647:
         raise ValueError("schema_id must be a nonnegative int32")
-    if not isinstance(fields, list) or not 1 <= len(fields) <= 64:
-        raise ValueError("schema requires 1..64 fields")
+    if not isinstance(fields, list) or not 1 <= len(fields) <= 128:
+        raise ValueError("schema requires 1..128 fields")
     output, names = [], set()
     for index, field in enumerate(fields, 1):
         if not isinstance(field, dict) or set(field) - {"field_id", "name", "type", "nullable", "precision", "scale"}:

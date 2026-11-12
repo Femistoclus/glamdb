@@ -1,7 +1,7 @@
 """Default E2E uses the compiled native server, verified TLS and isolated storage.
 
 Usage: python native_e2e_test.py CLI SERVER [--report-root DIRECTORY]
-No mock fallback and no database deletion endpoint are used.
+No mock fallback is used. Cleanup drops only databases created by the test.
 """
 
 import argparse
@@ -170,7 +170,7 @@ class NativeWorkload(unittest.TestCase):
                 "--data-dir",
                 str(self.data_dir),
                 "--port",
-                "0",
+                str(getattr(self, "fixed_port", 0)),
                 "--ui-root",
                 str(REPO / "ui"),
             ],
@@ -222,6 +222,108 @@ class NativeWorkload(unittest.TestCase):
             result.returncode, expected, result.stdout[-3000:] + result.stderr[-5000:]
         )
         return result
+
+    def test_maximum_width_decimal_schema_survives_restart_and_exact_retry(self):
+        from decimal import Decimal
+
+        schema = Schema([
+            Field("d" * (128 - len(str(index))) + str(index), "decimal", precision=38, scale=4)
+            for index in range(128)
+        ])
+        collection = self.collection("wide-decimal", schema)
+        row = {field.name: Decimal("9007199254740993.1250") for field in schema.fields}
+        with Client(self.direct, self.env["GLAMDB_TOKEN"], database_id=self.db) as client:
+            request = client.prepare_append(collection, [row, row], schema=schema, operation_id=uuid4())
+            outcome = client.append(request)
+            self.assertEqual(outcome.outcome, "committed")
+            self.assertEqual(client.scan_json(collection).rows, [row, row])
+        self.fixed_port = self.port
+        self.stop()
+        self.start()
+        with Client(self.direct, self.env["GLAMDB_TOKEN"], database_id=self.db) as client:
+            self.assertEqual(client.get_schema(collection), schema)
+            replay = client.append(request)
+            self.assertEqual(replay.outcome, "committed")
+            self.assertEqual(replay.result["snapshot_id"], outcome.result["snapshot_id"])
+            self.assertEqual(client.scan_json(collection).rows, [row, row])
+
+    def test_clickbench_prefix_all_columns_verified_sizes_and_restart(self):
+        self.check_clickbench_prefix("legacy-date")
+
+    def test_clickbench_native_date_verified_queries_sizes_and_restart(self):
+        self.check_clickbench_prefix("native")
+
+    def check_clickbench_prefix(self, type_profile):
+        from test_clickbench_dataset import source_table
+
+        source = source_table(self.tmp / "hits.parquet")
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        table = pq.read_table(source)
+        # Ensure the actual pinned filters have positive matches, including
+        # exact int64 equality and the July DATE interval.
+        for name, value in {"CounterID": 62, "UserID": 435090932899640449,
+                            "DontCountHits": 0, "IsRefresh": 0, "IsLink": 1, "IsDownload": 0,
+                            "TraficSourceID": -1, "RefererHash": 3594120000172545465,
+                            "URLHash": 2868770270353813622}.items():
+            table = table.set_column(table.schema.get_field_index(name), name, pa.array([value] * 31))
+        for name, value in {"URL": "https://example.org/google", "Title": "Google Привет 💗",
+                            "Referer": "https://www.example.org/страница"}.items():
+            table = table.set_column(table.schema.get_field_index(name), name, pa.array([value.encode()] * 31))
+        pq.write_table(table, source)
+        _, endpoint, ca = self.enterContext(tls_proxy(self.port, self.tmp))
+        def online(action, *args):
+            return self.cli("bench", "clickbench", action, *args, "--ca-file", ca)
+        dataset, state = self.tmp / "clickbench-data", self.reports / "clickbench-state.json"
+        self.cli("bench", "clickbench", "prepare", "--source", source, "--output", dataset,
+                 "--type-profile", type_profile, "--part-rows", 7)
+        online("init", "--dataset", dataset, "--state", state,
+               "--url", endpoint, "--name", "clickbench-e2e")
+        saved = json.loads(state.read_bytes())
+        import httpx
+        unauthorized = httpx.get(endpoint + "/storage", verify=ssl.create_default_context(cafile=str(ca)))
+        self.assertEqual(unauthorized.status_code, 401)
+        online("load", "--state", state)
+        online("load", "--state", state, "--resume")
+        for format in ("json", "arrow"):
+            online("verify", "--state", state, "--format", format)
+        sizes = self.reports / "clickbench-sizes.json"
+        owned = self.data_dir / "databases" / saved["store_id"]
+        online("size", "--state", state, "--report", sizes, "--include-footers", "--owned-store-dir", owned)
+        result = json.loads(sizes.read_bytes())
+        self.assertEqual(result["status"], "PASS")
+        self.assertTrue(result["performance_eligible"])
+        self.assertEqual(result["snapshot"]["rows"], 31)
+        self.assertEqual(result["snapshot"]["parquet_files"], 5)
+        self.assertGreater(result["snapshot"]["parquet_file_bytes"], 0)
+        independent = sum(path.stat().st_size for path in owned.rglob("*") if path.is_file())
+        self.assertEqual(result["local_filesystem"]["database_file_bytes"], independent)
+        self.assertGreater(result["local_filesystem"]["catalog_file_bytes"], 0)
+        self.assertIsNone(result["snapshot"]["database_file_bytes"])
+        self.assertEqual(int(result["server_storage"]["database_file_bytes"]), independent)
+        self.assertEqual(int(result["server_storage"]["committed_data_file_bytes"]),
+                         result["snapshot"]["parquet_file_bytes"])
+        catalog = os.environ.get("GLAMDB_CLICKBENCH_CATALOG")
+        self.assertTrue(catalog, "set GLAMDB_CLICKBENCH_CATALOG to fetched pinned query material")
+        campaign = self.reports / "clickbench-queries.json"
+        online("query", "--state", state, "--catalog", catalog, "--source", source,
+               "--report", campaign, "--mode", "both", "--warmup", "0", "--repeats", "1")
+        measured = json.loads(campaign.read_bytes())
+        self.assertEqual(measured["status"], "PASS")
+        self.assertEqual(len(measured["coverage"]), 86)
+        self.assertTrue(all(item["verified"] for item in measured["coverage"]))
+        with sqlite3.connect(self.reports / "clickbench-state-artifacts" / "worker-000000.sqlite") as db:
+            operation = db.execute("SELECT operation_id FROM operations LIMIT 1").fetchone()[0]
+        self.fixed_port = self.port
+        self.stop()
+        self.start()
+        with Client(self.direct, self.env["GLAMDB_TOKEN"], database_id=saved["database_id"]) as client:
+            self.assertEqual(len(client.get_schema(saved["collection_id"]).fields), 105)
+            self.assertEqual(client.find_append_outcome(saved["collection_id"], operation).outcome, "committed")
+            self.assertEqual(int(client.stats(saved["collection_id"], snapshot_id=result["snapshot"]["snapshot_id"])["rows"]), 31)
+        online("clean", "--state", state)
+        online("clean", "--state", state)
+        self.assertFalse(owned.exists())
 
     def test_generate_write_all_pages_json_arrow_verify_restart(self):
         schema = Schema(
@@ -564,7 +666,7 @@ class NativeWorkload(unittest.TestCase):
             "--users",
             "2",
             "--duration",
-            "1s",
+            "10s",
             "--spawn-rate",
             "20",
             "--master-port",

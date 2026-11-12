@@ -1,6 +1,6 @@
 // UI-only, per-page simulation for static hosting. No network/storage writer.
 import { APIError } from './api.js';
-import { wireRows } from './model.js';
+import { MAX_SCHEMA_FIELDS, wireRows } from './model.js';
 
 const TYPES = new Set(['string', 'bool', 'int64', 'float64', 'timestamp_us_utc']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -66,8 +66,12 @@ function normalizedTimestamp(text) {
     return `${new Date(Number(seconds) * 1000).toISOString().slice(0, 19)}.${String(fraction).padStart(6, '0')}Z`;
 }
 function normalizeSchema(value) {
-    if (!Array.isArray(value?.fields) || value.fields.length < 1 || value.fields.length > 64)
-        fail(422, 'Use 1..64 schema fields');
+    if (
+        !Array.isArray(value?.fields) ||
+        value.fields.length < 1 ||
+        value.fields.length > MAX_SCHEMA_FIELDS
+    )
+        fail(422, `Use 1..${MAX_SCHEMA_FIELDS} schema fields`);
     const names = new Set();
     const fields = value.fields.map((f, i) => {
         if (

@@ -585,6 +585,34 @@ TEST(JsonNativeScalars, RejectsInvalidParametersAndInexactValues)
         TFailure);
 }
 
+TEST(JsonAppendParser, MaximumWidthFitsTheFiniteJsonEventBudget)
+{
+    SchemaSpec schema;
+    TJson row = TJson::object();
+    for (size_t index = 0; index < 128; ++index) {
+        const auto name = "c" + std::to_string(index);
+        schema.fields.push_back({name, FieldType::Bool, false});
+        row[name] = true;
+    }
+    const auto one = row.dump();
+    std::string input = "[";
+    for (size_t index = 0; index < 10000; ++index) {
+        if (index != 0) {
+            input += ',';
+        }
+        input += one;
+    }
+    input += ']';
+    const auto body = Body(input);
+    ASSERT_LE(body.size(), MaxRequestBytes);
+    TJsonRows rows;
+    EXPECT_NO_THROW(ParseJson(body, rows));
+    const auto batch = ParseRows(schema, rows);
+    ASSERT_EQ(batch->num_rows(), 10000);
+    ASSERT_EQ(batch->num_columns(), 128);
+    EXPECT_TRUE(std::static_pointer_cast<arrow::BooleanArray>(batch->column(127))->Value(9999));
+}
+
 TEST(JsonAppendParser, MatchesDomPathAtRowAndComplexityLimits)
 {
     const SchemaSpec schema{{{"key", FieldType::String, false}, {"x", FieldType::Int64, true}}};

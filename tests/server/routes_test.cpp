@@ -12,6 +12,19 @@
 #include <gtest/gtest.h>
 
 namespace glamdb::NServer {
+TEST(NativeRoutes, PhysicalInventoryIsAuthenticatedAndUnavailableForCustomBackend)
+{
+    test::TempDir temporary;
+    const auto root = temporary.path / "store";
+    auto backend = std::make_shared<test::FakeStorage>(root);
+    auto engine = NTransport::Unwrap(detail::EngineFactory::Create({test::store_id, root.string()}, backend));
+    TRoutes routes(engine, {}, "secret");
+    EXPECT_EQ(routes.Handle({"GET", "/storage", {}, {}}).Status, 401);
+    const auto response = routes.Handle({"GET", "/storage", {{"authorization", "Bearer secret"}}, {}});
+    EXPECT_NE(response.Status, 200);
+    EXPECT_EQ(NTransport::ParseJson(response.Body)["error"]["code"], "DEPENDENCY_UNAVAILABLE");
+}
+
 TEST(NativeRoutes, CapabilitiesReflectThePublicFacade)
 {
     test::TempDir temporary;

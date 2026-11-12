@@ -12,6 +12,8 @@ from typing import Any, Iterable, Mapping
 
 from .errors import ValidationError
 
+MAX_SCHEMA_FIELDS = 128
+
 MIN_TIMESTAMP_US = -62135596800000000
 MAX_TIMESTAMP_US = 253402300799999999
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -44,8 +46,8 @@ class Schema:
 
     def __init__(self, fields: Iterable[Field], *, allow_empty: bool = False):
         values = tuple(fields)
-        if not (0 if allow_empty else 1) <= len(values) <= 64:
-            raise ValidationError("schema must have 1 through 64 fields")
+        if not (0 if allow_empty else 1) <= len(values) <= MAX_SCHEMA_FIELDS:
+            raise ValidationError(f"schema must have 1 through {MAX_SCHEMA_FIELDS} fields")
         names, ids = set(), set()
         assigned = []
         for index, field in enumerate(values, 1):

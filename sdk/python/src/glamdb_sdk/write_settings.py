@@ -17,7 +17,7 @@ ignored, set ones cannot be represented and are refused.
 
 from typing import Any, Mapping
 
-from .codec import Schema, int64
+from .codec import MAX_SCHEMA_FIELDS, Schema, int64
 from .errors import ValidationError
 
 PARQUET_CODECS = ("uncompressed", "snappy", "gzip", "lz4_raw", "zstd")
@@ -90,8 +90,8 @@ def canonical_write_settings(value: Mapping[str, Any] | None, schema: Schema | N
     limit = _page_size_limit(parquet.get("dictionary_page_size_limit"))
     columns = parquet.get("columns")
     columns = [] if columns is None else columns
-    if not isinstance(columns, (list, tuple)) or len(columns) > 64:
-        raise ValidationError("Parquet column settings must be a list of at most 64 entries")
+    if not isinstance(columns, (list, tuple)) or len(columns) > MAX_SCHEMA_FIELDS:
+        raise ValidationError(f"Parquet column settings must be a list of at most {MAX_SCHEMA_FIELDS} entries")
     names = {field.name: index for index, field in enumerate(schema.fields)} if schema is not None else None
     seen: dict[str, dict[str, Any]] = {}
     for item in columns:

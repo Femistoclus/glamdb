@@ -92,6 +92,33 @@ class BridgeTest(unittest.TestCase):
             if mode == "read":
                 self.assertEqual(args[args.index("--consume") + 1], "batches")
 
+    def test_clickbench_commands_forward_options_without_shell_or_target_overrides(self):
+        self.module.write_text("import json,sys\nprint(json.dumps(sys.argv[1:]))\n")
+        path = str(self.root / "ClickBench run with spaces.json")
+        for action, options in (
+            ("fetch-queries", ["--output", "reference with spaces"]),
+            ("query", ["--state", path, "--catalog", "reference", "--report", "queries.json",
+                       "--source", "hits.parquet", "--ids", "1,20,24", "--mode", "both",
+                       "--warmup", "0", "--repeats", "1", "--memory-bytes", "67108864"]),
+            ("prepare", ["--source", "hits.parquet", "--output", "data", "--type-profile", "legacy-date", "--rows", "31"]),
+            ("init", ["--state", path, "--dataset", "data", "--name", "hits", "--url", "https://example.org",
+                      "--limits", "limits.json", "--max-journal-bytes", "1024", "--test-backend", "mock"]),
+            ("load", ["--state", path, "--resume"]),
+            ("resolve", ["--state", path, "--retry"]),
+            ("verify", ["--state", path, "--format", "arrow"]),
+            ("size", ["--state", path, "--report", "sizes.json", "--include-footers", "--owned-store-dir", "/store"]),
+            ("status", ["--state", path]),
+            ("clean", ["--state", path]),
+        ):
+            result = subprocess.run([CLI, "bench", "clickbench", action, *options], env=self.env,
+                                    text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = json.loads(result.stdout)
+            self.assertEqual(args[:3], ["bench", "clickbench", action])
+            for value in options:
+                self.assertIn(value, args)
+            self.assertNotIn(self.env["GLAMDB_TOKEN"], result.stdout + result.stderr)
+
     def test_missing_python_is_actionable(self):
         self.env["GLAMDB_PYTHON"] = str(self.root / "no python")
         result = subprocess.run(

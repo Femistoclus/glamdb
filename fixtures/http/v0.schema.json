@@ -107,7 +107,7 @@
           "items": {
             "$ref": "#/$defs/field"
           },
-          "maxItems": 256
+          "maxItems": 128
         }
       },
       "required": [
@@ -2972,7 +2972,7 @@
                   "anyOf": [
                     {
                       "type": "array",
-                      "maxItems": 64,
+                      "maxItems": 128,
                       "items": {
                         "type": "object",
                         "properties": {

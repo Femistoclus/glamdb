@@ -19,6 +19,10 @@ export GLAMDB_NATIVE_SERVER="$server" GLAMDB_E2E_PYTHON="$python"
 mkdir -p artifacts/native-normal
 exec > >(tee artifacts/native-normal/client-browser.log) 2>&1
 "$python" tests/client/cli_network_test.py "$client" "$server"
+export GLAMDB_CLICKBENCH_CATALOG="$root/artifacts/native-normal/clickbench-reference"
+if [[ ! -f "$GLAMDB_CLICKBENCH_CATALOG/material.json" ]]; then
+  GLAMDB_PYTHON="$python" "$client" bench clickbench fetch-queries --output "$GLAMDB_CLICKBENCH_CATALOG"
+fi
 "$python" tools/workload/tests/native_e2e_test.py "$client" "$server" --report-root artifacts/native-normal/workload
 "$python" -m pytest tests/integration/test_network_sdk.py -q \
   --junitxml=artifacts/native-normal/sdk-conformance-junit.xml

@@ -852,6 +852,7 @@ EngineCapabilities TLocalStorageBackend::GetCapabilities() const
         .write_settings = true,
         .parquet_codecs = ParquetCodecCapabilities()};
     AddEncodingCapabilities(capabilities);
+    capabilities.storage_footprint = true;
     return capabilities;
 }
 

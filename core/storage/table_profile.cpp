@@ -14,8 +14,6 @@ namespace NGlamDB::NStorage {
 using iceberg::Error;
 namespace {
 
-constexpr std::size_t MaxSchemaFields = 64;
-
 std::shared_ptr<iceberg::Type> IcebergType(const TFieldSpec& field)
 {
     switch (field.Type) {
@@ -44,7 +42,7 @@ iceberg::Result<TTableProfile> MakeTableProfile(const TSchemaSpec& spec)
     return CatchIcebergExceptions([&]() -> iceberg::Result<TTableProfile> {
         constexpr std::size_t maxNameBytes = 128;
         if (spec.Fields.empty() || spec.Fields.size() > MaxSchemaFields) {
-            return iceberg::InvalidArgument("Schema must contain 1..64 fields");
+            return iceberg::InvalidArgument("Schema must contain 1..128 fields");
         }
         arrow::util::InitializeUTF8();
         std::vector<iceberg::SchemaField> fields;

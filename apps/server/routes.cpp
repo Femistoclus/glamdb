@@ -167,8 +167,9 @@ std::optional<bool> ArrowAccepted(std::string_view text)
 
 bool IsApiPath(std::string_view path)
 {
-    return path == "/databases" || path.starts_with("/databases/") || path == "/capabilities" || path == "/readyz" ||
-        path == "/collections" || path == "/collections:resolve" || path.starts_with("/collections/");
+    return path == "/storage" || path == "/databases" || path.starts_with("/databases/") || path == "/capabilities" ||
+        path == "/readyz" || path == "/collections" || path == "/collections:resolve" ||
+        path.starts_with("/collections/");
 }
 TResponse JsonResponse(const TJson& value)
 {
@@ -450,7 +451,8 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
             return JsonResponse(Databases_->Change(parts[1], parts[2], body));
         }
         Require(parts.size() >= 3 &&
-                (parts[2] == "collections" || parts[2] == "collections:resolve" || parts[2] == "capabilities"),
+                (parts[2] == "collections" || parts[2] == "collections:resolve" || parts[2] == "capabilities" ||
+                    parts[2] == "storage"),
             "route not found",
             "ROUTE_NOT_FOUND");
         // Validation and dispatch use the same once-decoded path and parsed body.
@@ -469,6 +471,10 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
             recoveryOnly);
     }
     Require(static_cast<bool>(Engine_), "select a database using /databases/{id}", "DATABASE_REQUIRED");
+    if (request.Method == "GET" && path == "/storage") {
+        Require(query.empty(), "unknown physical inventory parameter");
+        return JsonResponse(Footprint(Unwrap(Engine_->GetStorageFootprint())));
+    }
     if (request.Method == "GET" && path == "/collections:resolve") {
         Require(query.size() == 1 && query.contains("name"), "exact name is required");
         return JsonResponse(Collection(Unwrap(Engine_->ResolveCollection(query.at("name")))));

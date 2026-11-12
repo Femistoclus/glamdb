@@ -17,6 +17,10 @@
 namespace glamdb::detail {
 namespace {
 
+constexpr size_t MaxFieldNameBytes = 128;
+// Magic, version, count, then ID/name/type/nullability and optional decimal parameters.
+constexpr size_t MaxEncodedSchemaBytes = 20 + MaxSchemaFields * (4 + 2 + MaxFieldNameBytes + 1 + 1 + 2);
+
 int Hex(char c)
 {
     if (c >= '0' && c <= '9') {
@@ -39,10 +43,12 @@ std::string Unhex(std::string_view text)
 
 void ValidateSchema(const SchemaSpec& schema)
 {
-    Require(!schema.fields.empty() && schema.fields.size() <= 64, "INVALID_ARGUMENT", "schema requires 1..64 fields");
+    Require(!schema.fields.empty() && schema.fields.size() <= MaxSchemaFields,
+        "INVALID_ARGUMENT",
+        "schema requires 1..128 fields");
     std::unordered_set<std::string> names;
     for (const auto& field : schema.fields) {
-        Require(!field.name.empty() && field.name.size() <= 128 && ValidUtf8(field.name) &&
+        Require(!field.name.empty() && field.name.size() <= MaxFieldNameBytes && ValidUtf8(field.name) &&
                 field.name.find('\0') == std::string::npos && names.insert(field.name).second,
             "INVALID_ARGUMENT",
             "invalid or duplicate field name");
@@ -314,14 +320,14 @@ Result<std::string> EncodeSchema(const SchemaSpec& schema)
 Result<SchemaSpec> DecodeSchema(std::string_view bytes)
 {
     try {
-        Require(bytes.size() <= 16384 && bytes.starts_with(std::string_view("COLUMNAR-SCHEMA\0", 16)),
+        Require(bytes.size() <= MaxEncodedSchemaBytes && bytes.starts_with(std::string_view("COLUMNAR-SCHEMA\0", 16)),
             "CORRUPTION",
             "invalid schema encoding");
         Decoder in{bytes.substr(16)};
         const auto version = in.Number<uint16_t>();
         Require(version == 1 || version == 2, "UNSUPPORTED_STORE_VERSION", "unknown schema version");
         const auto count = in.Number<uint16_t>();
-        Require(count > 0 && count <= 64, "CORRUPTION", "invalid schema field count");
+        Require(count > 0 && count <= MaxSchemaFields, "CORRUPTION", "invalid schema field count");
         SchemaSpec schema;
         for (uint32_t i = 1; i <= count; ++i) {
             Require(in.Number<uint32_t>() == i, "CORRUPTION", "invalid field ID");

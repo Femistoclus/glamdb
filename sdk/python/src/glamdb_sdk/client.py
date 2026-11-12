@@ -406,6 +406,23 @@ class Client:
         """
         return self._page(self._read("collections", params=self._page_params(page_size, cursor), deadline=deadline))
 
+    def storage_footprint(self, *, store_id: str | UUID, deadline: float | None = None) -> dict[str, Any]:
+        """Inventory the exact owned store, independently of any selected snapshot."""
+        expected = uuid_string(store_id, "store_id")
+        value = self._read("storage", deadline=deadline)
+        if (type(value.get("version")) is not int or value["version"] != 1 or
+                value.get("store_id") != expected or value.get("backend") != "local" or
+                value.get("mock") is not False or value.get("consistency") != "writer_quiescent"):
+            raise ProtocolError("physical inventory identity or provenance differs", raw=value)
+        for name in ("database_file_bytes", "database_allocated_bytes", "data_file_bytes",
+                     "iceberg_metadata_file_bytes", "catalog_file_bytes", "other_file_bytes",
+                     "shared_file_bytes", "committed_data_file_bytes", "referenced_metadata_file_bytes",
+                     "unreferenced_warehouse_file_bytes", "files", "entries", "hardlink_paths"):
+            item = value.get(name)
+            if not isinstance(item, str) or not item.isascii() or not item.isdecimal() or str(int(item)) != item:
+                raise ProtocolError("physical inventory requires exact nonnegative decimal values", raw=value)
+        return value
+
     def resolve_collection(self, name: str, *, deadline: float | None = None) -> dict[str, Any]:
         if not isinstance(name, str) or not name:
             raise ValidationError("exact collection name is required")

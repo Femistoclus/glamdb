@@ -1,5 +1,8 @@
 # GlamDB CLI workloads
 
+For the complete-width hits ingestion and size adapter, see
+[ClickBench ingestion and storage reports](CLICKBENCH.md).
+
 `glamdb-cli generate` creates reproducible bounded datasets. `bench write` and
 `bench read` run the existing Python SDK through Locust. `bench verify` checks
 the rows actually committed; `bench resolve` looks up uncertain operations.

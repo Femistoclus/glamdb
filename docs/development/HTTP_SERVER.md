@@ -288,7 +288,11 @@ not promise persistent storage. Executable examples for every state are in
 Requests use UTF-8 JSON objects with unknown/duplicate fields rejected. Create:
 `{collection_id,name,schema:{fields:[{name,type,nullable}]},mode?:"append"}`.
 Types: `string`, `bool`, `int64`, `float64`, `timestamp_us_utc`. Core assigns IDs
-1..N; supplied field IDs must match. A field named `key`, if supplied, must be a
+1..N; supplied field IDs must match. Schemas contain 1..128 fields; `limits.schema_fields` advertises this finite
+limit. Row, request-byte and shared-resource limits still apply independently.
+The canonical encoding version and existing hashes are unchanged; older binaries
+limited to 64 fields cannot open collections created with wider schemas.
+A field named `key`, if supplied, must be a
 non-nullable string; its values are not unique.
 Schema evolution, SQL, upsert and delete are unsupported.
 
@@ -497,7 +501,7 @@ to eager senders. Read deadlines never cancel admitted core work.
 Transient accept failures retry with backoff. Header limit: 16 KiB; request/response:
 16 MiB; append: 10000 rows. JSON parsing allows 160 nesting levels for compound
 predicates. Event limits bound the single-pass parser and accommodate 10,000 rows
-of the full 64-field append schema (1,300,100 parser events). These transport
+of the full 128-field append schema (2,580,100 parser events). These transport
 bounds are not a qualified process-memory or storage budget. The same pass keeps
 append `rows` as compact parser nodes (no per-row DOM) that become Arrow columns
 once the collection schema is known, and JSON scan pages are written directly

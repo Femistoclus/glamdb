@@ -75,6 +75,12 @@ public:
         bool write_failure_latched = false;
     };
     virtual ~StorageBackend() = default;
+    virtual Result<StorageFootprint> GetStorageFootprint()
+    {
+        return std::unexpected(ErrorDetail{"DEPENDENCY_UNAVAILABLE",
+            "physical store inventory is not installed",
+            RetryHint::OperatorAction});
+    }
     virtual EngineCapabilities GetCapabilities() const
     {
         return {.backend = BackendKind::Custom};

@@ -47,6 +47,7 @@ struct EngineCapabilities
     int64_t min_dictionary_page_size_limit = 0;
     int64_t max_dictionary_page_size_limit = 0;
     int64_t default_dictionary_page_size_limit = 0;
+    bool storage_footprint = false;
 };
 
 struct TMetadataPageRequest
@@ -55,6 +56,27 @@ struct TMetadataPageRequest
     std::string PageToken{};
     // Trusted adapter-supplied principal and authorization generation/scope.
     std::string AuthorizationContext{};
+};
+
+// Whole owned store, observed while the engine excludes its writer. External
+// filesystem changes are not an atomic snapshot. File lengths and allocated
+// blocks are separate; the shared service registry is outside this scope.
+struct StorageFootprint
+{
+    std::string StoreID;
+    uint64_t DatabaseFileBytes = 0;
+    uint64_t DatabaseAllocatedBytes = 0;
+    uint64_t DataFileBytes = 0;
+    uint64_t IcebergMetadataFileBytes = 0;
+    uint64_t CatalogFileBytes = 0;
+    uint64_t OtherFileBytes = 0;
+    uint64_t SharedFileBytes = 0;
+    uint64_t CommittedDataFileBytes = 0;
+    uint64_t ReferencedMetadataFileBytes = 0;
+    uint64_t UnreferencedWarehouseFileBytes = 0;
+    uint64_t Files = 0;
+    uint64_t Entries = 0;
+    uint64_t HardlinkPaths = 0;
 };
 
 struct TCollectionPage

@@ -1,3 +1,4 @@
+-r requirements-clickbench.txt
 # Complete Python 3.13 workload/test lock. Local packages install separately.
 -r ../../requirements-dev.txt
 ConfigArgParse==1.9.0 \

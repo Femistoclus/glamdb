@@ -13,6 +13,7 @@ dependencies = ["glamdb-sdk==0.1.0"]
 generate = ["mimesis==22.2.0"]
 bench = ["locust==2.47.0", "gevent==26.9.0"]
 arrow = ["pyarrow==25.0.0"]
+clickbench = ["duckdb==2.0.0", "sqlglot==30.31.0"]
 test = ["pytest==9.2.0"]
 
 [tool.setuptools.packages.find]

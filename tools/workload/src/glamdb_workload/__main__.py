@@ -40,6 +40,9 @@ def parser():
     generate.add_argument("--part-rows", type=positive, default=1000)
     generate.add_argument("--part-bytes", type=positive, default=4 * 1024**2)
     benches = commands.add_parser("bench").add_subparsers(dest="mode", required=True)
+    from .clickbench.commands import add_parser as add_clickbench
+
+    add_clickbench(benches)
     tpch = benches.add_parser("tpch").add_subparsers(dest="tpch_command", required=True)
     clean = tpch.add_parser("clean")
     clean.add_argument("--state", required=True)
@@ -94,6 +97,10 @@ def _extra(name, package):
 
 
 def _bench(args):
+    if args.mode == "clickbench":
+        from .clickbench.commands import run
+
+        return run(args)
     if args.mode == "tpch":
         from .tpch import clean
 

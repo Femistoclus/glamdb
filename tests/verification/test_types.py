@@ -92,7 +92,7 @@ def test_aware_datetime_normalization_uses_exact_us(verify):
     {"fields": [{"name": "x", "type": "bool", "nullable": False, "field_id": 2}]},
     {"fields": [{"name": "x", "type": "bool", "nullable": False}] * 2},
     {"fields": [{"name": "é" * 65, "type": "bool", "nullable": False}]},
-    {"fields": [{"name": str(i), "type": "bool", "nullable": False} for i in range(65)]},
+    {"fields": [{"name": str(i), "type": "bool", "nullable": False} for i in range(129)]},
 ])
 def test_invalid_schema_rejected(verify, schema):
     with pytest.raises(ValueError):

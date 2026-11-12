@@ -197,6 +197,11 @@ status table separates implemented code from executed evidence per gate and
 keeps G4 power-loss qualification **NOT RUN**. Update that table when a change
 adds or removes gate evidence.
 
+Fixed schemas accept 1..128 fields, including the 105-column ClickBench layout.
+The limit is advertised as `limits.schema_fields`; row, byte and shared-resource
+budgets still apply. Wider-schema source support alone is not a completed
+ClickBench run or a native durability qualification.
+
 ## Architecture and correctness boundaries
 
 | Component | Responsibility |
@@ -700,6 +705,13 @@ source checks to alerting config; unavailable producers remain NODATA. Validate
 Prometheus and Loki dashboard queries with their respective engines.
 Telegram summaries use bounded, escaped native Alertmanager HTML groups; run
 `tools/alerting/check.py` for template rendering and loopback delivery checks.
+
+ClickBench preparation/loading/verification supports native DATE or explicit
+legacy-date profiles and preserves all 105 columns and exact append identities.
+Query campaigns validate all 43 scan/reduce readings. See
+[ClickBench](tools/workload/CLICKBENCH.md) and [physical inventory](docs/development/STORAGE_FOOTPRINT.md).
+The complete hits load remains blocked by the 4096-operation/history profile;
+do not raise constants, drop receipts, or replicate the dataset across workers.
 
 ## Validation and reporting
 

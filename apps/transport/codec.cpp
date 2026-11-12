@@ -92,7 +92,7 @@ private:
     size_t Nodes_ = 0;
     void Visit()
     {
-        // Accommodate all 10,000 rows of the maximum 64-field schema and
+        // Accommodate all 10,000 rows of the maximum-width schema and
         // depth-64 compound scan predicates.
         Require(Stack_.size() <= MaxJsonDepth && ++Nodes_ <= MaxJsonEvents, "JSON complexity limit exceeded");
     }
@@ -696,7 +696,7 @@ SchemaSpec ParseSchema(const TJson& value)
 {
     CheckKeys(value, {"fields"});
     const auto& fields = value.at("fields");
-    Require(fields.is_array() && !fields.empty() && fields.size() <= 256, "invalid schema fields");
+    Require(fields.is_array() && !fields.empty() && fields.size() <= MaxSchemaFields, "invalid schema fields");
     SchemaSpec result;
     for (const auto& field : fields) {
         CheckKeys(field, {"name", "type", "nullable", "field_id", "precision", "scale"});
@@ -773,7 +773,8 @@ WriteSettings ParseWriteSettings(const TJson& value)
     }
     if (parquet.contains("columns") && !parquet["columns"].is_null()) {
         const auto& columns = parquet["columns"];
-        Require(columns.is_array() && columns.size() <= 64, "write settings columns require an array of 0..64 items");
+        Require(columns.is_array() && columns.size() <= MaxSchemaFields,
+            "write settings columns require an array of 0..128 items");
         for (const auto& column : columns) {
             CheckKeys(column, {"field", "compression", "dictionary", "encoding"});
             Require(column.contains("field") && column["field"].is_string(), "column write settings require a field");

@@ -28,6 +28,30 @@ std::string MetricKindName(const Metric& metric)
     const std::array names{"unavailable", "metadata", "estimate", "measured"};
     return names.at(static_cast<size_t>(metric.kind));
 }
+TJson Footprint(const StorageFootprint& footprint)
+{
+    return {{"version", 1},
+        {"store_id", footprint.StoreID},
+        {"backend", "local"},
+        {"mock", false},
+        {"consistency", "writer_quiescent"},
+        {"scope", "whole_owned_store_current_physical_files"},
+        {"registry_included", false},
+        {"external_writes_atomic", false},
+        {"database_file_bytes", std::to_string(footprint.DatabaseFileBytes)},
+        {"database_allocated_bytes", std::to_string(footprint.DatabaseAllocatedBytes)},
+        {"data_file_bytes", std::to_string(footprint.DataFileBytes)},
+        {"iceberg_metadata_file_bytes", std::to_string(footprint.IcebergMetadataFileBytes)},
+        {"catalog_file_bytes", std::to_string(footprint.CatalogFileBytes)},
+        {"other_file_bytes", std::to_string(footprint.OtherFileBytes)},
+        {"shared_file_bytes", std::to_string(footprint.SharedFileBytes)},
+        {"committed_data_file_bytes", std::to_string(footprint.CommittedDataFileBytes)},
+        {"referenced_metadata_file_bytes", std::to_string(footprint.ReferencedMetadataFileBytes)},
+        {"unreferenced_warehouse_file_bytes", std::to_string(footprint.UnreferencedWarehouseFileBytes)},
+        {"files", std::to_string(footprint.Files)},
+        {"entries", std::to_string(footprint.Entries)},
+        {"hardlink_paths", std::to_string(footprint.HardlinkPaths)}};
+}
 TJson NativeIdentity(const BaseIdentity& identity, SnapshotSelector selector)
 {
     return {{"identity", EncodeIdentity(identity)},

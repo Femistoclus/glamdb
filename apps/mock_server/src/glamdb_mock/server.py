@@ -212,7 +212,7 @@ def create_app(*, token, ui_dir, theme_file=None, seed_demo=False, enable_develo
 
     @app.get("/capabilities")
     async def capabilities():
-        return _json({**CAPABILITIES, "development_faults": bool(enable_development_faults), "limits": {"request_body_bytes": max_body_bytes, "response_bytes": max_response_bytes, "rows": max_rows, "estimated_retained_state_bytes": max_state_bytes}})
+        return _json({**CAPABILITIES, "development_faults": bool(enable_development_faults), "limits": {"request_body_bytes": max_body_bytes, "schema_fields": 128, "response_bytes": max_response_bytes, "rows": max_rows, "estimated_retained_state_bytes": max_state_bytes}})
 
     @app.post("/collections")
     async def create_collection(request: Request):

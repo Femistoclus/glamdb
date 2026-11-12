@@ -1,4 +1,5 @@
 #include "core/storage/data_file_writer.h"
+#include "storage/schema.h"
 
 #include "core/storage/format_registry.h"
 #include "core/storage/format_verifier.h"
@@ -150,8 +151,8 @@ iceberg::Result<TInputShape> CheckBatches(const std::vector<std::shared_ptr<arro
     // across batches. Eight bytes per row, bounded by MaxRows.
     std::vector<std::int64_t> rowEnds;
     const auto fields = schema.fields();
-    if (fields.empty() || fields.size() > 64) {
-        return iceberg::InvalidArgument("Data schema must contain 1..64 fields.");
+    if (fields.empty() || fields.size() > MaxSchemaFields) {
+        return iceberg::InvalidArgument("Data schema must contain 1..128 fields.");
     }
     for (const auto& batch : batches) {
         if (!batch || batch->num_rows() < 0 || batch->num_rows() > limits.MaxRows - shape.Rows ||

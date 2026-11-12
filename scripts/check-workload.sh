@@ -17,5 +17,9 @@ if [[ $mode == native ]]; then
     exit 2
   }
   "$python" tools/workload/tests/bridge_test.py "$client"
+  export GLAMDB_CLICKBENCH_CATALOG="${GLAMDB_CLICKBENCH_CATALOG:-$PWD/artifacts/clickbench-reference}"
+  if [[ ! -f "$GLAMDB_CLICKBENCH_CATALOG/material.json" ]]; then
+    GLAMDB_PYTHON="$python" "$client" bench clickbench fetch-queries --output "$GLAMDB_CLICKBENCH_CATALOG"
+  fi
   "$python" tools/workload/tests/native_e2e_test.py "$client" "$server"
 fi

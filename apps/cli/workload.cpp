@@ -139,6 +139,100 @@ void AddWorkloadCommands(CLI::App& app, std::optional<int>& exitCode)
     Value(*clean, *cleanup, "--state", "Saved version-1 run state JSON file; never a database name", true);
     Value(*clean, *cleanup, "--ca-file", "Additional PEM certificate authority");
     Value(*clean, *cleanup, "--timeout", "SDK deadline in seconds (default 30)");
+    auto* clickbench =
+        bench->add_subcommand("clickbench", "Prepare, ingest, verify and measure a ClickBench hits dataset");
+    clickbench->require_subcommand(1);
+    auto* fetch = clickbench->add_subcommand("fetch-queries", "Fetch pinned query material and its original license");
+    auto fetching = Command(*fetch, {"bench", "clickbench", "fetch-queries"}, exitCode);
+    Value(*fetch, *fetching, "--output", "New cache directory; checksums are pinned in the adapter", true);
+    auto* query =
+        clickbench->add_subcommand("query", "Run all scan/reduce scenarios with independent source validation");
+    auto querying = Command(*query, {"bench", "clickbench", "query"}, exitCode);
+    for (const auto* name : {"--state", "--catalog", "--report"}) {
+        Value(*query, *querying, name, "Original state, pinned query cache, or output JSON report", true);
+    }
+    for (const auto* name : {"--source",
+             "--ids",
+             "--mode",
+             "--warmup",
+             "--repeats",
+             "--timeout",
+             "--ca-file",
+             "--memory-bytes",
+             "--temp-bytes",
+             "--max-candidate-bytes",
+             "--max-result-rows",
+             "--max-result-bytes"})
+    {
+        Value(*query, *querying, name, "Query campaign setting; see tools/workload/CLICKBENCH.md");
+    }
+    auto* prepare = clickbench->add_subcommand("prepare", "Convert all 105 columns to immutable bounded parts");
+    auto preparation = Command(*prepare, {"bench", "clickbench", "prepare"}, exitCode);
+    for (const auto* name : {"--source", "--output", "--type-profile"}) {
+        Value(*prepare,
+            *preparation,
+            name,
+            "Source Parquet, output directory, or explicit legacy-date/native profile",
+            true);
+    }
+    Value(*prepare, *preparation, "--rows", "Deterministic prefix rows; omit for the complete source");
+    Value(*prepare, *preparation, "--part-rows", "Maximum rows per append part (default 10000)");
+    Value(*prepare, *preparation, "--part-bytes", "Maximum part bytes (default 4194304)");
+    Value(*prepare, *preparation, "--max-source-bytes", "Source download/read budget (default 34359738368)");
+    Value(*prepare, *preparation, "--max-converted-bytes", "Converted dataset budget (default 8589934592)");
+    for (const auto* mode : {"init", "load", "status", "resolve", "verify", "size", "clean"}) {
+        auto* command = clickbench->add_subcommand(mode);
+        auto args = Command(*command, {"bench", "clickbench", mode}, exitCode);
+        Value(*command,
+            *args,
+            "--state",
+            "Original ClickBench run state; contains the fixed endpoint and identities",
+            true);
+        Value(*command, *args, "--ca-file", "Additional PEM certificate authority");
+        Value(*command, *args, "--timeout", "SDK deadline in seconds (verify default 120, other commands 30)");
+        const std::string_view action(mode);
+        if (action == "init") {
+            for (const auto* name : {"--dataset", "--url", "--name"}) {
+                Value(*command,
+                    *args,
+                    name,
+                    "Immutable dataset, native server endpoint, or dedicated database name",
+                    true);
+            }
+            Value(*command, *args, "--limits", "Explicit finite database limits JSON");
+            Value(*command,
+                *args,
+                "--max-journal-bytes",
+                "Journal request-body budget, excluding SQLite overhead (default 1073741824)");
+            Value(*command,
+                *args,
+                "--test-backend",
+                "Explicit mock test fixture only; excluded from performance results");
+        } else if (action == "load") {
+            Flag(*command,
+                *args,
+                "--resume",
+                "Resume original immutable requests after resolving ambiguous operations");
+        } else if (action == "resolve") {
+            Flag(*command,
+                *args,
+                "--retry",
+                "Explicitly retry authoritative OPERATION_NOT_FOUND using original ID and bytes");
+        } else if (action == "verify") {
+            Value(*command, *args, "--format", "arrow or json (default arrow); compare complete row multiplicities");
+        } else if (action == "size") {
+            Value(*command,
+                *args,
+                "--report",
+                "JSON report path; also writes CSV and Markdown using the same stem",
+                true);
+            Value(*command,
+                *args,
+                "--owned-store-dir",
+                "Optional caller-owned local store UUID directory; never a remote path");
+            Flag(*command, *args, "--include-footers", "Read column-chunk sizes for each committed Parquet file");
+        }
+    }
     for (const auto* mode : {"write", "read", "verify", "resolve"}) {
         auto* command = bench->add_subcommand(mode);
         auto args = Command(*command, {"bench", mode}, exitCode);

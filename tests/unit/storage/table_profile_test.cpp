@@ -63,13 +63,13 @@ TEST(TableProfile, RejectsEmptyOversizedAndUnknownTypeSchemas)
 {
     ExpectInvalid({});
     TSchemaSpec spec;
-    for (std::size_t index = 0; index < 64; ++index) {
+    for (std::size_t index = 0; index < 128; ++index) {
         spec.Fields.push_back({"field" + std::to_string(index), EFieldType::Int64});
     }
     const auto profile = MakeTableProfile(spec);
     ASSERT_TRUE(profile);
-    EXPECT_EQ(profile->Schema->fields().back().field_id(), 64);
-    spec.Fields.push_back({"field64", EFieldType::Int64});
+    EXPECT_EQ(profile->Schema->fields().back().field_id(), 128);
+    spec.Fields.push_back({"field128", EFieldType::Int64});
     ExpectInvalid(spec);
     ExpectInvalid({{{"untyped"}}});
     ExpectInvalid({{{"invalid", static_cast<EFieldType>(255)}}});

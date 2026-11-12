@@ -242,7 +242,8 @@ TEST(Transport, AcceptsAdvertisedWideAppendAndTypedValues)
 TEST(Transport, RejectsObjectFloodBeyondTheMaximumSupportedAppend)
 {
     std::string body = "[{}";
-    for (size_t i = 1; i < 650100; ++i) {
+    const size_t maxAppendEvents = 10000 * (2 * MaxSchemaFields + 2) + 100;
+    for (size_t i = 1; i < maxAppendEvents / 2 + 100; ++i) {
         body += ",{}";
     }
     body += ']';

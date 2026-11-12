@@ -22,6 +22,7 @@ class Route:
 
 ROUTES = (
     ("GET", r"/capabilities", Route("metadata", "capabilities")),
+    ("GET", r"/storage", Route("metadata", "storage")),
     ("GET", r"/collections", Route("metadata", "collections")),
     ("GET", r"/collections:resolve", Route("metadata", "collection")),
     ("POST", r"/collections", Route("write", "collections", "create")),

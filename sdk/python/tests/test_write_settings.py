@@ -111,7 +111,7 @@ def test_columns_may_set_only_a_dictionary_policy_or_only_an_encoding():
     {"parquet": {"dictionary_page_size_limit": 2**63}},
     {"parquet": {"columns": [{"field": "key", "compression": {"codec": "snappy"}},
                              {"field": "key", "compression": {"codec": "zstd"}}]}},
-    {"parquet": {"columns": [{"field": f"c{index}", "compression": {"codec": "snappy"}} for index in range(65)]}},
+    {"parquet": {"columns": [{"field": f"c{index}", "compression": {"codec": "snappy"}} for index in range(129)]}},
 ])
 def test_invalid_shapes_are_rejected_before_any_request(value):
     sent = []

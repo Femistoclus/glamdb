@@ -225,7 +225,7 @@ test('invalid write settings shapes are rejected', () => {
         },
         {
             parquet: {
-                columns: Array.from({ length: 65 }, (_, index) => ({
+                columns: Array.from({ length: 129 }, (_, index) => ({
                     field: `c${index}`,
                     compression: { codec: 'snappy' },
                 })),
