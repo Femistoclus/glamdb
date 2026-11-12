@@ -397,3 +397,8 @@ uvicorn==0.54.0 \
 wheel==0.48.0 \
     --hash=sha256:3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab \
     --hash=sha256:94800765601e9171bf5d58d066e640662842bcedcbab982b2c90787a2c987322
+
+-r tools/logging/requirements.txt
+
+# Operational logging uses the same pinned formatter in Python and native CI.
+-r tools/logging/requirements.txt

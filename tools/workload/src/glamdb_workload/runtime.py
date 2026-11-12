@@ -89,6 +89,176 @@ def error_code(error):
     return type(error).__name__
 
 
+# Admission/backpressure refusals: the server declined the request before or
+# instead of executing it. They are reported separately from other failures and
+# never count as completed work. The code set mirrors the native HTTP contract.
+REFUSAL_CODES = frozenset(
+    {"SERVER_BUSY", "DATABASE_BUSY", "RESOURCE_EXHAUSTED", "REQUEST_TIMEOUT"}
+)
+# Client CPU at or above this share of one core marks a saturated generator:
+# latency/throughput then describe the Python client as much as the server.
+SATURATION_PERCENT = 85.0
+WRITE_STAGES = ("input_load", "sdk_prepare", "journal", "http_send", "end_to_end")
+READ_MODES = {
+    ("json", "rows"): "json-decoded-rows",
+    ("arrow", "rows"): "arrow-python-rows",
+    ("arrow", "batches"): "arrow-batches",
+}
+
+
+def failure_kind(code):
+    """Locust request_type for a failure: an admission refusal or an error."""
+    return "REFUSED" if code in REFUSAL_CODES else "ERROR"
+
+
+def read_mode(config):
+    key = (config.get("format", "json"), config.get("consume", "rows"))
+    if key not in READ_MODES:
+        raise ValueError("--consume batches requires --format arrow")
+    return READ_MODES[key]
+
+
+def scan_request_name(config):
+    """Locust entry name; row-consuming modes keep their historical names."""
+    if config.get("consume", "rows") == "batches":
+        return "scan/arrow/batches"
+    return "scan/" + config.get("format", "json") + "/decoded"
+
+
+def consume_scan(client, config, progress, *, page_counter=None):
+    """Consume every page of one scan in the configured mode.
+
+    `progress` is updated while consuming so callers can report partial rows
+    after a failure. Batch-native mode only counts Arrow rows/buffer bytes; it
+    never materializes Python values. Row modes keep the historical behaviour.
+    """
+    first_page = page_counter.pages if page_counter else 0
+    mode = read_mode(config)
+    if config.get("format", "json") == "arrow":
+        with client.scan_batches(
+            config["collection"], **config["query"], deadline=config["timeout"]
+        ) as stream:
+            for batch in stream:
+                progress["batches"] += 1
+                if mode == "arrow-batches":
+                    progress["rows"] += batch.num_rows
+                    progress["batch_bytes"] += batch.nbytes
+                else:
+                    progress["rows"] += len(batch.to_pylist())
+            progress["bytes"] = stream.bytes_read
+        progress["pages"] = (page_counter.pages - first_page) if page_counter else 0
+    else:
+        with client.scan_pages(
+            config["collection"], **config["query"], deadline=config["timeout"]
+        ) as stream:
+            for page in stream:
+                progress["rows"] += len(page.rows)
+                progress["pages"] += 1
+    return progress
+
+
+def merge_counts(target, source):
+    """Add worker counters; nested dicts merge per key, `max_ms` keeps the max."""
+    for key, value in source.items():
+        if isinstance(value, dict):
+            merge_counts(target.setdefault(key, {}), value)
+        elif key == "max_ms":
+            target[key] = max(target.get(key, 0), value)
+        else:
+            target[key] = target.get(key, 0) + value
+    return target
+
+
+def add_stage(stages, name, seconds):
+    stage = stages.setdefault(name, {"count": 0, "total_seconds": 0.0, "max_ms": 0})
+    stage["count"] += 1
+    stage["total_seconds"] += seconds
+    stage["max_ms"] = max(stage["max_ms"], seconds * 1000)
+
+
+def stage_report(stages):
+    """Mean/max per write stage plus its share of client end-to-end time."""
+    total = stages.get("end_to_end", {}).get("total_seconds", 0)
+    result = {}
+    for name in WRITE_STAGES:
+        stage = stages.get(name)
+        if not stage or not stage["count"]:
+            continue
+        result[name] = {
+            "count": stage["count"],
+            "total_seconds": stage["total_seconds"],
+            "mean_ms": stage["total_seconds"] / stage["count"] * 1000,
+            "max_ms": stage["max_ms"],
+            "share_of_end_to_end": (stage["total_seconds"] / total if total else None),
+        }
+    return result
+
+
+def latency_report(stats):
+    """Split Locust's own percentiles by request type: success/refused/error.
+
+    Successes, refusals and other failures are fired under different Locust
+    request types, so each entry's histogram holds one population only.
+    """
+    buckets = {"SDK": "success", "REFUSED": "refused", "ERROR": "error"}
+    result = {"success": {}, "refused": {}, "error": {}}
+    for (name, method), entry in sorted(stats.entries.items()):
+        bucket = buckets.get(method)
+        if bucket is None or not entry.num_requests:
+            continue
+        result[bucket][name] = {
+            "count": entry.num_requests,
+            "p50_ms": entry.get_response_time_percentile(0.5),
+            "p95_ms": entry.get_response_time_percentile(0.95),
+            "p99_ms": entry.get_response_time_percentile(0.99),
+            "avg_ms": entry.avg_response_time,
+            "max_ms": entry.max_response_time,
+        }
+    return result
+
+
+def cpu_report(workers, controller=None):
+    processes = [
+        {
+            "worker": w["worker"],
+            "cpu_seconds": w["cpu_seconds"],
+            "cpu_percent_one_core": w["cpu_percent_one_core"],
+            "saturated": w["cpu_percent_one_core"] >= SATURATION_PERCENT,
+        }
+        for w in workers
+    ]
+    return {
+        "saturation_threshold_percent": SATURATION_PERCENT,
+        "generator_saturated": any(p["saturated"] for p in processes),
+        "processes": processes,
+        "controller": controller,
+    }
+
+
+def throughput_report(mode, counts, operations, elapsed):
+    """Offered attempts vs successful logical operations; refusals excluded."""
+    if mode == "read":
+        offered = counts["offered_scans"]
+        successful = counts["completed_scans"]
+        rows = counts["consumed_rows"]
+        rejected = counts["rejected_scans"]
+    else:
+        offered = operations["attempts"]
+        successful = operations["committed"]
+        rows = operations["confirmed_rows"]
+        rejected = counts["rejected_appends"]
+    return {
+        "offered_attempts": offered,
+        "successful_operations": successful,
+        "rejected_attempts": rejected,
+        "other_unsuccessful_attempts": max(0, offered - successful - rejected),
+        "offered_per_second": offered / elapsed,
+        "successful_per_second": successful / elapsed,
+        "successful_rows_per_second": rows / elapsed,
+        "rejected_share": rejected / offered if offered else None,
+    }
+
+
 def _save_outcome(log, request, outcome):
     code = outcome.error.code if outcome.error else None
     state = outcome.outcome
@@ -113,14 +283,20 @@ def _save_outcome(log, request, outcome):
 
 
 def append_once(client, log, request, *, deadline=None):
-    """Journal before sending; one SDK call and no automatic append retry."""
+    """Journal before sending; one SDK call and no automatic append retry.
+
+    `response_time_ms` surrounds only the SDK append call (HTTP send/receive and
+    response validation). `journal_ms` is the client SQLite journal: the
+    pre-send prepare/attempt transactions and the outcome update.
+    """
+    began = time.perf_counter()
     log.prepare(request)
     log.attempted(request.operation_id)
     started = time.perf_counter()
     try:
         outcome = client.append(request, deadline=deadline)
     except (TransportError, ProtocolError, HTTPError) as error:
-        elapsed = (time.perf_counter() - started) * 1000
+        ended = time.perf_counter()
         code = error_code(error)
         state = (
             "commit_unknown"
@@ -136,16 +312,22 @@ def append_once(client, log, request, *, deadline=None):
             )
         )
         log.mark(request.operation_id, state, error_code=code)
-        return {"state": state, "error_code": code, "response_time_ms": elapsed}
+        return {
+            "state": state,
+            "error_code": code,
+            "response_time_ms": (ended - started) * 1000,
+            "journal_ms": (started - began + time.perf_counter() - ended) * 1000,
+        }
     except BaseException:
         log.mark(request.operation_id, "transport_error", error_code="INTERRUPTED")
         raise
-    elapsed = (time.perf_counter() - started) * 1000
+    ended = time.perf_counter()
     state, code = _save_outcome(log, request, outcome)
     return {
         "state": state,
         "error_code": code,
-        "response_time_ms": elapsed,
+        "response_time_ms": (ended - started) * 1000,
+        "journal_ms": (started - began + time.perf_counter() - ended) * 1000,
     }
 
 

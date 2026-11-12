@@ -152,8 +152,8 @@ TEST(OutcomeConformance, CanonicalHashesAndTypedRowsMatchIndependentPreimages)
         EXPECT_EQ(EncodeRows(*batch), request.at("rows"));
         const auto hash = detail::FingerprintBatches(schema, fixture.at("collection_id").get<std::string>(), {batch});
         ASSERT_TRUE(hash);
-        EXPECT_EQ(*hash, request.at("payload_hash"));
-        EXPECT_EQ(detail::Sha256(Unhex(request.at("canonical_hex"))), request.at("payload_hash"));
+        EXPECT_EQ(*hash, request.at("payload_hash").get<std::string>());
+        EXPECT_EQ(detail::Sha256(Unhex(request.at("canonical_hex"))), request.at("payload_hash").get<std::string>());
     }
 }
 

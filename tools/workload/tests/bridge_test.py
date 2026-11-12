@@ -66,6 +66,30 @@ class BridgeTest(unittest.TestCase):
         self.assertIn("child-error", result.stderr)
         self.assertFalse(Path("MUST_NOT_EXIST").exists())
 
+    def test_bench_forwards_measurement_options(self):
+        self.module.write_text("import json,sys\nprint(json.dumps(sys.argv[1:]))\n")
+        common = ["--url", "http://127.0.0.1:1", "--database", "d", "--collection", "c"]
+        common += ["--report", str(self.root / "run"), "--processes", "3"]
+        for mode, extra in (
+            (
+                "read",
+                ["--query", "q.json", "--format", "arrow", "--consume", "batches"],
+            ),
+            ("write", ["--dataset", "data"]),
+        ):
+            result = subprocess.run(
+                [CLI, "bench", mode, *common, *extra],
+                env=self.env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = json.loads(result.stdout)
+            self.assertEqual(args[args.index("--processes") + 1], "3")
+            if mode == "read":
+                self.assertEqual(args[args.index("--consume") + 1], "batches")
+
     def test_missing_python_is_actionable(self):
         self.env["GLAMDB_PYTHON"] = str(self.root / "no python")
         result = subprocess.run(

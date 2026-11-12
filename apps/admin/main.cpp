@@ -1,13 +1,16 @@
+#include "core/telemetry/structured_log.h"
 #include "storage/engine.h"
 
 #include "apps/transport/codec.h"
 
 #include <CLI/CLI.hpp>
 
+#include <chrono>
 #include <iostream>
 #include <string>
+#include <string_view>
 
-int main(int argc, char** argv)
+int RunCommand(int argc, char** argv)
 try {
     CLI::App app{"GlamDB offline store administration"};
     app.require_subcommand(1);
@@ -117,6 +120,36 @@ try {
 } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return 1;
+} catch (...) {
+    return 100;
+}
+
+int main(int argc, char** argv)
+try {
+    using namespace NGlamDB::NTelemetry;
+    TLogRuntime logging;
+    auto* logger = logging.Get();
+    const auto requestID = logger ? logger->NewRequestID() : 0;
+    const auto operation = argc > 1 && std::string_view(argv[1]) == "create-store" ? ELogOperation::CreateStore
+        : argc > 1 && std::string_view(argv[1]) == "inspect-store"                 ? ELogOperation::InspectStore
+        : argc > 1 && std::string_view(argv[1]) == "read"                          ? ELogOperation::Scan
+        : argc > 1 && std::string_view(argv[1]) == "quiesce-store"                 ? ELogOperation::QuiesceStore
+                                                                                   : ELogOperation::Other;
+    const auto started = std::chrono::steady_clock::now();
+    TLogScope scope(logger, operation, requestID);
+    const auto result = RunCommand(argc, argv);
+    const auto duration =
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count();
+    if (logger) {
+        logger->TryLog({.Event = ELogEvent::RequestCompleted,
+            .Operation = operation,
+            .Outcome = result == 0 ? ELogOutcome::Ok : ELogOutcome::Error,
+            .RequestID = requestID,
+            .DurationUs = static_cast<std::uint64_t>(duration),
+            .StatusCode = static_cast<std::uint32_t>(result)});
+    }
+    logging.SetResult(result == 0);
+    return result;
 } catch (...) {
     return 100;
 }

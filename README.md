@@ -28,6 +28,8 @@ see [SCANNER.md](docs/development/SCANNER.md).
 Native scans reuse an immutable [verified membership index](docs/development/SCAN_INDEX.md)
 for fixed latest, historical and initial-empty views. Publication and reopen
 derive it from authoritative Iceberg metadata; healthy scan planning reads no manifests.
+Shared scan budgets cover planning, decoding and retained output descriptors;
+[profiles](docs/development/METADATA.md) separate memory, filtering and stop counters.
 Returned scan buffers retain allocator accounting, FileIO and engine ownership
 through slices and Arrow exports, including after shutdown.
 The [installed public API consumer](docs/development/BUILDING.md#build-and-install)
@@ -181,3 +183,10 @@ capabilities. It reports read availability separately from write readiness;
 - [Agent guide](AGENTS.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
+
+Operational logging emits bounded structured events independently of store writes.
+See [the logging guide](docs/development/LOGGING.md) for bounded Quill/Python stderr
+events, runtime journal collection, Loki/Alloy, private Grafana search,
+retention/quota setup and overload tests.
+
+For server debugging, see [Reading server logs](docs/development/READING_SERVER_LOGS.md).

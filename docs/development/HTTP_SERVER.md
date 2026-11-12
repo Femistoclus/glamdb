@@ -284,6 +284,10 @@ returns a schema-bearing Arrow IPC page, including empty results, with
 `Content-Length`, `X-Content-SHA256`, `X-GlamDB-Snapshot-Id`, and an optional
 `X-GlamDB-Next-Cursor`. Each page is fully prepared before success headers, so a
 read/encoding failure cannot become a successful partial page.
+The shared `apps/transport/arrow_ipc` codec measures schema, batch and EOS before
+allocating one fixed-size output buffer. The session retains its working,
+outgoing and replay reservations through encoding. Size refusal returns no page;
+the checksum is computed only after the writer closes successfully.
 
 For complete reads, continue with `POST .../scan {"cursor":"TOKEN"}` and the same
 Accept header until JSON `next_cursor` is null or the Arrow cursor header is

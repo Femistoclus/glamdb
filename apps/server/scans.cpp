@@ -1,11 +1,10 @@
 #include "apps/server/scans.h"
+#include "apps/transport/arrow_ipc.h"
 
 #include "storage/resources.h"
 
-#include <arrow/io/memory.h>
 #include <arrow/ipc/api.h>
 #include <arrow/util/byte_size.h>
-#include <openssl/evp.h>
 
 #include <array>
 #include <atomic>
@@ -40,51 +39,6 @@ std::string Token()
     }
     return value;
 }
-std::string Checksum(std::string_view bytes)
-{
-    unsigned char digest[EVP_MAX_MD_SIZE]{};
-    unsigned int size = 0;
-    Require(EVP_Digest(bytes.data(), bytes.size(), digest, &size, EVP_sha256(), nullptr) == 1 && size == 32,
-        "cannot checksum Arrow response",
-        "INTERNAL");
-    constexpr char Hex[] = "0123456789abcdef";
-    std::string result;
-    result.reserve(64);
-    for (unsigned int i = 0; i < size; ++i) {
-        result += Hex[digest[i] >> 4];
-        result += Hex[digest[i] & 15];
-    }
-    return result;
-}
-class TBoundedOutput final : public arrow::io::OutputStream
-{
-public:
-    arrow::Status Close() override
-    {
-        Closed_ = true;
-        return arrow::Status::OK();
-    }
-    bool closed() const override
-    {
-        return Closed_;
-    }
-    arrow::Result<int64_t> Tell() const override
-    {
-        return static_cast<int64_t>(Bytes.size());
-    }
-    arrow::Status Write(const void* data, int64_t size) override
-    {
-        if (Closed_ || size < 0 || static_cast<uint64_t>(size) > MaxResponseBytes - Bytes.size()) {
-            return arrow::Status::CapacityError("Arrow response exceeds transport limit");
-        }
-        Bytes.append(static_cast<const char*>(data), static_cast<size_t>(size));
-        return arrow::Status::OK();
-    }
-    std::string Bytes;
-
-private:
-    bool Closed_ = false;
-};
 TJson Snapshot(const ScanInfo& info)
 {
     return info.selector_resolved.kind == SnapshotSelectorKind::Id
@@ -372,7 +326,7 @@ struct TScans::TImpl
         rows += ']';
         return rows;
     }
-    std::string ArrowPage(TSession& session, size_t& count)
+    TResponse ArrowPage(TSession& session, size_t& count)
     {
         std::vector<std::shared_ptr<arrow::RecordBatch>> pieces, groups;
         size_t bytes = 0;
@@ -413,11 +367,9 @@ struct TScans::TImpl
         if (!pieces.empty()) {
             groups.push_back(pieces.size() == 1 ? pieces.front() : ArrowValue(arrow::ConcatenateRecordBatches(pieces)));
         }
-        auto sink = std::make_shared<TBoundedOutput>();
-        auto writer = ArrowValue(
-            arrow::ipc::MakeStreamWriter(sink, std::const_pointer_cast<arrow::Schema>(session.Info.output_schema)));
+        std::shared_ptr<arrow::RecordBatch> batch;
         if (!groups.empty()) {
-            auto batch = groups.size() == 1 ? groups.front() : ArrowValue(arrow::ConcatenateRecordBatches(groups));
+            batch = groups.size() == 1 ? groups.front() : ArrowValue(arrow::ConcatenateRecordBatches(groups));
             const auto prefix =
                 static_cast<size_t>(ArrowValue(arrow::ipc::SerializeSchema(*session.Info.output_schema))->size()) +
                 8; // schema message plus explicit EOS
@@ -443,10 +395,10 @@ struct TScans::TImpl
             Require(static_cast<uint64_t>(IpcSize(*batch)) <= MaxResponseBytes - prefix,
                 "individual Arrow row exceeds response byte limit");
             count = static_cast<size_t>(take);
-            Require(writer->WriteRecordBatch(*batch).ok(), "cannot write Arrow scan page", "INTERNAL");
         }
-        Require(writer->Close().ok(), "cannot finish Arrow scan page", "INTERNAL");
-        return std::move(sink->Bytes);
+        return EncodeArrowPage(std::const_pointer_cast<arrow::Schema>(session.Info.output_schema),
+            batch,
+            session.Info.selector_resolved);
     }
     TResponse Page(const TPtr& session,
         const std::string& token,
@@ -464,14 +416,9 @@ struct TScans::TImpl
             return response; // Replay does not extend idle or absolute lifetime.
         }
         size_t count = 0;
-        auto bytes = session->Arrow ? ArrowPage(*session, count) : JsonRows(*session, count);
+        auto response = session->Arrow ? ArrowPage(*session, count) : TResponse{200, JsonRows(*session, count)};
         const auto next = Peek(*session) ? Token() : std::string{};
-        TResponse response;
         if (session->Arrow) {
-            response = {200, std::move(bytes), "application/vnd.apache.arrow.stream"};
-            const auto snapshot = Snapshot(session->Info);
-            response.Headers["X-GlamDB-Snapshot-Id"] = snapshot.is_null() ? "initial" : snapshot.get<std::string>();
-            response.Headers["X-Content-SHA256"] = Checksum(response.Body);
             if (!next.empty()) {
                 response.Headers["X-GlamDB-Next-Cursor"] = next;
             }
@@ -479,7 +426,7 @@ struct TScans::TImpl
             auto body = Envelope(*session, next, count).dump();
             body.pop_back();
             body += ",\"rows\":";
-            body += bytes;
+            body += response.Body;
             body += '}';
             response = {200, std::move(body)};
         }

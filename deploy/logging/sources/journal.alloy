@@ -1,0 +1,8 @@
+// Install alongside config.alloy. Only this runtime unit is collected.
+loki.source.journal "application" {
+  path = "/var/log/journal"
+  matches = sys.env("GLAMDB_JOURNAL_MATCHES")
+  max_age = "24h"
+  labels = {service = "glamdb", environment = sys.env("GLAMDB_ENVIRONMENT")}
+  forward_to = [loki.process.application.receiver]
+}
