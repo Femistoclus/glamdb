@@ -21,6 +21,7 @@ try {
     int timeoutMs = 10000;
     glamdb::NServer::TScanLimits scanLimits;
     glamdb::ResourceLimits resourceLimits;
+    glamdb::NServer::TReaderLimits readerLimits;
     glamdb::Limits engineLimits;
     int64_t scanIdle = 60, scanLifetime = 0, completedTtl = 60;
     app.add_option("--data-dir", dataDir, "Server directory for managed databases");
@@ -34,6 +35,11 @@ try {
     app.add_option("--log-directory", logDirectory, "Private bounded JSONL log directory; disabled by default");
     app.add_option("--ui-root", uiRoot, "Workbench directory (defaults to installed share/glamdb/ui)");
     app.add_option("--request-timeout-ms", timeoutMs, "Total header/body read timeout")->check(CLI::Range(100, 60000));
+    app.add_option("--http-readers", readerLimits.Active, "Active HTTP readers (default 4)")->check(CLI::Range(1, 4));
+    app.add_option("--http-readers-per-database",
+           readerLimits.PerDatabase,
+           "Active HTTP readers per database (default 2)")
+        ->check(CLI::Range(1, 4));
     app.add_option("--scan-live-limit", scanLimits.Live, "Global live scan cursor limit")->check(CLI::Range(1, 4096));
     app.add_option("--scan-live-per-database", scanLimits.LivePerDatabase, "Live scan limit per database")
         ->check(CLI::Range(1, 4096));
@@ -66,6 +72,7 @@ try {
            "Maximum sampled successes per second")
         ->check(CLI::Range(1, 1000000));
     CLI11_PARSE(app, argc, argv);
+    glamdb::NServer::ValidateReaderLimits(readerLimits);
     scanLimits.Idle = std::chrono::seconds(scanIdle);
     scanLimits.Lifetime = std::chrono::seconds(scanLifetime);
     scanLimits.CompletedTtl = std::chrono::seconds(completedTtl);
@@ -100,7 +107,13 @@ try {
             return databases->IsReady();
         });
         glamdb::NServer::TRoutes routes(databases, uiRoot, token, scanLimits);
-        glamdb::NServer::RunServer(routes, address, port, std::chrono::milliseconds(timeoutMs), 96, logging.Get());
+        glamdb::NServer::RunServer(routes,
+            address,
+            port,
+            std::chrono::milliseconds(timeoutMs),
+            96,
+            logging.Get(),
+            readerLimits);
         routes.CancelScans();
         databases->Shutdown();
         logging.SetResult(true);
@@ -112,7 +125,13 @@ try {
         return engine->GetHealth().write_ready;
     });
     glamdb::NServer::TRoutes routes(engine, uiRoot, token, scanLimits);
-    glamdb::NServer::RunServer(routes, address, port, std::chrono::milliseconds(timeoutMs), 96, logging.Get());
+    glamdb::NServer::RunServer(routes,
+        address,
+        port,
+        std::chrono::milliseconds(timeoutMs),
+        96,
+        logging.Get(),
+        readerLimits);
     routes.CancelScans();
     const auto closed = engine->Shutdown(std::chrono::milliseconds(60000));
     if (!closed) {

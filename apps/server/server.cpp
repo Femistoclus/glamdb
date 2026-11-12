@@ -97,8 +97,12 @@ struct TCallQueue
 };
 struct TState
 {
-    explicit TState(TRoutes& routes, std::chrono::milliseconds timeout, TStructuredLogger* logger)
-        : Routes(routes)
+    explicit TState(TRoutes& routes,
+        std::chrono::milliseconds timeout,
+        TStructuredLogger* logger,
+        TReaderLimits readers)
+        : Readers(readers.Active, readers.PerDatabase)
+        , Routes(routes)
         , Timeout(timeout)
         , Logger(logger)
     { }
@@ -106,7 +110,7 @@ struct TState
     void PumpBodies();
     void ReapWorkers();
     void ObserveActivity();
-    TCallQueue Readers{4, 2};
+    TCallQueue Readers;
     TCallQueue Writers{4, 1};
     TCallQueue Control{2, 1};
     TCallQueue Lifecycle{4, 1};
@@ -921,13 +925,21 @@ void TCallQueue::Pump()
 }
 } // namespace
 
+void ValidateReaderLimits(TReaderLimits limits)
+{
+    Require(limits.Active >= 1 && limits.Active <= 4 && limits.PerDatabase >= 1 && limits.PerDatabase <= limits.Active,
+        "HTTP reader limits must be 1..4 with per-database <= global");
+}
+
 void RunServer(TRoutes& routes,
     std::string_view address,
     uint16_t port,
     std::chrono::milliseconds timeout,
     size_t maxConnections,
-    TStructuredLogger* logger)
+    TStructuredLogger* logger,
+    TReaderLimits readers)
 {
+    ValidateReaderLimits(readers);
     Require(maxConnections > 0 && maxConnections <= 96, "connection ceiling must be 1..96");
     std::unique_ptr<TLogRuntime> ownedRuntime;
     if (!logger) {
@@ -937,7 +949,7 @@ void RunServer(TRoutes& routes,
     if (logger) {
         logger->RegisterProducerThread();
     }
-    TState state(routes, timeout, logger);
+    TState state(routes, timeout, logger, readers);
     TTcp::acceptor acceptor(state.IO, TTcp::endpoint(asio::ip::make_address(address), port));
     asio::steady_timer retry(state.IO);
     asio::signal_set signals(state.IO, SIGINT, SIGTERM);

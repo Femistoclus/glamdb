@@ -67,6 +67,9 @@ eviction is oldest-first; live cursors are never evicted. See
 32-reader profile and `glamdb.scan_policy` real native validation.
 Separate HTTP reader, publisher, lifecycle and
 control pools use bounded fair per-database queues with deadlines and cancellation.
+`--http-readers` and `--http-readers-per-database` configure reader admission
+(defaults 4/2); a 1/1 profile queues heavy reads within a smaller shared budget
+without restricting publisher, control or lifecycle pools.
 Outcome lookups refuse tentative catalog reads without waiting on publication.
 HTTP body admission reserves four of sixteen readers from ordinary uploads for
 authenticated database lifecycle and scan cancellation, including through a TLS

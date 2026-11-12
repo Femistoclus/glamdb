@@ -1,4 +1,5 @@
 """Real sockets, native storage and fresh-process recovery; no mock backend."""
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import http.client
 import json
@@ -9,6 +10,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import uuid
 from urllib.parse import quote
@@ -33,9 +35,9 @@ class NativeHTTP(unittest.TestCase):
         self.assertTrue(self.api('/capabilities')['features']['database_management'])
         self.api('/databases', {'database_id': self.store_id, 'name': 'test_database'})
 
-    def start(self):
+    def start(self, extra_args=()):
         self.proc = subprocess.Popen([SERVER, '--data-dir', self.data_dir,
-                                      '--port', '0', '--ui-root', UI, '--request-timeout-ms', '1000'],
+                                      '--port', '0', '--ui-root', UI, '--request-timeout-ms', '1000', *extra_args],
                                      env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         readable, _, _ = select.select([self.proc.stdout], [], [], 15)
         self.assertTrue(readable, 'server did not report listening address')
@@ -88,6 +90,59 @@ class NativeHTTP(unittest.TestCase):
         self.assertEqual(info['collection_id'], cid)
         self.assertEqual(self.api('/collections', body), info)
         return '/collections/' + cid
+
+    def test_http_reader_limits_reject_invalid_profiles_before_store_creation(self):
+        profiles = (('0', '1'), ('5', '1'), ('1', '0'), ('1', '2'), ('4', '5'))
+        for index, (global_limit, database_limit) in enumerate(profiles):
+            with self.subTest(global_limit=global_limit, database_limit=database_limit):
+                directory = Path(self.tmp.name) / f'invalid-readers-{index}'
+                result = subprocess.run([SERVER, '--data-dir', str(directory), '--port', '0',
+                                         '--http-readers', global_limit,
+                                         '--http-readers-per-database', database_limit],
+                                        env=self.env, capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn(TOKEN, result.stdout + result.stderr)
+                self.assertFalse(directory.exists())
+
+    def test_serial_http_readers_queue_real_explain_and_statistics_with_finite_metadata(self):
+        path = self.collection()
+        body = {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'reader-profile', 'n': '7'}]}
+        receipt = self.api(path + '/append', body)
+        self.stop()
+        self.start(('--http-readers', '1', '--http-readers-per-database', '1',
+                    '--resource-metadata-bytes', str(1792 << 20),
+                    '--scan-live-limit', '1', '--scan-live-per-database', '1'))
+        baseline = self.api('/capabilities')['shared_resources']['memory_bytes'][1]
+
+        def concurrent(requests):
+            barrier = threading.Barrier(len(requests))
+
+            def run(request):
+                barrier.wait(timeout=10)
+                route, payload = request
+                return self.api(route, payload)
+
+            with ThreadPoolExecutor(max_workers=len(requests)) as workers:
+                return list(workers.map(run, requests))
+
+        for _ in range(3):
+            explanations = concurrent([(path + '/explain', {})] * 4)
+            self.assertTrue(all(item['estimates']['synthetic'] is False for item in explanations))
+            responses = concurrent([(path + '/explain', {}), (path + '/stats', None),
+                                    ('/databases/' + self.store_id + '/readyz', None),
+                                    (path + '/operations/' + body['operation_id'], None)])
+            self.assertTrue(responses[2]['write_ready'])
+            self.assertEqual(responses[3], receipt)
+            caps = self.api('/capabilities')
+            self.assertEqual(caps['shared_resources']['memory_bytes'][1], baseline)
+            occupancy = caps['scan_sessions']['global']
+            self.assertEqual((occupancy['live_cursors'], occupancy['completed_replays'],
+                              occupancy['executing_calls']), (0, 0, 0))
+        opened = self.api(path + '/scan/open', {})
+        page = self.api(path + '/scan', {'cursor': opened['cursor']})
+        self.assertEqual(page['rows'], [{'key': 'reader-profile', 'n': '7', 'ts': None}])
+        self.assertTrue(self.api(path + '/scan/cancel', {'cursor': opened['cursor']})['cancelled'])
+        self.assertEqual(self.api('/capabilities')['shared_resources']['memory_bytes'][1], baseline)
 
     def test_store_readiness_is_distinct_from_process_liveness(self):
         base = '/databases/' + self.store_id
