@@ -354,6 +354,31 @@ TEST_F(TBulkAppendTest, InterruptedValidationDoesNotBindTheOperation)
     EXPECT_EQ(Engine_->BulkAppendDurable(request).disposition, CommitDisposition::Committed);
 }
 
+TEST_F(TBulkAppendTest, CancellationAtPhysicalAdmissionDoesNotBindOrProduceFiles)
+{
+    const auto source = std::make_shared<TGeneratedBulkSource>();
+    source->Rows = 3;
+    const auto stop = std::make_shared<std::atomic<bool>>(false);
+    auto request = Request(source);
+    request.cancellation = stop;
+    bool enteredAdmission = false;
+    Hooks_->BeforeAppendAdmission = [&](std::chrono::steady_clock::time_point) {
+        enteredAdmission = true;
+        stop->store(true);
+    };
+    const auto files = CountRegularFiles(Root_ / "warehouse");
+    const auto failed = Engine_->BulkAppendDurable(request);
+    EXPECT_TRUE(enteredAdmission);
+    EXPECT_EQ(failed.disposition, CommitDisposition::DefinitelyNotCommitted);
+    ASSERT_TRUE(failed.error);
+    EXPECT_EQ(test::Present(failed.error).code, "CANCELLED");
+    const auto outcome = Engine_->FindAppendOutcome(test::collection_id, FirstOperation);
+    ASSERT_TRUE(outcome) << outcome.error().message;
+    EXPECT_FALSE(outcome->has_value());
+    EXPECT_EQ(CountRegularFiles(Root_ / "warehouse"), files);
+    EXPECT_EQ(Read(), 0);
+}
+
 TEST_F(TBulkAppendTest, CancellationDuringProductionRecordsFailure)
 {
     const auto source = std::make_shared<TGeneratedBulkSource>();

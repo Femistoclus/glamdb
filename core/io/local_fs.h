@@ -2,15 +2,19 @@
 
 #include "core/io/result.h"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
 
 namespace NGlamDB::NIO {
+
+struct ITreeInventory;
 
 enum class EFileKind : std::uint8_t { Other, Data, Manifest, ManifestList, Metadata };
 
@@ -59,6 +63,12 @@ struct ILocalFS
     virtual TResult<TFileStat> Stat(const THandle& handle) = 0;
     virtual TResult<TSpaceInfo> StatFs(const THandle& directory) = 0;
     virtual TResult<std::uint64_t> MeasureTree(const THandle&, std::uint64_t);
+    // Cancellation callbacks must be nonblocking and must not throw.
+    virtual TResult<std::uint64_t> MeasureTree(const THandle& directory,
+        std::uint64_t limit,
+        std::chrono::steady_clock::time_point deadline,
+        const std::function<bool()>& cancelled = {});
+    virtual TResult<std::shared_ptr<ITreeInventory>> TrackTree(const THandle& directory);
     // Removes one regular-file entry; used only for superseded metadata roots.
     virtual std::error_code Unlink(const THandle& parent, std::string_view name);
     virtual std::error_code SyncFile(const THandle& file) = 0;
@@ -79,6 +89,11 @@ public:
     TResult<TFileStat> Stat(const THandle& handle) override;
     TResult<TSpaceInfo> StatFs(const THandle& directory) override;
     TResult<std::uint64_t> MeasureTree(const THandle& directory, std::uint64_t limit) override;
+    TResult<std::uint64_t> MeasureTree(const THandle& directory,
+        std::uint64_t limit,
+        std::chrono::steady_clock::time_point deadline,
+        const std::function<bool()>& cancelled = {}) override;
+    TResult<std::shared_ptr<ITreeInventory>> TrackTree(const THandle& directory) override;
     std::error_code Unlink(const THandle& parent, std::string_view name) override;
     std::error_code SyncFile(const THandle& file) override;
     std::error_code SyncDir(const THandle& directory) override;

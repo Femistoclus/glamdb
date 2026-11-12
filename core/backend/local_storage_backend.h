@@ -8,6 +8,7 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -22,6 +23,7 @@ class MemoryPool;
 namespace NGlamDB::NIO {
 struct ILocalFS;
 class TStoreDirs;
+struct ITreeInventory;
 } // namespace NGlamDB::NIO
 
 namespace NGlamDB::NStorage {
@@ -49,9 +51,12 @@ struct TLocalStorageOptions
     // faults here.
     std::shared_ptr<NGlamDB::NIO::ILocalFS> Fs{};
     std::shared_ptr<ResourceOwner> Resources{};
+    // Use a fresh traversal at every admission, including for external mmap
+    // mutations that Linux filesystem notifications cannot report.
+    bool WalkWarehouseAtAdmission = false;
     // Publication rechecks the physical warehouse cap. By default it adds the
-    // append's own durable files to the admission measurement, so growth by
-    // anything else after admission is first seen by the next admission.
+    // append's own durable files to the conservative admission inventory.
+    // Ordinary notified growth after admission is seen by the next admission.
     // True walks the whole warehouse again before every append publication.
     bool WalkWarehouseAtPublication = false;
     // The guard validates an append's in-memory staged root after comparing
@@ -97,7 +102,9 @@ public:
     Status CheckAppendAdmissible(const StoreInfo& store,
         const CollectionInfo& collection,
         const BaseIdentity& base,
-        NormalizedInput& input) override;
+        NormalizedInput& input,
+        std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max(),
+        const std::function<bool()>& cancelled = {}) override;
     Result<std::unique_ptr<StagedAppend>> PrepareAppend(const StoreInfo& store,
         const BoundOperation& binding,
         const CollectionInfo& collection,
@@ -144,10 +151,13 @@ private:
     // Preserve admitted root capacity while invalidating uncertain metadata.
     // Recovery can rebuild the selected root even when ordinary memory is full.
     std::map<std::string, std::shared_ptr<ResourceReservation>, std::less<>> CacheMemory_;
-    // Warehouse bytes measured by the admission preflight of the append that
-    // is about to be prepared. Binding writes only the catalog, so
-    // PrepareAppend reuses them instead of walking the warehouse again.
+    // Conservative warehouse bytes admitted for the append about to be
+    // prepared. Binding writes only the catalog; production reuses the bound.
     std::optional<std::uint64_t> AdmittedWarehouseBytes_;
+    std::mutex InventoryMutex_;
+    bool InventoryInitialized_ = false;
+    std::shared_ptr<ResourceReservation> InventoryMemory_;
+    std::shared_ptr<NGlamDB::NIO::ITreeInventory> Inventory_;
 
     TLocalStorageBackend(StoreInfo store,
         TLocalStorageOptions options,
@@ -157,10 +167,13 @@ private:
 
     void CheckStore(const StoreInfo& store) const;
     // Root identity, warehouse limit and free-space reserve before a write.
-    // `remember` keeps the measured warehouse bytes for the same append's
-    // PrepareAppend; `reuse` consumes them instead of walking again. Returns
-    // the warehouse bytes it checked.
-    NGlamDB::NIO::TResult<std::uint64_t> CheckWriteCapacity(bool remember, bool reuse);
+    // `remember` keeps the warehouse bound for the same append's PrepareAppend;
+    // `reuse` consumes it. Returns the bytes checked against the admission cap.
+    void InitializeInventory();
+    NGlamDB::NIO::TResult<std::uint64_t> CheckWriteCapacity(bool remember,
+        bool reuse,
+        std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max(),
+        const std::function<bool()>& cancelled = {});
     // The caller holds Mutex_. Usage and cached bases are authoritative only
     // after VerifyRetained; InvalidateCache revokes them.
     void RequireVerified() const;

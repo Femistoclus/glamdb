@@ -1,4 +1,5 @@
 #include "core/backend/local_storage_backend.h"
+#include "core/io/tree_inventory.h"
 
 #include "core/api/binary.h"
 #include "core/api/canonical.h"
@@ -744,8 +745,9 @@ TLocalStorageBackend::Open(const std::filesystem::path& root, const StoreInfo& s
             auto fileIO = TakeIceberg(NStorage::TDurableLocalFileIO::Make(dirs, store.store_id, options.FileIO),
                 "IO_ERROR",
                 "open durable FileIO");
-            return std::shared_ptr<TLocalStorageBackend>(
+            auto backend = std::shared_ptr<TLocalStorageBackend>(
                 new TLocalStorageBackend(store, options, std::move(dirs), std::move(fileIO), std::move(readCache)));
+            return backend;
         });
 }
 
@@ -817,7 +819,9 @@ Result<std::unique_ptr<StagedCreate>> TLocalStorageBackend::PrepareCreate(const 
 Status TLocalStorageBackend::CheckAppendAdmissible(const StoreInfo& store,
     const CollectionInfo& collection,
     const BaseIdentity& base,
-    NormalizedInput& input)
+    NormalizedInput& input,
+    std::chrono::steady_clock::time_point deadline,
+    const std::function<bool()>& cancelled)
 {
     return Guarded<Status>([&]() -> Status {
         CheckStore(store);
@@ -832,7 +836,10 @@ Status TLocalStorageBackend::CheckAppendAdmissible(const StoreInfo& store,
         } else {
             CheckWriterInput(collection.schema, input, Options_.Writer);
         }
-        (void)TakeIO(CheckWriteCapacity(true, false), EStoragePath::Preflight, "storage preflight");
+        InitializeInventory();
+        (void)TakeIO(CheckWriteCapacity(true, false, deadline, cancelled),
+            EStoragePath::Preflight,
+            "storage preflight");
         // Every append writes a strictly larger root with one more snapshot,
         // data file, manifest and manifest list. The pinned Iceberg builder
         // never records a previous metadata location for these commits, so the
@@ -898,11 +905,11 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
         }
         const auto base = ResolveBase(binding.base);
         CheckDeadline(deadline);
-        // A full measurement from this append's admission (or a new walk), taken
+        // A conservative bound from this append's admission (or a new walk), taken
         // before any file of this attempt exists; publication adds the attempt's
         // own files to it instead of walking the warehouse again.
         const auto warehouseBytes =
-            TakeIO(CheckWriteCapacity(false, true), EStoragePath::Preflight, "storage preflight");
+            TakeIO(CheckWriteCapacity(false, true, deadline), EStoragePath::Preflight, "storage preflight");
         std::optional<NStorage::TWarehouseBaseline> warehouse;
         std::optional<NStorage::TWarehouseBaseline> productionBaseline;
         if (!Options_.WalkWarehouseAtPublication || input.bulk) {
@@ -1192,6 +1199,12 @@ void TLocalStorageBackend::PublicationFinished(std::string_view collectionID,
     VerifiedGeneration_ = false;
     Collections_.clear();
     AdmittedWarehouseBytes_.reset();
+    {
+        std::lock_guard inventoryLock(InventoryMutex_);
+        if (Inventory_) {
+            Inventory_->Invalidate();
+        }
+    }
     if (ReadCache_) {
         ReadCache_->Clear();
     }
@@ -1217,12 +1230,38 @@ void TLocalStorageBackend::InvalidateCache()
     VerifiedGeneration_ = false;
     Collections_.clear();
     AdmittedWarehouseBytes_.reset();
+    {
+        std::lock_guard inventoryLock(InventoryMutex_);
+        if (Inventory_) {
+            Inventory_->Invalidate();
+        }
+    }
     if (ReadCache_) {
         ReadCache_->Clear();
     }
 }
 
-NIO::TResult<std::uint64_t> TLocalStorageBackend::CheckWriteCapacity(bool remember, bool reuse)
+void TLocalStorageBackend::InitializeInventory()
+{
+    std::lock_guard lock(InventoryMutex_);
+    if (InventoryInitialized_ || Options_.WalkWarehouseAtAdmission) {
+        return;
+    }
+    InventoryInitialized_ = true;
+    auto memory = Options_.Resources->Reserve(ResourceClass::Metadata, 4ULL << 20);
+    if (memory) {
+        auto inventory = Dirs_->Fs()->TrackTree(Dirs_->Warehouse());
+        if (inventory) {
+            InventoryMemory_ = std::move(*memory);
+            Inventory_ = std::move(inventory).Value();
+        }
+    }
+}
+
+NIO::TResult<std::uint64_t> TLocalStorageBackend::CheckWriteCapacity(bool remember,
+    bool reuse,
+    std::chrono::steady_clock::time_point deadline,
+    const std::function<bool()>& cancelled)
 {
     std::optional<std::uint64_t> bytes;
     {
@@ -1233,7 +1272,15 @@ NIO::TResult<std::uint64_t> TLocalStorageBackend::CheckWriteCapacity(bool rememb
         return error;
     }
     if (!reuse || !bytes) {
-        const auto measured = NStorage::MeasureWarehouse(*Dirs_, Options_.Storage);
+        std::lock_guard inventoryLock(InventoryMutex_);
+        const auto measure = [&] {
+            return Dirs_->Fs()->MeasureTree(Dirs_->Warehouse(), Options_.Storage.WarehouseBytes, deadline, cancelled);
+        };
+        const auto admissionLimit = Options_.Storage.AttemptReserveBytes <= Options_.Storage.WarehouseBytes
+            ? Options_.Storage.WarehouseBytes - Options_.Storage.AttemptReserveBytes
+            : 0;
+        const auto measured =
+            Inventory_ ? Inventory_->Measure(measure, admissionLimit, deadline, cancelled) : measure();
         if (!measured) {
             return measured.Error();
         }

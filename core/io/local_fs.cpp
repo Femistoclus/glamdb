@@ -1,4 +1,5 @@
 #include "core/io/local_fs.h"
+#include "core/io/tree_inventory.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -37,6 +38,14 @@ struct TNativeHandle final : TFSHandle
 std::error_code LastError()
 {
     return {errno, std::generic_category()};
+}
+
+std::error_code CheckInterrupted(std::chrono::steady_clock::time_point deadline, const std::function<bool()>& cancelled)
+{
+    if (cancelled && cancelled()) {
+        return std::make_error_code(std::errc::operation_canceled);
+    }
+    return std::chrono::steady_clock::now() < deadline ? std::error_code{} : std::make_error_code(std::errc::timed_out);
 }
 
 bool ValidLeaf(std::string_view name)
@@ -96,8 +105,13 @@ std::error_code AddTreeBytes(const struct stat& info, std::uint64_t limit, std::
     return {};
 }
 
-std::error_code
-MeasureDirectory(int fd, const struct stat* expected, unsigned depth, std::uint64_t& total, std::uint64_t limit)
+std::error_code MeasureDirectory(int fd,
+    const struct stat* expected,
+    unsigned depth,
+    std::uint64_t& total,
+    std::uint64_t limit,
+    std::chrono::steady_clock::time_point deadline,
+    const std::function<bool()>& cancelled)
 {
     std::unique_ptr<DIR, decltype(&::closedir)> directory(::fdopendir(fd), ::closedir);
     if (!directory) {
@@ -116,7 +130,13 @@ MeasureDirectory(int fd, const struct stat* expected, unsigned depth, std::uint6
     if (const auto error = AddTreeBytes(parent, limit, total)) {
         return error;
     }
+    std::size_t visited = 0;
     while (true) {
+        if (visited++ % 64 == 0) {
+            if (const auto error = CheckInterrupted(deadline, cancelled)) {
+                return error;
+            }
+        }
         errno = 0;
         const auto* entry = ::readdir(directory.get());
         if (!entry) {
@@ -153,7 +173,7 @@ MeasureDirectory(int fd, const struct stat* expected, unsigned depth, std::uint6
         if (child < 0) {
             return LastError();
         }
-        if (const auto error = MeasureDirectory(child, &info, depth + 1, total, limit)) {
+        if (const auto error = MeasureDirectory(child, &info, depth + 1, total, limit, deadline, cancelled)) {
             return error;
         }
     }
@@ -314,6 +334,17 @@ TResult<TSpaceInfo> TPosixLocalFS::StatFs(const THandle& directory)
 
 TResult<std::uint64_t> TPosixLocalFS::MeasureTree(const THandle& directory, std::uint64_t limit)
 {
+    return MeasureTree(directory, limit, std::chrono::steady_clock::time_point::max());
+}
+
+TResult<std::uint64_t> TPosixLocalFS::MeasureTree(const THandle& directory,
+    std::uint64_t limit,
+    std::chrono::steady_clock::time_point deadline,
+    const std::function<bool()>& cancelled)
+{
+    if (const auto error = CheckInterrupted(deadline, cancelled)) {
+        return error;
+    }
     // Only duplicate the directory under the handle lock: the walk itself runs
     // on the private descriptor, so concurrent opens through the same handle
     // (scan readers) do not wait for a whole-tree traversal.
@@ -328,10 +359,20 @@ TResult<std::uint64_t> TPosixLocalFS::MeasureTree(const THandle& directory, std:
         return scan.Error();
     }
     std::uint64_t total = 0;
-    if (const auto error = MeasureDirectory(scan.Value(), nullptr, 0, total, limit)) {
+    if (const auto error = MeasureDirectory(scan.Value(), nullptr, 0, total, limit, deadline, cancelled)) {
+        return error;
+    }
+    if (const auto error = CheckInterrupted(deadline, cancelled)) {
         return error;
     }
     return total;
+}
+
+TResult<std::shared_ptr<ITreeInventory>> TPosixLocalFS::TrackTree(const THandle& directory)
+{
+    return WithHandle(directory, true, [](int fd) {
+        return MakeTreeInventory(fd);
+    });
 }
 
 std::error_code TPosixLocalFS::SyncFile(const THandle& file)
@@ -377,6 +418,26 @@ std::string_view TPosixLocalFS::Profile() noexcept
 }
 
 TResult<std::uint64_t> ILocalFS::MeasureTree(const THandle&, std::uint64_t)
+{
+    return std::errc::not_supported;
+}
+
+TResult<std::uint64_t> ILocalFS::MeasureTree(const THandle& directory,
+    std::uint64_t limit,
+    std::chrono::steady_clock::time_point deadline,
+    const std::function<bool()>& cancelled)
+{
+    if (const auto error = CheckInterrupted(deadline, cancelled)) {
+        return error;
+    }
+    auto result = MeasureTree(directory, limit);
+    if (const auto error = CheckInterrupted(deadline, cancelled)) {
+        return error;
+    }
+    return result;
+}
+
+TResult<std::shared_ptr<ITreeInventory>> ILocalFS::TrackTree(const THandle&)
 {
     return std::errc::not_supported;
 }

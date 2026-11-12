@@ -23,13 +23,15 @@ adapter in `core/storage/durable_local_file_io.h`, and retains the confirmed bas
 from `VerifyReachable` or a previously confirmed publication.
 
 1. Run `CheckWriteCapacity` before binding a new operation. It checks the root
-   identity, measures the warehouse including orphan files, and reserves space
+   identity, accounts for the warehouse including orphan files, and reserves space
    for the next attempt, journal, and filesystem headroom. The catalog owner
    supplies aggregate storage usage separately to the publication guard. The
-   backend measures the warehouse before production: `PrepareAppend` reuses the
-   admission measurement (binding writes only the catalog) and rechecks the
-   root identity and free space. The walk runs on a private descriptor, not
-   under the shared warehouse handle that concurrent scans open files through.
+   backend uses a conservative incremental inventory on supported Linux local
+   filesystems; other adapters retain full traversal. `PrepareAppend` reuses the
+   admission bound (binding writes only the catalog) and rechecks root identity
+   and free space. Full walks use a private descriptor. See
+   [warehouse inventory](WAREHOUSE_INVENTORY.md) for fallback, deadline, memory
+   bounds and the reviewed change to external-mutation detection.
 2. The coordinator owns operation identity, canonical hashing, durable binding,
    and input normalization. Pass owned, immutable, normalized Arrow batches to
    `WriteDataFile`; their buffers must remain unchanged until it returns. The
@@ -81,11 +83,11 @@ from `VerifyReachable` or a previously confirmed publication.
    publication: for an append it adds the physical size of every durable file
    of the sealed attempt (the larger of length and allocated blocks, recorded
    after the file sync) and the growth of the collection's data/metadata
-   directories to the full pre-production measurement, which includes orphans
-   present at admission. That equals a new walk when nothing else wrote to the
-   warehouse in between; growth from outside the writer after admission is
-   first rejected by the next admission. A failed estimate falls back to a
-   walk. Collection creation, and `WalkWarehouseAtPublication=true`, still
+   directories to the conservative pre-production inventory, including orphans.
+   Ordinary notified growth outside the writer after admission is first rejected
+   by the next admission under the inventory ownership contract. Any failed
+   estimate, including a conservative capacity refusal, falls back to an exact
+   walk before rejecting publication. Collection creation, and `WalkWarehouseAtPublication=true`, still
    walk the whole warehouse at publication.
 6. `GetCandidate()` returns a tentative verified state. Install it as the next
    confirmed base only after the caller confirms its outer catalog COMMIT.
@@ -190,8 +192,10 @@ The native `vertical/aggregate_capacity_test.cpp` suite additionally covers
 cross-collection root/history limits, uncertain COMMIT success and rollback,
 physical orphan usage on publication/reconciliation/reopen, and fresh-process
 rejection under lower limits. `vertical/append_preflight_cost_test.cpp` bounds
-warehouse traversal to one walk per append (admission) and prints per-append
-root/manifest-list/manifest opens. `vertical/append_history_bench_test.cpp` is a
+warehouse traversal to zero walks per steady append on a supported filesystem
+(one per admission in strict/fallback mode), and prints per-append
+root/manifest-list/manifest opens. `io/tree_inventory_test.cpp` checks incremental
+physical accounting, mutation races, invalidation, overflow fallback and deadlines. `vertical/append_history_bench_test.cpp` is a
 manual benchmark (skipped unless `GLAMDB_APPEND_HISTORY_BENCH=<appends>`) that
 reports one-row append latency per bucket of retained history.
 

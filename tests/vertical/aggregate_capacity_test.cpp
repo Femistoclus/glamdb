@@ -9,6 +9,7 @@
 #include <limits>
 #include <spawn.h>
 #include <sys/wait.h>
+#include <thread>
 
 extern char** environ;
 
@@ -217,10 +218,83 @@ TEST_F(TAggregateCapacityTest, AttemptFilesAboveThePhysicalCapCannotPublish)
     for (std::size_t index = mark; index < events.size(); ++index) {
         walks += events[index].Op == NGlamDB::NTesting::EIOOp::MeasureTree ? 1 : 0;
     }
-    EXPECT_EQ(walks, 1U) << "only admission walks the warehouse";
+    EXPECT_EQ(walks, 2U) << "admission and exact confirmation of publication capacity refusal";
     const auto collection = Engine_->GetCollection(test::collection_id);
     ASSERT_TRUE(collection);
     EXPECT_FALSE(collection->current_snapshot_id);
+}
+
+TEST_F(TAggregateCapacityTest, ExistingOrphanGrowthRefusesNextCollectionBeforeBinding)
+{
+    detail::TLocalStorageOptions options;
+    options.Storage.WarehouseBytes = 1U << 20;
+    options.Storage.AttemptReserveBytes = 0;
+    Create(options);
+    const auto orphan = Root_ / "warehouse" / "existing-orphan";
+    WriteBytes(orphan, "");
+    const auto first = Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
+    ASSERT_EQ(first.disposition, CommitDisposition::Committed);
+    std::filesystem::resize_file(orphan, 2U << 20);
+    const auto rejected = Engine_->AppendDurable({SecondCollection, FirstOperation, {}, {Batch(SecondRows)}});
+    ASSERT_EQ(rejected.disposition, CommitDisposition::DefinitelyNotCommitted);
+    ASSERT_TRUE(rejected.error);
+    EXPECT_EQ(test::Present(rejected.error).code, "RESOURCE_EXHAUSTED");
+    const auto unbound = Engine_->FindAppendOutcome(SecondCollection, FirstOperation);
+    ASSERT_TRUE(unbound);
+    EXPECT_FALSE(unbound->has_value());
+    const auto original = Engine_->FindAppendOutcome(test::collection_id, FirstOperation);
+    ASSERT_TRUE(original);
+    ASSERT_TRUE(original->has_value());
+    EXPECT_EQ(test::Present(*original).disposition, CommitDisposition::Committed);
+    ASSERT_TRUE(std::filesystem::remove(orphan));
+    EXPECT_EQ(Engine_->AppendDurable({SecondCollection, FirstOperation, {}, {Batch(SecondRows)}}).disposition,
+        CommitDisposition::Committed);
+}
+
+TEST_F(TAggregateCapacityTest, StrictAdmissionStillWalksOnEveryAppend)
+{
+    auto faults = std::make_shared<NGlamDB::NTesting::TFaultFS>(Posix_);
+    detail::TLocalStorageOptions options;
+    options.Fs = faults;
+    options.WalkWarehouseAtAdmission = true;
+    Create(options);
+    ASSERT_EQ(Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}}).disposition,
+        CommitDisposition::Committed);
+    const auto mark = faults->Events().size();
+    ASSERT_EQ(Engine_->AppendDurable({SecondCollection, FirstOperation, {}, {Batch(SecondRows)}}).disposition,
+        CommitDisposition::Committed);
+    const auto events = faults->Events();
+    std::size_t walks = 0;
+    for (std::size_t index = mark; index < events.size(); ++index) {
+        walks += events[index].Op == NGlamDB::NTesting::EIOOp::MeasureTree ? 1 : 0;
+    }
+    EXPECT_EQ(walks, 1U);
+}
+
+TEST_F(TAggregateCapacityTest, InventoryDeadlineExpiresBeforeBindingOrProduction)
+{
+    auto created = detail::EngineFactory::CreateWith(
+        {.store_id = test::store_id, .absolute_root = Root_.string(), .limits = {.append_deadline = 100ms}},
+        THookBackend::Factory(Hooks_));
+    ASSERT_TRUE(created) << created.error().message;
+    Engine_ = std::move(*created);
+    ASSERT_EQ(Engine_->CreateCollection({test::collection_id, "a", Schema}).disposition, CommitDisposition::Committed);
+    const auto before = CountRegularFiles(Root_ / "warehouse");
+    bool admissionCalled = false;
+    Hooks_->BeforeAppendAdmission = [&](auto deadline) {
+        admissionCalled = true;
+        ASSERT_NE(deadline, std::chrono::steady_clock::time_point::max());
+        std::this_thread::sleep_until(deadline);
+    };
+    const auto rejected = Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
+    EXPECT_TRUE(admissionCalled);
+    ASSERT_EQ(rejected.disposition, CommitDisposition::DefinitelyNotCommitted);
+    ASSERT_TRUE(rejected.error);
+    EXPECT_EQ(test::Present(rejected.error).code, "DEADLINE_EXCEEDED");
+    const auto outcome = Engine_->FindAppendOutcome(test::collection_id, FirstOperation);
+    ASSERT_TRUE(outcome);
+    EXPECT_FALSE(outcome->has_value());
+    EXPECT_EQ(CountRegularFiles(Root_ / "warehouse"), before);
 }
 
 TEST_F(TAggregateCapacityTest, PhysicalCapacityFailureKeepsReconcileNotReadyUntilSpaceIsReleased)

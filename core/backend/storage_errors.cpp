@@ -35,6 +35,12 @@ RetryHint HintFor(std::string_view code)
 
 std::string_view ClassifyFsError(std::error_code error, EStoragePath path)
 {
+    if (error == std::errc::operation_canceled) {
+        return "CANCELLED";
+    }
+    if (error == std::errc::timed_out) {
+        return "DEADLINE_EXCEEDED";
+    }
     if (error == std::errc::state_not_recoverable || error == std::errc::too_many_symbolic_link_levels ||
         error == std::errc::not_a_directory || error == std::errc::cross_device_link ||
         error == std::errc::no_such_file_or_directory)

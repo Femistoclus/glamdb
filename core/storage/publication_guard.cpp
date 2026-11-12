@@ -163,9 +163,7 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
     auto warehouse = Context_.Warehouse
         ? EstimateAttemptWarehouse(*Context_.Directories, *Context_.Warehouse, *Context_.Attempt, Context_.Limits)
         : MeasureWarehouse(*Context_.Directories, Context_.Limits);
-    if (!warehouse && Context_.Warehouse && warehouse.Error() != std::errc::no_space_on_device &&
-        warehouse.Error() != std::errc::value_too_large)
-    {
+    if (!warehouse && Context_.Warehouse) {
         warehouse = MeasureWarehouse(*Context_.Directories, Context_.Limits);
     }
     if (!warehouse) {

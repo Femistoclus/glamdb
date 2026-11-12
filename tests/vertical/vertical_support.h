@@ -192,6 +192,7 @@ inline std::size_t CountRegularFiles(const std::filesystem::path& root)
 class THookBackend final : public detail::StorageBackend
 {
 public:
+    std::function<void(std::chrono::steady_clock::time_point)> BeforeAppendAdmission;
     std::function<void(const detail::BoundOperation&)> AfterPrepareAppend;
     std::function<void(std::string_view collectionID)> BeforeVerifyClosure;
     std::function<void(std::string_view collectionID)> AfterPublish;
@@ -224,9 +225,14 @@ public:
     Status CheckAppendAdmissible(const StoreInfo& store,
         const CollectionInfo& collection,
         const BaseIdentity& base,
-        detail::NormalizedInput& input) override
+        detail::NormalizedInput& input,
+        std::chrono::steady_clock::time_point deadline,
+        const std::function<bool()>& cancelled) override
     {
-        return Inner_->CheckAppendAdmissible(store, collection, base, input);
+        if (BeforeAppendAdmission) {
+            BeforeAppendAdmission(deadline);
+        }
+        return Inner_->CheckAppendAdmissible(store, collection, base, input, deadline, cancelled);
     }
 
     Result<std::unique_ptr<detail::StagedAppend>> PrepareAppend(const StoreInfo& store,

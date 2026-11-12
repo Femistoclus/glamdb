@@ -1,7 +1,3 @@
-// PrepareAppend reuses admission's measurement because binding writes only
-// the catalog. Publication adds the attempt's durable files to it instead of
-// walking again, so one O(files) walk remains per append.
-
 #include "core/storage/format_verifier.h"
 #include "tests/support/fault_fs.h"
 #include "tests/vertical/vertical_support.h"
@@ -18,7 +14,7 @@ using namespace std::chrono_literals;
 using namespace glamdb::vertical;
 namespace NT = NGlamDB::NTesting;
 
-TEST(BackendPreflightCostTest, AppendMeasuresWarehouseOnlyAtAdmission)
+TEST(BackendPreflightCostTest, AppendReusesWarehouseInventoryAndChecksFreeSpace)
 {
     test::TempDir temporary;
     const auto root = temporary.path / "store";
@@ -37,6 +33,10 @@ TEST(BackendPreflightCostTest, AppendMeasuresWarehouseOnlyAtAdmission)
         CommitDisposition::Committed);
     ASSERT_EQ(engine->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}}).disposition,
         CommitDisposition::Committed);
+
+    const auto warehouse = posix.OpenDir(root / "warehouse");
+    ASSERT_TRUE(warehouse);
+    const bool incremental = static_cast<bool>(posix.TrackTree(warehouse.Value()));
 
     const auto mark = faults->Events().size();
     const auto parses = NGlamDB::NStorage::TableMetadataParses();
@@ -71,7 +71,7 @@ TEST(BackendPreflightCostTest, AppendMeasuresWarehouseOnlyAtAdmission)
         rootOpens,
         listOpens,
         manifestOpens);
-    EXPECT_EQ(walks, 1U) << "warehouse tree walks during one append";
+    EXPECT_EQ(walks, incremental ? 0U : 1U) << "supported filesystems need no full inventory for each append";
     EXPECT_EQ(rootParses, 0U) << "the guard validates the staged root without parsing the durable file";
     EXPECT_GE(statfs, 1U) << "free-space reserve must still be checked";
     ASSERT_TRUE(engine->Shutdown(1000ms));

@@ -33,6 +33,11 @@ evidence.
 | K, S | Not started | None. | Everything. |
 | Optional asynchronous admission | Outlined below only | None. | Decision record, interfaces, prototype and measurements. |
 
+The [warehouse inventory](development/WAREHOUSE_INVENTORY.md) adds bounded
+incremental physical-capacity admission on supported Linux local filesystems,
+with full fallback, cancellation and lower-limit reopen checks. Its performance
+and regression evidence does not change the G4 qualification status.
+
 Power-loss durability remains **NOT VALIDATED** until G4's physical evidence
 exists. Process kills, injected faults and restarts do not establish it. The
 remaining work is tracked in [issue #28](https://github.com/glamourdb/glamdb/issues/28).

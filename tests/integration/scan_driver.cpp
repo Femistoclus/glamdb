@@ -149,9 +149,11 @@ public:
     Status CheckAppendAdmissible(const StoreInfo& store,
         const CollectionInfo& collection,
         const BaseIdentity& base,
-        detail::NormalizedInput& input) override
+        detail::NormalizedInput& input,
+        std::chrono::steady_clock::time_point deadline,
+        const std::function<bool()>& cancelled) override
     {
-        return Inner_->CheckAppendAdmissible(store, collection, base, input);
+        return Inner_->CheckAppendAdmissible(store, collection, base, input, deadline, cancelled);
     }
     Result<std::unique_ptr<detail::StagedAppend>> PrepareAppend(const StoreInfo& store,
         const detail::BoundOperation& binding,

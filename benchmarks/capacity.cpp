@@ -1,5 +1,6 @@
 #include "core/backend/local_storage_backend.h"
 #include "core/engine/engine_factory.h"
+#include "core/io/tree_inventory.h"
 #include "core/storage/base_state.h"
 #include "storage/resources.h"
 
@@ -54,6 +55,42 @@ TJson ReadJson(const std::filesystem::path& path)
     return TJson::parse(input);
 }
 
+struct TInventoryCounters
+{
+    std::atomic<uint64_t> Calls{0}, Nanoseconds{0};
+};
+
+class TCountingInventory final : public ITreeInventory
+{
+public:
+    TCountingInventory(std::shared_ptr<ITreeInventory> inner, std::shared_ptr<TInventoryCounters> counters)
+        : Inner_(std::move(inner))
+        , Counters_(std::move(counters))
+    { }
+
+    TResult<std::uint64_t> Measure(const std::function<TResult<std::uint64_t>()>& fullMeasure,
+        std::uint64_t limit,
+        TClock::time_point deadline,
+        const std::function<bool()>& cancelled) override
+    {
+        const auto started = TClock::now();
+        auto result = Inner_->Measure(fullMeasure, limit, deadline, cancelled);
+        ++Counters_->Calls;
+        Counters_->Nanoseconds += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(TClock::now() - started).count());
+        return result;
+    }
+
+    void Invalidate() override
+    {
+        Inner_->Invalidate();
+    }
+
+private:
+    const std::shared_ptr<ITreeInventory> Inner_;
+    const std::shared_ptr<TInventoryCounters> Counters_;
+};
+
 // Forward real POSIX handles without retaining per-call or per-file records.
 class TCountingFS final : public ILocalFS
 {
@@ -105,7 +142,27 @@ public:
     }
     TResult<std::uint64_t> MeasureTree(const THandle& handle, std::uint64_t limit) override
     {
-        return Posix_.MeasureTree(handle, limit);
+        return MeasureTree(handle, limit, TClock::time_point::max());
+    }
+    TResult<std::uint64_t> MeasureTree(const THandle& handle,
+        std::uint64_t limit,
+        TClock::time_point deadline,
+        const std::function<bool()>& cancelled = {}) override
+    {
+        const auto started = TClock::now();
+        auto result = Posix_.MeasureTree(handle, limit, deadline, cancelled);
+        ++TreeCalls_;
+        TreeNanoseconds_ += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(TClock::now() - started).count());
+        return result;
+    }
+    TResult<std::shared_ptr<ITreeInventory>> TrackTree(const THandle& handle) override
+    {
+        auto inventory = Posix_.TrackTree(handle);
+        if (!inventory) {
+            return inventory.Error();
+        }
+        return std::shared_ptr<ITreeInventory>(std::make_shared<TCountingInventory>(inventory.Value(), Inventory_));
     }
     std::error_code Unlink(const THandle& parent, std::string_view name) override
     {
@@ -132,12 +189,18 @@ public:
             {"written_bytes", Written_.load()},
             {"read_opens", Opens_.load()},
             {"file_syncs", FileSyncs_.load()},
-            {"directory_syncs", DirSyncs_.load()}};
+            {"directory_syncs", DirSyncs_.load()},
+            {"warehouse_walks", TreeCalls_.load()},
+            {"warehouse_walk_ns", TreeNanoseconds_.load()},
+            {"inventory_calls", Inventory_->Calls.load()},
+            {"inventory_ns", Inventory_->Nanoseconds.load()}};
     }
 
 private:
     TPosixLocalFS Posix_;
     std::atomic<uint64_t> Read_{0}, Written_{0}, Opens_{0}, FileSyncs_{0}, DirSyncs_{0};
+    std::atomic<uint64_t> TreeCalls_{0}, TreeNanoseconds_{0};
+    const std::shared_ptr<TInventoryCounters> Inventory_ = std::make_shared<TInventoryCounters>();
 };
 
 struct TCounterBaseline
@@ -390,6 +453,23 @@ try {
                 "create collection failed");
         }
     }
+    const auto emptyOrphans = config.value("empty_orphan_files", uint64_t{0});
+    Require(emptyOrphans <= 1000000, "empty orphan fixture exceeds one million entries");
+    if (create && emptyOrphans != 0) {
+        const auto warehouse = fs->OpenDir(root / "warehouse");
+        Require(static_cast<bool>(warehouse), "open fixture warehouse failed");
+        Require(!fs->MakeDir(warehouse.Value(), "capacity-fixture"), "create fixture directory failed");
+        const auto fixture = fs->OpenDir(warehouse.Value(), "capacity-fixture");
+        Require(static_cast<bool>(fixture), "open fixture directory failed");
+        for (uint64_t index = 0; index < emptyOrphans; ++index) {
+            const auto file = fs->CreateExclusive(fixture.Value(), std::to_string(index), {});
+            Require(file && !fs->Close(file.Value()), "create empty orphan failed");
+        }
+        Require(!fs->SyncDir(fixture.Value()) && !fs->Close(fixture.Value()) && !fs->SyncDir(warehouse.Value()) &&
+                !fs->Close(warehouse.Value()),
+            "finish empty orphan fixture failed");
+    }
+    const auto usageBefore = PhysicalUsage(root);
     const auto batch = Batch();
     std::shared_ptr<arrow::RecordBatch> retained;
     if (!ledger.empty()) {
@@ -529,10 +609,14 @@ try {
                      {"open_ms", openMs},
                      {"append_ms", appendMs},
                      {"append_latencies_ms", latencies},
+                     {"append_rows_per_second",
+                         appendMs > 0 ? 1000000.0 * static_cast<double>(added.size()) / appendMs : 0},
+                     {"empty_orphan_files", emptyOrphans},
                      {"retry_us", retryUs},
                      {"retry_io", retryIO},
                      {"io", appendIO},
                      {"process_io", processIO},
+                     {"usage_before", usageBefore},
                      {"usage", usage},
                      {"rss_peak_bytes", PeakRSS()},
                      {"resource_memory_peak_bytes", resources.memory_peak},
