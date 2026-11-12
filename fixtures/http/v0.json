@@ -277,6 +277,52 @@
     },
     {
       "method": "GET",
+      "path": "/databases/{database_id}/collections/{collection_id}/snapshot-archive",
+      "core": "Engine::GetSnapshotArchive",
+      "status": 200,
+      "response_fields": {
+        "hot_snapshots": "null|string",
+        "root_snapshots": "string",
+        "archived_snapshots": "string",
+        "expired_snapshots": "string",
+        "archive_pending": "string"
+      },
+      "response_schema": "snapshotArchive"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections/{collection_id}/snapshot-archive",
+      "core": "Engine::UpdateSnapshotArchive",
+      "status": 200,
+      "response_fields": {
+        "collection_id": "string",
+        "hot_snapshots": "string"
+      },
+      "request": {
+        "hot_snapshots": "1"
+      },
+      "response_schema": "collection",
+      "request_schema": "snapshotArchiveUpdate"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections/{collection_id}/snapshot-archive/maintenance",
+      "core": "Engine::ArchiveSnapshots",
+      "status": 200,
+      "response_fields": {
+        "hot_snapshots": "null|string",
+        "root_snapshots": "string",
+        "archived_snapshots": "string",
+        "expired_snapshots": "string",
+        "archive_pending": "string",
+        "snapshots_archived": "string"
+      },
+      "request": {},
+      "response_schema": "snapshotArchiveMaintenance",
+      "request_schema": "empty"
+    },
+    {
+      "method": "GET",
       "path": "/databases/{database_id}/collections/{collection_id}/operations/{operation_id}",
       "core": "Engine::FindAppendOutcome",
       "status": 200,
@@ -577,6 +623,20 @@
         "target_file_bytes": "1024"
       },
       "request_schema": "compact"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections/{kv_collection_id}/snapshot-archive",
+      "core": "Engine::UpdateSnapshotArchive (append collections only)",
+      "status": 409,
+      "response_fields": {
+        "error": "object"
+      },
+      "request": {
+        "hot_snapshots": "1"
+      },
+      "response_schema": "error",
+      "request_schema": "snapshotArchiveUpdate"
     },
     {
       "method": "POST",

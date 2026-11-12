@@ -242,6 +242,7 @@ std::string Collection(const CollectionInfo& collection)
     out.Add("schema", "{\"fields\":" + fields + "}");
     out.Add("write_settings", WriteSettingsJson(collection.write_settings));
     out.Integer("write_settings_version", collection.write_settings_version);
+    out.OptionalInteger("hot_snapshots", collection.hot_snapshots);
     return out.Finish();
 }
 

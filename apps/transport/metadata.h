@@ -23,4 +23,13 @@ TJson FileJson(const Engine& engine,
     const std::string& collection,
     const std::string& file,
     const std::map<std::string, std::string>& query);
+// Snapshot archive status as decimal strings: hot_snapshots (null when unset),
+// root_snapshots, archived_snapshots, expired_snapshots and archive_pending;
+// maintenance responses add snapshots_archived.
+TJson SnapshotArchiveJson(const SnapshotArchiveStatus& status, bool maintenance);
+// A create or update hot_snapshots member: null (no setting) or a decimal
+// string. The engine checks the range.
+std::optional<int64_t> ParseHotSnapshots(const TJson& value);
+// {"hot_snapshots": "N"|null}; the member is required.
+UpdateSnapshotArchiveRequest ParseSnapshotArchiveUpdate(std::string collectionID, const TJson& body);
 } // namespace glamdb::NTransport

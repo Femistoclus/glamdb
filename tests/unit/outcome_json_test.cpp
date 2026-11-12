@@ -166,6 +166,13 @@ TEST(OutcomeJson, CollectionSuccessMatchesExistingUiShapeAndStableFieldIds)
     EXPECT_EQ(JsonAt(encoded->body, "$.write_settings.parquet.columns").type, "array");
     EXPECT_EQ(JsonAt(encoded->body, "$.write_settings_version").text, "0");
     EXPECT_EQ(JsonAt(encoded->body, "$.write_settings_version").type, "text");
+    EXPECT_EQ(JsonAt(encoded->body, "$.hot_snapshots").type, "null");
+    auto archived = info;
+    archived.hot_snapshots = 1LL << 40;
+    const auto withSetting = json_adapter::CollectionJson(archived);
+    ASSERT_TRUE(withSetting);
+    EXPECT_EQ(JsonAt(*withSetting, "$.hot_snapshots").text, "1099511627776");
+    EXPECT_EQ(JsonAt(*withSetting, "$.hot_snapshots").type, "text");
 }
 
 TEST(OutcomeJson, CollectionWriteSettingsAreCanonicalParquetObjects)

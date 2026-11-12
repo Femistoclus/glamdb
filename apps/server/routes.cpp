@@ -502,7 +502,7 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
             {"next_cursor", page.NextPageToken.empty() ? TJson(nullptr) : TJson(page.NextPageToken)}});
     }
     if (request.Method == "POST" && path == "/collections") {
-        CheckKeys(body, {"collection_id", "name", "schema", "mode", "write_settings"});
+        CheckKeys(body, {"collection_id", "name", "schema", "mode", "write_settings", "hot_snapshots"});
         const auto mode = body.value("mode", "append");
         Require(mode == "append" || mode == "kv", "mode must be append or kv", "UNSUPPORTED_OPERATION");
         return OutcomeResponse(
@@ -510,7 +510,8 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
                 body.at("name").get<std::string>(),
                 ParseSchema(body.at("schema")),
                 body.contains("write_settings") ? ParseWriteSettings(body["write_settings"]) : WriteSettings{},
-                mode == "kv" ? CollectionMode::KeyValue : CollectionMode::Append})));
+                mode == "kv" ? CollectionMode::KeyValue : CollectionMode::Append,
+                body.contains("hot_snapshots") ? ParseHotSnapshots(body["hot_snapshots"]) : std::nullopt})));
     }
     const auto parts = Split(path);
     Require(parts.size() >= 2 && parts[0] == "collections", "route not found", "ROUTE_NOT_FOUND");
@@ -540,6 +541,21 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
             "write settings require expected_version and write_settings");
         return JsonResponse(Collection(Unwrap(Engine_->UpdateWriteSettings(
             {id, ParseInt64(body["expected_version"]), ParseWriteSettings(body["write_settings"])}))));
+    }
+    if (action == "snapshot-archive") {
+        Require(query.empty(), "unknown query parameter");
+        if (request.Method == "GET" && parts.size() == 3) {
+            return JsonResponse(SnapshotArchiveJson(Unwrap(Engine_->GetSnapshotArchive(id)), false));
+        }
+        if (request.Method == "POST" && parts.size() == 3) {
+            return JsonResponse(
+                Collection(Unwrap(Engine_->UpdateSnapshotArchive(ParseSnapshotArchiveUpdate(id, body)))));
+        }
+        if (request.Method == "POST" && parts.size() == 4 && parts[3] == "maintenance") {
+            CheckKeys(body, {});
+            return JsonResponse(SnapshotArchiveJson(Unwrap(Engine_->ArchiveSnapshots(id)), true));
+        }
+        return ErrorResponse(404, "ROUTE_NOT_FOUND", "route not found");
     }
     if (request.Method == "POST" && parts.size() == 3 && (action == "append" || action == "upsert")) {
         Require(query.empty(), "unknown query parameter");

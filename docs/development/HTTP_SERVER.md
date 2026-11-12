@@ -201,6 +201,9 @@ separate, broader development profile.
 | `POST /collections/{id}/append` | `AppendDurable` | Synchronous native receipt |
 | `POST /collections/{id}/bulk-append` | `BulkAppendDurable` | Bounded NDJSON, anonymous disk replay, one atomic receipt |
 | `POST /collections/{id}/write-settings` | `UpdateWriteSettings` | Compare-and-set of Parquet settings for later appends |
+| `GET /collections/{id}/snapshot-archive` | `GetSnapshotArchive` | `hot_snapshots` and root/archived/expired counts, no I/O |
+| `POST /collections/{id}/snapshot-archive` | `UpdateSnapshotArchive` | Replace `hot_snapshots` for later appends; idempotent |
+| `POST /collections/{id}/snapshot-archive/maintenance` | `ArchiveSnapshots` | Archive at most 1024 root snapshots above `hot_snapshots` |
 | `GET /collections/{id}/operations/{op}` | `FindAppendOutcome` | Original result or authoritative absence |
 | `POST /collections/{id}/scan/open` | `Scan` | Resolve a fixed view and return a cursor without consuming rows |
 | `POST /collections/{id}/scan` | `Scan` / `ScanCursor::Next` | First page or cursor continuation, JSON or Arrow IPC |
@@ -733,6 +736,45 @@ capacity. Reclaimed continuation tokens return `404` like expired tokens.
 Lifecycle close/reconcile clears tokens. No raw file paths can be requested;
 file IDs outside the selected snapshot fail even when the file exists elsewhere.
 See `glamdb.native_metadata` and [system acceptance](NATIVE_ACCEPTANCE.md).
+
+## Snapshot archive
+
+Create also accepts optional `hot_snapshots` (decimal string 1..2^40, or null for
+none), part of the definition like `write_settings`: a repeated creation with
+another value, or without the original value, returns 409
+`SNAPSHOT_ARCHIVE_MISMATCH`. Collections report `hot_snapshots` (`null` when
+unset). Appends then keep only the newest snapshots in the Iceberg root and
+move older ones to the catalog archive; see
+[the snapshot archive tier](SNAPSHOT_ARCHIVE.md). `features.snapshot_archive`
+advertises it.
+
+`GET /collections/{id}/snapshot-archive` returns `{hot_snapshots,
+root_snapshots, archived_snapshots, expired_snapshots, archive_pending}` (decimal
+strings; `hot_snapshots` may be null) from the confirmed view without I/O; it
+uses the reader pool. `POST` on the same route with `{hot_snapshots:"N"|null}`
+replaces the setting under the writer and returns the collection; nothing moves
+immediately, null stops archiving later snapshots and archived snapshots never
+return to the root. Repeating an applied request returns the collection
+unchanged, so a lost response is retried as is. `POST
+.../snapshot-archive/maintenance` with `{}` archives at most 1024 root snapshots
+above `hot_snapshots` and returns the status plus `snapshots_archived`; repeat it
+while `archive_pending` is not `"0"`. Both POST routes run on the publisher
+pool. There is no PUT route: the server accepts only GET and POST.
+
+KV collections refuse a setting, at creation or update, and maintenance with
+409 `COLLECTION_MODE_MISMATCH` (an update to null succeeds unchanged). Values
+outside 1..2^40, non-string values and `hot_snapshots` above an explicit
+retention `keep_last` return 400 `INVALID_ARGUMENT`. An uncertain COMMIT of an
+update or maintenance call returns 503 `RECOVERY_REQUIRED`
+(`SameIdAfterReconcile`): reconcile the database, then repeat the same request.
+
+Archived snapshots need no other routes. `.../snapshots` lists them before the
+root's snapshots in the same keyset pages, and `.../stats`, `.../files`,
+`.../files/{file}`, `.../explain` and `.../scan` with their `snapshot_id` answer
+exactly as while the snapshot was in the root; operation lookups and exact
+retries keep their original receipts, and an `expected_snapshot` naming an
+archived (non-current) snapshot is `PRECONDITION_FAILED`. `retained_snapshots`
+in statistics counts archived snapshots.
 
 ## Explicit KV routes and receipts
 

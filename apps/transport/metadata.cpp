@@ -409,4 +409,33 @@ TJson FileJson(const Engine& engine,
     return value;
 }
 
+TJson SnapshotArchiveJson(const SnapshotArchiveStatus& status, bool maintenance)
+{
+    TJson value{{"hot_snapshots", OptionalInteger(status.hot_snapshots)},
+        {"root_snapshots", std::to_string(status.root_snapshots)},
+        {"archived_snapshots", std::to_string(status.archived_snapshots)},
+        {"expired_snapshots", std::to_string(status.expired_snapshots)},
+        {"archive_pending", std::to_string(status.archive_pending)}};
+    if (maintenance) {
+        value["snapshots_archived"] = std::to_string(status.snapshots_archived);
+    }
+    return value;
+}
+
+std::optional<int64_t> ParseHotSnapshots(const TJson& value)
+{
+    if (value.is_null()) {
+        return std::nullopt;
+    }
+    Require(value.is_string(), "hot_snapshots must be a decimal string or null");
+    return ParseInt64(value);
+}
+
+UpdateSnapshotArchiveRequest ParseSnapshotArchiveUpdate(std::string collectionID, const TJson& body)
+{
+    CheckKeys(body, {"hot_snapshots"});
+    Require(body.contains("hot_snapshots"), "snapshot archive update requires hot_snapshots");
+    return {std::move(collectionID), ParseHotSnapshots(body["hot_snapshots"])};
+}
+
 } // namespace glamdb::NTransport

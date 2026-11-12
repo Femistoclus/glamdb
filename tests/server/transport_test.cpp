@@ -51,6 +51,8 @@ TEST(Transport, EveryCoreErrorHasAnExplicitStatusAndRetryPolicy)
         {"RECOVERY_REQUIRED", 503, SameIdAfterReconcile},
         {"RESOURCE_EXHAUSTED", 429, SameIdAfterReconcile},
         {"SCHEMA_MISMATCH", 409, FixInput},
+        {"SNAPSHOT_ARCHIVE_MISMATCH", 409, FixInput},
+        {"COLLECTION_MODE_MISMATCH", 409, FixInput},
         {"STALE_BASE", 409, FixInput},
         {"STATE_IN_USE", 409, OperatorAction},
         {"STORE_IDENTITY_MISMATCH", 409, OperatorAction},
