@@ -131,3 +131,130 @@ def test_owned_flow_cannot_be_modified_when_shared(sharing):
     with pytest.raises(ValueError):
         configure_login_form(admin)
     assert admin.executions[FLOW] == before
+
+
+USER = "00112233-4455-4677-8899-aabbccddeeff"
+ORG = "11112233-4455-4677-8899-aabbccddeeff"
+
+
+class CredentialAdmin:
+    def __init__(self):
+        self.user = {
+            "id": USER, "username": "owner", "enabled": True,
+            "emailVerified": True, "requiredActions": ["UPDATE_PASSWORD"],
+            "attributes": {"glamdb_managed_org": [ORG], "other": ["preserved"]},
+        }
+        self.memberships = [{"id": "native-org", "alias": ORG}]
+        self.policy = "length(14) and digits(1)"
+        self.calls = []
+        self.conflict = None
+        self.fail_reset = False
+        self.username_editable = False
+        self.fail_rename = False
+
+    def get_user(self, identity):
+        assert identity == USER
+        return deepcopy(self.user)
+
+    def get_user_id(self, login):
+        return self.conflict or (USER if self.user["username"] == login else None)
+
+    def get_user_organizations(self, identity):
+        assert identity == USER
+        return deepcopy(self.memberships)
+
+    def get_realm(self, realm):
+        assert realm == "glamdb"
+        return {"passwordPolicy": self.policy, "editUsernameAllowed": self.username_editable}
+
+    def update_realm(self, realm, payload):
+        assert realm == "glamdb"
+        if "passwordPolicy" in payload:
+            self.policy = payload["passwordPolicy"]
+            self.calls.append(("policy", self.policy))
+        if "editUsernameAllowed" in payload:
+            self.username_editable = payload["editUsernameAllowed"]
+            self.calls.append(("username-editable", self.username_editable))
+
+    def set_user_password(self, identity, password, temporary):
+        assert identity == USER
+        assert self.policy == ""
+        if self.fail_reset:
+            raise RuntimeError("password reset unavailable")
+        self.calls.append(("password", password, temporary))
+        self.user["requiredActions"].remove("UPDATE_PASSWORD")
+
+    def update_user(self, identity, payload):
+        assert identity == USER
+        if not self.username_editable:
+            raise ValueError("error-user-attribute-read-only")
+        if self.fail_rename:
+            raise RuntimeError("rename unavailable")
+        self.user.update(deepcopy(payload))
+        self.calls.append(("user", deepcopy(payload)))
+
+    def user_logout(self, identity):
+        assert identity == USER
+        self.calls.append(("logout", identity))
+
+
+def test_demo_credentials_preserve_account_and_restore_realm_password_policy():
+    from apps.workbench_access.login_form import configure_demo_credentials
+
+    admin = CredentialAdmin()
+    original = deepcopy(admin.user)
+    assert configure_demo_credentials(admin, USER) == {"demo_login": "hello"}
+    assert admin.user == {**original, "username": "hello", "requiredActions": []}
+    assert admin.policy == "length(14) and digits(1)"
+    assert admin.username_editable is False
+    assert admin.calls == [
+        ("policy", ""), ("password", "world", False),
+        ("policy", "length(14) and digits(1)"),
+        ("username-editable", True), ("user", {"username": "hello"}),
+        ("username-editable", False), ("logout", USER),
+    ]
+
+
+def test_failed_demo_password_reset_restores_policy_without_renaming_account():
+    from apps.workbench_access.login_form import configure_demo_credentials
+
+    admin = CredentialAdmin()
+    admin.fail_reset = True
+    with pytest.raises(RuntimeError, match="password reset unavailable"):
+        configure_demo_credentials(admin, USER)
+    assert admin.policy == "length(14) and digits(1)"
+    assert admin.user["username"] == "owner"
+    assert admin.calls == [("policy", ""), ("policy", "length(14) and digits(1)")]
+
+
+def test_failed_demo_rename_restores_the_read_only_username_setting():
+    from apps.workbench_access.login_form import configure_demo_credentials
+
+    admin = CredentialAdmin()
+    admin.fail_rename = True
+    with pytest.raises(RuntimeError, match="rename unavailable"):
+        configure_demo_credentials(admin, USER)
+    assert admin.user["username"] == "owner"
+    assert admin.username_editable is False
+    assert admin.policy == "length(14) and digits(1)"
+    assert admin.calls[-2:] == [("username-editable", True), ("username-editable", False)]
+
+
+@pytest.mark.parametrize("invalid", ["unmanaged", "disabled", "membership", "collision"])
+def test_demo_credentials_refuse_unrelated_or_disabled_accounts_before_changes(invalid):
+    from apps.workbench_access.login_form import configure_demo_credentials
+
+    admin = CredentialAdmin()
+    if invalid == "unmanaged":
+        admin.user["attributes"] = {}
+    elif invalid == "disabled":
+        admin.user["enabled"] = False
+    elif invalid == "membership":
+        admin.memberships = []
+    else:
+        admin.conflict = "other-user"
+    before = deepcopy(admin.user)
+    with pytest.raises(ValueError):
+        configure_demo_credentials(admin, USER)
+    assert admin.user == before
+    assert admin.calls == []

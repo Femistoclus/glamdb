@@ -33,7 +33,9 @@ concurrent snapshot readers. Power-loss durability qualification is still pendin
   and outcome lookup after restart. Writes distinguish committed, definitely
   not committed, and unknown outcomes.
 - **Open columnar formats.** Arrow batches in memory, immutable Parquet data
-  files, and Iceberg v2 tables with retained snapshot history.
+  files, and Iceberg v2 tables with retained snapshot history. Collection and
+  per-column Parquet compression, levels, encodings and dictionary policies are
+  configurable through the SDK and [workbench](docs/development/WORKBENCH.md).
 - **Data inspection.** Browse schemas, snapshot history, statistics, files,
   Parquet row groups, scan plans, and execution profiles.
 - **Connected tools.** Manage multiple databases through one authenticated
@@ -65,9 +67,6 @@ a replayable source produces multiple files with one atomic snapshot and receipt
 Native uploads stream bounded batches through an anonymous disk spool. UI import and 1 TiB qualification remain future work.
 
 ### Planned
-- Configurable Parquet compression, encodings, and dictionary policies
-  ([#97](https://github.com/glamourdb/glamdb/issues/97),
-  [#98](https://github.com/glamourdb/glamdb/issues/98)).
 - An opt-in small-write buffering and write-ahead log extension
   ([#68](https://github.com/glamourdb/glamdb/issues/68)).
 
@@ -79,6 +78,8 @@ The [organization workbench](docs/development/ORGANIZATIONS.md) uses Keycloak
 sign-in, OAuth2 Proxy sessions and Cerbos policies for isolated database access.
 See the [deployment and operating guide](docs/development/SSO_OPERATIONS.md)
 for HTTPS hosting, native account management and database ownership workflows.
+The [combined-login guide](docs/development/COMPACT_WORKBENCH.md) also documents
+the explicit temporary `hello`/`world` setup for an existing demonstration account.
 The static Pages demo contains disposable sample data and remains a separate
 publication; it does not connect to protected database servers.
 

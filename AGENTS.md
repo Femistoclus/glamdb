@@ -103,7 +103,10 @@ results stay inside Read rows. Light/dark appearance and sidebar preferences are
 local display settings. Runtime design remains configurable through theme JSON.
 Existing Keycloak realms use the client-only migration in
 [compact workbench operations](docs/development/COMPACT_WORKBENCH.md); custom or
-shared authentication flows require explicit review before migration. Native
+shared authentication flows require explicit review before migration. Its optional
+`--demo-user-id` sets the explicitly selected managed account to public temporary
+`hello`/`world` constants through Keycloak, preserving its identity and membership;
+normal provisioning never enables those credentials. Native
 Overview, Snapshots, Storage and Explain use public-facade HTTP metadata;
 reload/restart restore these views from the server. Storage IDs derive from
 selected committed manifest membership; details verify actual Parquet footers,
@@ -446,6 +449,8 @@ Client conformance uses `GLAMDB_TEST_BACKEND=mock|native`; native requires an
 executable `GLAMDB_NATIVE_SERVER` and fails on setup/identity/storage errors.
 The same SDK TCP/TLS scenarios and `shared-contract.spec.mjs` run against both;
 native checks inspect catalog-selected JSON/Avro/Parquet after closing storage.
+Native browser creation tests cover append/KV with compression and encodings,
+verified Parquet column chunks, and exact settings/rows after close/open.
 `GLAMDB_TEST_BACKEND=static` runs only the browser demo, without an API server.
 See [client conformance](docs/development/CLIENT_CONFORMANCE.md) for commands,
 documented response differences and separate evidence. Normal native acceptance
