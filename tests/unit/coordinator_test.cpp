@@ -515,6 +515,41 @@ TEST_F(CoordinatorTest, CreateRetryRequiresExactNameIdAndSchema)
     EXPECT_EQ(test::Present(engine->CreateCollection(other).error).code, "ALREADY_EXISTS");
 }
 
+TEST_F(CoordinatorTest, MissingCollectionLookupDoesNotWaitForAnActiveWriter)
+{
+    std::promise<void> entered, release;
+    auto released = release.get_future();
+    backend->on_prepare = [&] {
+        entered.set_value();
+        released.wait();
+    };
+    auto write = std::async(std::launch::async, [&] {
+        return engine->AppendDurable(Request());
+    });
+    entered.get_future().wait();
+    const auto byID = engine->GetCollection("00000000-0000-0000-0000-000000000006");
+    const auto byName = engine->ResolveCollection("absent");
+    const auto existing = engine->GetCollection(test::collection_id);
+    const auto resolved = engine->ResolveCollection("events");
+    release.set_value();
+    EXPECT_EQ(write.get().disposition, CommitDisposition::Committed);
+    backend->on_prepare = {};
+    ASSERT_FALSE(byID);
+    ASSERT_FALSE(byName);
+    EXPECT_EQ(byID.error().code, "OPERATION_IN_PROGRESS");
+    EXPECT_EQ(byName.error().code, "OPERATION_IN_PROGRESS");
+    EXPECT_EQ(byID.error().retry_hint, RetryHint::SameIdAfterReconcile);
+    EXPECT_EQ(byName.error().retry_hint, RetryHint::SameIdAfterReconcile);
+    EXPECT_TRUE(existing);
+    EXPECT_TRUE(resolved);
+    const auto absentID = engine->GetCollection("00000000-0000-0000-0000-000000000006");
+    const auto absentName = engine->ResolveCollection("absent");
+    ASSERT_FALSE(absentID);
+    ASSERT_FALSE(absentName);
+    EXPECT_EQ(absentID.error().code, "COLLECTION_NOT_FOUND");
+    EXPECT_EQ(absentName.error().code, "COLLECTION_NOT_FOUND");
+}
+
 TEST_F(CoordinatorTest, CreateVerifierExceptionUsesRecoverableHintAndRetainsContext)
 {
     const CreateCollectionRequest request{test::collection_id, "events", SchemaSpec{{{"n", FieldType::Int64, true}}}};

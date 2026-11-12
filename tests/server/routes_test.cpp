@@ -140,6 +140,20 @@ TEST(NativeRoutes, SharedPressurePreservesLookupAndOutgoingResponseCharges)
         EXPECT_GT(owner->GetUsage().memory_bytes[3], 0);
     }
     EXPECT_EQ(owner->GetUsage().memory_bytes[3], 0);
+    request.Target = "/collections:resolve?name=events";
+    {
+        auto response = routes.Handle(request);
+        ASSERT_EQ(response.Status, 200) << response.Body;
+        EXPECT_EQ(NTransport::ParseJson(response.Body)["collection_id"], test::collection_id);
+        EXPECT_GT(owner->GetUsage().memory_bytes[3], 0);
+    }
+    EXPECT_EQ(owner->GetUsage().memory_bytes[3], 0);
+    request.Target = "/collections:resolve?name=absent";
+    {
+        const auto response = routes.Handle(request);
+        ASSERT_EQ(response.Status, 404) << response.Body;
+        EXPECT_EQ(NTransport::ParseJson(response.Body)["error"]["code"], "COLLECTION_NOT_FOUND");
+    }
     request.Target = std::string("/collections/") + test::collection_id + "/scan";
     request.Method = "POST";
     request.Body = "{}";
