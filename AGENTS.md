@@ -137,6 +137,16 @@ run concurrently. Collections are fixed-schema, unpartitioned Iceberg v2 tables.
 Append preserves every input row, including duplicate keys. It provides neither
 key uniqueness nor replacement semantics.
 
+Ordinary and bulk appends use the pinned Iceberg merge append in the existing
+atomic publication. Small manifests merge at the upstream threshold of 100,
+targeting 8 MiB; data files and historical views remain immutable. Publication
+and recovery compare every rewritten EXISTING entry exactly and count only
+ADDED entries as new data. The shared 32 MiB verification guard includes removed
+manifest inputs as well as new outputs, the list and the current root. Keep
+the eight-new-manifest guard and ordinary/bulk added-file limits unchanged.
+See [manifest merging](docs/development/STORAGE_MODULE.md#manifest-merging)
+for retained-history growth and compatibility.
+
 Collections carry Parquet write settings (collection-default compression codec
 and level, dictionary policy and page limit; per-column codec, dictionary and
 value-encoding overrides) that apply to data files of later appends.

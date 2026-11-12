@@ -1,0 +1,1913 @@
+{
+  "schema_version": 1,
+  "issue": "https://github.com/glamourdb/glamdb/issues/169",
+  "date": "2026-11-12",
+  "official_base": "37b58fa",
+  "workload": {
+    "runner": "benchmarks/capacity.py",
+    "attempt_budget": 5000,
+    "rows_per_append": 1000,
+    "collections": 2,
+    "checkpoint_appends": 100,
+    "profile": "default",
+    "caps_raised": false
+  },
+  "notes": [
+    "Both Release campaigns ran on the same host and dependency installation; builds and tests shared the host, so timings are observations, not an isolated performance comparison.",
+    "The measured dependency installation preceded refresh of the existing Decimal PLAIN patch. This string/int64 workload does not exercise that option; final test validation used the refreshed installation.",
+    "Fresh-process reopen retains the operating-system page cache. Physical power-loss qualification was not run.",
+    "Before latest-manifest counts equal each collection snapshot count because FastAppend writes one manifest per append; fixed counts are measured directly.",
+    "All history and outcomes are retained. Root JSON growth remains; merged manifests retain O(N^2/K) file descriptors in the single-bin regime, while retained manifest lists become O(KN)."
+  ],
+  "runs": {
+    "before": {
+      "environment": {
+        "started_at_utc": "2026-11-12T13:01:31.328802+00:00",
+        "revision": "37b58faec3704e00a69d253eaaaff3c682a1d8ed",
+        "dirty": false,
+        "platform": "Linux-5.4.210-39.1.pagevecsize-x86_64-with-glibc2.39",
+        "machine": "x86_64",
+        "python": "3.12.3",
+        "arguments": {
+          "driver": "build/issue169-baseline/benchmarks/glamdb_capacity_bench",
+          "output": "artifacts/issue169/before",
+          "profile": "default",
+          "limit": 8,
+          "attempts": 5000,
+          "checkpoint": 100,
+          "timeout": 1800,
+          "trace_syncs": false
+        },
+        "measurement": "fresh engine/process; OS page cache retained; shared host; no power-loss qualification",
+        "io_scope": "successful external-file bytes; attempted external file/directory sync calls; excludes SQLite VFS",
+        "driver_sha256": "74dfba6488d7daa129ff74a7552497b00d083233facb0e21a8aaeee7f040797a",
+        "build": [
+          "CMAKE_BUILD_TYPE:STRING=Release",
+          "CMAKE_CXX_COMPILER:STRING=/usr/bin/clang++-18",
+          "CMAKE_PREFIX_PATH:UNINITIALIZED=/home/ditimizhev/glam/2glamdb/.deps/install;/home/ditimizhev/glam/glamdb/.deps/install",
+          "GLAMDB_ENABLE_ASAN:BOOL=OFF",
+          "GLAMDB_ENABLE_UBSAN:BOOL=OFF"
+        ],
+        "filesystem": "{\n   \"filesystems\": [\n      {\n         \"target\": \"/home/ditimizhev/glam\",\n         \"source\": \"/dev/vda1[/home/ditimizhev/glam]\",\n         \"fstype\": \"ext4\",\n         \"options\": \"rw,nosuid,nodev,relatime,errors=panic\"\n      }\n   ]\n}"
+      },
+      "profile": {
+        "operations": 4096,
+        "snapshots": 4096,
+        "warehouse_bytes": 1099511627776,
+        "attempt_reserve_bytes": 268435456
+      },
+      "summary": {
+        "stop_reason": "backpressure",
+        "stop": {
+          "bound": false,
+          "error": "RESOURCE_EXHAUSTED",
+          "message": "storage capacity: No space left on device"
+        },
+        "attempt_budget": 5000,
+        "attempted_appends": 4097,
+        "successful_appends": 4096,
+        "rows": 4096000,
+        "receipt_count": 4096,
+        "same_profile_reopen": true,
+        "lowered_limits_rejected": [
+          "operations",
+          "snapshots",
+          "warehouse_bytes"
+        ],
+        "retained_slice_verified": true,
+        "orphan_pressure_verified": false,
+        "append_seconds": 399.35948805099997,
+        "append_rows_per_second": 10256.423404361243,
+        "wall_seconds": 874.705424384003,
+        "rss_peak_bytes": 85504000,
+        "cold_process_reopen_ms": 22270.879136,
+        "retry_us": 224.64499999999998,
+        "io": {
+          "directory_syncs": 16384,
+          "file_syncs": 16384,
+          "read_bytes": 8173049414,
+          "read_opens": 77820,
+          "written_bytes": 4007419613
+        },
+        "process_io": {
+          "cancelled_write_bytes": 0,
+          "rchar": 8174594601,
+          "read_bytes": 24576,
+          "syscr": 188501,
+          "syscw": 344469,
+          "wchar": 4264961461,
+          "write_bytes": 4362543104
+        },
+        "usage": {
+          "catalog_bytes": 3801088,
+          "data_files": 4096,
+          "footer_bytes": 1368064,
+          "manifest_bytes": 12601876,
+          "manifest_list_bytes": 160814027,
+          "manifests": 4096,
+          "root_bytes": 3743761,
+          "snapshots": 4096,
+          "warehouse_file_bytes": 179801584,
+          "warehouse_files": 12290,
+          "warehouse_physical_bytes": 207814656
+        },
+        "qualification": "measurement only; OS cache retained; physical power-loss NOT RUN"
+      },
+      "checkpoints": [
+        {
+          "successful_appends": 100,
+          "segment_successes": 100,
+          "append_ms": 2806.356069,
+          "open_ms": 16.572043,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 6215178,
+            "read_opens": 1896,
+            "written_bytes": 3020035
+          },
+          "root_bytes": 92555,
+          "manifest_bytes": 307609,
+          "manifest_list_bytes": 241407,
+          "latest_manifest_counts": [
+            50,
+            50
+          ]
+        },
+        {
+          "successful_appends": 200,
+          "segment_successes": 100,
+          "append_ms": 3196.088747,
+          "open_ms": 236.489734,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 15803946,
+            "read_opens": 1900,
+            "written_bytes": 7726348
+          },
+          "root_bytes": 183220,
+          "manifest_bytes": 615212,
+          "manifest_list_bytes": 656233,
+          "latest_manifest_counts": [
+            100,
+            100
+          ]
+        },
+        {
+          "successful_appends": 300,
+          "segment_successes": 100,
+          "append_ms": 3230.695048,
+          "open_ms": 578.791082,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 25458010,
+            "read_opens": 1900,
+            "written_bytes": 12458601
+          },
+          "root_bytes": 274264,
+          "manifest_bytes": 922818,
+          "manifest_list_bytes": 1260372,
+          "latest_manifest_counts": [
+            150,
+            150
+          ]
+        },
+        {
+          "successful_appends": 400,
+          "segment_successes": 100,
+          "append_ms": 3765.752238,
+          "open_ms": 884.788161,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 35106078,
+            "read_opens": 1900,
+            "written_bytes": 17193104
+          },
+          "root_bytes": 365417,
+          "manifest_bytes": 1230494,
+          "manifest_list_bytes": 2043881,
+          "latest_manifest_counts": [
+            200,
+            200
+          ]
+        },
+        {
+          "successful_appends": 500,
+          "segment_successes": 100,
+          "append_ms": 4361.226729,
+          "open_ms": 1217.608636,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 44785184,
+            "read_opens": 1900,
+            "written_bytes": 21938804
+          },
+          "root_bytes": 456598,
+          "manifest_bytes": 1538169,
+          "manifest_list_bytes": 3014739,
+          "latest_manifest_counts": [
+            250,
+            250
+          ]
+        },
+        {
+          "successful_appends": 600,
+          "segment_successes": 100,
+          "append_ms": 4420.015329,
+          "open_ms": 1575.054866,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 54444888,
+            "read_opens": 1900,
+            "written_bytes": 26678410
+          },
+          "root_bytes": 547762,
+          "manifest_bytes": 1845851,
+          "manifest_list_bytes": 4166448,
+          "latest_manifest_counts": [
+            300,
+            300
+          ]
+        },
+        {
+          "successful_appends": 700,
+          "segment_successes": 100,
+          "append_ms": 4606.740541,
+          "open_ms": 1820.379791,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 64119450,
+            "read_opens": 1900,
+            "written_bytes": 31422456
+          },
+          "root_bytes": 638898,
+          "manifest_bytes": 2153513,
+          "manifest_list_bytes": 5504270,
+          "latest_manifest_counts": [
+            350,
+            350
+          ]
+        },
+        {
+          "successful_appends": 800,
+          "segment_successes": 100,
+          "append_ms": 4963.048434,
+          "open_ms": 2653.197844,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 73781584,
+            "read_opens": 1900,
+            "written_bytes": 36162165
+          },
+          "root_bytes": 730054,
+          "manifest_bytes": 2461170,
+          "manifest_list_bytes": 7025213,
+          "latest_manifest_counts": [
+            400,
+            400
+          ]
+        },
+        {
+          "successful_appends": 900,
+          "segment_successes": 100,
+          "append_ms": 5139.256478,
+          "open_ms": 2593.986583,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 83451422,
+            "read_opens": 1900,
+            "written_bytes": 40904469
+          },
+          "root_bytes": 821185,
+          "manifest_bytes": 2768843,
+          "manifest_list_bytes": 8730986,
+          "latest_manifest_counts": [
+            450,
+            450
+          ]
+        },
+        {
+          "successful_appends": 1000,
+          "segment_successes": 100,
+          "append_ms": 5357.589886,
+          "open_ms": 2697.740533,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 93120763,
+            "read_opens": 1900,
+            "written_bytes": 45646364
+          },
+          "root_bytes": 912306,
+          "manifest_bytes": 3076504,
+          "manifest_list_bytes": 10622693,
+          "latest_manifest_counts": [
+            500,
+            500
+          ]
+        },
+        {
+          "successful_appends": 1100,
+          "segment_successes": 100,
+          "append_ms": 5575.934585,
+          "open_ms": 2933.597536,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 102781860,
+            "read_opens": 1900,
+            "written_bytes": 50385511
+          },
+          "root_bytes": 1003454,
+          "manifest_bytes": 3384192,
+          "manifest_list_bytes": 12696845,
+          "latest_manifest_counts": [
+            550,
+            550
+          ]
+        },
+        {
+          "successful_appends": 1200,
+          "segment_successes": 100,
+          "append_ms": 6543.547421,
+          "open_ms": 3755.531926,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 112458605,
+            "read_opens": 1900,
+            "written_bytes": 55130165
+          },
+          "root_bytes": 1094573,
+          "manifest_bytes": 3691847,
+          "manifest_list_bytes": 14958743,
+          "latest_manifest_counts": [
+            600,
+            600
+          ]
+        },
+        {
+          "successful_appends": 1300,
+          "segment_successes": 100,
+          "append_ms": 5518.403383,
+          "open_ms": 3869.278781,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 122114084,
+            "read_opens": 1900,
+            "written_bytes": 59867420
+          },
+          "root_bytes": 1185702,
+          "manifest_bytes": 3999501,
+          "manifest_list_bytes": 17401335,
+          "latest_manifest_counts": [
+            650,
+            650
+          ]
+        },
+        {
+          "successful_appends": 1400,
+          "segment_successes": 100,
+          "append_ms": 6015.277626,
+          "open_ms": 3425.815536,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 131797953,
+            "read_opens": 1900,
+            "written_bytes": 64614596
+          },
+          "root_bytes": 1276874,
+          "manifest_bytes": 4307184,
+          "manifest_list_bytes": 20033731,
+          "latest_manifest_counts": [
+            700,
+            700
+          ]
+        },
+        {
+          "successful_appends": 1500,
+          "segment_successes": 100,
+          "append_ms": 6341.014328,
+          "open_ms": 3698.244011,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 141451164,
+            "read_opens": 1900,
+            "written_bytes": 69351681
+          },
+          "root_bytes": 1368026,
+          "manifest_bytes": 4614863,
+          "manifest_list_bytes": 22844889,
+          "latest_manifest_counts": [
+            750,
+            750
+          ]
+        },
+        {
+          "successful_appends": 1600,
+          "segment_successes": 100,
+          "append_ms": 7008.029731,
+          "open_ms": 4035.269567,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 151142455,
+            "read_opens": 1900,
+            "written_bytes": 74101337
+          },
+          "root_bytes": 1459182,
+          "manifest_bytes": 4922542,
+          "manifest_list_bytes": 25848294,
+          "latest_manifest_counts": [
+            800,
+            800
+          ]
+        },
+        {
+          "successful_appends": 1700,
+          "segment_successes": 100,
+          "append_ms": 6803.505767,
+          "open_ms": 4345.252651,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 160790102,
+            "read_opens": 1900,
+            "written_bytes": 78836399
+          },
+          "root_bytes": 1550338,
+          "manifest_bytes": 5230235,
+          "manifest_list_bytes": 29029223,
+          "latest_manifest_counts": [
+            850,
+            850
+          ]
+        },
+        {
+          "successful_appends": 1800,
+          "segment_successes": 100,
+          "append_ms": 7304.772316,
+          "open_ms": 4652.990956,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 170485804,
+            "read_opens": 1900,
+            "written_bytes": 83587615
+          },
+          "root_bytes": 1641502,
+          "manifest_bytes": 5537886,
+          "manifest_list_bytes": 32403192,
+          "latest_manifest_counts": [
+            900,
+            900
+          ]
+        },
+        {
+          "successful_appends": 1900,
+          "segment_successes": 100,
+          "append_ms": 7383.957522,
+          "open_ms": 5157.687337,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 180135238,
+            "read_opens": 1900,
+            "written_bytes": 88323452
+          },
+          "root_bytes": 1732644,
+          "manifest_bytes": 5845558,
+          "manifest_list_bytes": 35955130,
+          "latest_manifest_counts": [
+            950,
+            950
+          ]
+        },
+        {
+          "successful_appends": 2000,
+          "segment_successes": 100,
+          "append_ms": 7877.149163,
+          "open_ms": 5659.677631,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 189823017,
+            "read_opens": 1900,
+            "written_bytes": 93071750
+          },
+          "root_bytes": 1823806,
+          "manifest_bytes": 6153240,
+          "manifest_list_bytes": 39698010,
+          "latest_manifest_counts": [
+            1000,
+            1000
+          ]
+        },
+        {
+          "successful_appends": 2100,
+          "segment_successes": 100,
+          "append_ms": 9132.060267,
+          "open_ms": 7129.488898,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 199499782,
+            "read_opens": 1900,
+            "written_bytes": 97820179
+          },
+          "root_bytes": 1915354,
+          "manifest_bytes": 6460898,
+          "manifest_list_bytes": 43621080,
+          "latest_manifest_counts": [
+            1050,
+            1050
+          ]
+        },
+        {
+          "successful_appends": 2200,
+          "segment_successes": 100,
+          "append_ms": 9144.562499,
+          "open_ms": 6312.123524,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 209220852,
+            "read_opens": 1900,
+            "written_bytes": 102586097
+          },
+          "root_bytes": 2006906,
+          "manifest_bytes": 6768578,
+          "manifest_list_bytes": 47733061,
+          "latest_manifest_counts": [
+            1100,
+            1100
+          ]
+        },
+        {
+          "successful_appends": 2300,
+          "segment_successes": 100,
+          "append_ms": 9470.193628,
+          "open_ms": 7228.017693,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 218922273,
+            "read_opens": 1900,
+            "written_bytes": 107345953
+          },
+          "root_bytes": 2098442,
+          "manifest_bytes": 7076262,
+          "manifest_list_bytes": 52027142,
+          "latest_manifest_counts": [
+            1150,
+            1150
+          ]
+        },
+        {
+          "successful_appends": 2400,
+          "segment_successes": 100,
+          "append_ms": 8975.597435,
+          "open_ms": 7875.69167,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 228639411,
+            "read_opens": 1900,
+            "written_bytes": 112110501
+          },
+          "root_bytes": 2189998,
+          "manifest_bytes": 7383923,
+          "manifest_list_bytes": 56508813,
+          "latest_manifest_counts": [
+            1200,
+            1200
+          ]
+        },
+        {
+          "successful_appends": 2500,
+          "segment_successes": 100,
+          "append_ms": 25794.711134,
+          "open_ms": 14215.127685,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 238350920,
+            "read_opens": 1900,
+            "written_bytes": 116873886
+          },
+          "root_bytes": 2281558,
+          "manifest_bytes": 7691609,
+          "manifest_list_bytes": 61175731,
+          "latest_manifest_counts": [
+            1250,
+            1250
+          ]
+        },
+        {
+          "successful_appends": 2600,
+          "segment_successes": 100,
+          "append_ms": 14833.533085,
+          "open_ms": 21201.607649,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 248065763,
+            "read_opens": 1900,
+            "written_bytes": 121638143
+          },
+          "root_bytes": 2373128,
+          "manifest_bytes": 7999279,
+          "manifest_list_bytes": 66028459,
+          "latest_manifest_counts": [
+            1300,
+            1300
+          ]
+        },
+        {
+          "successful_appends": 2700,
+          "segment_successes": 100,
+          "append_ms": 10573.668715,
+          "open_ms": 9218.589771,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 257784184,
+            "read_opens": 1900,
+            "written_bytes": 126403704
+          },
+          "root_bytes": 2464678,
+          "manifest_bytes": 8306951,
+          "manifest_list_bytes": 71068932,
+          "latest_manifest_counts": [
+            1350,
+            1350
+          ]
+        },
+        {
+          "successful_appends": 2800,
+          "segment_successes": 100,
+          "append_ms": 10439.598458,
+          "open_ms": 9408.985279,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 267483872,
+            "read_opens": 1900,
+            "written_bytes": 131162474
+          },
+          "root_bytes": 2556202,
+          "manifest_bytes": 8614608,
+          "manifest_list_bytes": 76291164,
+          "latest_manifest_counts": [
+            1400,
+            1400
+          ]
+        },
+        {
+          "successful_appends": 2900,
+          "segment_successes": 100,
+          "append_ms": 12074.41113,
+          "open_ms": 11882.821552,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 277207998,
+            "read_opens": 1900,
+            "written_bytes": 135929428
+          },
+          "root_bytes": 2647762,
+          "manifest_bytes": 8922283,
+          "manifest_list_bytes": 81704003,
+          "latest_manifest_counts": [
+            1450,
+            1450
+          ]
+        },
+        {
+          "successful_appends": 3000,
+          "segment_successes": 100,
+          "append_ms": 14255.459285,
+          "open_ms": 13197.353732,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 286903409,
+            "read_opens": 1900,
+            "written_bytes": 140687344
+          },
+          "root_bytes": 2739326,
+          "manifest_bytes": 9229958,
+          "manifest_list_bytes": 87296065,
+          "latest_manifest_counts": [
+            1500,
+            1500
+          ]
+        },
+        {
+          "successful_appends": 3100,
+          "segment_successes": 100,
+          "append_ms": 11996.665408,
+          "open_ms": 13134.25119,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 296636336,
+            "read_opens": 1900,
+            "written_bytes": 145457495
+          },
+          "root_bytes": 2830874,
+          "manifest_bytes": 9537552,
+          "manifest_list_bytes": 93081043,
+          "latest_manifest_counts": [
+            1550,
+            1550
+          ]
+        },
+        {
+          "successful_appends": 3200,
+          "segment_successes": 100,
+          "append_ms": 12538.642292,
+          "open_ms": 14843.106871,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 306335653,
+            "read_opens": 1900,
+            "written_bytes": 150217540
+          },
+          "root_bytes": 2922526,
+          "manifest_bytes": 9845207,
+          "manifest_list_bytes": 99045210,
+          "latest_manifest_counts": [
+            1600,
+            1600
+          ]
+        },
+        {
+          "successful_appends": 3300,
+          "segment_successes": 100,
+          "append_ms": 14327.360713,
+          "open_ms": 15811.985501,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 316078030,
+            "read_opens": 1900,
+            "written_bytes": 154992552
+          },
+          "root_bytes": 3014202,
+          "manifest_bytes": 10152871,
+          "manifest_list_bytes": 105201598,
+          "latest_manifest_counts": [
+            1650,
+            1650
+          ]
+        },
+        {
+          "successful_appends": 3400,
+          "segment_successes": 100,
+          "append_ms": 14971.556803,
+          "open_ms": 15462.334543,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 325783996,
+            "read_opens": 1900,
+            "written_bytes": 159755631
+          },
+          "root_bytes": 3105846,
+          "manifest_bytes": 10460548,
+          "manifest_list_bytes": 111537980,
+          "latest_manifest_counts": [
+            1700,
+            1700
+          ]
+        },
+        {
+          "successful_appends": 3500,
+          "segment_successes": 100,
+          "append_ms": 14606.994501,
+          "open_ms": 18252.314677,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 335524383,
+            "read_opens": 1900,
+            "written_bytes": 164529943
+          },
+          "root_bytes": 3197518,
+          "manifest_bytes": 10768222,
+          "manifest_list_bytes": 118065842,
+          "latest_manifest_counts": [
+            1750,
+            1750
+          ]
+        },
+        {
+          "successful_appends": 3600,
+          "segment_successes": 100,
+          "append_ms": 13641.095863,
+          "open_ms": 15946.48615,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 345237083,
+            "read_opens": 1900,
+            "written_bytes": 169295306
+          },
+          "root_bytes": 3289170,
+          "manifest_bytes": 11075861,
+          "manifest_list_bytes": 124776003,
+          "latest_manifest_counts": [
+            1800,
+            1800
+          ]
+        },
+        {
+          "successful_appends": 3700,
+          "segment_successes": 100,
+          "append_ms": 16367.383518,
+          "open_ms": 18626.953631,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 354965388,
+            "read_opens": 1900,
+            "written_bytes": 174065238
+          },
+          "root_bytes": 3380810,
+          "manifest_bytes": 11383520,
+          "manifest_list_bytes": 131674235,
+          "latest_manifest_counts": [
+            1850,
+            1850
+          ]
+        },
+        {
+          "successful_appends": 3800,
+          "segment_successes": 100,
+          "append_ms": 15137.763366,
+          "open_ms": 19819.437343,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 364682686,
+            "read_opens": 1900,
+            "written_bytes": 178832100
+          },
+          "root_bytes": 3472466,
+          "manifest_bytes": 11691167,
+          "manifest_list_bytes": 138756449,
+          "latest_manifest_counts": [
+            1900,
+            1900
+          ]
+        },
+        {
+          "successful_appends": 3900,
+          "segment_successes": 100,
+          "append_ms": 17580.6589,
+          "open_ms": 21407.126092,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 374410542,
+            "read_opens": 1900,
+            "written_bytes": 183602030
+          },
+          "root_bytes": 3564118,
+          "manifest_bytes": 11998828,
+          "manifest_list_bytes": 146026228,
+          "latest_manifest_counts": [
+            1950,
+            1950
+          ]
+        },
+        {
+          "successful_appends": 4000,
+          "segment_successes": 100,
+          "append_ms": 18284.749265,
+          "open_ms": 21948.513714,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 384134578,
+            "read_opens": 1900,
+            "written_bytes": 188371224
+          },
+          "root_bytes": 3655770,
+          "manifest_bytes": 12306503,
+          "manifest_list_bytes": 153482047,
+          "latest_manifest_counts": [
+            2000,
+            2000
+          ]
+        },
+        {
+          "successful_appends": 4096,
+          "segment_successes": 96,
+          "append_ms": 16994.460445,
+          "open_ms": 26025.019472,
+          "io": {
+            "directory_syncs": 384,
+            "file_syncs": 384,
+            "read_bytes": 377915490,
+            "read_opens": 1824,
+            "written_bytes": 185322163
+          },
+          "root_bytes": 3743761,
+          "manifest_bytes": 12601876,
+          "manifest_list_bytes": 160814027,
+          "latest_manifest_counts": [
+            2048,
+            2048
+          ]
+        }
+      ]
+    },
+    "after": {
+      "environment": {
+        "started_at_utc": "2026-11-12T13:17:06.347622+00:00",
+        "revision": "37b58faec3704e00a69d253eaaaff3c682a1d8ed",
+        "dirty": true,
+        "platform": "Linux-5.4.210-39.1.pagevecsize-x86_64-with-glibc2.39",
+        "machine": "x86_64",
+        "python": "3.12.3",
+        "arguments": {
+          "driver": "build/stress-release/benchmarks/glamdb_capacity_bench",
+          "output": "artifacts/issue169/after",
+          "profile": "default",
+          "limit": 8,
+          "attempts": 5000,
+          "checkpoint": 100,
+          "timeout": 1800,
+          "trace_syncs": false
+        },
+        "measurement": "fresh engine/process; OS page cache retained; shared host; no power-loss qualification",
+        "io_scope": "successful external-file bytes; attempted external file/directory sync calls; excludes SQLite VFS",
+        "driver_sha256": "67bbc6f83261859cf135ace497d00e3f00b499ab57cca204fc09fcf18c9dd4a5",
+        "build": [
+          "CMAKE_BUILD_TYPE:STRING=Release",
+          "CMAKE_CXX_COMPILER:STRING=/usr/bin/clang++-18",
+          "CMAKE_PREFIX_PATH:UNINITIALIZED=/home/ditimizhev/glam/2glamdb/.deps/install;/home/ditimizhev/glam/glamdb/.deps/install",
+          "GLAMDB_ENABLE_ASAN:BOOL=OFF",
+          "GLAMDB_ENABLE_UBSAN:BOOL=OFF"
+        ],
+        "filesystem": "{\n   \"filesystems\": [\n      {\n         \"target\": \"/home/ditimizhev/glam\",\n         \"source\": \"/dev/vda1[/home/ditimizhev/glam]\",\n         \"fstype\": \"ext4\",\n         \"options\": \"rw,nosuid,nodev,relatime,errors=panic\"\n      }\n   ]\n}"
+      },
+      "profile": {
+        "operations": 4096,
+        "snapshots": 4096,
+        "warehouse_bytes": 1099511627776,
+        "attempt_reserve_bytes": 268435456
+      },
+      "summary": {
+        "stop_reason": "backpressure",
+        "stop": {
+          "bound": false,
+          "error": "RESOURCE_EXHAUSTED",
+          "message": "storage capacity: No space left on device"
+        },
+        "attempt_budget": 5000,
+        "attempted_appends": 4097,
+        "successful_appends": 4096,
+        "rows": 4096000,
+        "receipt_count": 4096,
+        "same_profile_reopen": true,
+        "lowered_limits_rejected": [
+          "operations",
+          "snapshots",
+          "warehouse_bytes"
+        ],
+        "retained_slice_verified": true,
+        "orphan_pressure_verified": false,
+        "append_seconds": 386.056107425,
+        "append_rows_per_second": 10609.856757144398,
+        "wall_seconds": 790.5836421269996,
+        "rss_peak_bytes": 82522112,
+        "cold_process_reopen_ms": 14903.25785,
+        "retry_us": 247.58399999999997,
+        "io": {
+          "directory_syncs": 16424,
+          "file_syncs": 16424,
+          "read_bytes": 7780064828,
+          "read_opens": 109848,
+          "written_bytes": 3857024037
+        },
+        "process_io": {
+          "cancelled_write_bytes": 0,
+          "rchar": 7781610000,
+          "read_bytes": 81920,
+          "syscr": 204515,
+          "syscw": 219823,
+          "wchar": 4114565885,
+          "write_bytes": 4211761152
+        },
+        "usage": {
+          "catalog_bytes": 3801088,
+          "data_files": 4096,
+          "footer_bytes": 1368064,
+          "latest_manifest_counts": [
+            68,
+            68
+          ],
+          "manifest_bytes": 14377913,
+          "manifest_list_bytes": 13617787,
+          "manifests": 4096,
+          "root_bytes": 3737514,
+          "snapshots": 4096,
+          "warehouse_file_bytes": 34498207,
+          "warehouse_files": 12330,
+          "warehouse_physical_bytes": 62046208
+        },
+        "qualification": "measurement only; OS cache retained; physical power-loss NOT RUN"
+      },
+      "checkpoints": [
+        {
+          "successful_appends": 100,
+          "segment_successes": 100,
+          "append_ms": 3668.685014,
+          "open_ms": 31.394845,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 6450462,
+            "read_opens": 2092,
+            "written_bytes": 3019956
+          },
+          "root_bytes": 92540,
+          "manifest_bytes": 307559,
+          "manifest_list_bytes": 241694,
+          "latest_manifest_counts": [
+            50,
+            50
+          ]
+        },
+        {
+          "successful_appends": 200,
+          "segment_successes": 100,
+          "append_ms": 4482.099726,
+          "open_ms": 226.587259,
+          "io": {
+            "directory_syncs": 402,
+            "file_syncs": 402,
+            "read_bytes": 18052474,
+            "read_opens": 3292,
+            "written_bytes": 7733795
+          },
+          "root_bytes": 183220,
+          "manifest_bytes": 623317,
+          "manifest_list_bytes": 650191,
+          "latest_manifest_counts": [
+            1,
+            1
+          ]
+        },
+        {
+          "successful_appends": 300,
+          "segment_successes": 100,
+          "append_ms": 4413.177433,
+          "open_ms": 1018.237751,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 24634982,
+            "read_opens": 2100,
+            "written_bytes": 12101321
+          },
+          "root_bytes": 274158,
+          "manifest_bytes": 930944,
+          "manifest_list_bytes": 899904,
+          "latest_manifest_counts": [
+            51,
+            51
+          ]
+        },
+        {
+          "successful_appends": 400,
+          "segment_successes": 100,
+          "append_ms": 4953.364233,
+          "open_ms": 907.312852,
+          "io": {
+            "directory_syncs": 402,
+            "file_syncs": 402,
+            "read_bytes": 36293703,
+            "read_opens": 3292,
+            "written_bytes": 16836893
+          },
+          "root_bytes": 365173,
+          "manifest_bytes": 1255282,
+          "manifest_list_bytes": 1313312,
+          "latest_manifest_counts": [
+            2,
+            2
+          ]
+        },
+        {
+          "successful_appends": 500,
+          "segment_successes": 100,
+          "append_ms": 4913.681056,
+          "open_ms": 1804.100281,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 42851216,
+            "read_opens": 2100,
+            "written_bytes": 21205802
+          },
+          "root_bytes": 456225,
+          "manifest_bytes": 1562924,
+          "manifest_list_bytes": 1566578,
+          "latest_manifest_counts": [
+            52,
+            52
+          ]
+        },
+        {
+          "successful_appends": 600,
+          "segment_successes": 100,
+          "append_ms": 5779.059802,
+          "open_ms": 1701.805562,
+          "io": {
+            "directory_syncs": 402,
+            "file_syncs": 402,
+            "read_bytes": 54530159,
+            "read_opens": 3292,
+            "written_bytes": 25946114
+          },
+          "root_bytes": 547261,
+          "manifest_bytes": 1895737,
+          "manifest_list_bytes": 1976361,
+          "latest_manifest_counts": [
+            3,
+            3
+          ]
+        },
+        {
+          "successful_appends": 700,
+          "segment_successes": 100,
+          "append_ms": 5882.596697,
+          "open_ms": 2274.185013,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 61076394,
+            "read_opens": 2100,
+            "written_bytes": 30314113
+          },
+          "root_bytes": 638299,
+          "manifest_bytes": 2203390,
+          "manifest_list_bytes": 2233937,
+          "latest_manifest_counts": [
+            53,
+            53
+          ]
+        },
+        {
+          "successful_appends": 800,
+          "segment_successes": 100,
+          "append_ms": 6563.409382,
+          "open_ms": 2840.623471,
+          "io": {
+            "directory_syncs": 402,
+            "file_syncs": 402,
+            "read_bytes": 72773684,
+            "read_opens": 3292,
+            "written_bytes": 35057047
+          },
+          "root_bytes": 729353,
+          "manifest_bytes": 2544751,
+          "manifest_list_bytes": 2641705,
+          "latest_manifest_counts": [
+            4,
+            4
+          ]
+        },
+        {
+          "successful_appends": 900,
+          "segment_successes": 100,
+          "append_ms": 5515.858975,
+          "open_ms": 3121.839881,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 79297314,
+            "read_opens": 2100,
+            "written_bytes": 39421782
+          },
+          "root_bytes": 820397,
+          "manifest_bytes": 2852416,
+          "manifest_list_bytes": 2902029,
+          "latest_manifest_counts": [
+            54,
+            54
+          ]
+        },
+        {
+          "successful_appends": 1000,
+          "segment_successes": 100,
+          "append_ms": 6537.387901,
+          "open_ms": 2657.636253,
+          "io": {
+            "directory_syncs": 402,
+            "file_syncs": 402,
+            "read_bytes": 91008023,
+            "read_opens": 3292,
+            "written_bytes": 44166140
+          },
+          "root_bytes": 911474,
+          "manifest_bytes": 3202310,
+          "manifest_list_bytes": 3305086,
+          "latest_manifest_counts": [
+            5,
+            5
+          ]
+        },
+        {
+          "successful_appends": 1100,
+          "segment_successes": 100,
+          "append_ms": 6161.495254,
+          "open_ms": 4242.575657,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 97528040,
+            "read_opens": 2100,
+            "written_bytes": 48532516
+          },
+          "root_bytes": 1002520,
+          "manifest_bytes": 3509985,
+          "manifest_list_bytes": 3570068,
+          "latest_manifest_counts": [
+            55,
+            55
+          ]
+        },
+        {
+          "successful_appends": 1200,
+          "segment_successes": 100,
+          "append_ms": 7154.687584,
+          "open_ms": 3877.495763,
+          "io": {
+            "directory_syncs": 402,
+            "file_syncs": 402,
+            "read_bytes": 109250713,
+            "read_opens": 3292,
+            "written_bytes": 53277007
+          },
+          "root_bytes": 1093566,
+          "manifest_bytes": 3868012,
+          "manifest_list_bytes": 3970799,
+          "latest_manifest_counts": [
+            6,
+            6
+          ]
+        },
+        {
+          "successful_appends": 1300,
+          "segment_successes": 100,
+          "append_ms": 6990.097902,
+          "open_ms": 3668.474505,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 115750380,
+            "read_opens": 2100,
+            "written_bytes": 57640604
+          },
+          "root_bytes": 1184618,
+          "manifest_bytes": 4175688,
+          "manifest_list_bytes": 4238847,
+          "latest_manifest_counts": [
+            56,
+            56
+          ]
+        },
+        {
+          "successful_appends": 1400,
+          "segment_successes": 100,
+          "append_ms": 7364.088317,
+          "open_ms": 4630.273539,
+          "io": {
+            "directory_syncs": 402,
+            "file_syncs": 402,
+            "read_bytes": 127488199,
+            "read_opens": 3292,
+            "written_bytes": 62387150
+          },
+          "root_bytes": 1275648,
+          "manifest_bytes": 4542306,
+          "manifest_list_bytes": 4635933,
+          "latest_manifest_counts": [
+            7,
+            7
+          ]
+        },
+        {
+          "successful_appends": 1500,
+          "segment_successes": 100,
+          "append_ms": 7794.887772,
+          "open_ms": 4892.316787,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 133973474,
+            "read_opens": 2100,
+            "written_bytes": 66748362
+          },
+          "root_bytes": 1366708,
+          "manifest_bytes": 4849978,
+          "manifest_list_bytes": 4907760,
+          "latest_manifest_counts": [
+            57,
+            57
+          ]
+        },
+        {
+          "successful_appends": 1600,
+          "segment_successes": 100,
+          "append_ms": 7751.426084,
+          "open_ms": 5557.907403,
+          "io": {
+            "directory_syncs": 402,
+            "file_syncs": 402,
+            "read_bytes": 145725887,
+            "read_opens": 3292,
+            "written_bytes": 71496703
+          },
+          "root_bytes": 1457770,
+          "manifest_bytes": 5225090,
+          "manifest_list_bytes": 5301322,
+          "latest_manifest_counts": [
+            8,
+            8
+          ]
+        },
+        {
+          "successful_appends": 1700,
+          "segment_successes": 100,
+          "append_ms": 7484.469711,
+          "open_ms": 5227.061953,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 152199920,
+            "read_opens": 2100,
+            "written_bytes": 75857700
+          },
+          "root_bytes": 1548797,
+          "manifest_bytes": 5532739,
+          "manifest_list_bytes": 5577042,
+          "latest_manifest_counts": [
+            58,
+            58
+          ]
+        },
+        {
+          "successful_appends": 1800,
+          "segment_successes": 100,
+          "append_ms": 8203.008406,
+          "open_ms": 5916.7713,
+          "io": {
+            "directory_syncs": 402,
+            "file_syncs": 402,
+            "read_bytes": 163962816,
+            "read_opens": 3292,
+            "written_bytes": 80605416
+          },
+          "root_bytes": 1639806,
+          "manifest_bytes": 5916402,
+          "manifest_list_bytes": 5967630,
+          "latest_manifest_counts": [
+            9,
+            9
+          ]
+        },
+        {
+          "successful_appends": 1900,
+          "segment_successes": 100,
+          "append_ms": 7954.643469,
+          "open_ms": 5268.515717,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 170413460,
+            "read_opens": 2100,
+            "written_bytes": 84961673
+          },
+          "root_bytes": 1730844,
+          "manifest_bytes": 6224087,
+          "manifest_list_bytes": 6246107,
+          "latest_manifest_counts": [
+            59,
+            59
+          ]
+        },
+        {
+          "successful_appends": 2000,
+          "segment_successes": 100,
+          "append_ms": 7921.079295,
+          "open_ms": 5987.553438,
+          "io": {
+            "directory_syncs": 402,
+            "file_syncs": 402,
+            "read_bytes": 182193920,
+            "read_opens": 3292,
+            "written_bytes": 89712527
+          },
+          "root_bytes": 1821878,
+          "manifest_bytes": 6616315,
+          "manifest_list_bytes": 6632269,
+          "latest_manifest_counts": [
+            10,
+            10
+          ]
+        },
+        {
+          "successful_appends": 2100,
+          "segment_successes": 100,
+          "append_ms": 8366.976531,
+          "open_ms": 5596.849074,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 188654280,
+            "read_opens": 2100,
+            "written_bytes": 94078305
+          },
+          "root_bytes": 1913250,
+          "manifest_bytes": 6924010,
+          "manifest_list_bytes": 6914562,
+          "latest_manifest_counts": [
+            60,
+            60
+          ]
+        },
+        {
+          "successful_appends": 2200,
+          "segment_successes": 100,
+          "append_ms": 9252.174481,
+          "open_ms": 6145.309318,
+          "io": {
+            "directory_syncs": 402,
+            "file_syncs": 402,
+            "read_bytes": 200486042,
+            "read_opens": 3292,
+            "written_bytes": 98847909
+          },
+          "root_bytes": 2004604,
+          "manifest_bytes": 7324809,
+          "manifest_list_bytes": 7298508,
+          "latest_manifest_counts": [
+            11,
+            11
+          ]
+        },
+        {
+          "successful_appends": 2300,
+          "segment_successes": 100,
+          "append_ms": 10248.203175,
+          "open_ms": 7471.771404,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 206943520,
+            "read_opens": 2100,
+            "written_bytes": 103218606
+          },
+          "root_bytes": 2095959,
+          "manifest_bytes": 7632474,
+          "manifest_list_bytes": 7585096,
+          "latest_manifest_counts": [
+            61,
+            61
+          ]
+        },
+        {
+          "successful_appends": 2400,
+          "segment_successes": 100,
+          "append_ms": 12560.286347,
+          "open_ms": 8960.684314,
+          "io": {
+            "directory_syncs": 402,
+            "file_syncs": 402,
+            "read_bytes": 218783914,
+            "read_opens": 3292,
+            "written_bytes": 107987384
+          },
+          "root_bytes": 2187298,
+          "manifest_bytes": 8041454,
+          "manifest_list_bytes": 7965698,
+          "latest_manifest_counts": [
+            12,
+            12
+          ]
+        },
+        {
+          "successful_appends": 2500,
+          "segment_successes": 100,
+          "append_ms": 12027.844829,
+          "open_ms": 10823.020984,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 225226704,
+            "read_opens": 2100,
+            "written_bytes": 112356476
+          },
+          "root_bytes": 2278646,
+          "manifest_bytes": 8349129,
+          "manifest_list_bytes": 8256044,
+          "latest_manifest_counts": [
+            62,
+            62
+          ]
+        },
+        {
+          "successful_appends": 2600,
+          "segment_successes": 100,
+          "append_ms": 11996.795649,
+          "open_ms": 10577.750824,
+          "io": {
+            "directory_syncs": 402,
+            "file_syncs": 402,
+            "read_bytes": 237082624,
+            "read_opens": 3292,
+            "written_bytes": 117127565
+          },
+          "root_bytes": 2369992,
+          "manifest_bytes": 8766723,
+          "manifest_list_bytes": 8633524,
+          "latest_manifest_counts": [
+            13,
+            13
+          ]
+        },
+        {
+          "successful_appends": 2700,
+          "segment_successes": 100,
+          "append_ms": 11283.284259,
+          "open_ms": 11325.774815,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 243510950,
+            "read_opens": 2100,
+            "written_bytes": 121495267
+          },
+          "root_bytes": 2461360,
+          "manifest_bytes": 9074408,
+          "manifest_list_bytes": 8927190,
+          "latest_manifest_counts": [
+            63,
+            63
+          ]
+        },
+        {
+          "successful_appends": 2800,
+          "segment_successes": 100,
+          "append_ms": 11536.633729,
+          "open_ms": 10311.805662,
+          "io": {
+            "directory_syncs": 402,
+            "file_syncs": 402,
+            "read_bytes": 255384544,
+            "read_opens": 3292,
+            "written_bytes": 126268810
+          },
+          "root_bytes": 2552718,
+          "manifest_bytes": 9500523,
+          "manifest_list_bytes": 9301441,
+          "latest_manifest_counts": [
+            14,
+            14
+          ]
+        },
+        {
+          "successful_appends": 2900,
+          "segment_successes": 100,
+          "append_ms": 10978.89614,
+          "open_ms": 11144.373308,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 261798222,
+            "read_opens": 2100,
+            "written_bytes": 130635052
+          },
+          "root_bytes": 2644060,
+          "manifest_bytes": 9808167,
+          "manifest_list_bytes": 9598959,
+          "latest_manifest_counts": [
+            64,
+            64
+          ]
+        },
+        {
+          "successful_appends": 3000,
+          "segment_successes": 100,
+          "append_ms": 14401.600265,
+          "open_ms": 11748.075749,
+          "io": {
+            "directory_syncs": 402,
+            "file_syncs": 402,
+            "read_bytes": 273682318,
+            "read_opens": 3292,
+            "written_bytes": 135408679
+          },
+          "root_bytes": 2735408,
+          "manifest_bytes": 10242885,
+          "manifest_list_bytes": 9969583,
+          "latest_manifest_counts": [
+            15,
+            15
+          ]
+        },
+        {
+          "successful_appends": 3100,
+          "segment_successes": 100,
+          "append_ms": 11609.744301,
+          "open_ms": 11616.237187,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 280081442,
+            "read_opens": 2100,
+            "written_bytes": 139773358
+          },
+          "root_bytes": 2826776,
+          "manifest_bytes": 10550550,
+          "manifest_list_bytes": 10270400,
+          "latest_manifest_counts": [
+            65,
+            65
+          ]
+        },
+        {
+          "successful_appends": 3200,
+          "segment_successes": 100,
+          "append_ms": 11647.537035,
+          "open_ms": 12360.244348,
+          "io": {
+            "directory_syncs": 402,
+            "file_syncs": 402,
+            "read_bytes": 291986673,
+            "read_opens": 3292,
+            "written_bytes": 144551334
+          },
+          "root_bytes": 2918188,
+          "manifest_bytes": 10993879,
+          "manifest_list_bytes": 10637492,
+          "latest_manifest_counts": [
+            16,
+            16
+          ]
+        },
+        {
+          "successful_appends": 3300,
+          "segment_successes": 100,
+          "append_ms": 11113.870521,
+          "open_ms": 11942.634296,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 298381952,
+            "read_opens": 2100,
+            "written_bytes": 148918953
+          },
+          "root_bytes": 3009638,
+          "manifest_bytes": 11301556,
+          "manifest_list_bytes": 10942987,
+          "latest_manifest_counts": [
+            66,
+            66
+          ]
+        },
+        {
+          "successful_appends": 3400,
+          "segment_successes": 100,
+          "append_ms": 12729.518279,
+          "open_ms": 10663.437895,
+          "io": {
+            "directory_syncs": 402,
+            "file_syncs": 402,
+            "read_bytes": 310302795,
+            "read_opens": 3292,
+            "written_bytes": 153699774
+          },
+          "root_bytes": 3101072,
+          "manifest_bytes": 11753504,
+          "manifest_list_bytes": 11306837,
+          "latest_manifest_counts": [
+            17,
+            17
+          ]
+        },
+        {
+          "successful_appends": 3500,
+          "segment_successes": 100,
+          "append_ms": 15251.813423,
+          "open_ms": 14653.600939,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 316681760,
+            "read_opens": 2100,
+            "written_bytes": 158066003
+          },
+          "root_bytes": 3192532,
+          "manifest_bytes": 12061160,
+          "manifest_list_bytes": 11615200,
+          "latest_manifest_counts": [
+            67,
+            67
+          ]
+        },
+        {
+          "successful_appends": 3600,
+          "segment_successes": 100,
+          "append_ms": 13790.895611,
+          "open_ms": 12204.952587,
+          "io": {
+            "directory_syncs": 402,
+            "file_syncs": 402,
+            "read_bytes": 328621615,
+            "read_opens": 3292,
+            "written_bytes": 162849402
+          },
+          "root_bytes": 3283946,
+          "manifest_bytes": 12521192,
+          "manifest_list_bytes": 11975915,
+          "latest_manifest_counts": [
+            18,
+            18
+          ]
+        },
+        {
+          "successful_appends": 3700,
+          "segment_successes": 100,
+          "append_ms": 13185.293561,
+          "open_ms": 13155.555575,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 334985674,
+            "read_opens": 2100,
+            "written_bytes": 167213764
+          },
+          "root_bytes": 3375398,
+          "manifest_bytes": 12828864,
+          "manifest_list_bytes": 12288433,
+          "latest_manifest_counts": [
+            68,
+            68
+          ]
+        },
+        {
+          "successful_appends": 3800,
+          "segment_successes": 100,
+          "append_ms": 14182.064108,
+          "open_ms": 13253.540608,
+          "io": {
+            "directory_syncs": 402,
+            "file_syncs": 402,
+            "read_bytes": 346938018,
+            "read_opens": 3292,
+            "written_bytes": 171998635
+          },
+          "root_bytes": 3466828,
+          "manifest_bytes": 13297580,
+          "manifest_list_bytes": 12645957,
+          "latest_manifest_counts": [
+            19,
+            19
+          ]
+        },
+        {
+          "successful_appends": 3900,
+          "segment_successes": 100,
+          "append_ms": 13519.693376,
+          "open_ms": 16091.346146,
+          "io": {
+            "directory_syncs": 400,
+            "file_syncs": 400,
+            "read_bytes": 353285438,
+            "read_opens": 2100,
+            "written_bytes": 176360914
+          },
+          "root_bytes": 3558288,
+          "manifest_bytes": 13605258,
+          "manifest_list_bytes": 12961225,
+          "latest_manifest_counts": [
+            69,
+            69
+          ]
+        },
+        {
+          "successful_appends": 4000,
+          "segment_successes": 100,
+          "append_ms": 15157.397021,
+          "open_ms": 16153.758734,
+          "io": {
+            "directory_syncs": 402,
+            "file_syncs": 402,
+            "read_bytes": 365254619,
+            "read_opens": 3292,
+            "written_bytes": 181147751
+          },
+          "root_bytes": 3649714,
+          "manifest_bytes": 14082521,
+          "manifest_list_bytes": 13314918,
+          "latest_manifest_counts": [
+            20,
+            20
+          ]
+        },
+        {
+          "successful_appends": 4096,
+          "segment_successes": 96,
+          "append_ms": 13726.380771,
+          "open_ms": 16386.475925,
+          "io": {
+            "directory_syncs": 384,
+            "file_syncs": 384,
+            "read_bytes": 356536504,
+            "read_opens": 2016,
+            "written_bytes": 177997475
+          },
+          "root_bytes": 3737514,
+          "manifest_bytes": 14377913,
+          "manifest_list_bytes": 13617787,
+          "latest_manifest_counts": [
+            68,
+            68
+          ]
+        }
+      ]
+    }
+  },
+  "legacy_fast_append_history": {
+    "opened": true,
+    "verified": true,
+    "successful_appends": 4096,
+    "latest_manifest_counts": [
+      2048,
+      2048
+    ],
+    "retry_io": {
+      "directory_syncs": 0,
+      "file_syncs": 0,
+      "read_bytes": 0,
+      "read_opens": 0,
+      "written_bytes": 0
+    }
+  },
+  "final_validation": {
+    "official_base": "ad898d7e74e3a402223281260e416e01db14b4d9",
+    "build": "cmake --build build/local --parallel 4",
+    "full_suite": "GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 ctest --preset local --parallel 4",
+    "registered_tests": 1114,
+    "ctest_cases": 1110,
+    "skipped": 12,
+    "disabled": 4,
+    "functional_and_integration_failures": 0,
+    "parallel_timing_failure": {
+      "test": "glamdb.unit.IcebergMetadataJsonCost.SerializationIsLinearInRetainedSnapshots",
+      "actual_ratio": 3.0082668337660436,
+      "strict_limit": 3.0,
+      "isolated_command": "ctest --preset local --rerun-failed --repeat until-fail:5 --verbose",
+      "consecutive_passes": 5,
+      "ratios": [
+        1.88,
+        2.46,
+        2.1,
+        2.03,
+        1.43
+      ],
+      "test_changed_or_disabled": false
+    },
+    "measurement_base_full_suite": {
+      "base": "37b58fa",
+      "cases": 1105,
+      "failures": 0
+    },
+    "format_files": 288,
+    "format_pass": true,
+    "quality_negative_pass": true,
+    "affected_clang_tidy_units": 5,
+    "clang_tidy_pass": true,
+    "rebased_closure_clang_tidy_pass": true,
+    "independent_review": "No source blocker; failed-operation exact retry coverage added. Multi-bin and widest-schema memory execution remain broader coverage limits."
+  }
+}

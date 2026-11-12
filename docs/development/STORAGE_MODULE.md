@@ -129,6 +129,41 @@ cross-device entry, and, when opening an existing file, a non-regular file or
 one larger than its file-kind limit. See
 [SCANNER.md](SCANNER.md#error-classification) for the engine mapping.
 
+## Manifest merging
+
+Ordinary and bulk appends use the pinned Iceberg C++ `NewMergeAppend` inside
+the existing append transaction. The upstream defaults target 8 MiB manifests
+and merge a bin containing the newest manifest at 100 manifests. Full bins can
+merge earlier. No separate maintenance commit, data rewrite, table-property
+change or storage-format migration is required. Existing FastAppend histories
+are still accepted, and a subsequent append can merge their small manifests.
+
+The shared closure verifier matches unchanged manifest descriptors exactly,
+then checks removed parent manifests against the new manifests. Every old live
+entry must occur exactly once as EXISTING, with identical data-file metadata,
+metrics, snapshot ID and sequence numbers. Deletes, missing/duplicate/invented
+entries and changed counters fail closed. Only ADDED entries contribute new
+data, summary counters, footer usage and scan membership; ordinary appends still
+add exactly one file and bulk appends at most 256.
+
+Before materializing changed manifests, publication and recovery check their
+combined input/output bytes, manifest-list bytes and root against 32 MiB; only
+the current commit is charged the final root on recovery. Each manifest remains
+at most 8 MiB, each rewrite's entries are bounded by the store file cap, and at
+most eight new reachable manifests are accepted. The FileIO attempt independently
+limits all newly written manifests, including an unreferenced staging manifest.
+Retained usage counts new reachable outputs once; old manifests stay reachable
+through history. Unreferenced staging files remain charged to physical capacity.
+
+The latest list is bounded by target-sized bins and fewer than 100 small
+manifests under the finite metadata profile. For the default capacity workload,
+the current membership fits one target bin, so the latest list cycles from
+one through 99 manifests. With every snapshot retained, merging every K appends
+retains O(N²/K) file descriptors in merged manifests in this single-bin regime,
+while retained manifest-list entries become O(KN). Root JSON still rewrites
+retained history; snapshot expiration and #168 remain separate work. See
+[capacity measurements](CAPACITY_CAMPAIGN.md) for the executed comparison.
+
 ## Read, recovery, and copy boundaries
 
 Reads on the binding thread participate in its active attempt and I/O budget.
@@ -291,6 +326,7 @@ Earlier regression and installed-package evidence is retained in
 
 [Bulk ingestion](BULK_INGESTION.md) uses an explicit bounded I/O attempt profile,
 file rollover and `StageBulkAppend` to stage multiple verified files in one
-FastAppend. Supported bulk markers enable bounded multiple-entry manifests;
-ordinary unmarked transitions keep the one-file rule. Publication and recovery
+merge append. Supported bulk markers permit bounded multiple ADDED entries;
+ordinary unmarked transitions keep the one-added-file rule even when a merged
+manifest carries older EXISTING entries. Publication and recovery
 check actual aggregate rows/files/bytes against the summary and receipt.

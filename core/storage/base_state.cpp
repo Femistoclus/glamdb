@@ -40,6 +40,68 @@ struct TAppendCounts
     std::set<std::string, std::less<>> Paths;
 };
 
+using TRewrittenEntries = std::map<std::string, iceberg::ManifestEntry, std::less<>>;
+
+struct TManifestChanges
+{
+    std::vector<const iceberg::ManifestFile*> Added;
+    std::vector<const iceberg::ManifestFile*> Removed;
+};
+
+iceberg::Result<TManifestChanges> CheckManifestChanges(const std::vector<iceberg::ManifestFile>& previous,
+    std::span<const iceberg::ManifestFile> current,
+    const TStorageLimits& limits,
+    std::uint64_t rootBytes,
+    std::uint64_t listBytes)
+{
+    if (current.empty() || current.size() > limits.Store.Manifests || rootBytes > limits.CommitBytes ||
+        listBytes > limits.CommitBytes - rootBytes)
+    {
+        return iceberg::ValidationFailed("CAPACITY: Invalid append manifest list size or bytes.");
+    }
+    std::map<std::string_view, const iceberg::ManifestFile*, std::less<>> retained;
+    for (const auto& manifest : previous) {
+        if (!retained.emplace(manifest.manifest_path, &manifest).second) {
+            return iceberg::ValidationFailed("Duplicate parent manifest path.");
+        }
+    }
+    TManifestChanges changes;
+    std::set<std::string_view> paths;
+    for (const auto& manifest : current) {
+        if (!paths.insert(manifest.manifest_path).second) {
+            return iceberg::ValidationFailed("Duplicate manifest path.");
+        }
+        const auto retainedIt = retained.find(manifest.manifest_path);
+        if (retainedIt == retained.end()) {
+            changes.Added.push_back(&manifest);
+        } else {
+            if (!EqualManifest(*retainedIt->second, manifest)) {
+                return iceberg::ValidationFailed("Append changes a retained manifest descriptor.");
+            }
+            retained.erase(retainedIt);
+        }
+    }
+    if (changes.Added.empty() || changes.Added.size() > limits.NewManifests) {
+        return iceberg::ValidationFailed("CAPACITY: Invalid new manifest count.");
+    }
+    for (const auto& [path, manifest] : retained) {
+        changes.Removed.push_back(manifest);
+    }
+    auto bytes = rootBytes + listBytes;
+    for (const auto* group : {&changes.Added, &changes.Removed}) {
+        for (const auto* manifest : *group) {
+            if (manifest->manifest_length <= 0 ||
+                static_cast<std::uint64_t>(manifest->manifest_length) > limits.ManifestBytes ||
+                static_cast<std::uint64_t>(manifest->manifest_length) > limits.CommitBytes - bytes)
+            {
+                return iceberg::ValidationFailed("CAPACITY: Manifest rewrite exceeds verification bytes.");
+            }
+            bytes += static_cast<std::uint64_t>(manifest->manifest_length);
+        }
+    }
+    return changes;
+}
+
 iceberg::Status CheckPath(std::string_view path, const NIO::TStoreUri& table, NIO::EFileKind kind)
 {
     const auto parsed = NIO::TStoreUri::Parse(path, table.StoreId());
@@ -166,6 +228,37 @@ iceberg::Result<std::uint64_t> CheckData(const std::shared_ptr<iceberg::FileIO>&
     return static_cast<std::uint64_t>(footer->size());
 }
 
+iceberg::Result<TRewrittenEntries> ReadRewrittenEntries(const std::shared_ptr<iceberg::FileIO>& fileIO,
+    const TManifestChanges& changes,
+    const iceberg::TableMetadata& metadata,
+    const NIO::TStoreUri& table,
+    const TStorageLimits& limits)
+{
+    TRewrittenEntries rewritten;
+    ICEBERG_ASSIGN_OR_RAISE(auto schema, metadata.Schema());
+    ICEBERG_ASSIGN_OR_RAISE(auto spec, metadata.PartitionSpec());
+    for (const auto* manifest : changes.Removed) {
+        ICEBERG_RETURN_UNEXPECTED(CheckPath(manifest->manifest_path, table, NIO::EFileKind::Manifest));
+        ICEBERG_RETURN_UNEXPECTED(CheckAvro(*fileIO,
+            manifest->manifest_path,
+            manifest->manifest_length,
+            NIO::EFileKind::Manifest,
+            limits.ManifestBytes,
+            limits.Store.DataFiles,
+            {}));
+        ICEBERG_ASSIGN_OR_RAISE(auto reader, iceberg::ManifestReader::Make(*manifest, fileIO, schema, spec));
+        ICEBERG_ASSIGN_OR_RAISE(auto entries, reader->Entries());
+        for (const auto& entry : entries) {
+            if (!entry.data_file || !entry.IsAlive() || rewritten.size() >= limits.Store.DataFiles ||
+                !rewritten.emplace(entry.data_file->file_path, entry.AsExisting()).second)
+            {
+                return iceberg::ValidationFailed("Invalid or duplicate rewritten parent entry.");
+            }
+        }
+    }
+    return rewritten;
+}
+
 iceberg::Result<TStorageUsage> CheckManifest(const std::shared_ptr<iceberg::FileIO>& fileIO,
     const iceberg::ManifestFile& manifest,
     const iceberg::Snapshot& snapshot,
@@ -176,41 +269,60 @@ iceberg::Result<TStorageUsage> CheckManifest(const std::shared_ptr<iceberg::File
     TRecoveryVisited* visited,
     TScanMembership* scanIndex,
     bool bulk,
-    TAppendCounts& counts)
+    TAppendCounts& counts,
+    TRewrittenEntries& rewritten)
 {
     if (manifest.content != iceberg::ManifestContent::kData || manifest.partition_spec_id != metadata.default_spec_id ||
         manifest.added_snapshot_id != snapshot.snapshot_id || manifest.sequence_number != snapshot.sequence_number ||
-        manifest.min_sequence_number != snapshot.sequence_number || !manifest.partitions.empty() ||
-        !manifest.key_metadata.empty() || manifest.first_row_id)
+        manifest.min_sequence_number <= 0 || manifest.min_sequence_number > snapshot.sequence_number ||
+        !manifest.partitions.empty() || !manifest.key_metadata.empty() || manifest.first_row_id)
     {
         return iceberg::ValidationFailed("Invalid append manifest.");
     }
     ICEBERG_RETURN_UNEXPECTED(CheckPath(manifest.manifest_path, table, NIO::EFileKind::Manifest));
+    const auto maxEntries = rewritten.empty() ? (bulk ? BulkFiles : 1) : limits.Store.DataFiles;
     ICEBERG_ASSIGN_OR_RAISE(auto bytes,
         CheckAvro(*fileIO,
             manifest.manifest_path,
             manifest.manifest_length,
             NIO::EFileKind::Manifest,
             limits.ManifestBytes,
-            bulk ? BulkFiles : 1,
+            maxEntries,
             attempt));
     ICEBERG_ASSIGN_OR_RAISE(auto schema, metadata.Schema());
     ICEBERG_ASSIGN_OR_RAISE(auto spec, metadata.PartitionSpec());
     ICEBERG_ASSIGN_OR_RAISE(auto reader, iceberg::ManifestReader::Make(manifest, fileIO, schema, spec));
     ICEBERG_ASSIGN_OR_RAISE(auto entries, reader->Entries());
-    if (entries.empty() || entries.size() > (bulk ? BulkFiles : 1)) {
+    if (entries.empty() || entries.size() > limits.Store.DataFiles) {
         return iceberg::ValidationFailed("An append manifest has an invalid data file count.");
     }
-    if (manifest.added_files_count != static_cast<std::int32_t>(entries.size()) || manifest.existing_files_count != 0 ||
-        manifest.deleted_files_count != 0 || manifest.existing_rows_count != 0 || manifest.deleted_rows_count != 0)
-    {
+    if (manifest.deleted_files_count != 0 || manifest.deleted_rows_count != 0) {
         return iceberg::ValidationFailed("Manifest counters or entry inheritance differ.");
     }
     TStorageUsage delta;
     delta.Manifests = 1;
     delta.ManifestBytes = bytes;
     std::uint64_t manifestRows = 0;
+    std::int64_t existingRows = 0;
+    std::int32_t addedFiles = 0;
+    std::int32_t existingFiles = 0;
+    auto minSequence = snapshot.sequence_number;
     for (const auto& entry : entries) {
+        if (entry.data_file && entry.status == iceberg::ManifestStatus::kExisting) {
+            const auto rewrittenIt = rewritten.find(entry.data_file->file_path);
+            if (rewrittenIt == rewritten.end() || entry != rewrittenIt->second || !entry.sequence_number ||
+                *entry.sequence_number <= 0 || *entry.sequence_number >= snapshot.sequence_number ||
+                entry.data_file->record_count <= 0 ||
+                entry.data_file->record_count > std::numeric_limits<std::int64_t>::max() - existingRows)
+            {
+                return iceberg::ValidationFailed("Merged manifest changes or invents an existing entry.");
+            }
+            minSequence = std::min(minSequence, *entry.sequence_number);
+            existingRows += entry.data_file->record_count;
+            ++existingFiles;
+            rewritten.erase(rewrittenIt);
+            continue;
+        }
         if (!entry.data_file || entry.status != iceberg::ManifestStatus::kAdded ||
             entry.snapshot_id != snapshot.snapshot_id || entry.sequence_number != snapshot.sequence_number ||
             entry.file_sequence_number != snapshot.sequence_number)
@@ -247,11 +359,15 @@ iceberg::Result<TStorageUsage> CheckManifest(const std::shared_ptr<iceberg::File
         counts.Rows += static_cast<std::uint64_t>(file.record_count);
         counts.Bytes += static_cast<std::uint64_t>(file.file_size_in_bytes);
         manifestRows += static_cast<std::uint64_t>(file.record_count);
+        ++addedFiles;
         if (scanIndex) {
             scanIndex->Files.push_back({file.file_path, file.file_size_in_bytes, file.record_count, entry.data_file});
         }
     }
-    if (manifest.added_rows_count != static_cast<std::int64_t>(manifestRows)) {
+    if (manifest.added_files_count != addedFiles || manifest.existing_files_count != existingFiles ||
+        manifest.added_rows_count != static_cast<std::int64_t>(manifestRows) ||
+        manifest.existing_rows_count != existingRows || manifest.min_sequence_number != minSequence)
+    {
         return iceberg::ValidationFailed("Manifest counters or entry inheritance differ.");
     }
     ICEBERG_RETURN_UNEXPECTED(MarkVerified(attempt, manifest.manifest_path));
@@ -363,28 +479,20 @@ iceberg::Result<TBaseState> CheckAppendClosureImpl(const std::shared_ptr<iceberg
                 attempt));
         ICEBERG_ASSIGN_OR_RAISE(auto reader, iceberg::ManifestListReader::Make(snapshot->manifest_list, fileIO));
         ICEBERG_ASSIGN_OR_RAISE(auto manifests, reader->Files());
-        if (manifests.size() <= previousManifests.size() || manifests.size() > limits.Store.Manifests) {
-            return iceberg::ValidationFailed("Invalid append manifest list size.");
-        }
-        const auto added = manifests.size() - previousManifests.size();
-        if (added > limits.NewManifests ||
-            !std::ranges::equal(previousManifests, std::span(manifests).subspan(added), EqualManifest))
-        {
-            return iceberg::ValidationFailed("Append changes retained manifests.");
-        }
-        std::set<std::string_view> paths;
-        for (const auto& manifest : manifests) {
-            if (!paths.insert(manifest.manifest_path).second) {
-                return iceberg::ValidationFailed("Duplicate manifest path.");
-            }
-        }
+        // Historical commits did not write the final root. Both verification
+        // paths charge rewrite inputs and outputs, and only the latest root.
+        const auto rootBytes = commitRoot ? candidate.Usage.RootBytes : 0;
+        ICEBERG_ASSIGN_OR_RAISE(auto changes,
+            CheckManifestChanges(previousManifests, manifests, limits, rootBytes, listBytes));
+        ICEBERG_ASSIGN_OR_RAISE(auto rewritten,
+            ReadRewrittenEntries(fileIO, changes, *candidate.Metadata, table.Value(), limits));
         TStorageUsage delta;
         TAppendCounts counts;
         delta.ManifestListBytes = listBytes;
-        for (const auto& manifest : std::span(manifests).first(added)) {
+        for (const auto* manifest : changes.Added) {
             ICEBERG_ASSIGN_OR_RAISE(auto fileUsage,
                 CheckManifest(fileIO,
-                    manifest,
+                    *manifest,
                     *snapshot,
                     *candidate.Metadata,
                     table.Value(),
@@ -393,17 +501,17 @@ iceberg::Result<TBaseState> CheckAppendClosureImpl(const std::shared_ptr<iceberg
                     visited,
                     scanIndex,
                     bulk,
-                    counts));
+                    counts,
+                    rewritten));
             auto total = ReplaceUsage(delta, {.Next = fileUsage});
             if (!total) {
                 return iceberg::ValidationFailed("Manifest usage overflows.");
             }
             delta = total.Value();
         }
-        // Only the commit that wrote the candidate root is charged for it.
-        // Recovery replays history against the final root, whose size older
-        // commits never wrote; their manifest and list must still fit.
-        const auto rootBytes = commitRoot ? candidate.Usage.RootBytes : 0;
+        if (!rewritten.empty()) {
+            return iceberg::ValidationFailed("Merged append omits retained data files.");
+        }
         const auto matches = [&](const std::string& key, std::uint64_t actual) {
             const auto value = snapshot->summary.find(key);
             return value != snapshot->summary.end() && value->second == std::to_string(actual);

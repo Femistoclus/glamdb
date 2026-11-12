@@ -11,8 +11,9 @@ descriptor once in chronological order, retaining the verified
 `{Path, SizeBytes, RecordCount}`) so indexed scans can evaluate manifest column
 bounds and null counts without reopening manifests. A sorted snapshot-ID table identifies
 each retained snapshot's prefix boundary. IDs are opaque; sorting IDs is only
-for lookup. Scanning reverses the selected prefix to preserve the manifest
-order produced by fast append. Initial-empty views select zero files.
+for lookup. Scanning reverses the selected prefix to visit newer appends first.
+Manifest merging preserves the original descriptors and snapshot boundaries;
+only ADDED entries extend the index. Initial-empty views select zero files.
 
 This works only for the current append-only, unpartitioned, fixed-schema
 profile. Deletes, branches, compaction, snapshot expiration and schema evolution
@@ -24,7 +25,10 @@ need a different representation and validation contract.
 entry/counter/path checks and Parquet length, row-count, schema and field-ID
 verification succeed. Recovery builds one index while verifying every retained
 transition. Publication copies the verified base index and checks only the new
-closure; that candidate remains tentative until the outer SQLite commit.
+closure; that candidate remains tentative until the outer SQLite commit. When
+manifests are merged, the verifier compares EXISTING entries with the removed
+parent manifests, including metrics and original snapshot/sequence numbers,
+without adding those files or charging their footers again.
 
 - Confirmed publication installs the exact candidate.
 - Definite rollback discards the candidate and retains the previous index.

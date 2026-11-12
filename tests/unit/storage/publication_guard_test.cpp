@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 #include <iceberg/catalog/memory/in_memory_catalog.h>
 #include <iceberg/manifest/manifest_entry.h>
+#include <iceberg/manifest/manifest_reader.h>
 #include <iceberg/manifest/manifest_writer.h>
 #include <iceberg/partition_spec.h>
 #include <iceberg/snapshot.h>
@@ -223,7 +224,8 @@ protected:
         const std::function<void(TPublicationContext*, TPointerChange*)>& mutate = {},
         const std::string& retainedDataPath = {},
         int bulkFiles = 0,
-        bool duplicateBulkFile = false)
+        bool duplicateBulkFile = false,
+        const std::function<void(std::vector<iceberg::ManifestEntry>&)>& rewriteEntries = {})
     {
         Scope_.reset();
         const auto attemptID = std::string("33333333-3333-7333-8333-33333333333") + std::to_string(index + 3);
@@ -276,7 +278,29 @@ protected:
             summary.emplace("glamdb.bulk-version", "1");
         }
         std::shared_ptr<iceberg::Transaction> transaction;
-        if (bulkFiles && !duplicateBulkFile) {
+        std::shared_ptr<iceberg::TableMetadata> stagedMetadata;
+        if (rewriteEntries) {
+            stagedMetadata = std::make_shared<iceberg::TableMetadata>(*base->Metadata);
+            auto snapshot = std::make_shared<iceberg::Snapshot>();
+            snapshot->snapshot_id = 1690000 + index;
+            snapshot->parent_snapshot_id = base->Metadata->current_snapshot_id;
+            snapshot->sequence_number = ++stagedMetadata->last_sequence_number;
+            stagedMetadata->last_updated_ms += std::chrono::milliseconds(1);
+            snapshot->timestamp_ms = stagedMetadata->last_updated_ms;
+            snapshot->schema_id = stagedMetadata->current_schema_id;
+            snapshot->summary = summary;
+            snapshot->summary["operation"] = "append";
+            snapshot->summary[iceberg::SnapshotSummaryFields::kAddedRecords] = std::to_string(rows);
+            snapshot->summary[iceberg::SnapshotSummaryFields::kAddedDataFiles] = "1";
+            snapshot->summary[iceberg::SnapshotSummaryFields::kAddedFileSize] =
+                std::to_string(data.DataFile->file_size_in_bytes);
+            stagedMetadata->current_snapshot_id = snapshot->snapshot_id;
+            stagedMetadata->snapshots.push_back(snapshot);
+            stagedMetadata->snapshot_log.push_back({snapshot->timestamp_ms, snapshot->snapshot_id});
+            stagedMetadata->refs["main"] =
+                std::make_shared<iceberg::SnapshotRef>(iceberg::SnapshotRef{.snapshot_id = snapshot->snapshot_id,
+                    .retention = iceberg::SnapshotRef::Branch{}});
+        } else if (bulkFiles && !duplicateBulkFile) {
             ICEBERG_ASSIGN_OR_RAISE(auto staged, StageBulkAppend(table, dataFiles, summary, Attempt_));
             transaction = std::move(staged.Transaction);
         } else if (!reusesData && !duplicateBulkFile) {
@@ -316,8 +340,55 @@ protected:
                     std::to_string(2 * data.DataFile->file_size_in_bytes);
             }
         }
+        if (!stagedMetadata) {
+            stagedMetadata = std::make_shared<iceberg::TableMetadata>(transaction->current());
+        }
+        if (rewriteEntries) {
+            ICEBERG_ASSIGN_OR_RAISE(auto snapshot, stagedMetadata->Snapshot());
+            ICEBERG_ASSIGN_OR_RAISE(auto schema, base->Metadata->Schema());
+            ICEBERG_ASSIGN_OR_RAISE(auto spec, base->Metadata->PartitionSpec());
+            std::vector<iceberg::ManifestEntry> entries{{.status = iceberg::ManifestStatus::kAdded,
+                .snapshot_id = snapshot->snapshot_id,
+                .sequence_number = snapshot->sequence_number,
+                .file_sequence_number = snapshot->sequence_number,
+                .data_file = data.DataFile}};
+            for (const auto& manifest : base->CurrentManifests) {
+                ICEBERG_ASSIGN_OR_RAISE(auto reader, iceberg::ManifestReader::Make(manifest, IO_, schema, spec));
+                ICEBERG_ASSIGN_OR_RAISE(auto files, reader->Entries());
+                for (const auto& entry : files) {
+                    entries.push_back(entry.AsExisting());
+                }
+            }
+            rewriteEntries(entries);
+            ICEBERG_ASSIGN_OR_RAISE(auto writer,
+                iceberg::ManifestWriter::MakeWriter(2,
+                    snapshot->snapshot_id,
+                    Location_ + "/metadata/" + attemptID + "-m7.avro",
+                    IO_,
+                    spec,
+                    schema));
+            for (const auto& entry : entries) {
+                ICEBERG_RETURN_UNEXPECTED(entry.status == iceberg::ManifestStatus::kAdded
+                        ? writer->WriteAddedEntry(entry)
+                        : entry.status == iceberg::ManifestStatus::kDeleted ? writer->WriteDeletedEntry(entry)
+                                                                            : writer->WriteExistingEntry(entry));
+            }
+            ICEBERG_RETURN_UNEXPECTED(writer->Close());
+            ICEBERG_ASSIGN_OR_RAISE(auto manifest, writer->ToManifestFile());
+            const auto list = std::format("{}/metadata/snap-{}-1-{}.avro", Location_, snapshot->snapshot_id, attemptID);
+            ICEBERG_ASSIGN_OR_RAISE(auto listWriter,
+                iceberg::ManifestListWriter::MakeWriter(2,
+                    snapshot->snapshot_id,
+                    snapshot->parent_snapshot_id,
+                    list,
+                    IO_,
+                    snapshot->sequence_number));
+            ICEBERG_RETURN_UNEXPECTED(listWriter->Add(manifest));
+            ICEBERG_RETURN_UNEXPECTED(listWriter->Close());
+            snapshot->manifest_list = list;
+        }
         const auto location = Location_ + "/metadata/0000" + std::to_string(index) + "-" + attemptID + ".metadata.json";
-        ICEBERG_RETURN_UNEXPECTED(iceberg::TableMetadataUtil::Write(*IO_, location, transaction->current()));
+        ICEBERG_RETURN_UNEXPECTED(iceberg::TableMetadataUtil::Write(*IO_, location, *stagedMetadata));
         auto context = Context();
         context.Base = base;
         context.StoreUsage = base->Usage;
@@ -536,6 +607,153 @@ TEST_F(TPublicationGuardTest, WritesTwoAppendsAndReopensEveryRetainedFile)
     CheckRows(DataLocations_[0], 1000);
     CheckRows(DataLocations_[1], 10);
     ExpectFreshProcess(Root_, (*second)->MetadataLocation);
+}
+
+TEST_F(TPublicationGuardTest, MergedClosurePreservesMembershipAndIdenticalRecoveryAccounting)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto first = Append(1, create.GetCandidate(), 3);
+    ASSERT_TRUE(first) << first.error().message;
+    const auto second = Append(2, *first, 2, {}, {}, 0, false, [](auto&) {
+    });
+    ASSERT_TRUE(second) << second.error().message;
+    EXPECT_EQ((*second)->CurrentManifests.size(), 1U);
+    EXPECT_EQ((*second)->Usage.Manifests, 2U);
+    EXPECT_EQ((*second)->Usage.DataFiles, 2U);
+    ASSERT_EQ((*second)->ScanIndex->Files.size(), 2U);
+    EXPECT_EQ((*second)->ScanIndex->Files[0].RecordCount, 3);
+    EXPECT_EQ((*second)->ScanIndex->Files[1].RecordCount, 2);
+    const auto recovered = VerifyReachable(IO_, (*second)->MetadataLocation, StoreID, CollectionID);
+    ASSERT_TRUE(recovered) << recovered.error().message;
+    EXPECT_EQ(recovered->Usage, (*second)->Usage);
+    EXPECT_EQ(recovered->ScanIndex->Files, (*second)->ScanIndex->Files);
+    EXPECT_TRUE(VerifyRetainedSnapshot(IO_,
+        (*second)->MetadataLocation,
+        StoreID,
+        CollectionID,
+        (*second)->Metadata->current_snapshot_id));
+    ExpectFreshProcess(Root_, (*second)->MetadataLocation);
+}
+
+class TMergedClosureCorruptionTest
+    : public TPublicationGuardTest
+    , public ::testing::WithParamInterface<int>
+{ };
+
+TEST_P(TMergedClosureCorruptionTest, RejectsChangesToExistingEntries)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto first = Append(1, create.GetCandidate(), 3);
+    ASSERT_TRUE(first) << first.error().message;
+    const auto second = Append(2, *first, 2, {}, {}, 0, false, [](auto& entries) {
+        const auto existing =
+            std::ranges::find(entries, iceberg::ManifestStatus::kExisting, &iceberg::ManifestEntry::status);
+        ASSERT_NE(existing, entries.end());
+        switch (GetParam()) {
+            case 0:
+                entries.erase(existing);
+                break;
+            case 1:
+                entries.push_back(*existing);
+                break;
+            case 2:
+                existing->snapshot_id = 123;
+                break;
+            case 3:
+                existing->file_sequence_number = 123;
+                break;
+            case 4: {
+                existing->data_file = std::make_shared<iceberg::DataFile>(*existing->data_file);
+                ++existing->data_file->record_count;
+                break;
+            }
+            case 5:
+                existing->status = iceberg::ManifestStatus::kDeleted;
+                break;
+            case 6: {
+                existing->data_file = std::make_shared<iceberg::DataFile>(*existing->data_file);
+                existing->data_file->value_counts[1] = 123;
+                break;
+            }
+            default:
+                FAIL() << "Invalid corruption test mode";
+        }
+    });
+    EXPECT_FALSE(second);
+    const auto readOnly = IO_->ReadOnlyView();
+    ASSERT_TRUE(readOnly);
+    EXPECT_TRUE(VerifyReachable(*readOnly, (*first)->MetadataLocation, StoreID, CollectionID));
+}
+
+INSTANTIATE_TEST_SUITE_P(Membership, TMergedClosureCorruptionTest, ::testing::Range(0, 7));
+
+class TMergedClosureLimitTest
+    : public TPublicationGuardTest
+    , public ::testing::WithParamInterface<bool>
+{ };
+
+TEST_P(TMergedClosureLimitTest, CountsRewriteInputsAtTheExactCommitByteBoundary)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto first = Append(1, create.GetCandidate(), 3);
+    ASSERT_TRUE(first) << first.error().message;
+    TStorageLimits limits;
+    const auto second = Append(
+        2,
+        *first,
+        2,
+        [&](TPublicationContext* context, auto*) {
+            auto bytes = static_cast<std::uint64_t>((*first)->CurrentManifests[0].manifest_length);
+            for (const auto& record : context->Attempt->Records()) {
+                if (record.Kind != NIO::EFileKind::Data) {
+                    bytes += record.Length;
+                }
+            }
+            limits.CommitBytes = bytes - (GetParam() ? 0 : 1);
+            context->Limits = limits;
+        },
+        {},
+        0,
+        false,
+        [](auto&) {
+        });
+    if (GetParam()) {
+        ASSERT_TRUE(second) << second.error().message;
+        const auto recovered = VerifyReachable(IO_, (*second)->MetadataLocation, StoreID, CollectionID, limits);
+        ASSERT_TRUE(recovered) << recovered.error().message;
+        EXPECT_EQ(recovered->Usage, (*second)->Usage);
+        --limits.CommitBytes;
+        EXPECT_FALSE(VerifyReachable(IO_, (*second)->MetadataLocation, StoreID, CollectionID, limits));
+    } else {
+        ASSERT_FALSE(second);
+        EXPECT_TRUE(second.error().message.starts_with("CAPACITY:"));
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(Bytes, TMergedClosureLimitTest, ::testing::Bool());
+
+TEST_F(TPublicationGuardTest, OrdinaryMergePreservesEveryFileOfAnEarlierBulkAppend)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto first = Append(1, create.GetCandidate(), 3, {}, {}, 2);
+    ASSERT_TRUE(first) << first.error().message;
+    const auto second = Append(2, *first, 2, {}, {}, 0, false, [](auto&) {
+    });
+    ASSERT_TRUE(second) << second.error().message;
+    EXPECT_EQ((*second)->CurrentManifests.size(), 1U);
+    EXPECT_EQ((*second)->Usage.DataFiles, 3U);
+    const auto recovered = VerifyReachable(IO_, (*second)->MetadataLocation, StoreID, CollectionID);
+    ASSERT_TRUE(recovered) << recovered.error().message;
+    EXPECT_EQ(recovered->Usage, (*second)->Usage);
+    EXPECT_EQ(recovered->ScanIndex->Files, (*second)->ScanIndex->Files);
 }
 
 TEST_F(TPublicationGuardTest, BulkClosureAndRecoveryVerifyEveryFile)

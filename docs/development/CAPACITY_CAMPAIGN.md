@@ -105,6 +105,7 @@ orphan still consuming physical space.
 | `rss_peak_bytes` | Process high-water RSS, including engine, Arrow/Iceberg/SQLite, the benchmark ledger and verification. It is neither engine-only RSS nor a hard memory bound. |
 | `resource_memory_peak_bytes` | Shared-owner reservation peaks for data, metadata, control, completion and recovery; these conservative envelopes differ from RSS. |
 | `usage` logical fields | Verified aggregate reachable roots, snapshots, data files, manifests, manifest lists and footers from the production backend. |
+| `usage.latest_manifest_counts` | Number of manifests in each collection's current snapshot, separate from the aggregate count retained by history. |
 | `warehouse_physical_bytes` | Larger of logical length and allocated blocks per regular file, plus directory blocks; includes orphans. |
 | `warehouse_file_bytes`, `warehouse_files`, `catalog_bytes` | Logical lengths and count of all warehouse regular files; SQLite catalog length separately. |
 | `io` | Successful external-file bytes read/written and attempted external-file/directory sync calls **during appends**, excluding the SQLite VFS. The adapter keeps counters, not an event history. |
@@ -200,6 +201,94 @@ aggregation findings each have a failing-before/passing-after regression.
 Formatting covers all 236 project C++ files; clang-tidy covered the changed
 benchmark translation unit. Power-loss, device-cold and dedicated cgroup
 campaigns were not run.
+
+## Manifest merging comparison, 2026-11-12
+
+Issue [#169](https://github.com/glamourdb/glamdb/issues/169) switches ordinary and
+bulk staging to Iceberg merge append inside the same atomic publication. Its
+100-manifest threshold and 8 MiB target keep the latest list below 100 manifests
+per collection for this workload. The verifier checks exact preservation of
+rewritten entries and charges both rewrite inputs and outputs to the existing
+32 MiB commit bound. See [the storage contract](STORAGE_MODULE.md#manifest-merging).
+
+The [before/after record](evidence/manifest-merging-2026-11-12.json) contains
+both environments, binary hashes, unchanged profiles, summaries and every
+checkpoint. Both runs started from official base `37b58fa`, used Release Clang
+18 on the same Linux x86-64/ext4 host, and ran the unmodified default 5,000-attempt,
+1,000-row workload with 100-append checkpoints. The baseline binary was preserved
+before changing production code. Both binaries used the same installed native
+dependencies. That installation preceded refreshing the repository's existing
+Decimal PLAIN patch for final test validation; this string/int64 workload does
+not exercise that option. Concurrent builds/tests shared the host, so timing
+differences are observations rather than an isolated throughput comparison.
+
+Both campaigns exited **0**, accepted 4,096 appends (4,096,000 rows), and stopped
+on the expected unbound capacity refusal at attempt 4,097. Every checkpoint and
+final fresh process verified latest rows, historical and initial views, original
+receipts and exact retries. Lowered operation/snapshot/warehouse profiles failed
+closed, followed by another successful original-profile reopen. The fixed
+verifier also opened and verified all 4,096 baseline FastAppend operations.
+
+| Measurement after 4,096 appends | FastAppend baseline | Merge append |
+| --- | ---: | ---: |
+| Latest manifests per collection | 2,048 / 2,048 | 68 / 68 |
+| Retained manifest-list bytes | 160,814,027 | 13,617,787 |
+| Retained manifest bytes | 12,601,876 | 14,377,913 |
+| Retained manifests across history | 4,096 | 4,096 |
+| External bytes read during appends | 8,173,049,414 | 7,780,064,828 |
+| External bytes written during appends | 4,007,419,613 | 3,857,024,037 |
+| External read opens | 77,820 | 109,848 |
+| External file sync calls | 16,384 | 16,424 |
+| Physical warehouse bytes | 207,814,656 | 62,046,208 |
+| Append time, seconds | 399.36 | 386.06 |
+| Fresh-process final reopen, ms | 22,270.88 | 14,903.26 |
+
+Manifest-list storage fell **91.53%**, and physical warehouse use fell **70.14%**.
+Retained manifest bytes increased **14.09%**; merge inputs and staging add read
+opens and forty additional durable staging files. The adapter deliberately
+refuses deletion, so unreferenced staging files remain physical orphans. The
+eight-new-manifest attempt limit and permanent history/outcome caps remain
+unchanged. Metadata root history still dominates I/O: external read/write bytes
+fell only **4.81% / 3.75%**.
+
+| Successful appends | Baseline list bytes | Merged list bytes |
+| --- | ---: | ---: |
+| 1,000 | 10,622,693 | 3,305,086 |
+| 2,000 | 39,698,010 | 6,632,269 |
+| 3,000 | 87,296,065 | 9,969,583 |
+| 4,096 | 160,814,027 | 13,617,787 |
+
+The retained lists grow approximately linearly here; current membership fits one
+target bin, and each latest list cycles between one and 99 entries. Per-append
+root serialization and verification remain linear in retained history length.
+Keeping all historical snapshots also retains O(N²/K) descriptors in merged
+manifests in this single-bin regime (K=99 appends between later merges), versus
+O(KN) retained manifest-list entries. Snapshot expiration and #168 remain
+separate work; this change does not remove the history/outcome cap.
+
+Validation on the measurement base reported **1,105 CTest cases, zero failures**.
+After rebasing onto official `ad898d7`, the complete suite exercised 1,110 cases
+with twelve expected standalone child/manual skips and four disabled tests
+(1,114 registered). All functional/integration cases passed. The existing
+`IcebergMetadataJsonCost.SerializationIsLinearInRetainedSnapshots` timing check
+measured 3.008× against a strict 3× limit under parallel load; five consecutive
+isolated reruns passed (ratios 1.88, 2.46, 2.10, 2.03 and 1.43). It was not
+changed or disabled. Real repeated-merge tests check every latest manifest count
+through 205 appends; five fault cases cover the original/merged manifest,
+manifest-list and SQLite commits before/after journal unlink, followed by
+fresh-process rows/history and committed/failed exact retries. Adversarial tests
+reject seven changed EXISTING-entry cases and verify exact commit-byte boundaries,
+identical recovery usage and ordinary appends after bulk ingestion. All 288 C++
+files passed formatting, intentional negative quality checks passed, and the
+five affected translation units passed clang-tidy.
+
+An independent source review found no blocking implementation defect and prompted
+the failed-operation retry check at a merge boundary. It favored the upstream
+merge implementation over a separate maintenance commit, which would complicate
+operation identity and publication. Multi-bin execution with EXISTING-only outputs
+and maximum-width metadata expansion remain broader coverage limits; a bounded
+scratch comparison is a possible future option if expansion warrants it. No
+power-loss or RSS qualification is added.
 
 ## Qualification limits
 

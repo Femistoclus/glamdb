@@ -346,6 +346,7 @@ TJson PhysicalUsage(const std::filesystem::path& root)
 TJson Usage(const std::shared_ptr<Engine>& engine, const std::shared_ptr<detail::TLocalStorageBackend>& backend)
 {
     NGlamDB::NStorage::TStorageUsage total;
+    auto latestManifests = TJson::array();
     for (const auto* collection : CollectionIDs) {
         auto cursor = Take(engine->Scan({.collection_id = collection, .limit = 0}));
         const auto state = Take(backend->VerifiedScanState(cursor->Info().identity));
@@ -356,11 +357,13 @@ TJson Usage(const std::shared_ptr<Engine>& engine, const std::shared_ptr<detail:
         total.ManifestBytes += state->Usage.ManifestBytes;
         total.ManifestListBytes += state->Usage.ManifestListBytes;
         total.FooterBytes += state->Usage.FooterBytes;
+        latestManifests.push_back(state->CurrentManifests.size());
     }
     return {{"root_bytes", total.RootBytes},
         {"snapshots", total.Snapshots},
         {"data_files", total.DataFiles},
         {"manifests", total.Manifests},
+        {"latest_manifest_counts", std::move(latestManifests)},
         {"manifest_bytes", total.ManifestBytes},
         {"manifest_list_bytes", total.ManifestListBytes},
         {"footer_bytes", total.FooterBytes}};

@@ -11,7 +11,7 @@
 #include <iceberg/table.h>
 #include <iceberg/table_metadata.h>
 #include <iceberg/transaction.h>
-#include <iceberg/update/fast_append.h>
+#include <iceberg/update/merge_append.h>
 #include <iceberg/util/macros.h>
 
 #include <set>
@@ -108,7 +108,7 @@ iceberg::Result<TStagedAppend> StageFiles(std::shared_ptr<iceberg::Table> table,
         RegisterStorageFormats();
         ICEBERG_ASSIGN_OR_RAISE(auto transaction,
             iceberg::Transaction::Make(std::move(table), iceberg::TransactionKind::kUpdate));
-        ICEBERG_ASSIGN_OR_RAISE(auto append, transaction->NewFastAppend());
+        ICEBERG_ASSIGN_OR_RAISE(auto append, transaction->NewMergeAppend());
         for (const auto& dataFile : dataFiles) {
             append->AppendFile(dataFile);
         }
