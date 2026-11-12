@@ -47,6 +47,13 @@ public:
     // for every admission; external ENOSPC/EIO still needs normal handling.
     Result<std::shared_ptr<ResourceReservation>>
     ReserveDevice(const std::string& absolute_path, uint64_t bytes, uint64_t inodes);
+    // Staging admission leaves this headroom atomically available to execution.
+    // Headroom is not reserved again and does not guarantee later admission.
+    Result<std::shared_ptr<ResourceReservation>> ReserveStagingDevice(const std::string& absolutePath,
+        uint64_t bytes,
+        uint64_t inodes,
+        uint64_t completionBytes,
+        uint64_t completionInodes);
     ResourceUsage GetUsage() const;
     const ResourceLimits& GetLimits() const;
     static std::shared_ptr<ResourceOwner> ProcessDefault();

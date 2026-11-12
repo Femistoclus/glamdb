@@ -35,8 +35,10 @@ Contract 1.3 adds [scan negotiation](docs/development/SCAN_NEGOTIATION.md): opaq
 compute expressions keep their identities and residuals; typed necessary conditions
 never discharge the original expression. Serial limits push only without residuals
 or ordering; splits retain the global limit in compute.
-Staged sessions, remote read views,
-stable C ABI and Flight are explicitly unsupported. Keep publication on the existing Engine path.
+Contract 1.4 adds bounded [native durable write sessions](docs/development/WRITE_SESSIONS.md)
+for one-pass append/KV upsert output, using a separately locked staging directory
+and the supplied shared Engine. Remote write/read sessions, stable C ABI and Flight
+are explicitly unsupported. Keep publication on the existing Engine path.
 Independent durable I/O and Arrow/Parquet/Iceberg
 storage primitives provide file production, staging, publication validation,
 recovery verification, and capacity checks. `core/backend/` connects them to the

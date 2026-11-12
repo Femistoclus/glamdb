@@ -354,3 +354,13 @@ latched through read failure mapping. Scratch and decoder caps complement shared
 owner admission; none of these envelopes is a total process-RSS guarantee.
 No-op bound roots have charged retention pins and remain in physical warehouse
 accounting. Retained snapshot files are never refunded by deletion/compaction.
+
+## Native write-session staging
+
+The [write-session resource matrix](WRITE_SESSIONS.md#resource-bounds) describes
+separate lifetime session/part/batch and IPC quotas, protected completion space,
+shared Data/Metadata/Completion leases and atomic device headroom admission.
+A facade uses the exact Engine ResourceOwner and holds its stage database/journal
+envelope until destruction. Existing publisher reservations remain unchanged.
+Cleanup never releases unresolved sealed replay data; permanent receipts remain
+in the existing Engine catalog.

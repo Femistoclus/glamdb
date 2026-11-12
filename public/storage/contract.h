@@ -3,6 +3,7 @@
 #include "storage/metadata.h"
 #include "storage/read_view.h"
 #include "storage/scan_split.h"
+#include "storage/write_session.h"
 
 #include <compare>
 #include <cstdint>
@@ -51,7 +52,16 @@ enum class EStorageOperation : uint16_t {
     NextScanSplits,
     ReadSplit,
     CancelScanPlan,
-    NegotiateScan
+    NegotiateScan,
+    BeginWrite,
+    PutPart,
+    GetPartReceipt,
+    SealWrite,
+    CommitWrite,
+    GetWriteStatus,
+    GetWriteOutcome,
+    AbortWrite,
+    CleanupWrites
 };
 
 enum class EStorageFeature : uint16_t {
@@ -65,8 +75,9 @@ enum class EStorageFeature : uint16_t {
     IndependentReadView,
     // Native splits are advertised only from contract 1.2.
     ScanSplits,
-    // Proposed capabilities: never advertised by contracts 1.0 through 1.3.
+    // Native append/upsert sessions from 1.4; requires an explicit staging owner.
     StagedWrites,
+    // Proposed capabilities, not advertised.
     StableCAbi,
     ArrowFlight,
     RemoteDescriptors,
@@ -108,6 +119,8 @@ struct TStorageContractLimits
     // Present only when native IndependentReadView is advertised.
     std::optional<TReadViewLimits> ReadViews{};
     std::optional<TScanSplitLimits> ScanSplits{};
+    // Default configurable staging ceilings. A directory retains its chosen limits.
+    std::optional<TWriteSessionLimits> WriteSessions{};
 };
 
 struct TStorageContract

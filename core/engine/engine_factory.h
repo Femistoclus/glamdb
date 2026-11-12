@@ -16,6 +16,11 @@ using BackendFactory =
 // Internal integration seam; never installed and never accepts a client writer.
 struct EngineFactory
 {
+    static Result<std::optional<AppendOutcome>> FindWriteOutcome(const Engine& engine,
+        std::string_view collection,
+        std::string_view operation,
+        std::string_view expectedHash);
+    static Status ValidateStagingDirectory(const Engine& engine, const std::filesystem::path& directory);
     static Result<std::shared_ptr<Engine>> Create(const CreateStoreRequest& request,
         std::shared_ptr<StorageBackend> backend = {},
         std::string sqlite_vfs = {});

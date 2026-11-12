@@ -7,7 +7,7 @@
 namespace glamdb {
 namespace {
 
-constexpr TStorageContractVersion CurrentVersion{1, 3};
+constexpr TStorageContractVersion CurrentVersion{1, 4};
 
 void AddOperations(TStorageContract& contract, std::initializer_list<EStorageOperation> operations)
 {
@@ -81,6 +81,20 @@ TStorageContract DescribeContract(TStorageContractVersion version,
     }
     if (supportedMode && capabilities.append) {
         contract.Operations.push_back(EStorageOperation::CreateCollection);
+        if (native && version >= TStorageContractVersion{1, 4}) {
+            AddOperations(contract,
+                {EStorageOperation::BeginWrite,
+                    EStorageOperation::PutPart,
+                    EStorageOperation::GetPartReceipt,
+                    EStorageOperation::SealWrite,
+                    EStorageOperation::CommitWrite,
+                    EStorageOperation::GetWriteStatus,
+                    EStorageOperation::GetWriteOutcome,
+                    EStorageOperation::AbortWrite,
+                    EStorageOperation::CleanupWrites});
+            contract.Features.push_back(EStorageFeature::StagedWrites);
+            contract.EffectiveLimits.WriteSessions = TWriteSessionLimits{};
+        }
         if (mode == CollectionMode::Append) {
             contract.Operations.push_back(EStorageOperation::Append);
             contract.Features.push_back(EStorageFeature::SnapshotPreconditions);

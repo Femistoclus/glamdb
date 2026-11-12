@@ -69,7 +69,7 @@ TEST(StorageContract, SelectsSupportedVersionFromInclusiveRange)
     request.MaxVersion = {3, 7};
     const auto result = NegotiateStorageContract(request, LocalCapabilities(), {});
     ASSERT_TRUE(result);
-    EXPECT_EQ(result->Version, (TStorageContractVersion{1, 3}));
+    EXPECT_EQ(result->Version, (TStorageContractVersion{1, 4}));
     request.MaxVersion = {1, 0};
     ASSERT_TRUE(NegotiateStorageContract(request, LocalCapabilities(), {}));
 }
@@ -115,7 +115,7 @@ TEST(StorageContract, ReadViewsAreAdditiveAndNativeOnly)
 TEST(StorageContract, RejectsDisjointVersionRangesAndMalformedRequests)
 {
     for (const auto version :
-        {TStorageContractVersion{0, 9}, TStorageContractVersion{1, 4}, TStorageContractVersion{2, 0}})
+        {TStorageContractVersion{0, 9}, TStorageContractVersion{1, 5}, TStorageContractVersion{2, 0}})
     {
         TStorageContractRequest request;
         request.MinVersion = version;
@@ -306,3 +306,17 @@ TEST(StorageContract, EngineConvenienceUsesEffectiveLimitsWithoutConsultingReadi
 
 } // namespace
 } // namespace glamdb
+
+namespace glamdb {
+TEST(StorageContract, NativeStagedWritesAreAdditiveFrom14)
+{
+    TStorageContractRequest request;
+    request.MaxVersion = {1, 4};
+    request.RequiredFeatures = {EStorageFeature::StagedWrites};
+    auto contract = NegotiateStorageContract(request, LocalCapabilities(), {});
+    ASSERT_TRUE(contract);
+    EXPECT_EQ(contract->Version, (TStorageContractVersion{1, 4}));
+    request.MaxVersion = {1, 3};
+    EXPECT_FALSE(NegotiateStorageContract(request, LocalCapabilities(), {}));
+}
+}

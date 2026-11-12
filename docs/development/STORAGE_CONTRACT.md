@@ -1,6 +1,6 @@
 # Compute-facing native storage contract
 
-The installed `storage/contract.h` defines native semantic contracts **1.0**, **1.1**, **1.2** and **1.3**.
+The installed `storage/contract.h` defines native semantic contracts **1.0**, **1.1**, **1.2**, **1.3** and **1.4**.
 `Engine::NegotiateStorageContract(request)` describes supported operations for an
 intended collection mode and returns the engine's effective limits. It is a
 convenience over the pure `glamdb::NegotiateStorageContract(request,
@@ -44,8 +44,8 @@ auto contract = engine.NegotiateStorageContract(request);
 
 Versions are `(Major, Minor)` pairs ordered lexicographically. The request range
 is inclusive and negotiation selects the highest implemented version in it.
-Versions 1.0 through 1.3 are implemented; a range spanning several majors selects
-1.3. The default request range remains [1.0, 1.0], preserving existing negotiation
+Versions 1.0 through 1.4 are implemented; a range spanning several majors selects
+1.4. The default request range remains [1.0, 1.0], preserving existing negotiation
 and feature results. New view consumers must include 1.1 and require
 `IndependentReadView`; a 1.0-only request with that requirement fails.
 A new major denotes incompatible semantics; a minor may add optional capabilities
@@ -250,9 +250,9 @@ classification, trusted translation assertions, stable field mapping, compute
 projection inputs and legal limits. The pure scan planner uses bounded shared
 metadata admission; this is separate from pure capability discovery above.
 
-`StagedWrites`, `StableCAbi`, `ArrowFlight`, `RemoteDescriptors`, `Overwrite`,
+`StableCAbi`, `ArrowFlight`, `RemoteDescriptors`, `Overwrite`,
 `Merge`, `SqlMutations`, `SchemaEvolution` and `CrossCollectionTransactions`
-remain reserved and unimplemented. Requiring one fails explicitly in all four
+remain reserved and unimplemented. Requiring one fails explicitly in all five
 versions. Native scan cursors and bulk sources do not imply these protocols.
 
 ## Executable evidence
@@ -269,3 +269,16 @@ receipts, exact retries and KV no-op/lookup behavior. It also checks mode/type
 refusals before binding and unsupported negotiation requirements. Local executed
 results are recorded in the implementation report; no physical durability
 qualification or new transport/ABI qualification is claimed.
+
+## Contract 1.4: native staged output
+
+Version 1.4 advertises StagedWrites and BeginWrite, PutPart, GetPartReceipt,
+SealWrite, CommitWrite, GetWriteStatus/GetWriteOutcome, AbortWrite and CleanupWrites
+only for native local append/KV modes. The installed TWriteSessions facade owns
+an explicit separate staging directory bound to the supplied Engine/store/scope.
+Default negotiation remains 1.0; contracts through 1.3 do not advertise staging.
+WriteSessions effective limits describe default configurable staging ceilings,
+independent of readiness and available shared capacity. Only append and last-wins
+upsert are supported; other mutation sessions fail before staging. See
+[write sessions](WRITE_SESSIONS.md) for durable identities, resource reserves,
+recovery, cancellation and permanent receipt rules.

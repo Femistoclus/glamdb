@@ -3,7 +3,9 @@
 Contract **1.1** adds `IndependentReadView` for the local storage backend. Default
 contract requests still negotiate **1.0** and do not advertise this feature.
 Native callers use the installed `storage/read_view.h` types through `Engine`;
-there is no HTTP route, remote token, split executor or stable ABI for views.
+there is no HTTP route, remote token or stable ABI for views. Contract **1.2**
+adds [native view-bound split planning and execution](SCAN_SPLITS.md) through
+`PlanScan`, `NextScanSplits` and `ReadSplit`; the 1.1 profile does not expose them.
 
 ## Capture and scan
 
@@ -120,7 +122,7 @@ owning engine holds `state_mutex`; it has no second lock. Root readers use that
 same lock. Destruction callbacks hold only weak engine ownership and enter the
 same serialized release path.
 
-The registry's checked entry resolver is the private bridge for future split
+The registry's checked entry resolver is the private bridge for native split
 planning. A consumer must validate engine/scope/deadline and take a separate root
 reader under `state_mutex`, copy the original `shared_ptr<const TBaseState>`
 **with its aliasing ownership intact**, then plan from that state and the captured

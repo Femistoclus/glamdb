@@ -1030,6 +1030,28 @@ struct Engine::Impl
 
 namespace detail {
 
+Result<std::optional<AppendOutcome>> EngineFactory::FindWriteOutcome(const Engine& engine,
+    std::string_view collection,
+    std::string_view operation,
+    std::string_view expectedHash)
+{
+    return engine.FindAppendOutcomeImpl(collection, operation, expectedHash);
+}
+
+Status EngineFactory::ValidateStagingDirectory(const Engine& engine, const std::filesystem::path& directory)
+{
+    const auto root = std::filesystem::weakly_canonical(engine.impl_->lease->Root());
+    const auto stage = std::filesystem::weakly_canonical(directory);
+    auto contains = [](const auto& parent, const auto& child) {
+        const auto relative = child.lexically_relative(parent);
+        return relative.empty() || *relative.begin() != "..";
+    };
+    if (contains(root, stage) || contains(stage, root)) {
+        return std::unexpected(ErrorDetail{"INVALID_ARGUMENT", "staging and store directories must be disjoint"});
+    }
+    return {};
+}
+
 Result<std::shared_ptr<Engine>> EngineFactory::Create(const CreateStoreRequest& request,
     std::shared_ptr<StorageBackend> backend,
     std::string sqlite_vfs)
@@ -2403,6 +2425,13 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
 Result<std::optional<AppendOutcome>> Engine::FindAppendOutcome(std::string_view collection_id,
     std::string_view operation_id) const
 {
+    return FindAppendOutcomeImpl(collection_id, operation_id, {});
+}
+
+Result<std::optional<AppendOutcome>> Engine::FindAppendOutcomeImpl(std::string_view collection_id,
+    std::string_view operation_id,
+    std::string_view expectedHash) const
+{
     const auto impl = impl_;
     try {
         Require(ValidUuid(collection_id) && ValidUuid(operation_id),
@@ -2414,6 +2443,9 @@ Result<std::optional<AppendOutcome>> Engine::FindAppendOutcome(std::string_view 
             if (!impl->ready && recovery && recovery->collection_id == collection_id &&
                 recovery->operation_id == operation_id)
             {
+                Require(expectedHash.empty() || recovery->payload_hash == expectedHash,
+                    "IDEMPOTENCY_CONFLICT",
+                    "sealed identity differs from the bound operation");
                 auto error = recovery->first_error;
                 error.retry_hint = RetryHint::SameIdAfterReconcile;
                 return std::optional(AppendOutcome{std::string(operation_id),
@@ -2441,6 +2473,9 @@ Result<std::optional<AppendOutcome>> Engine::FindAppendOutcome(std::string_view 
         if (!record) {
             return std::optional<AppendOutcome>{};
         }
+        Require(expectedHash.empty() || record->binding.payload_hash == expectedHash,
+            "IDEMPOTENCY_CONFLICT",
+            "sealed identity differs from the bound operation");
         if (!record->outcome) {
             throw Failure(
                 {"OPERATION_IN_PROGRESS", "registered append is still executing", RetryHint::SameIdAfterReconcile});

@@ -118,6 +118,8 @@ public:
     Status Shutdown(std::chrono::milliseconds timeout);
 
 private:
+    Result<std::optional<AppendOutcome>>
+    FindAppendOutcomeImpl(std::string_view collection, std::string_view operation, std::string_view expectedHash) const;
     void CloseOnCorruption(const ErrorDetail& error) const;
     CreateOutcome CreateCollectionImpl(const CreateCollectionRequest& request,
         std::string_view migrationIdentity,

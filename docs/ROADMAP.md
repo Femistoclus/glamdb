@@ -306,3 +306,9 @@ milestone complete from one passing test.
 - [Repository structure](PROJECT_STRUCTURE.md)
 - [Build and quality checks](development/BUILDING.md)
 - [Dependency pins and build](../third_party/README.md)
+
+Native contract 1.4 implements restart-resumable multipart append/KV upsert output
+through an explicit, separately locked staging journal and the existing Engine
+publisher. See [write sessions](development/WRITE_SESSIONS.md) for bounded resource
+and recovery semantics. Native process-crash and injected SQLite disk-full tests
+are separate from G4 physical power-loss qualification, which remains NOT RUN.
