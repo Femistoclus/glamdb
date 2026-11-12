@@ -77,10 +77,10 @@ TJson EncodeCell(const Cell& cell)
 TJson EncodeRows(const arrow::RecordBatch& batch)
 {
     auto rows = TJson::array();
-    size_t bytes = 0;
+    size_t bytes = 2;
     for (int64_t row = 0; row < batch.num_rows(); ++row) {
         auto item = EncodeRow(batch, row);
-        bytes += item.dump().size() + 1;
+        bytes += item.dump().size() + static_cast<size_t>(row != 0);
         Require(bytes <= MaxResponseBytes, "JSON response exceeds transport limit", "INPUT_TOO_LARGE");
         rows.push_back(std::move(item));
     }
