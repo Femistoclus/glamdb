@@ -120,6 +120,34 @@ checks tentative/confirmed, rollback, uncertainty and failed-rebuild transitions
 results with real SQLite/Parquet/Iceberg. The existing uncached `ScanMockTest`
 suite uses in-memory FileIO and remains separate evidence.
 
+## Publication cost versus data files
+
+`glamdb_append_history_bench ROOT keep-last|retain-all CHECKPOINT...` appends
+one-row batches to one collection and reports, for the 200 appends before each
+checkpoint, the publication guard time (`StagedAppend::VerifyClosure`: closure
+verification and candidate accounting) and the whole append latency.
+`keep-last` expires all but the newest 100 snapshots every 100 appends, so the
+root stays small and costs that grow with data files dominate:
+
+```sh
+cmake --build --preset release --target glamdb_append_history_bench --parallel 2
+build/release/benchmarks/glamdb_append_history_bench /tmp/ah keep-last 1000 5000 10000 15000
+```
+
+Measured on 2026-11-12 with Linux aarch64 (4-CPU VM), Clang 18, Release, store
+on tmpfs; p50 in microseconds, before (copying index, 8532c49) / after:
+
+| Data files | Guard p50 | Append p50 | Peak RSS, MiB |
+| ---: | ---: | ---: | ---: |
+| 1,000 | 636 / 574 | 2,483 / 2,341 | 38 / 28 |
+| 5,000 | 1,041 / 639 | 3,264 / 2,630 | 64 / 56 |
+| 10,000 | 1,886 / 640 | 4,746 / 2,662 | 89 / 85 |
+| 15,000 | 2,650 / 614 | 5,830 / 2,511 | 116 / 109 |
+
+With all snapshots retained (`retain-all`), guard time still grows with the
+root (1,199 / 2,823 / 4,577 us at 1,000 / 3,000 / 5,000 snapshots, previously
+1,237 / 3,587 / 6,199 us) because root verification remains O(snapshots).
+
 ## Executed checks
 
 On official base `0382261`, the normal Release build and native CTest pass with
