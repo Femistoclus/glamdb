@@ -335,8 +335,12 @@ class PagedScanStream:
             raise ProtocolError('Arrow stream is already closed')
         return self
 
-    def __exit__(self, *args):
-        self.close()
+    def __exit__(self, exc_type, exc, traceback):
+        try:
+            self.close()
+        except BaseException:
+            if exc_type is None:
+                raise
 
     def __iter__(self):
         return self
@@ -366,7 +370,7 @@ class PagedScanStream:
                         if cursor == self._cursor:
                             raise ProtocolError('Arrow scan cursor did not advance')
                     except BaseException:
-                        following.close()
+                        following._close_preserving_error()
                         raise
                     self._bytes += self._page.bytes_read
                     self._page = following

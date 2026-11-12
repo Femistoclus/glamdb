@@ -178,6 +178,16 @@ def test_bad_arrow_schema_closes_transport_even_before_context_entry():
     assert body.closed
 
 
+@pytest.mark.parametrize("snapshot", [None, "1"])
+def test_requested_snapshot_must_match_arrow_header_before_returning_batches(snapshot):
+    client, body = connection()
+    with client:
+        with pytest.raises(ProtocolError, match="snapshot"):
+            client.scan_batches(CID, snapshot_id=snapshot)
+        assert body.closed
+        assert not client._streams
+
+
 def test_initial_empty_stream_retains_schema_and_has_no_fabricated_batch():
     schema = pa.schema([("n", pa.int64())])
     client, body = connection(ipc_bytes([], schema), headers={"X-GlamDB-Snapshot-Id": "initial"})

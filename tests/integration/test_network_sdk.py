@@ -9,12 +9,13 @@ import httpx
 import pytest
 
 from glamdb_sdk import (AuthenticationError, Client, Field, HTTPError, ProtocolError,
-                        Schema, TransportError, col)
+                        IntegrityError, Schema, TransportError, col)
 
 from .helpers.http_server import (REPOSITORY, ScenarioHTTPTransport, TOKEN,
                                  make_tls_material, package_environment)
 
 from .helpers.backends import assert_storage, client_server
+from .helpers.arrow_transport import ArrowHTTPTransport
 
 SCHEMA = Schema([Field("key", "string", False), Field("n", "int64", True),
                  Field("at", "timestamp_us_utc", True), Field("flag", "bool", True),
@@ -212,6 +213,125 @@ def test_runnable_quickstart_uses_actual_http_and_reports_verified_stream(server
     with Client(server.url, TOKEN) as client:
         assert int(client.stats(collection_id)["rows"]) == 2
     assert_storage(server, collection_id, 2)
+
+
+def test_real_arrow_empty_schema_eos_and_fixed_view_survive_later_append(server):
+    import pyarrow as pa
+    transport = ArrowHTTPTransport()
+    with Client(server.url, TOKEN, transport=transport) as client:
+        cid = create(client)
+        with client.scan_batches(cid, snapshot_id=None) as empty:
+            assert empty.schema.names == ['key', 'n', 'at', 'flag', 'ratio']
+            assert [field.type for field in empty.schema] == [
+                pa.string(), pa.int64(), pa.timestamp('us', 'UTC'), pa.bool_(), pa.float64()]
+            assert not empty.schema.field('key').nullable
+            assert list(empty) == []
+        assert empty.snapshot_id is None and empty.integrity == 'verified'
+        assert empty.checksum_verified and empty.bytes_read > 8
+        first = client.append(cid, ROWS, operation_id=uuid4(), schema=SCHEMA)
+        snapshot = first.result['snapshot_id']
+        stream = client.scan_batches(cid)
+        try:
+            client.append(cid, [{'key': 'after-open'}], operation_id=uuid4(), schema=SCHEMA)
+            with stream:
+                batches = list(stream)
+        finally:
+            stream.close()
+        assert stream.snapshot_id == snapshot and stream.integrity == 'verified'
+        assert stream.checksum_verified
+        assert all(body.closed for body in transport.bodies)
+    # Closing all readers, response bodies and the HTTP pool must not invalidate buffers.
+    rows = [row for batch in batches for row in batch.to_pylist()]
+    assert len(rows) == 3 and [row['key'] for row in rows] == ['duplicate'] * 3
+    assert rows[0]['n'] == 9007199254740993
+    assert rows[1]['at'] == datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc)
+    assert_storage(server, cid, 4)
+
+
+@pytest.mark.parametrize('fault', [
+    'checksum', 'length', 'missing_eos', 'truncated_body', 'trailing_data',
+    'snapshot', 'missing_snapshot', 'schema',
+])
+def test_real_arrow_fault_never_reports_integrity_success_and_closes_owners(server, fault):
+    transport = ArrowHTTPTransport()
+    with Client(server.url, TOKEN, transport=transport) as client:
+        cid = create(client)
+        receipt = client.append(cid, ROWS, operation_id=uuid4(), schema=SCHEMA)
+        transport.fault = fault
+        stream = None
+        retained = []
+        expected = ProtocolError if fault in ('snapshot', 'missing_snapshot') else IntegrityError
+        with pytest.raises(expected):
+            stream = client.scan_batches(cid, snapshot_id=receipt.result['snapshot_id'])
+            with stream:
+                for batch in stream:
+                    retained.append(batch)
+        assert transport.bodies and all(body.closed for body in transport.bodies)
+        if stream is not None:
+            assert stream.closed and stream.integrity == 'not_complete' and not stream.checksum_verified
+            with pytest.raises(expected):
+                next(stream)  # decode failures stay failures, never successful EOS
+        transport.fault = None
+        with client.scan_batches(cid) as healthy:
+            assert sum(batch.num_rows for batch in healthy) == 3
+        assert healthy.integrity == 'verified'
+    for batch in retained:
+        assert all(row['key'] == 'duplicate' for row in batch.to_pylist())
+
+
+@pytest.mark.parametrize('finish', ['early', 'consumer', 'client', 'close_error', 'client_error', 'view_error'])
+def test_real_arrow_paged_ownership_closes_promptly_and_keeps_returned_batch(server, finish):
+    if finish == 'view_error' and server.mock:
+        # The legacy mock has no cursor pages; this path requires a real native session.
+        pytest.skip('legacy mock has no cursor pages')
+    transport = ArrowHTTPTransport()
+    client = Client(server.url, TOKEN, transport=transport)
+    try:
+        cid = create(client)
+        # Native pages hold at most 10,000 rows; this guarantees a continuation.
+        client.append(cid, [{'key': 'same', 'n': 9007199254740993}] * 10000,
+                      operation_id=uuid4(), schema=SCHEMA)
+        client.append(cid, [{'key': 'last'}], operation_id=uuid4(), schema=SCHEMA)
+        if finish in ('close_error', 'client_error'):
+            transport.fault = 'close'
+        stream = client.scan_batches(cid)
+        retained = next(stream)
+        sent = transport.bodies[-1].bytes_yielded
+        if finish == 'view_error':
+            transport.fault = 'snapshot_close'
+            with pytest.raises(ProtocolError, match='view changed'):
+                list(stream)
+        elif finish == 'client_error':
+            with pytest.raises(ValueError, match='consumer failed'):
+                with client:
+                    raise ValueError('consumer failed')
+        elif finish in ('consumer', 'close_error'):
+            with pytest.raises(ValueError, match='consumer failed'):
+                with stream:
+                    raise ValueError('consumer failed')
+        elif finish == 'early':
+            stream.close()
+        else:
+            client.close()
+        assert stream.closed and stream.integrity == 'not_complete' and not stream.checksum_verified
+        assert all(body.closed for body in transport.bodies)
+        if finish == 'view_error':
+            with pytest.raises(ProtocolError, match='view changed'):
+                next(stream)
+        else:
+            assert transport.bodies[-1].bytes_yielded == sent
+            assert list(stream) == []
+        if not server.mock:
+            assert len(transport.cancellations) == 1 and transport.cancellations[0][1] == 200
+        else:
+            assert transport.cancellations == []
+    finally:
+        client.close()
+    assert retained.num_rows > 0
+    retained_rows = retained.to_pylist()
+    # Native file enumeration is not an insertion-order guarantee.
+    assert all(row['key'] in ('same', 'last') for row in retained_rows)
+    assert any(row['key'] == 'same' and row['n'] == 9007199254740993 for row in retained_rows)
 
 
 def test_actual_https_accepts_explicit_trusted_test_ca(tmp_path, tls_material):
