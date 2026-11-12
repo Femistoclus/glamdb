@@ -4,6 +4,7 @@
 #include "apps/transport/outcome_json.h"
 #include "core/api/write_settings.h"
 #include "core/scan/predicate.h"
+#include "storage/scalars.h"
 
 #include <openssl/rand.h>
 
@@ -23,7 +24,17 @@ TJson LiteralJson(const OptionalLiteral& value)
 {
     return value ? std::visit(
                        [](const auto& literal) {
-                           return EncodeCell(Cell(literal));
+                           using T = std::decay_t<decltype(literal)>;
+                           if constexpr (std::is_same_v<T, Decimal>) {
+                               return TJson{{"type", "decimal"},
+                                   {"precision", literal.precision},
+                                   {"scale", literal.scale},
+                                   {"value", FormatDecimal(literal)}};
+                           } else if constexpr (std::is_same_v<T, Date>) {
+                               return TJson{{"type", "date"}, {"value", FormatDate(literal)}};
+                           } else {
+                               return EncodeCell(Cell(literal));
+                           }
                        },
                        *value)
                  : TJson(nullptr);
@@ -122,7 +133,8 @@ TJson ParquetJson(const EngineCapabilities& capabilities)
         }
         codecs.push_back({{"codec", detail::CodecName(codec.codec)}, {"level", std::move(level)}});
     }
-    constexpr std::array<std::string_view, 5> types{"string", "bool", "int64", "float64", "timestamp_us_utc"};
+    constexpr std::array<std::string_view, 7>
+        types{"string", "bool", "int64", "float64", "timestamp_us_utc", "decimal", "date"};
     const auto typeNames = [&](const std::vector<FieldType>& fields) {
         auto names = TJson::array();
         for (const auto field : fields) {
@@ -214,6 +226,17 @@ TJson CapabilitiesJson(const EngineCapabilities& capabilities,
                 {"predicate_literals", detail::MaxPredicateLiterals}}}};
     if (!storeID.empty()) {
         value["store_id"] = storeID;
+    }
+    value["schema_types"] = {"string", "bool", "int64", "float64", "timestamp_us_utc"};
+    if (capabilities.backend == BackendKind::LocalStorage) {
+        value["schema_types"].push_back("decimal");
+        value["schema_types"].push_back("date");
+        value["decimal"] = {{"max_precision", 38},
+            {"min_precision", 1},
+            {"min_scale", 0},
+            {"max_scale", 38},
+            {"max_text_bytes", 128}};
+        value["date"] = {{"min", "0001-01-01"}, {"max", "9999-12-31"}, {"format", "YYYY-MM-DD"}};
     }
     return value;
 }

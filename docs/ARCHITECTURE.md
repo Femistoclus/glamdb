@@ -151,8 +151,11 @@ keeps only TRUE. Unsupported table features and active delete files are rejected
 Page/Bloom index presence does not claim execution support; those optimizations
 are outside initial scan execution.
 
-The initial schema is flat and supports UTF-8 strings, booleans, int64, finite
-float64, and UTC timestamps in microseconds. Field IDs persist in Iceberg and
+The schema is flat and supports UTF-8 strings, booleans, int64, finite float64,
+UTC timestamps in microseconds, decimal128(p,s) and calendar dates. Decimal
+precision is 1..38 and scale is 0..precision; dates span years 0001..9999.
+See [scalar forms and version compatibility](development/SCALAR_TYPES.md).
+Field IDs persist in Iceberg and
 Parquet. A `key` field, when present, is a required string but is not unique in
 append mode. Omitted nullable fields become NULL; missing required fields,
 unknown fields, and incompatible types are rejected. NaN and infinity are

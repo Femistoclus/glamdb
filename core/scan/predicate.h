@@ -51,6 +51,7 @@ struct TBoundInSet
     std::vector<uint8_t> Bools{};
     std::vector<int64_t> Ints{};
     std::vector<double> Doubles{};
+    std::vector<std::pair<int64_t, uint64_t>> Decimals{};
 };
 
 struct TBoundOp
@@ -69,7 +70,7 @@ struct TBoundPredicate
     // Destroy compiled literals before their reservation.
     std::shared_ptr<const void> ResourceLease;
     std::vector<size_t> ReferencedFields;
-    std::vector<FieldType> ReferencedTypes;
+    std::vector<FieldSpec> ReferencedSpecs;
     std::vector<TBoundOp> Ops;
     std::vector<TBoundInSet> InSets;
 
@@ -93,7 +94,7 @@ Result<std::vector<int64_t>> SelectRows(const TBoundPredicate& predicate,
 
 Result<std::vector<int64_t>> SelectRows(const TBoundPredicate& predicate, const arrow::RecordBatch& batch);
 
-// Copies the selected rows, preserving NULLs, for the five supported types.
+// Copies the selected rows, preserving NULLs and logical type parameters.
 Result<std::shared_ptr<arrow::Array>>
 TakeRows(const arrow::Array& column, std::span<const int64_t> rows, arrow::MemoryPool* pool = nullptr);
 

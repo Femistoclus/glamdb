@@ -19,6 +19,8 @@ import {
     readPendingFile,
     schemaSignature,
     supportsFeature,
+    schemaTypes,
+    creationSchema,
     queryMaxRows,
     storageNotice,
     validateQueryCapabilities,
@@ -860,7 +862,7 @@ function schemaView() {
     return `${heading('The shape of your data', 'Fixed, typed, and a little more organised.')}<section class="panel"><div class="panel-header"><h2>Collection schema</h2>${badge('Unpartitioned', 'pink')}</div><div class="table-wrap"><table class="schema-table" aria-label="Collection schema"><thead><tr><th>Column</th><th>Type</th><th>Field ID</th><th>Nullable</th></tr></thead><tbody>${fields()
         .map(
             (f) =>
-                `<tr><td><strong>${e(f.name)}</strong></td><td><span class="type">${e(f.type)}</span></td><td>${e(f.field_id)}</td><td>${f.nullable ? 'Yes' : 'Required'}</td></tr>`,
+                `<tr><td><strong>${e(f.name)}</strong></td><td><span class="type">${e(f.type === 'decimal' ? `decimal(${f.precision},${f.scale})` : f.type)}</span></td><td>${e(f.field_id)}</td><td>${f.nullable ? 'Yes' : 'Required'}</td></tr>`,
         )
         .join(
             '',
@@ -1231,7 +1233,13 @@ function renderCreationFields() {
         .map((field, i) => {
             const label = `column ${i + 1}`;
             const type = field.type ?? 'string';
-            return `<div class="schema-editor-row${parquet ? ' with-parquet' : ''}" ${parquet ? 'data-parquet-choice' : ''}><input name="field-name" value="${e(field.name)}" aria-label="Column name ${i + 1}" required><select name="field-type" aria-label="Column type ${i + 1}">${['string', 'int64', 'float64', 'bool', 'timestamp_us_utc'].map((option) => `<option ${type === option ? 'selected' : ''}>${option}</option>`).join('')}</select><label><input name="field-nullable" type="checkbox" ${field.nullable ? 'checked' : ''}>NULL</label>${parquet ? `<div class="column-parquet"><select name="field-codec" data-parquet-codec aria-label="Parquet compression for ${label}">${codecOptions(parquet, field.codec, 'Default codec')}</select><input name="field-level" type="number" step="1" inputmode="numeric" data-parquet-level aria-label="Parquet level for ${label}" ${levelAttributes(parquet, field.codec, field.level)}>${columnDictionarySelect(parquet, type, field, label)}${columnEncodingSelect(parquet, type, field, label)}</div>` : ''}<button class="icon-button" type="button" data-action="remove-field" data-index="${i}" aria-label="Remove field ${i + 1}">${icon('close')}</button></div>`;
+            return `<div class="schema-editor-row${parquet ? ' with-parquet' : ''}" ${parquet ? 'data-parquet-choice' : ''}><input name="field-name" value="${e(field.name)}" aria-label="Column name ${i + 1}" required><div class="schema-type-controls"><select name="field-type" aria-label="Column type ${i + 1}">${schemaTypes(
+                state.capabilities,
+            )
+                .map((option) => `<option ${type === option ? 'selected' : ''}>${option}</option>`)
+                .join(
+                    '',
+                )}</select>${type === 'decimal' ? `<div class="decimal-parameters"><label>Precision<input name="field-precision" type="number" min="1" max="38" step="1" value="${e(field.precision ?? 18)}" aria-label="Decimal precision ${i + 1}" required></label><label>Scale<input name="field-scale" type="number" min="0" max="38" step="1" value="${e(field.scale ?? 2)}" aria-label="Decimal scale ${i + 1}" required></label></div>` : ''}</div><label><input name="field-nullable" type="checkbox" ${field.nullable ? 'checked' : ''}>NULL</label>${parquet ? `<div class="column-parquet"><select name="field-codec" data-parquet-codec aria-label="Parquet compression for ${label}">${codecOptions(parquet, field.codec, 'Default codec')}</select><input name="field-level" type="number" step="1" inputmode="numeric" data-parquet-level aria-label="Parquet level for ${label}" ${levelAttributes(parquet, field.codec, field.level)}>${columnDictionarySelect(parquet, type, field, label)}${columnEncodingSelect(parquet, type, field, label)}</div>` : ''}<button class="icon-button" type="button" data-action="remove-field" data-index="${i}" aria-label="Remove field ${i + 1}">${icon('close')}</button></div>`;
         })
         .join('');
 }
@@ -1240,6 +1248,12 @@ function readCreationFields() {
         name: row.querySelector('[name=field-name]').value,
         type: row.querySelector('[name=field-type]').value,
         nullable: row.querySelector('[name=field-nullable]').checked,
+        ...(row.querySelector('[name=field-type]').value === 'decimal'
+            ? {
+                  precision: Number(row.querySelector('[name=field-precision]')?.value ?? 18),
+                  scale: Number(row.querySelector('[name=field-scale]')?.value ?? 2),
+              }
+            : {}),
         ...readParquetChoice(row),
     }));
 }
@@ -1341,9 +1355,15 @@ async function createForm(form) {
         draft = state.creation;
         if (!draft) {
             const rows = readCreationFields();
-            const schema = {
-                fields: rows.map(({ name, type, nullable }) => ({ name, type, nullable })),
-            };
+            const schema = creationSchema(
+                rows.map(({ name, type, nullable, precision, scale }) => ({
+                    name,
+                    type,
+                    nullable,
+                    ...(type === 'decimal' ? { precision, scale } : {}),
+                })),
+                state.capabilities,
+            );
             const writeSettings = creationWriteSettings(form, rows, schema);
             const body = {
                 collection_id: crypto.randomUUID(),
@@ -1680,7 +1700,11 @@ function sampleRow() {
                     ? 12.5
                     : field.type === 'bool'
                       ? true
-                      : '2026-11-10T12:00:00.000000Z',
+                      : field.type === 'decimal'
+                        ? '0' + (field.scale ? '.' + '0'.repeat(field.scale) : '')
+                        : field.type === 'date'
+                          ? '2026-11-10'
+                          : '2026-11-10T12:00:00.000000Z',
         ]),
     );
 }
@@ -2151,9 +2175,11 @@ document.addEventListener('change', async (event) => {
             );
         else if (target.matches('[data-parquet-codec], [data-parquet-encoding]'))
             syncParquetChoice(target.closest('[data-parquet-choice]'));
-        else if (target.matches('#schema-editor [name=field-type]'))
+        else if (target.matches('#schema-editor [name=field-type]')) {
             refreshColumnOptions(target.closest('.schema-editor-row'));
-        else if (target.dataset.themeColor) {
+            creationFields = readCreationFields();
+            renderCreationFields();
+        } else if (target.dataset.themeColor) {
             state.theme = structuredClone(state.theme);
             state.theme.colors[target.dataset.themeColor] = target.value;
             state.themePreview = true;

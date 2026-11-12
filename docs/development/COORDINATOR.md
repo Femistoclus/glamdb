@@ -53,6 +53,10 @@ Its result receipt version 2 extends counts without changing old receipts.
   NULL, duplicate rows remain, float negative zero normalizes, nonfinite floats
   fail, and timestamps are UTC microseconds in years 0001 through 9999. SHA-256
   hashes use versioned canonical bytes, independent of batch chunking.
+  Native decimal128(p,s) and date32 preserve exact coefficients, immutable
+  parameters and Gregorian days; extended schemas use canonical schema version 2
+  without changing scalar-only hashes or existing receipts. See
+  [scalar types and compatibility](SCALAR_TYPES.md).
 - A permanent collection-scoped operation binding commits before file work.
   Its exact base includes store/collection/table identities, metadata location,
   optional snapshot, schema and partition-spec IDs. Retrying identical content

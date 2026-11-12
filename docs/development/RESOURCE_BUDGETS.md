@@ -92,6 +92,10 @@ All rows below are **Current** local checks. Their native owners also use
 the shared reservation envelopes above. CLI, SDK and UI requests
 use these same server checks; their own client memory belongs to their process.
 
+Canonical non-NULL DECIMAL coefficients use 16 bytes and DATE uses four-byte
+epoch days, in addition to presence bytes. Arrow and writer estimates also
+reserve those slots for NULL or omitted columns. See [scalar types](SCALAR_TYPES.md).
+
 | Limit / unit | Bound and scope | Owner and enforcement / release |
 | --- | --- | --- |
 | Canonical input, rows / batches / bytes | Per append: 1..10,000 rows; at most 10,000 Arrow batches; 2 MiB per row; 16 MiB per append; strings 1 MiB, `key` 1,024 bytes | Core `Inspect`/fingerprint before binding. Deterministic validation, not a reservation. |

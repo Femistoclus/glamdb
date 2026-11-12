@@ -59,6 +59,12 @@ std::string MakeBody(const SchemaSpec& schema, size_t rows)
                     body += "\"2026-0" + std::to_string(1 + random() % 9) + "-1" + std::to_string(random() % 10) +
                         "T12:34:56." + std::to_string(100000 + random() % 900000) + "Z\"";
                     break;
+                case FieldType::Decimal:
+                    body += "\"" + std::to_string(random() % 10000) + ".00\"";
+                    break;
+                case FieldType::Date:
+                    body += "\"2000-02-" + std::to_string(10 + random() % 20) + "\"";
+                    break;
             }
         }
         body += "}";
@@ -97,7 +103,7 @@ std::shared_ptr<arrow::RecordBatch> ParseNew(const SchemaSpec& schema, const std
 } // namespace
 
 int main(int argc, char** argv)
-{
+try {
     const double minimum = argc > 1 ? std::atof(argv[1]) : 1.0;
     if (argc == 5) {
         const auto schema = MakeSchema(std::strtoull(argv[2], nullptr, 10));
@@ -176,4 +182,7 @@ int main(int argc, char** argv)
         }
     }
     return 0;
+} catch (const std::exception& error) {
+    std::fprintf(stderr, "%s\n", error.what());
+    return 1;
 }

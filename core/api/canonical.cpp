@@ -1,7 +1,10 @@
 #include "core/api/canonical.h"
 
 #include "core/api/binary.h"
+#include "core/api/scalar_validation.h"
 #include "core/io/sha256_blocks.h"
+
+#include <arrow/util/decimal.h>
 
 #include <algorithm>
 #include <array>
@@ -43,9 +46,14 @@ void ValidateSchema(const SchemaSpec& schema)
                 field.name.find('\0') == std::string::npos && names.insert(field.name).second,
             "INVALID_ARGUMENT",
             "invalid or duplicate field name");
-        Require(field.type >= FieldType::String && field.type <= FieldType::TimestampUsUtc,
+        Require(field.type >= FieldType::String && field.type <= FieldType::Date,
             "INVALID_ARGUMENT",
             "unsupported field type");
+        Require(field.type == FieldType::Decimal
+                ? field.precision >= 1 && field.precision <= 38 && field.scale >= 0 && field.scale <= field.precision
+                : field.precision == 0 && field.scale == 0,
+            "INVALID_ARGUMENT",
+            "invalid decimal precision or scale");
         Require(field.name != "key" || (field.type == FieldType::String && !field.nullable),
             "INVALID_ARGUMENT",
             "key must be a required string");
@@ -90,6 +98,23 @@ void EncodeCell(TCanonicalHasher& encoder, const FieldSpec& field, Cell& cell)
             Require(value >= -62135596800000000LL && value <= 253402300799999999LL,
                 "INVALID_ARGUMENT",
                 "timestamp outside years 0001..9999");
+            encoder.AddNumber(value);
+            break;
+        }
+        case FieldType::Decimal: {
+            const auto& value = std::get<Decimal>(cell);
+            Require(value.precision == field.precision && value.scale == field.scale &&
+                    FitsDecimalPrecision(arrow::Decimal128(value.coefficient_high, value.coefficient_low),
+                        field.precision),
+                "INVALID_ARGUMENT",
+                "decimal coefficient or parameters do not match schema");
+            encoder.AddNumber(value.coefficient_low);
+            encoder.AddNumber(value.coefficient_high);
+            break;
+        }
+        case FieldType::Date: {
+            const auto value = std::get<Date>(cell).days_since_epoch;
+            Require(value >= -719162 && value <= 2932896, "INVALID_ARGUMENT", "date outside years 0001..9999");
             encoder.AddNumber(value);
             break;
         }
@@ -263,7 +288,10 @@ Result<std::string> EncodeSchema(const SchemaSpec& schema)
         ValidateSchema(schema);
         Encoder out;
         out.bytes.assign("COLUMNAR-SCHEMA\0", 16);
-        out.Number<uint16_t>(1);
+        const bool extended = std::ranges::any_of(schema.fields, [](const auto& field) {
+            return field.type == FieldType::Decimal || field.type == FieldType::Date;
+        });
+        out.Number<uint16_t>(extended ? 2 : 1);
         out.Number(static_cast<uint16_t>(schema.fields.size()));
         uint32_t id = 1;
         for (const auto& field : schema.fields) {
@@ -272,6 +300,10 @@ Result<std::string> EncodeSchema(const SchemaSpec& schema)
             out.bytes.append(field.name);
             out.Number(static_cast<uint8_t>(field.type));
             out.Number<uint8_t>(field.nullable ? 1 : 0);
+            if (field.type == FieldType::Decimal) {
+                out.Number(static_cast<uint8_t>(field.precision));
+                out.Number(static_cast<uint8_t>(field.scale));
+            }
         }
         return out.bytes;
     } catch (const Failure& error) {
@@ -286,7 +318,8 @@ Result<SchemaSpec> DecodeSchema(std::string_view bytes)
             "CORRUPTION",
             "invalid schema encoding");
         Decoder in{bytes.substr(16)};
-        Require(in.Number<uint16_t>() == 1, "UNSUPPORTED_STORE_VERSION", "unknown schema version");
+        const auto version = in.Number<uint16_t>();
+        Require(version == 1 || version == 2, "UNSUPPORTED_STORE_VERSION", "unknown schema version");
         const auto count = in.Number<uint16_t>();
         Require(count > 0 && count <= 64, "CORRUPTION", "invalid schema field count");
         SchemaSpec schema;
@@ -298,10 +331,20 @@ Result<SchemaSpec> DecodeSchema(std::string_view bytes)
             in.position += length;
             const auto type = static_cast<FieldType>(in.Number<uint8_t>());
             const auto nullable = in.Boolean();
-            schema.fields.push_back({std::move(name), type, nullable});
+            Require(version == 2 || type <= FieldType::TimestampUsUtc,
+                "CORRUPTION",
+                "extended scalar in legacy schema encoding");
+            FieldSpec field{std::move(name), type, nullable};
+            if (type == FieldType::Decimal) {
+                field.precision = in.Number<uint8_t>();
+                field.scale = in.Number<uint8_t>();
+            }
+            schema.fields.push_back(std::move(field));
         }
         in.End();
         ValidateSchema(schema);
+        const auto canonical = EncodeSchema(schema);
+        Require(canonical && *canonical == bytes, "CORRUPTION", "noncanonical schema encoding");
         return schema;
     } catch (const Failure& error) {
         return std::unexpected(error.detail);

@@ -17,6 +17,7 @@
 #include <iceberg/sort_order.h>
 #include <iceberg/table_metadata.h>
 #include <iceberg/type.h>
+#include <parquet/column_writer.h>
 #include <parquet/file_writer.h>
 #include <parquet/schema.h>
 #include <zlib.h>
@@ -393,6 +394,151 @@ TEST_F(TFormatVerifierTest, RejectsRepeatedPrimitiveForRequiredScalar)
     ASSERT_TRUE(bytes.ok());
     ASSERT_TRUE(IO_->WriteFile("repeated.parquet", (*bytes)->ToString()));
     EXPECT_FALSE(CheckData("repeated.parquet", 0));
+}
+
+TEST_F(TFormatVerifierTest, AcceptsNativeDecimalAndDateFootersAndRejectsWrongParameters)
+{
+    struct TNativeType
+    {
+        std::shared_ptr<iceberg::Type> Iceberg;
+        std::shared_ptr<const parquet::LogicalType> Logical;
+        parquet::Type::type Physical;
+        int Width = -1;
+    };
+    const std::array cases{
+        TNativeType{iceberg::decimal(9, 2), parquet::LogicalType::Decimal(9, 2), parquet::Type::INT32},
+        TNativeType{iceberg::decimal(18, 6), parquet::LogicalType::Decimal(18, 6), parquet::Type::INT64},
+        TNativeType{iceberg::decimal(20, 0),
+            parquet::LogicalType::Decimal(20, 0),
+            parquet::Type::FIXED_LEN_BYTE_ARRAY,
+            9},
+        TNativeType{iceberg::decimal(38, 38),
+            parquet::LogicalType::Decimal(38, 38),
+            parquet::Type::FIXED_LEN_BYTE_ARRAY,
+            16},
+        TNativeType{iceberg::date(), parquet::LogicalType::Date(), parquet::Type::INT32}};
+    for (const auto& test : cases) {
+        SCOPED_TRACE(test.Iceberg->ToString());
+        auto output = arrow::io::BufferOutputStream::Create();
+        ASSERT_TRUE(output.ok());
+        auto node = parquet::schema::PrimitiveNode::Make("value",
+            parquet::Repetition::REQUIRED,
+            test.Logical,
+            test.Physical,
+            test.Width,
+            1);
+        auto schema = parquet::schema::GroupNode::Make("schema", parquet::Repetition::REQUIRED, {node});
+        auto writer =
+            parquet::ParquetFileWriter::Open(*output, std::static_pointer_cast<parquet::schema::GroupNode>(schema));
+        writer->Close();
+        auto bytes = (*output)->Finish();
+        ASSERT_TRUE(bytes.ok());
+        ASSERT_TRUE(IO_->WriteFile("native.parquet", (*bytes)->ToString()));
+        Schema_ = std::make_shared<iceberg::Schema>(
+            std::vector{iceberg::SchemaField::MakeRequired(1, "value", test.Iceberg)});
+        const auto checked = CheckData("native.parquet", 0);
+        EXPECT_TRUE(checked) << checked.error().message;
+        for (const auto& wrong : std::array<std::shared_ptr<iceberg::Type>, 5>{iceberg::decimal(8, 2),
+                 iceberg::decimal(18, 5),
+                 iceberg::decimal(37, 37),
+                 iceberg::int32(),
+                 iceberg::string()})
+        {
+            Schema_ =
+                std::make_shared<iceberg::Schema>(std::vector{iceberg::SchemaField::MakeRequired(1, "value", wrong)});
+            EXPECT_FALSE(CheckData("native.parquet", 0));
+        }
+    }
+}
+
+TEST_F(TFormatVerifierTest, RejectsNativeBoundsOutsideDecimalPrecisionAndCalendarRange)
+{
+    for (const bool date : {false, true}) {
+        for (const std::int32_t value : date ? std::array{-719163, 2932897} : std::array{-1000000000, 1000000000}) {
+            auto output = arrow::io::BufferOutputStream::Create();
+            ASSERT_TRUE(output.ok());
+            auto node = parquet::schema::PrimitiveNode::Make("value",
+                parquet::Repetition::REQUIRED,
+                date ? parquet::LogicalType::Date() : parquet::LogicalType::Decimal(9, 2),
+                parquet::Type::INT32,
+                -1,
+                1);
+            auto schema = parquet::schema::GroupNode::Make("schema", parquet::Repetition::REQUIRED, {node});
+            auto writer =
+                parquet::ParquetFileWriter::Open(*output, std::static_pointer_cast<parquet::schema::GroupNode>(schema));
+            auto* column = static_cast<parquet::Int32Writer*>(writer->AppendRowGroup()->NextColumn());
+            column->WriteBatch(1, nullptr, nullptr, &value);
+            writer->Close();
+            auto bytes = (*output)->Finish();
+            ASSERT_TRUE(bytes.ok());
+            ASSERT_TRUE(IO_->WriteFile("overflow.parquet", (*bytes)->ToString()));
+            Schema_ = std::make_shared<iceberg::Schema>(std::vector{iceberg::SchemaField::MakeRequired(1,
+                "value",
+                date ? std::shared_ptr<iceberg::Type>(iceberg::date()) : iceberg::decimal(9, 2))});
+            EXPECT_FALSE(CheckData("overflow.parquet", 1));
+        }
+    }
+}
+
+TEST_F(TFormatVerifierTest, RejectsDecimalPhysicalTypesAndWidthsOutsideTheFixedProfile)
+{
+    struct TPhysicalType
+    {
+        int Precision;
+        parquet::Type::type Physical;
+        int Width;
+    };
+    for (const auto test : std::array{TPhysicalType{9, parquet::Type::INT64, -1},
+             TPhysicalType{9, parquet::Type::FIXED_LEN_BYTE_ARRAY, 4},
+             TPhysicalType{18, parquet::Type::FIXED_LEN_BYTE_ARRAY, 8},
+             TPhysicalType{20, parquet::Type::FIXED_LEN_BYTE_ARRAY, 10},
+             TPhysicalType{38, parquet::Type::BYTE_ARRAY, -1}})
+    {
+        auto output = arrow::io::BufferOutputStream::Create();
+        ASSERT_TRUE(output.ok());
+        auto field = parquet::schema::PrimitiveNode::Make("value",
+            parquet::Repetition::REQUIRED,
+            parquet::LogicalType::Decimal(test.Precision, 2),
+            test.Physical,
+            test.Width,
+            1);
+        auto schema = parquet::schema::GroupNode::Make("schema", parquet::Repetition::REQUIRED, {field});
+        auto writer =
+            parquet::ParquetFileWriter::Open(*output, std::static_pointer_cast<parquet::schema::GroupNode>(schema));
+        writer->Close();
+        auto bytes = (*output)->Finish();
+        ASSERT_TRUE(bytes.ok());
+        ASSERT_TRUE(IO_->WriteFile("physical.parquet", (*bytes)->ToString()));
+        Schema_ = std::make_shared<iceberg::Schema>(
+            std::vector{iceberg::SchemaField::MakeRequired(1, "value", iceberg::decimal(test.Precision, 2))});
+        EXPECT_FALSE(CheckData("physical.parquet", 0));
+    }
+}
+
+TEST_F(TFormatVerifierTest, RejectsMinimumPhysicalDecimalBound)
+{
+    auto output = arrow::io::BufferOutputStream::Create();
+    ASSERT_TRUE(output.ok());
+    auto field = parquet::schema::PrimitiveNode::Make("value",
+        parquet::Repetition::REQUIRED,
+        parquet::LogicalType::Decimal(38, 2),
+        parquet::Type::FIXED_LEN_BYTE_ARRAY,
+        16,
+        1);
+    auto schema = parquet::schema::GroupNode::Make("schema", parquet::Repetition::REQUIRED, {field});
+    auto writer =
+        parquet::ParquetFileWriter::Open(*output, std::static_pointer_cast<parquet::schema::GroupNode>(schema));
+    auto* column = static_cast<parquet::FixedLenByteArrayWriter*>(writer->AppendRowGroup()->NextColumn());
+    std::array<std::uint8_t, 16> coefficient{0x80};
+    const parquet::FixedLenByteArray value(coefficient.data());
+    column->WriteBatch(1, nullptr, nullptr, &value);
+    writer->Close();
+    const auto bytes = (*output)->Finish();
+    ASSERT_TRUE(bytes.ok());
+    ASSERT_TRUE(IO_->WriteFile("minimum.parquet", (*bytes)->ToString()));
+    Schema_ = std::make_shared<iceberg::Schema>(
+        std::vector{iceberg::SchemaField::MakeRequired(1, "value", iceberg::decimal(38, 2))});
+    EXPECT_FALSE(CheckData("minimum.parquet", 1));
 }
 
 class TCloseFailureInput : public iceberg::InputFile

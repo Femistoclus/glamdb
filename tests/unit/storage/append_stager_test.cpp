@@ -6,10 +6,12 @@
 
 #include <arrow/array.h>
 #include <arrow/array/builder_binary.h>
+#include <arrow/array/builder_decimal.h>
 #include <arrow/array/builder_primitive.h>
 #include <arrow/io/memory.h>
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
+#include <arrow/util/decimal.h>
 #include <gtest/gtest.h>
 #include <iceberg/catalog/memory/in_memory_catalog.h>
 #include <iceberg/manifest/manifest_entry.h>
@@ -371,6 +373,65 @@ TEST_F(TManifestMetricsTest, RoundTripsIndependentMetricsThroughRealParquetAndAv
     EXPECT_FALSE(missingBounds->HasMinMax());
     EXPECT_EQ(missingBounds->null_count(), 3);
     EXPECT_FALSE(Attempt_->FirstError());
+}
+
+class TNativeManifestMetricsTest : public TAppendStagerTest
+{
+protected:
+    void SetUp() override
+    {
+        SchemaSpec_ = {{{"amount", EFieldType::Decimal, true, 38, 2}, {"day", EFieldType::Date, true}}};
+        TAppendStagerTest::SetUp();
+    }
+};
+
+TEST_F(TNativeManifestMetricsTest, PreservesSignedDecimalAndDateBoundsThroughAvroManifests)
+{
+    arrow::Decimal128Builder amounts(arrow::decimal128(38, 2), arrow::default_memory_pool());
+    ASSERT_TRUE(amounts.Append(arrow::Decimal128(32768)).ok());
+    ASSERT_TRUE(amounts.Append(arrow::Decimal128(-32769)).ok());
+    ASSERT_TRUE(amounts.AppendNull().ok());
+    arrow::Date32Builder dates;
+    ASSERT_TRUE(dates.Append(-719162).ok());
+    ASSERT_TRUE(dates.Append(2932896).ok());
+    ASSERT_TRUE(dates.AppendNull().ok());
+    const auto amountArray = amounts.Finish();
+    const auto dateArray = dates.Finish();
+    ASSERT_TRUE(amountArray.ok());
+    ASSERT_TRUE(dateArray.ok());
+    const auto batch = arrow::RecordBatch::Make(
+        arrow::schema({arrow::field("amount", arrow::decimal128(38, 2)), arrow::field("day", arrow::date32())}),
+        3,
+        {*amountArray, *dateArray});
+    ASSERT_NO_FATAL_FAILURE(BindAppend());
+    const auto path = Location() + "/data/" + OperationID + "-" + AppendID + "-00000.parquet";
+    TDataWriterLimits limits;
+    limits.MaxRowGroupBytes = 22;
+    const auto written = WriteDataFile(IO_, Attempt_, *Table_->metadata(), path, {batch}, limits);
+    ASSERT_TRUE(written) << written.error().message;
+    const auto staged = StageAppend(Table_, written->DataFile, {}, Attempt_);
+    ASSERT_TRUE(staged) << staged.error().message;
+    const auto snapshot = staged->Transaction->current().Snapshot();
+    ASSERT_TRUE(snapshot);
+    iceberg::SnapshotReader snapshotReader(snapshot->get());
+    const auto manifests = snapshotReader.Manifests(IO_);
+    ASSERT_TRUE(manifests) << manifests.error().message;
+    ASSERT_EQ(manifests->size(), 1);
+    const auto reader =
+        iceberg::ManifestReader::Make(manifests->front(), IO_, Table_->schema().value(), Table_->spec().value());
+    ASSERT_TRUE(reader) << reader.error().message;
+    const auto entries = (*reader)->Entries();
+    ASSERT_TRUE(entries) << entries.error().message;
+    ASSERT_EQ(entries->size(), 1);
+    ASSERT_TRUE(entries->front().data_file);
+    const auto& data = *entries->front().data_file;
+    EXPECT_EQ(data.value_counts, (std::map<std::int32_t, std::int64_t>{{1, 3}, {2, 3}}));
+    EXPECT_EQ(data.null_value_counts, (std::map<std::int32_t, std::int64_t>{{1, 1}, {2, 1}}));
+    EXPECT_EQ(data.lower_bounds,
+        (std::map<std::int32_t, std::vector<std::uint8_t>>{{1, {0xff, 0x7f, 0xff}}, {2, {0xc6, 0x06, 0xf5, 0xff}}}));
+    EXPECT_EQ(data.upper_bounds,
+        (std::map<std::int32_t, std::vector<std::uint8_t>>{{1, {0x00, 0x80, 0x00}}, {2, {0xa0, 0xc0, 0x2c, 0x00}}}));
+    EXPECT_EQ(data.split_offsets.size(), 3);
 }
 
 TEST_F(TAppendStagerTest, StagesRealManifestsWithoutPublishingTheTable)

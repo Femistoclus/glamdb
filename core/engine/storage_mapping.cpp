@@ -32,6 +32,10 @@ NGlamDB::EFieldType ToStorageType(FieldType type)
             return NGlamDB::EFieldType::Float64;
         case FieldType::TimestampUsUtc:
             return NGlamDB::EFieldType::TimestampUsUtc;
+        case FieldType::Decimal:
+            return NGlamDB::EFieldType::Decimal;
+        case FieldType::Date:
+            return NGlamDB::EFieldType::Date;
     }
     return NGlamDB::EFieldType{};
 }
@@ -64,6 +68,10 @@ arrow::Status AppendCell(TBuilder& builder, const Cell& cell, bool& mismatch)
     }
     if constexpr (std::is_same_v<TValue, TimestampUs>) {
         return builder.Append(value->value);
+    } else if constexpr (std::is_same_v<TValue, Decimal>) {
+        return builder.Append(arrow::Decimal128(value->coefficient_high, value->coefficient_low));
+    } else if constexpr (std::is_same_v<TValue, Date>) {
+        return builder.Append(value->days_since_epoch);
     } else {
         return builder.Append(*value);
     }
@@ -73,7 +81,7 @@ template <class TBuilder, class TValue>
 Result<std::shared_ptr<arrow::Array>>
 BuildTypedColumn(const FieldSpec& field, const std::vector<Row>& rows, size_t column, arrow::MemoryPool* pool)
 {
-    TBuilder builder(MakeArrowType(field.type), pool);
+    TBuilder builder(MakeArrowType(field), pool);
     if (const auto status = builder.Reserve(static_cast<int64_t>(rows.size())); !status.ok()) {
         return std::unexpected(ArrowError(status));
     }
@@ -112,6 +120,10 @@ BuildColumn(const FieldSpec& field, const std::vector<Row>& rows, size_t column,
             return BuildTypedColumn<arrow::DoubleBuilder, double>(field, rows, column, pool);
         case FieldType::TimestampUsUtc:
             return BuildTypedColumn<arrow::TimestampBuilder, TimestampUs>(field, rows, column, pool);
+        case FieldType::Decimal:
+            return BuildTypedColumn<arrow::Decimal128Builder, Decimal>(field, rows, column, pool);
+        case FieldType::Date:
+            return BuildTypedColumn<arrow::Date32Builder, Date>(field, rows, column, pool);
     }
     return std::unexpected(CellMismatch(0, column));
 }
@@ -123,7 +135,7 @@ NGlamDB::TSchemaSpec ToStorageSchema(const SchemaSpec& schema)
     NGlamDB::TSchemaSpec result;
     result.Fields.reserve(schema.fields.size());
     for (const auto& field : schema.fields) {
-        result.Fields.push_back({field.name, ToStorageType(field.type), field.nullable});
+        result.Fields.push_back({field.name, ToStorageType(field.type), field.nullable, field.precision, field.scale});
     }
     return result;
 }
@@ -141,8 +153,18 @@ std::shared_ptr<arrow::DataType> MakeArrowType(FieldType type)
             return arrow::float64();
         case FieldType::TimestampUsUtc:
             return arrow::timestamp(arrow::TimeUnit::MICRO, "UTC");
+        case FieldType::Date:
+            return arrow::date32();
+        case FieldType::Decimal:
+            return {};
     }
     return {};
+}
+
+std::shared_ptr<arrow::DataType> MakeArrowType(const FieldSpec& field)
+{
+    return field.type == FieldType::Decimal ? arrow::decimal128(field.precision, field.scale)
+                                            : MakeArrowType(field.type);
 }
 
 std::shared_ptr<arrow::Schema> MakeArrowSchema(const SchemaSpec& schema)
@@ -150,7 +172,7 @@ std::shared_ptr<arrow::Schema> MakeArrowSchema(const SchemaSpec& schema)
     std::vector<std::shared_ptr<arrow::Field>> fields;
     fields.reserve(schema.fields.size());
     for (const auto& field : schema.fields) {
-        fields.push_back(arrow::field(field.name, MakeArrowType(field.type), field.nullable));
+        fields.push_back(arrow::field(field.name, MakeArrowType(field), field.nullable));
     }
     return arrow::schema(std::move(fields));
 }
@@ -197,6 +219,12 @@ int64_t EstimateRecordBatchBytes(const SchemaSpec& schema, const std::vector<Row
             case FieldType::Bool:
                 total += bitmap;
                 break;
+            case FieldType::Decimal:
+                total += 16 * count;
+                break;
+            case FieldType::Date:
+                total += 4 * count;
+                break;
             case FieldType::Int64:
             case FieldType::Float64:
             case FieldType::TimestampUsUtc:
@@ -223,6 +251,12 @@ int64_t EstimateRecordBatchBytes(const SchemaSpec& schema, const arrow::RecordBa
             }
             case FieldType::Bool:
                 total += bitmap;
+                break;
+            case FieldType::Decimal:
+                total += 16 * count;
+                break;
+            case FieldType::Date:
+                total += 4 * count;
                 break;
             case FieldType::Int64:
             case FieldType::Float64:

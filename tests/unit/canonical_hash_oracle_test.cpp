@@ -60,6 +60,15 @@ std::string OracleHash(const SchemaSpec& schema, const std::vector<Row>& rows, s
                 case FieldType::TimestampUsUtc:
                     out.Number(std::get<TimestampUs>(cell).value);
                     break;
+                case FieldType::Decimal: {
+                    const auto& value = std::get<Decimal>(cell);
+                    out.Number(value.coefficient_low);
+                    out.Number(value.coefficient_high);
+                    break;
+                }
+                case FieldType::Date:
+                    out.Number(std::get<Date>(cell).days_since_epoch);
+                    break;
             }
         }
     }
@@ -168,6 +177,67 @@ std::vector<Row> Fixture()
     return rows;
 }
 
+const SchemaSpec ExtendedTypes{{{"key", FieldType::String, false},
+    {"amount", FieldType::Decimal, true, 38, 2},
+    {"fraction", FieldType::Decimal, true, 38, 38},
+    {"day", FieldType::Date, true},
+    {"omitted", FieldType::Decimal, true, 9, 4}}};
+
+std::vector<Row> ExtendedFixture()
+{
+    // Literal signed128 extrema for precision 38: +/- (10^38 - 1).
+    const Decimal minimum{std::bit_cast<int64_t>(0xb4c4b357a5793b85ULL), 0xf675ddc000000001ULL, 38, 2};
+    const Decimal maximum{0x4b3b4ca85a86c47aLL, 0x098a223fffffffffULL, 38, 2};
+    const Decimal fraction{maximum.coefficient_high, maximum.coefficient_low, 38, 38};
+    const Row duplicate{std::string("duplicate"),
+        Decimal{0, 12345, 38, 2},
+        Decimal{0, 1, 38, 38},
+        Date{-1},
+        std::monostate{}};
+    return {
+        {std::string("min"),
+            minimum,
+            Decimal{-1, std::numeric_limits<uint64_t>::max(), 38, 38},
+            Date{-719162},
+            std::monostate{}},
+        {std::string("max"), maximum, fraction, Date{2932896}, std::monostate{}},
+        {std::string("zero"), Decimal{0, 0, 38, 2}, Decimal{0, 0, 38, 38}, Date{0}, std::monostate{}},
+        {std::string("null"), std::monostate{}, std::monostate{}, std::monostate{}, std::monostate{}},
+        duplicate,
+        duplicate,
+    };
+}
+
+std::shared_ptr<arrow::RecordBatch> ExtendedArrow(const std::vector<Row>& rows)
+{
+    arrow::StringBuilder keys;
+    arrow::Decimal128Builder amounts(arrow::decimal128(38, 2), arrow::default_memory_pool());
+    arrow::Decimal128Builder fractions(arrow::decimal128(38, 38), arrow::default_memory_pool());
+    arrow::Date32Builder days;
+    for (const auto& row : rows) {
+        EXPECT_TRUE(keys.Append(std::get<std::string>(row[0])).ok());
+        const auto* amount = std::get_if<Decimal>(&row[1]);
+        EXPECT_TRUE((amount ? amounts.Append(arrow::Decimal128(amount->coefficient_high, amount->coefficient_low))
+                            : amounts.AppendNull())
+                        .ok());
+        const auto* fraction = std::get_if<Decimal>(&row[2]);
+        EXPECT_TRUE(
+            (fraction ? fractions.Append(arrow::Decimal128(fraction->coefficient_high, fraction->coefficient_low))
+                      : fractions.AppendNull())
+                .ok());
+        const auto* day = std::get_if<Date>(&row[3]);
+        EXPECT_TRUE((day ? days.Append(day->days_since_epoch) : days.AppendNull()).ok());
+    }
+    // Reordered input names and omitted nullable Decimal exercise mapping and
+    // parameter preservation independently of MakeRecordBatch.
+    return arrow::RecordBatch::Make(arrow::schema({arrow::field("fraction", arrow::decimal128(38, 38)),
+                                        arrow::field("day", arrow::date32()),
+                                        arrow::field("key", arrow::utf8(), false),
+                                        arrow::field("amount", arrow::decimal128(38, 2))}),
+        static_cast<int64_t>(rows.size()),
+        {Finish(fractions), Finish(days), Finish(keys), Finish(amounts)});
+}
+
 TEST(CanonicalHashOracle, HasherMatchesTheMaterializedEncoding)
 {
     std::mt19937_64 random(11);
@@ -265,6 +335,62 @@ TEST(CanonicalHashOracle, AllInputPathsMatchTheOracle)
         EXPECT_EQ(EstimateRecordBatchBytes(AllTypes, *normalized->Columns),
             EstimateRecordBatchBytes(AllTypes, fromRows->rows));
     }
+}
+
+TEST(CanonicalHashOracle, DecimalAndDateOwnedColumnsMatchTheMaterializedOracle)
+{
+    const auto rows = ExtendedFixture();
+    size_t decoded = 0;
+    const auto expected = OracleHash(ExtendedTypes, rows, &decoded);
+    EXPECT_EQ(decoded, 266U);
+    const auto fromRows = NormalizeRows(ExtendedTypes, CollectionID, rows);
+    ASSERT_TRUE(fromRows) << fromRows.error().message;
+    EXPECT_EQ(fromRows->payload_hash, expected);
+    EXPECT_EQ(fromRows->decoded_bytes, decoded);
+    const auto expectedBatch = MakeRecordBatch(ExtendedTypes, fromRows->rows);
+    ASSERT_TRUE(expectedBatch);
+
+    const auto batch = ExtendedArrow(rows);
+    const std::vector<std::vector<std::shared_ptr<arrow::RecordBatch>>> inputs{
+        {batch},
+        {batch->Slice(0, 1), batch->Slice(1, 3), batch->Slice(4, 2)},
+        {batch->Slice(0, 3), batch->Slice(3, 3)},
+    };
+    for (const auto& batches : inputs) {
+        SCOPED_TRACE(batches.size());
+        const auto fingerprint = FingerprintInput(ExtendedTypes, CollectionID, batches);
+        ASSERT_TRUE(fingerprint) << fingerprint.error().message;
+        EXPECT_EQ(fingerprint->PayloadHash, expected);
+        auto normalized = NormalizeBatches(ExtendedTypes, CollectionID, batches, fingerprint->Reservation);
+        ASSERT_TRUE(normalized) << normalized.error().message;
+        ASSERT_NE(normalized->Columns, nullptr);
+        EXPECT_TRUE(normalized->rows.empty());
+        EXPECT_EQ(normalized->GetRowCount(), rows.size());
+        EXPECT_EQ(normalized->payload_hash, expected);
+        EXPECT_EQ(normalized->decoded_bytes, decoded);
+        EXPECT_TRUE(normalized->Columns->schema()->Equals(*(*expectedBatch)->schema(), true));
+        EXPECT_TRUE(normalized->Columns->Equals(**expectedBatch));
+        EXPECT_TRUE(normalized->Columns->ValidateFull().ok());
+        // The same Decimal tag occurs at three different parameter pairs;
+        // missing input must retain decimal(9,4) as an all-NULL owned column.
+        EXPECT_TRUE(normalized->Columns->column(4)->type()->Equals(arrow::decimal128(9, 4)));
+        EXPECT_EQ(normalized->Columns->column(4)->null_count(), static_cast<int64_t>(rows.size()));
+        EXPECT_EQ(EstimateRecordBatchBytes(ExtendedTypes, *normalized->Columns),
+            EstimateRecordBatchBytes(ExtendedTypes, fromRows->rows));
+    }
+
+    // Caller buffer changes must not affect the owned Decimal/Date columns.
+    auto mutableBatch = ExtendedArrow(rows);
+    auto owned = NormalizeBatches(ExtendedTypes, CollectionID, {mutableBatch});
+    ASSERT_TRUE(owned) << owned.error().message;
+    for (const int column : {0, 1, 3}) {
+        auto buffer = mutableBatch->column(column)->data()->buffers[1];
+        ASSERT_TRUE(buffer->is_mutable());
+        buffer->mutable_data()[0] ^= 1;
+    }
+    mutableBatch.reset();
+    EXPECT_TRUE(owned->Columns->Equals(**expectedBatch));
+    EXPECT_EQ(owned->payload_hash, expected);
 }
 
 // NaN and infinities are rejected as before on every path.

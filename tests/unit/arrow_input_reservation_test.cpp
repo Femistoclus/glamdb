@@ -152,5 +152,47 @@ TEST(ArrowInputReservation, FingerprintInspectionYieldsTheSameReservation)
     EXPECT_EQ(invalid.error().retry_hint, RetryHint::FixInput);
 }
 
+TEST(ArrowInputReservation, NativeScalarNullAndOmittedSlotsCoverMeasuredWriterGrowth)
+{
+    for (const auto type : {FieldType::Decimal, FieldType::Date}) {
+        SchemaSpec schema;
+        for (int column = 0; column < 64; ++column) {
+            schema.fields.push_back({"v" + std::to_string(column),
+                type,
+                true,
+                type == FieldType::Decimal ? 38 : 0,
+                type == FieldType::Decimal ? 2 : 0});
+        }
+        const auto omitted =
+            arrow::RecordBatch::Make(arrow::schema({}), 10000, std::vector<std::shared_ptr<arrow::Array>>{});
+        const auto reservation = InputReservation(schema, {omitted});
+        ASSERT_TRUE(reservation);
+        arrow::ProxyMemoryPool ownedPool(arrow::default_memory_pool());
+        const auto normalized =
+            NormalizeBatches(schema, "00112233-4455-6677-8899-aabbccddeeff", {omitted}, std::nullopt, &ownedPool);
+        ASSERT_TRUE(normalized);
+        ASSERT_NE(normalized->Columns, nullptr);
+        EXPECT_EQ(normalized->GetRowCount(), 10000U);
+        arrow::ProxyMemoryPool pool(arrow::default_memory_pool());
+        const auto writer = CopyRecordBatch(*normalized->Columns, &pool);
+        ASSERT_TRUE(writer);
+        EXPECT_GE(*reservation, static_cast<size_t>(ownedPool.max_memory() + pool.max_memory()));
+        std::vector<Row> rows(10000, Row(schema.fields.size(), std::monostate{}));
+        const auto fromRows = NormalizeRows(schema, "00112233-4455-6677-8899-aabbccddeeff", rows);
+        ASSERT_TRUE(fromRows);
+        arrow::ProxyMemoryPool rowPool(arrow::default_memory_pool());
+        ASSERT_TRUE(MakeRecordBatch(schema, fromRows->rows, &rowPool));
+        size_t ownedBytes = fromRows->rows.capacity() * sizeof(Row);
+        for (const auto& row : fromRows->rows) {
+            ownedBytes += row.capacity() * sizeof(Cell);
+        }
+        EXPECT_GE(*reservation, ownedBytes + static_cast<size_t>(rowPool.max_memory()));
+        EXPECT_LE(*reservation, static_cast<size_t>(Limits{}.max_owned_input_bytes));
+        const auto explicitNulls = InputReservation(schema, {*writer});
+        ASSERT_TRUE(explicitNulls);
+        EXPECT_EQ(*explicitNulls, *reservation);
+    }
+}
+
 } // namespace
 } // namespace glamdb::detail

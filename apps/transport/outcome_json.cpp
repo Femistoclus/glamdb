@@ -199,7 +199,8 @@ std::string WriteSettingsJson(const WriteSettings& settings)
 
 std::string Collection(const CollectionInfo& collection)
 {
-    constexpr std::array<std::string_view, 5> types{"string", "bool", "int64", "float64", "timestamp_us_utc"};
+    constexpr std::array<std::string_view, 7>
+        types{"string", "bool", "int64", "float64", "timestamp_us_utc", "decimal", "date"};
     Object out;
     out.String("collection_id", collection.collection_id);
     out.String("name", collection.name);
@@ -220,6 +221,10 @@ std::string Collection(const CollectionInfo& collection)
         item.String("name", field.name);
         item.String("type", types[type - 1]);
         item.Add("nullable", field.nullable ? "true" : "false");
+        if (field.type == FieldType::Decimal) {
+            item.Add("precision", std::to_string(field.precision));
+            item.Add("scale", std::to_string(field.scale));
+        }
         fields += item.Finish();
     }
     fields += ']';

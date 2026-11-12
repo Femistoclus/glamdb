@@ -128,6 +128,8 @@ class MockStore:
         if body.get("mode", "append") != "append":
             raise MockError(422, "UNSUPPORTED_OPERATION", "only append collections are available")
         schema = normalize_schema(body.get("schema"))
+        if any(field['type'] in ('decimal', 'date') for field in schema['fields']):
+            raise MockError(422, 'UNSUPPORTED_OPERATION', 'native decimal/date types require the native backend')
         if cid in self.collections:
             existing = self.collections[cid]
             if existing.name == name and existing.schema == schema:

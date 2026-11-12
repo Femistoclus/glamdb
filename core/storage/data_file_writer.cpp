@@ -10,6 +10,7 @@
 #include <arrow/type.h>
 #include <arrow/util/byte_size.h>
 #include <arrow/util/compression.h>
+#include <arrow/util/decimal.h>
 #include <iceberg/file_io.h>
 #include <iceberg/file_writer.h>
 #include <iceberg/manifest/manifest_entry.h>
@@ -56,6 +57,15 @@ bool MatchesType(const iceberg::Type& expected, const arrow::DataType& actual)
             return actual.id() == arrow::Type::TIMESTAMP &&
                 static_cast<const arrow::TimestampType&>(actual).unit() == arrow::TimeUnit::MICRO &&
                 static_cast<const arrow::TimestampType&>(actual).timezone() == "UTC";
+        case iceberg::TypeId::kDecimal: {
+            const auto& decimal = static_cast<const iceberg::DecimalType&>(expected);
+            return actual.id() == arrow::Type::DECIMAL128 && decimal.precision() >= 1 && decimal.precision() <= 38 &&
+                decimal.scale() >= 0 && decimal.scale() <= decimal.precision() &&
+                static_cast<const arrow::Decimal128Type&>(actual).precision() == decimal.precision() &&
+                static_cast<const arrow::Decimal128Type&>(actual).scale() == decimal.scale();
+        }
+        case iceberg::TypeId::kDate:
+            return actual.id() == arrow::Type::DATE32;
         default:
             return false;
     }
@@ -67,7 +77,11 @@ CheckRow(const arrow::RecordBatch& batch, std::span<const iceberg::SchemaField> 
     std::int64_t size = 0;
     for (std::size_t column = 0; column < fields.size(); ++column) {
         const auto& array = *batch.column(static_cast<int>(column));
-        size += 1 + (array.type_id() == arrow::Type::STRING ? 4 : array.type_id() == arrow::Type::BOOL ? 1 : 8);
+        size += 1 +
+            (array.type_id() == arrow::Type::STRING || array.type_id() == arrow::Type::DATE32 ? 4
+                    : array.type_id() == arrow::Type::BOOL                                    ? 1
+                    : array.type_id() == arrow::Type::DECIMAL128                              ? 16
+                                                                                              : 8);
         if (array.IsNull(row)) {
             continue;
         }
@@ -92,6 +106,23 @@ CheckRow(const arrow::RecordBatch& batch, std::span<const iceberg::SchemaField> 
                 const auto value = static_cast<const arrow::TimestampArray&>(array).Value(row);
                 if (value < -62135596800000000LL || value > 253402300799999999LL) {
                     return iceberg::InvalidArgument("Timestamp is outside the supported UTC range.");
+                }
+                break;
+            }
+            case arrow::Type::DECIMAL128: {
+                const auto& decimalArray = static_cast<const arrow::Decimal128Array&>(array);
+                const auto& decimalType = static_cast<const arrow::Decimal128Type&>(*array.type());
+                const arrow::Decimal128 coefficient(decimalArray.GetValue(row));
+                const auto maximum = arrow::Decimal128::GetMaxValue(decimalType.precision());
+                if (coefficient < -maximum || coefficient > maximum) {
+                    return iceberg::InvalidArgument("Decimal value exceeds its declared precision.");
+                }
+                break;
+            }
+            case arrow::Type::DATE32: {
+                const auto days = static_cast<const arrow::Date32Array&>(array).Value(row);
+                if (days < -719162 || days > 2932896) {
+                    return iceberg::InvalidArgument("Date is outside the supported calendar range.");
                 }
                 break;
             }

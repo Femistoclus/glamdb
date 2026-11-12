@@ -19,6 +19,7 @@ namespace glamdb::detail {
 NGlamDB::TSchemaSpec ToStorageSchema(const SchemaSpec& schema);
 
 std::shared_ptr<arrow::DataType> MakeArrowType(FieldType type);
+std::shared_ptr<arrow::DataType> MakeArrowType(const FieldSpec& field);
 
 // The single Arrow representation of a fixed collection schema.
 std::shared_ptr<arrow::Schema> MakeArrowSchema(const SchemaSpec& schema);

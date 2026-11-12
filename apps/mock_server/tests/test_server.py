@@ -95,6 +95,19 @@ def test_create_exact_resolve_schema_and_idempotency(client):
     assert client.post("/collections", json={"collection_id": OTHER, "name": "exact Name", "schema": SCHEMA}).status_code == 409
 
 
+@pytest.mark.parametrize('field', [
+    {'name': 'amount', 'type': 'decimal', 'precision': 15, 'scale': 2},
+    {'name': 'day', 'type': 'date'},
+])
+def test_mock_rejects_native_only_types_before_binding_collection(client, field):
+    response = client.post('/collections', json={
+        'collection_id': CID, 'name': 'native_types', 'schema': {'fields': [field]}})
+    assert response.status_code == 422
+    assert response.json()['error']['code'] == 'UNSUPPORTED_OPERATION'
+    assert client.get(f'/collections/{CID}').status_code == 404
+    assert create(client)['collection_id'] == CID
+
+
 def test_append_preserves_duplicates_and_original_outcome_before_new_precondition(client):
     create(client)
     original = append(client, expected_snapshot=None)

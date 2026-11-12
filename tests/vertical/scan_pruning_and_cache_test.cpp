@@ -1018,6 +1018,13 @@ int CompareTestLiterals(const Literal& lhs, const Literal& rhs)
                 return 0;
             } else if constexpr (std::is_same_v<TA, TimestampUs>) {
                 return a.value < b.value ? -1 : (a.value > b.value ? 1 : 0);
+            } else if constexpr (std::is_same_v<TA, Decimal>) {
+                if (a.coefficient_high != b.coefficient_high) {
+                    return a.coefficient_high < b.coefficient_high ? -1 : 1;
+                }
+                return a.coefficient_low < b.coefficient_low ? -1 : (a.coefficient_low > b.coefficient_low ? 1 : 0);
+            } else if constexpr (std::is_same_v<TA, Date>) {
+                return a.days_since_epoch < b.days_since_epoch ? -1 : (a.days_since_epoch > b.days_since_epoch ? 1 : 0);
             } else if constexpr (std::is_same_v<TA, double>) {
                 const double na = (a == 0.0) ? 0.0 : a;
                 const double nb = (b == 0.0) ? 0.0 : b;

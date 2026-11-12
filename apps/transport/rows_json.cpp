@@ -1,5 +1,6 @@
 #include "apps/transport/codec.h"
 #include "apps/transport/utf8.h"
+#include "storage/scalars.h"
 
 #include <algorithm>
 #include <charconv>
@@ -9,6 +10,13 @@
 
 namespace glamdb::NTransport {
 namespace {
+std::string DecimalText(const arrow::Array& array, int64_t row)
+{
+    const auto& type = static_cast<const arrow::Decimal128Type&>(*array.type());
+    const arrow::Decimal128 coefficient(static_cast<const arrow::Decimal128Array&>(array).GetValue(row));
+    return FormatDecimal(Decimal{coefficient.high_bits(), coefficient.low_bits(), type.precision(), type.scale()});
+}
+
 std::string FormatTimestamp(int64_t micros)
 {
     const std::chrono::sys_time<std::chrono::microseconds> instant{std::chrono::microseconds(micros)};
@@ -54,6 +62,12 @@ TJson EncodeRow(const arrow::RecordBatch& batch, int64_t row)
             case arrow::Type::TIMESTAMP:
                 value = FormatTimestamp(static_cast<const arrow::TimestampArray&>(array).Value(row));
                 break;
+            case arrow::Type::DECIMAL128:
+                value = DecimalText(array, row);
+                break;
+            case arrow::Type::DATE32:
+                value = FormatDate(Date{static_cast<const arrow::Date32Array&>(array).Value(row)});
+                break;
             default:
                 throw TFailure({"INTERNAL", "unsupported output type", RetryHint::OperatorAction});
         }
@@ -77,6 +91,8 @@ public:
                 case arrow::Type::INT64:
                 case arrow::Type::DOUBLE:
                 case arrow::Type::TIMESTAMP:
+                case arrow::Type::DECIMAL128:
+                case arrow::Type::DATE32:
                     break;
                 default:
                     // EncodeRow encodes NULL cells of such columns and rejects values.
@@ -110,6 +126,12 @@ public:
                 case arrow::Type::TIMESTAMP:
                     column.Kind = EKind::Timestamp;
                     column.Int64 = static_cast<const arrow::TimestampArray&>(array).raw_values();
+                    break;
+                case arrow::Type::DECIMAL128:
+                    column.Kind = EKind::Decimal;
+                    break;
+                case arrow::Type::DATE32:
+                    column.Kind = EKind::Date;
                     break;
                 default:
                     break;
@@ -171,6 +193,16 @@ public:
                 case EKind::Timestamp:
                     AppendTimestamp(output, column.Int64[row]);
                     break;
+                case EKind::Decimal:
+                    output += '"';
+                    output += DecimalText(*column.Array, row);
+                    output += '"';
+                    break;
+                case EKind::Date:
+                    output += '"';
+                    output += FormatDate(Date{static_cast<const arrow::Date32Array&>(*column.Array).Value(row)});
+                    output += '"';
+                    break;
             }
         }
         output += '}';
@@ -184,6 +216,8 @@ private:
         Int64,
         Double,
         Timestamp,
+        Decimal,
+        Date,
     };
     struct TColumn
     {
@@ -299,6 +333,10 @@ TJson EncodeCell(const Cell& cell)
                 return std::to_string(value);
             } else if constexpr (std::is_same_v<T, TimestampUs>) {
                 return FormatTimestamp(value.value);
+            } else if constexpr (std::is_same_v<T, Decimal>) {
+                return FormatDecimal(value);
+            } else if constexpr (std::is_same_v<T, Date>) {
+                return FormatDate(value);
             } else {
                 return value;
             }

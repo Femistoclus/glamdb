@@ -125,6 +125,10 @@ std::optional<Literal> DecodeBoundOpt(const FieldSpec& spec, std::span<const uin
             }
             return Literal{TimestampUs{micros}};
         }
+        case FieldType::Decimal:
+        case FieldType::Date:
+            // These value bounds are not used for pruning; exact filtering validates the decoded values.
+            return std::nullopt;
     }
     return std::nullopt;
 }
@@ -156,6 +160,19 @@ int CompareTyped(FieldType type, const Literal& lhs, const Literal& rhs)
         case FieldType::TimestampUsUtc: {
             const auto a = std::get<TimestampUs>(lhs).value;
             const auto b = std::get<TimestampUs>(rhs).value;
+            return a < b ? -1 : (a > b ? 1 : 0);
+        }
+        case FieldType::Decimal: {
+            const auto& a = std::get<Decimal>(lhs);
+            const auto& b = std::get<Decimal>(rhs);
+            if (a.coefficient_high != b.coefficient_high) {
+                return a.coefficient_high < b.coefficient_high ? -1 : 1;
+            }
+            return a.coefficient_low < b.coefficient_low ? -1 : (a.coefficient_low > b.coefficient_low ? 1 : 0);
+        }
+        case FieldType::Date: {
+            const auto a = std::get<Date>(lhs).days_since_epoch;
+            const auto b = std::get<Date>(rhs).days_since_epoch;
             return a < b ? -1 : (a > b ? 1 : 0);
         }
     }
@@ -206,6 +223,9 @@ bool MatchesParquetColumnOrder(FieldType type, const parquet::SchemaDescriptor* 
             return descr->physical_type() == parquet::Type::INT64 && descr->sort_order() == parquet::SortOrder::SIGNED;
         case FieldType::Float64:
             return descr->physical_type() == parquet::Type::DOUBLE && descr->sort_order() == parquet::SortOrder::SIGNED;
+        case FieldType::Decimal:
+        case FieldType::Date:
+            return false;
     }
     return false;
 }
@@ -288,6 +308,12 @@ TZoneTruth EvalCompareZone(const TBoundOp& op, const TColumnZoneStats& stats, in
     const bool canHaveNonNull = !stats.NullCount.has_value() || *stats.NullCount < rowCount;
     TZoneTruth out{.CanBeTrue = false, .CanBeFalse = false, .CanBeUnknown = canHaveNull};
     if (!canHaveNonNull) {
+        return out;
+    }
+    if (op.Type == FieldType::Decimal || op.Type == FieldType::Date) {
+        // Counts still provide SQL NULL facts, but unsupported value bounds cannot exclude either outcome.
+        out.CanBeTrue = true;
+        out.CanBeFalse = true;
         return out;
     }
 
@@ -389,8 +415,9 @@ TZoneTruth EvalInZone(const TBoundOp& op, const TBoundInSet& set, const TColumnZ
         return out;
     }
 
-    const bool singleExactPoint = stats.LowerBound.has_value() && stats.UpperBound.has_value() && stats.LowerExact &&
-        stats.UpperExact && CompareTyped(op.Type, *stats.LowerBound, *stats.UpperBound) == 0;
+    const bool supportsValueBounds = op.Type != FieldType::Decimal && op.Type != FieldType::Date;
+    const bool singleExactPoint = supportsValueBounds && stats.LowerBound.has_value() && stats.UpperBound.has_value() &&
+        stats.LowerExact && stats.UpperExact && CompareTyped(op.Type, *stats.LowerBound, *stats.UpperBound) == 0;
 
     bool canMatch = false;
     bool canMiss = true;
@@ -451,6 +478,12 @@ TZoneTruth EvalInZone(const TBoundOp& op, const TBoundInSet& set, const TColumnZ
             EvalSortedInRange<int64_t>(set.Ints, lower, upper, singleExactPoint, false, canMatch, canMiss);
             break;
         }
+        case FieldType::Decimal:
+            canMatch = !set.Decimals.empty();
+            break;
+        case FieldType::Date:
+            canMatch = !set.Ints.empty();
+            break;
     }
 
     if (canMatch) {

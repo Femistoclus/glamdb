@@ -58,6 +58,8 @@ def receipt_schema(value):
             "name",
             "type",
             "nullable",
+            "precision",
+            "scale",
         }:
             raise ValueError()
         field = {
@@ -72,6 +74,14 @@ def receipt_schema(value):
             or not isinstance(field["name"], str)
             or not isinstance(field["type"], str)
         ):
+            raise ValueError()
+        if field['type'] == 'decimal':
+            precision, scale = item.get('precision'), item.get('scale')
+            if (type(precision) is not int or type(scale) is not int
+                    or not 1 <= precision <= 38 or not 0 <= scale <= precision):
+                raise ValueError()
+            field.update(precision=precision, scale=scale)
+        elif 'precision' in item or 'scale' in item:
             raise ValueError()
         normalized.append(field)
     return {"schema_id": schema_id, "fields": normalized}

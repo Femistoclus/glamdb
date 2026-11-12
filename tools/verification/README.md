@@ -31,7 +31,9 @@ The frozen public API exports `normalize_schema`, `normalize_rows`, `wire_rows`,
 `format_timestamp`, and `scan_rows`. Invalid input raises `ValueError`.
 
 `normalize_schema(schema)` returns an owned schema with `schema_id` defaulting
-to zero and fields `{field_id, name, type, nullable}`. Initial fixed-schema IDs
+to zero and fields `{field_id, name, type, nullable}`, plus required integer
+`precision` (1–38) and `scale` (0–precision) for decimal fields. These parameters
+are forbidden on every other type. Initial fixed-schema IDs
 must be consecutive in declaration order starting at one. It validates 1–64
 fields, unique UTF-8 names of at most 128 bytes, supported types, and the required
 string `key` rule. Omitted `nullable` defaults to false. This validates a complete
@@ -48,9 +50,20 @@ rejected. Float64 accepts JSON numeric integers as well as floats, without strin
 coercion, and normalizes negative zero. Key strings are at most 1024 UTF-8 bytes;
 other strings at most 1 MiB; a canonical decoded row at most 2 MiB.
 
+Decimal values normalize to `decimal.Decimal` and dates to `datetime.date`.
+Decimal inputs accept plain `-?[0-9]+(\.[0-9]+)?` text within 128 characters or
+finite Decimal objects whose exact plain expansion fits that bound. Textual
+exponents, float inputs, precision overflow, and any rescaling that discards
+nonzero digits are rejected. Formatting and coefficient calculation never use
+context-sensitive Decimal arithmetic. Dates require strict `YYYY-MM-DD` text
+or a Python date excluding datetime, in calendar years 0001–9999. Native Parquet
+readers produce these same Decimal/date objects, so normalized persisted values
+can be checked with the independent canonical encoder and predicate oracle.
+
 `wire_rows` converts int64 to decimal strings and timestamps to exactly six UTC
 fractional digits while retaining all field names. Wire a complete row with its
 complete schema before applying a reordered/empty projection.
+Decimal wire values are canonical fixed-scale strings; dates use ISO text.
 
 `parse_timestamp` uses integer calendar arithmetic, validates the UTC range after
 subtracting the offset, and never rounds. Years 0001–9999, negative epoch values,
@@ -67,8 +80,13 @@ presence bytes, string lengths, and encoded values, excluding the append header.
 `normalize_rows` has no append-wide cap so accumulated historical scan fixtures
 can exceed a single append. Canonical encoding has no sorting, deduplication,
 Unicode normalization, Arrow chunk boundaries, operation ID, or snapshot selector.
+Schemas containing decimal/date use schema version 2; old schemas retain v1
+exactly. Decimal cells contain a signed128 little-endian coefficient and date
+cells a signed32 little-endian count of days since 1970-01-01, after the presence
+byte. Their non-null canonical sizes are 17 and 5 bytes. Append/hash and ordinary
+append result receipts remain version 1; bulk result receipts use version 2.
 
-The checked-in JSON fixtures and adjacent `.hex` files cover all five types,
+The checked-in JSON fixtures and adjacent `.hex` files cover all seven types,
 min/max timestamps and int64 values, int64 above 2^53, nulls, UTF-8, negative zero,
 and duplicate rows. Their schema/row preimages were written explicitly and their
 digests computed with a separate `hashlib` calculation without importing this
@@ -76,6 +94,8 @@ package. Tests contain a second literal copy of the minimal vector, so changing
 the encoder cannot silently regenerate its expectation. The generator produces
 synthetic fixtures using an explicitly specified 32-bit LCG; a fixed seed/count
 produces identical JSON values without wall-clock time or random UUIDs.
+`decimal-date-boundaries` combines a legacy string field, signed 38-digit
+coefficients, both calendar date limits, negative decimal zero, and NULLs.
 
 `fixtures/metadata/file-metrics.json` supplies additional expected writer/manifest
 inputs: keys with a common ASCII prefix longer than 16 bytes, a 1024-byte UTF-8
@@ -107,6 +127,11 @@ UNKNOWN; only TRUE survives. Empty IN is FALSE for non-null and UNKNOWN for NULL
 IN containing NULL follows SQL 3VL. Strings use binary UTF-8 ordering, with no
 Unicode normalization. Tests exercise all nine AND/OR truth-table combinations,
 NOT, nullable IN, filter-only columns, projection, empty input, and limits.
+Decimal literals require `{type: "decimal", precision: p, scale: s, value: text}`
+with parameters equal to the field. Date literals require
+`{type: "date", value: "YYYY-MM-DD"}`. Typed NULL retains those parameters;
+raw NULL remains valid. Mismatched or missing parameters are rejected even for
+empty input and a zero scan limit.
 
 This is an independent expected-result oracle for a future engine. The current
 development mock deliberately reuses it as its evaluator. Mock tests therefore
@@ -115,7 +140,7 @@ do not constitute an independent comparison against a C++ scanner or pruning.
 ## Receipts, fault schedules, and evidence
 
 `validate_receipt` checks the full C-RESULT AppendResult shape, UUIDs, supported
-hash/receipt version, digest, exact counters, one-file append mode, and retained
+hash/receipt version, digest, exact counters, ordinary one-file or bounded bulk mode, and retained
 snapshot creation time in whole milliseconds. `canonical_receipt` is the
 controller's deterministic JSON serialization; it makes no claim to define the
 future engine's persisted receipt bytes.

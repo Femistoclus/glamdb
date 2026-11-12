@@ -29,16 +29,18 @@ struct TEncodingPolicy
 {
     ParquetEncoding Encoding;
     std::string_view Name;
-    std::array<bool, 5> Types; // String, Bool, Int64, Float64, TimestampUsUtc
+    std::array<bool, 7> Types; // String, Bool, Int64, Float64, TimestampUsUtc, Decimal, Date
 };
 
 constexpr std::array<TEncodingPolicy, 6> Encodings{{
-    {ParquetEncoding::Plain, "plain", {true, true, true, true, true}},
-    {ParquetEncoding::DeltaBinaryPacked, "delta_binary_packed", {false, false, true, false, true}},
-    {ParquetEncoding::DeltaLengthByteArray, "delta_length_byte_array", {true, false, false, false, false}},
-    {ParquetEncoding::DeltaByteArray, "delta_byte_array", {true, false, false, false, false}},
-    {ParquetEncoding::ByteStreamSplit, "byte_stream_split", {false, false, true, true, true}},
-    {ParquetEncoding::Rle, "rle", {false, true, false, false, false}},
+    {ParquetEncoding::Plain, "plain", {true, true, true, true, true, true, true}},
+    {ParquetEncoding::DeltaBinaryPacked, "delta_binary_packed", {false, false, true, false, true, false, true}},
+    {ParquetEncoding::DeltaLengthByteArray,
+        "delta_length_byte_array",
+        {true, false, false, false, false, false, false}},
+    {ParquetEncoding::DeltaByteArray, "delta_byte_array", {true, false, false, false, false, false, false}},
+    {ParquetEncoding::ByteStreamSplit, "byte_stream_split", {false, false, true, true, true, false, true}},
+    {ParquetEncoding::Rle, "rle", {false, true, false, false, false, false, false}},
 }};
 
 bool KnownEncoding(ParquetEncoding encoding)
@@ -54,7 +56,8 @@ bool KnownPolicy(DictionaryPolicy policy)
 bool Accepts(ParquetEncoding encoding, FieldType type)
 {
     const auto index = static_cast<size_t>(type) - 1;
-    return KnownEncoding(encoding) && index < 5 && Encodings[static_cast<size_t>(encoding) - 1].Types[index];
+    return KnownEncoding(encoding) && index < Encodings.front().Types.size() &&
+        Encodings[static_cast<size_t>(encoding) - 1].Types[index];
 }
 
 // Options of one settings level, in tag order.
@@ -462,11 +465,13 @@ std::vector<ParquetCodecCapability> ParquetCodecCapabilities()
 
 void AddEncodingCapabilities(EngineCapabilities& capabilities)
 {
-    constexpr std::array<FieldType, 5> types{FieldType::String,
+    constexpr std::array<FieldType, 7> types{FieldType::String,
         FieldType::Bool,
         FieldType::Int64,
         FieldType::Float64,
-        FieldType::TimestampUsUtc};
+        FieldType::TimestampUsUtc,
+        FieldType::Decimal,
+        FieldType::Date};
     for (const auto& policy : Encodings) {
         ParquetEncodingCapability encoding{policy.Encoding, {}};
         for (size_t index = 0; index < types.size(); ++index) {
@@ -479,7 +484,9 @@ void AddEncodingCapabilities(EngineCapabilities& capabilities)
     capabilities.dictionary_types = {FieldType::String,
         FieldType::Int64,
         FieldType::Float64,
-        FieldType::TimestampUsUtc};
+        FieldType::TimestampUsUtc,
+        FieldType::Decimal,
+        FieldType::Date};
     capabilities.min_dictionary_page_size_limit = MinDictionaryPageSizeLimit;
     capabilities.max_dictionary_page_size_limit = MaxDictionaryPageSizeLimit;
     capabilities.default_dictionary_page_size_limit = DefaultDictionaryPageSizeLimit;

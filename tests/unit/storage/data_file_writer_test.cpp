@@ -7,6 +7,7 @@
 
 #include <arrow/array.h>
 #include <arrow/array/builder_binary.h>
+#include <arrow/array/builder_decimal.h>
 #include <arrow/array/builder_primitive.h>
 #include <arrow/io/file.h>
 #include <arrow/record_batch.h>
@@ -14,14 +15,18 @@
 #include <arrow/type.h>
 #include <arrow/util/byte_size.h>
 #include <arrow/util/compression.h>
+#include <arrow/util/decimal.h>
 #include <gtest/gtest.h>
 #include <iceberg/manifest/manifest_entry.h>
 #include <iceberg/partition_spec.h>
+#include <iceberg/schema.h>
 #include <iceberg/sort_order.h>
 #include <iceberg/table_metadata.h>
+#include <iceberg/type.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/file_reader.h>
 #include <parquet/metadata.h>
+#include <parquet/schema.h>
 
 #include <algorithm>
 #include <array>
@@ -460,6 +465,249 @@ TEST_F(TDataFileWriterTest, ReadbackErrorInvalidatesDurableButUnverifiedFile)
     EXPECT_TRUE(Attempt_->Receipts().empty());
     EXPECT_FALSE(Attempt_->Record(Path_).Value().FormatVerified);
     EXPECT_FALSE(Latch_->IsSet());
+}
+
+class TDecimalDateWriterTest : public TDataFileWriterTest
+{
+protected:
+    void UseSchema(std::int32_t precision, std::int32_t scale, bool nullable = true)
+    {
+        const iceberg::Schema schema(
+            std::vector{iceberg::SchemaField(1, "amount", iceberg::decimal(precision, scale), nullable),
+                iceberg::SchemaField(2, "day", iceberg::date(), nullable)});
+        auto metadata = iceberg::TableMetadata::Make(schema,
+            *iceberg::PartitionSpec::Unpartitioned(),
+            *iceberg::SortOrder::Unsorted(),
+            Metadata_->location,
+            {{"write.metadata.metrics.default", "truncate(16)"}});
+        ASSERT_TRUE(metadata) << metadata.error().message;
+        Metadata_ = std::move(*metadata);
+    }
+
+    static std::shared_ptr<arrow::RecordBatch> NativeBatch(std::int32_t precision = 38,
+        std::int32_t scale = 2,
+        const std::vector<std::optional<std::string>>& amounts = {"129", "-128", std::nullopt, "32768", "-32769"},
+        const std::vector<std::optional<std::int32_t>>& days = {-719162, 2932896, std::nullopt, -1, 0})
+    {
+        const auto decimalType = arrow::decimal128(precision, scale);
+        arrow::Decimal128Builder decimals(decimalType, arrow::default_memory_pool());
+        arrow::Date32Builder dates;
+        for (const auto& value : amounts) {
+            EXPECT_TRUE((value ? decimals.Append(arrow::Decimal128(*value)) : decimals.AppendNull()).ok());
+        }
+        for (const auto& value : days) {
+            EXPECT_TRUE((value ? dates.Append(*value) : dates.AppendNull()).ok());
+        }
+        auto decimalArray = decimals.Finish();
+        auto dateArray = dates.Finish();
+        EXPECT_TRUE(decimalArray.ok());
+        EXPECT_TRUE(dateArray.ok());
+        return arrow::RecordBatch::Make(
+            arrow::schema({arrow::field("amount", decimalType), arrow::field("day", arrow::date32())}),
+            static_cast<std::int64_t>(amounts.size()),
+            {*decimalArray, *dateArray});
+    }
+};
+
+TEST_F(TDecimalDateWriterTest, WritesNativeLogicalTypesExactValuesAndSignedBoundsAcrossRowGroups)
+{
+    for (const auto precision : {9, 18, 38}) {
+        SCOPED_TRACE(precision);
+        ASSERT_NO_FATAL_FAILURE(UseSchema(precision, 2));
+        const auto batch = NativeBatch(precision);
+        TDataWriterLimits limits;
+        // DECIMAL128 uses 16 bytes, DATE uses four; each has one validity byte.
+        limits.MaxRowGroupBytes = 44;
+        const auto result = Write({batch->Slice(0, 1), batch->Slice(1)}, limits);
+        ASSERT_TRUE(result) << result.error().message;
+        EXPECT_EQ(GroupRows(), (std::vector<std::int64_t>{2, 2, 1}));
+        const auto& data = *result->DataFile;
+        EXPECT_EQ(data.lower_bounds.at(1), (std::vector<std::uint8_t>{0xff, 0x7f, 0xff}));
+        EXPECT_EQ(data.upper_bounds.at(1), (std::vector<std::uint8_t>{0x00, 0x80, 0x00}));
+        EXPECT_EQ(data.lower_bounds.at(2), (std::vector<std::uint8_t>{0xc6, 0x06, 0xf5, 0xff}));
+        EXPECT_EQ(data.upper_bounds.at(2), (std::vector<std::uint8_t>{0xa0, 0xc0, 0x2c, 0x00}));
+        const auto footer = Footer();
+        EXPECT_TRUE(footer->schema()->Column(0)->logical_type()->Equals(*parquet::LogicalType::Decimal(precision, 2)));
+        EXPECT_TRUE(footer->schema()->Column(1)->logical_type()->Equals(*parquet::LogicalType::Date()));
+        EXPECT_EQ(footer->schema()->Column(0)->physical_type(),
+            precision == 9        ? parquet::Type::INT32
+                : precision == 18 ? parquet::Type::INT64
+                                  : parquet::Type::FIXED_LEN_BYTE_ARRAY);
+        EXPECT_EQ(footer->schema()->Column(1)->physical_type(), parquet::Type::INT32);
+        for (int column = 0; column < 2; ++column) {
+            EXPECT_EQ(footer->schema()->Column(column)->schema_node()->field_id(), column + 1);
+            EXPECT_EQ(data.value_counts.at(column + 1), 5);
+            EXPECT_EQ(data.null_value_counts.at(column + 1), 1);
+            std::int64_t compressed = 0;
+            for (int group = 0; group < footer->num_row_groups(); ++group) {
+                compressed += footer->RowGroup(group)->ColumnChunk(column)->total_compressed_size();
+            }
+            EXPECT_EQ(data.column_sizes.at(column + 1), compressed);
+        }
+        const auto actual = ReadBack();
+        ASSERT_NE(actual, nullptr);
+        EXPECT_TRUE(actual->field(0)->type()->Equals(batch->column(0)->type()));
+        EXPECT_TRUE(actual->field(1)->type()->Equals(arrow::date32()));
+        EXPECT_TRUE(actual->column(0)->Equals(*std::make_shared<arrow::ChunkedArray>(batch->column(0))));
+        EXPECT_TRUE(actual->column(1)->Equals(*std::make_shared<arrow::ChunkedArray>(batch->column(1))));
+        TearDown();
+        SetUp();
+    }
+}
+
+TEST_F(TDecimalDateWriterTest, PreservesFullDecimal128PrecisionAndMaximumScale)
+{
+    for (const auto scale : {0, 38}) {
+        ASSERT_NO_FATAL_FAILURE(UseSchema(38, scale));
+        const auto batch = NativeBatch(38,
+            scale,
+            {"-99999999999999999999999999999999999999", "99999999999999999999999999999999999999"},
+            {-719162, 2932896});
+        const auto result = Write({batch});
+        ASSERT_TRUE(result) << result.error().message;
+        const auto& data = *result->DataFile;
+        const auto lower = arrow::Decimal128::FromBigEndian(data.lower_bounds.at(1).data(),
+            static_cast<std::int32_t>(data.lower_bounds.at(1).size()));
+        const auto upper = arrow::Decimal128::FromBigEndian(data.upper_bounds.at(1).data(),
+            static_cast<std::int32_t>(data.upper_bounds.at(1).size()));
+        ASSERT_TRUE(lower.ok());
+        ASSERT_TRUE(upper.ok());
+        EXPECT_EQ(lower->ToIntegerString(), "-99999999999999999999999999999999999999");
+        EXPECT_EQ(upper->ToIntegerString(), "99999999999999999999999999999999999999");
+        const auto actual = ReadBack();
+        ASSERT_NE(actual, nullptr);
+        EXPECT_TRUE(actual->column(0)->Equals(*std::make_shared<arrow::ChunkedArray>(batch->column(0))));
+        TearDown();
+        SetUp();
+    }
+}
+
+TEST_F(TDecimalDateWriterTest, AllNullColumnsHaveCountsAndNoBounds)
+{
+    ASSERT_NO_FATAL_FAILURE(UseSchema(38, 2));
+    const auto result = Write({NativeBatch(38, 2, {std::nullopt, std::nullopt}, {std::nullopt, std::nullopt})});
+    ASSERT_TRUE(result) << result.error().message;
+    for (int id = 1; id <= 2; ++id) {
+        EXPECT_EQ(result->DataFile->value_counts.at(id), 2);
+        EXPECT_EQ(result->DataFile->null_value_counts.at(id), 2);
+        EXPECT_FALSE(result->DataFile->lower_bounds.contains(id));
+        EXPECT_FALSE(result->DataFile->upper_bounds.contains(id));
+    }
+}
+
+TEST_F(TDecimalDateWriterTest, RejectsInexactSchemaPrecisionScaleOverflowAndInvalidCalendarDaysBeforeIo)
+{
+    ASSERT_NO_FATAL_FAILURE(UseSchema(9, 2));
+    for (const auto& batch : {NativeBatch(9, 3),
+             NativeBatch(8, 2),
+             NativeBatch(10, 2),
+             NativeBatch(9, 2, {"1000000000"}, {0}),
+             NativeBatch(9, 2, {"-1000000000"}, {0}),
+             NativeBatch(9, 2, {"1"}, {-719163}),
+             NativeBatch(9, 2, {"1"}, {2932897})})
+    {
+        EXPECT_FALSE(Write({batch}));
+        EXPECT_TRUE(Attempt_->Receipts().empty());
+    }
+    ASSERT_NO_FATAL_FAILURE(UseSchema(38, 2, false));
+    EXPECT_FALSE(Write({NativeBatch()}));
+    for (const auto& coefficient :
+        {"100000000000000000000000000000000000000", "-100000000000000000000000000000000000000"})
+    {
+        EXPECT_FALSE(Write({NativeBatch(38, 2, {coefficient}, {0})}));
+    }
+    EXPECT_EQ(CountEvents(NTesting::EIOOp::CreateExclusive), 0);
+}
+
+TEST_F(TDecimalDateWriterTest, FooterValidationRejectsWrongDecimalParametersAndDateTypes)
+{
+    ASSERT_NO_FATAL_FAILURE(UseSchema(38, 2));
+    const auto result = Write({NativeBatch()});
+    ASSERT_TRUE(result) << result.error().message;
+    auto file = IO_->NewInputFile(Path_);
+    ASSERT_TRUE(file);
+    for (const auto& type : std::array<std::shared_ptr<iceberg::Type>, 3>{iceberg::decimal(37, 2),
+             iceberg::decimal(38, 3),
+             iceberg::string()})
+    {
+        const iceberg::Schema wrong({iceberg::SchemaField::MakeOptional(1, "amount", type),
+            iceberg::SchemaField::MakeOptional(2, "day", iceberg::date())});
+        EXPECT_FALSE(CheckParquet(**file, wrong, {result->DataFile->file_size_in_bytes, 5}));
+    }
+    const iceberg::Schema wrongDate({iceberg::SchemaField::MakeOptional(1, "amount", iceberg::decimal(38, 2)),
+        iceberg::SchemaField::MakeOptional(2, "day", iceberg::int32())});
+    EXPECT_FALSE(CheckParquet(**file, wrongDate, {result->DataFile->file_size_in_bytes, 5}));
+}
+
+TEST_F(TDecimalDateWriterTest, RejectsMinimumPhysicalCoefficientOutsideDecimal128Precision)
+{
+    ASSERT_NO_FATAL_FAILURE(UseSchema(38, 2));
+    arrow::Decimal128Builder amounts(arrow::decimal128(38, 2), arrow::default_memory_pool());
+    ASSERT_TRUE(amounts.Append(arrow::Decimal128(std::numeric_limits<std::int64_t>::min(), 0)).ok());
+    arrow::Date32Builder days;
+    ASSERT_TRUE(days.Append(0).ok());
+    const auto amountArray = amounts.Finish();
+    const auto dayArray = days.Finish();
+    ASSERT_TRUE(amountArray.ok());
+    ASSERT_TRUE(dayArray.ok());
+    const auto batch = arrow::RecordBatch::Make(
+        arrow::schema({arrow::field("amount", arrow::decimal128(38, 2)), arrow::field("day", arrow::date32())}),
+        1,
+        {*amountArray, *dayArray});
+    EXPECT_FALSE(Write({batch}));
+    EXPECT_EQ(CountEvents(NTesting::EIOOp::CreateExclusive), 0);
+}
+
+TEST_F(TDecimalDateWriterTest, AppliesNativePlainAndDateIntegerEncodingsWithExactRoundTrip)
+{
+    for (const auto precision : {9, 18, 38}) {
+        for (const auto encoding :
+            {parquet::Encoding::PLAIN, parquet::Encoding::DELTA_BINARY_PACKED, parquet::Encoding::BYTE_STREAM_SPLIT})
+        {
+            ASSERT_NO_FATAL_FAILURE(UseSchema(precision, 2));
+            const auto batch = NativeBatch(precision);
+            const auto result = Write({batch},
+                {},
+                {.Dictionary = false,
+                    .Columns = {{.Name = "amount", .Encoding = parquet::Encoding::PLAIN},
+                        {.Name = "day", .Encoding = encoding}}});
+            ASSERT_TRUE(result) << result.error().message;
+            const auto footer = Footer();
+            for (int column = 0; column < 2; ++column) {
+                const auto chunk = footer->RowGroup(0)->ColumnChunk(column);
+                EXPECT_FALSE(chunk->has_dictionary_page());
+                for (const auto& stats : chunk->encoding_stats()) {
+                    if (stats.page_type != parquet::PageType::DICTIONARY_PAGE && stats.count > 0) {
+                        EXPECT_EQ(stats.encoding, column == 0 ? parquet::Encoding::PLAIN : encoding);
+                    }
+                }
+            }
+            const auto actual = ReadBack();
+            ASSERT_NE(actual, nullptr);
+            for (int column = 0; column < 2; ++column) {
+                EXPECT_TRUE(
+                    actual->column(column)->Equals(*std::make_shared<arrow::ChunkedArray>(batch->column(column))));
+            }
+            TearDown();
+            SetUp();
+        }
+    }
+}
+
+TEST_F(TDecimalDateWriterTest, AppliesNativeDictionaryOverridesForEveryDecimalPhysicalType)
+{
+    for (const auto precision : {9, 18, 38}) {
+        ASSERT_NO_FATAL_FAILURE(UseSchema(precision, 2));
+        const auto result = Write({NativeBatch(precision)},
+            {},
+            {.Dictionary = false, .Columns = {{.Name = "amount", .Dictionary = true}}});
+        ASSERT_TRUE(result) << result.error().message;
+        const auto footer = Footer();
+        EXPECT_TRUE(footer->RowGroup(0)->ColumnChunk(0)->has_dictionary_page());
+        EXPECT_FALSE(footer->RowGroup(0)->ColumnChunk(1)->has_dictionary_page());
+        TearDown();
+        SetUp();
+    }
 }
 
 // Optional payload strings up to 1 MiB, next to the required key.

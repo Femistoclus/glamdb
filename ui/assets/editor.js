@@ -17,7 +17,7 @@ export function writeEditor(schema, draft, operation, collectionId, labels = {})
                         const control =
                             field.type === 'bool'
                                 ? `<select id="${id}" data-write-value ${disabled} aria-label="${e(field.name)} row ${index + 1}"><option value="true" ${value === true || value === 'true' ? 'selected' : ''}>true</option><option value="false" ${value !== true && value !== 'true' ? 'selected' : ''}>false</option></select>`
-                                : `<input id="${id}" data-write-value type="text" ${field.type === 'int64' || field.type === 'float64' ? 'inputmode="decimal"' : ''} value="${e(value ?? '')}" ${disabled} aria-label="${e(field.name)} row ${index + 1}" placeholder="${field.type === 'timestamp_us_utc' ? '2026-11-11T12:00:00.000000Z' : e(field.name)}">`;
+                                : `<input id="${id}" data-write-value type="text" ${['int64', 'float64', 'decimal'].includes(field.type) ? 'inputmode="decimal"' : ''} value="${e(value ?? '')}" ${disabled} aria-label="${e(field.name)} row ${index + 1}" placeholder="${field.type === 'timestamp_us_utc' ? '2026-11-11T12:00:00.000000Z' : field.type === 'date' ? 'YYYY-MM-DD' : e(field.name)}">`;
                         return `<div class="write-field" data-field="${e(field.name)}"><label for="${id}">${e(field.name)} <span class="field-type">${e(field.type)}</span></label><div class="write-value">${control}${field.nullable ? `<label class="null-toggle"><input type="checkbox" data-write-null ${isNull ? 'checked' : ''} ${frozen ? 'disabled' : ''} aria-label="${e(field.name)} row ${index + 1} NULL">NULL</label>` : ''}</div></div>`;
                     })
                     .join('')}</fieldset>`,

@@ -88,18 +88,29 @@ const NATIVE = {
         encodings: [
             {
                 encoding: 'plain',
-                types: ['string', 'bool', 'int64', 'float64', 'timestamp_us_utc'],
+                types: [
+                    'string',
+                    'bool',
+                    'int64',
+                    'float64',
+                    'timestamp_us_utc',
+                    'decimal',
+                    'date',
+                ],
             },
-            { encoding: 'delta_binary_packed', types: ['int64', 'timestamp_us_utc'] },
+            { encoding: 'delta_binary_packed', types: ['int64', 'timestamp_us_utc', 'date'] },
             { encoding: 'delta_length_byte_array', types: ['string'] },
             { encoding: 'delta_byte_array', types: ['string'] },
-            { encoding: 'byte_stream_split', types: ['int64', 'float64', 'timestamp_us_utc'] },
+            {
+                encoding: 'byte_stream_split',
+                types: ['int64', 'float64', 'timestamp_us_utc', 'date'],
+            },
             { encoding: 'rle', types: ['bool'] },
         ],
         dictionary: {
             policies: ['auto', 'enabled', 'disabled'],
             default_policy: 'auto',
-            types: ['string', 'int64', 'float64', 'timestamp_us_utc'],
+            types: ['string', 'int64', 'float64', 'timestamp_us_utc', 'decimal', 'date'],
             fallback_encoding: 'plain',
             page_size_limit: { min: 4096, max: 8388608, default: 1048576 },
         },
@@ -265,7 +276,7 @@ test('controls are enabled only by an advertised feature and valid codec list', 
             codecs: [{ codec: 'future', level: null }, ...NATIVE.parquet.codecs.slice(0, 2)],
             encodings: [
                 { encoding: 'future', types: ['string'] },
-                { encoding: 'plain', types: ['string', 'decimal'] },
+                { encoding: 'plain', types: ['string', 'binary'] },
             ],
         },
     });
@@ -314,6 +325,14 @@ test('column choices are filtered by type from capabilities', () => {
     assert.deepEqual(options('bool'), {
         encodings: ['plain', 'rle'],
         dictionaries: ['auto', 'disabled'],
+    });
+    assert.deepEqual(options('decimal'), {
+        encodings: ['plain'],
+        dictionaries: ['auto', 'enabled', 'disabled'],
+    });
+    assert.deepEqual(options('date'), {
+        encodings: ['plain', 'delta_binary_packed', 'byte_stream_split'],
+        dictionaries: ['auto', 'enabled', 'disabled'],
     });
     assert.deepEqual(
         model.columnParquetOptions(model.parquetCapabilities(COMPRESSION_ONLY), 'int64'),

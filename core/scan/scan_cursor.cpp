@@ -3,6 +3,7 @@
 
 #include "core/api/binary.h"
 #include "core/api/canonical.h"
+#include "core/api/scalar_validation.h"
 #include "core/engine/storage_mapping.h"
 #include "core/scan/metadata_cache.h"
 #include "core/scan/parquet_input.h"
@@ -121,6 +122,26 @@ void ValidateColumn(const FieldSpec& field, const arrow::Array& array)
         case FieldType::Bool:
         case FieldType::Int64:
             break;
+        case FieldType::Decimal: {
+            const auto& values = static_cast<const arrow::Decimal128Array&>(array);
+            for (int64_t row = 0; row < values.length(); ++row) {
+                if (!values.IsNull(row) &&
+                    !FitsDecimalPrecision(arrow::Decimal128(values.GetValue(row)), field.precision))
+                {
+                    Fail("CORRUPTION", "read Parquet batch", "stored decimal exceeds its precision");
+                }
+            }
+            break;
+        }
+        case FieldType::Date: {
+            const auto& values = static_cast<const arrow::Date32Array&>(array);
+            for (int64_t row = 0; row < values.length(); ++row) {
+                if (!values.IsNull(row) && (values.Value(row) < -719162 || values.Value(row) > 2932896)) {
+                    Fail("CORRUPTION", "read Parquet batch", "stored date is outside the supported range");
+                }
+            }
+            break;
+        }
     }
 }
 
@@ -701,7 +722,7 @@ private:
         if (!array) {
             Fail("CORRUPTION", "read Parquet batch", "batch lacks a requested column");
         }
-        const auto expected = MakeArrowType(spec.type);
+        const auto expected = MakeArrowType(spec);
         if (!array->type()->Equals(*expected)) {
             const bool sameTimestamp = expected->id() == arrow::Type::TIMESTAMP &&
                 array->type_id() == arrow::Type::TIMESTAMP &&

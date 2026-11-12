@@ -28,6 +28,40 @@ CREATE_FAILURE = {
 }
 
 
+@pytest.mark.parametrize('mismatch', [None, 'precision', 'scale'])
+def test_native_decimal_create_receipt_preserves_parameters(setup, mismatch):
+    app, path, _, _, own, _, seen = setup
+    payload = {
+        'collection_id': str(uuid4()), 'name': 'exact_amounts',
+        'schema': {'fields': [
+            {'name': 'amount', 'type': 'decimal', 'precision': 15, 'scale': 2},
+            {'name': 'day', 'type': 'date', 'nullable': True}]}}
+    schema = deepcopy(payload['schema'])
+    schema['schema_id'] = 0
+    for index, field in enumerate(schema['fields'], 1):
+        field['field_id'] = index
+        field.setdefault('nullable', False)
+    if mismatch:
+        schema['fields'][0][mismatch] += 1
+    outcome = {'collection_id': payload['collection_id'], 'name': payload['name'],
+               'schema': schema, 'mode': 'append', 'current_snapshot_id': None}
+
+    async def backend(request):
+        seen.append(request)
+        assert json.loads(request.content) == payload
+        return httpx.Response(201, json=outcome)
+
+    app.app.state.gateway.backend_transport = httpx.MockTransport(backend)
+    with TestClient(app, base_url='https://testserver') as client:
+        response = client.post(f'/databases/{own}/collections',
+            headers={'Authorization': 'Bearer valid'}, json=payload)
+        assert response.status_code == 201
+        assert response.json() == outcome
+    with ResourceCatalog(path) as catalog:
+        assert len(catalog.unresolved(own)) == (0 if mismatch is None else 1)
+    assert len(seen) == 1
+
+
 @pytest.mark.parametrize("kind", ["create", "append"])
 def test_noncanonical_original_write_identity_never_reaches_backend(setup, kind):
     app, path, _, _, own, _, seen = setup

@@ -1,5 +1,6 @@
 #include "metadata.h"
 #include "apps/transport/outcome_json.h"
+#include "storage/scalars.h"
 
 #include <arrow/util/utf8.h>
 
@@ -82,13 +83,14 @@ TJson BinaryHex(const TBound& bound)
     }
     return result;
 }
-TJson DecodeBound(const TBound& bound, FieldType type)
+TJson DecodeBound(const TBound& bound, const FieldSpec& field, std::string_view encoding)
 {
     if (!bound) {
         return nullptr;
     }
-    // Supported Iceberg single values and Parquet statistics share these scalar
-    // encodings. Their provenance and original bytes remain separate on the wire.
+    // Integer-backed Parquet decimals use little endian; Iceberg decimal bounds
+    // and fixed-byte Parquet decimals use signed big endian.
+    const auto type = field.type;
     if (type == FieldType::String) {
         const std::string text(bound->begin(), bound->end());
         static std::once_flag Utf8;
@@ -97,6 +99,44 @@ TJson DecodeBound(const TBound& bound, FieldType type)
     }
     if (type == FieldType::Bool) {
         return bound->size() == 1 && bound->front() <= 1 ? TJson(bound->front() != 0) : TJson(nullptr);
+    }
+    if (type == FieldType::Decimal) {
+        if (bound->empty() || bound->size() > 16) {
+            return nullptr;
+        }
+        arrow::Result<arrow::Decimal128> coefficient = arrow::Status::Invalid("Invalid decimal bound.");
+        if (encoding == "parquet-plain" && field.precision <= 18) {
+            const auto width = field.precision <= 9 ? size_t{4} : size_t{8};
+            if (bound->size() != width) {
+                return nullptr;
+            }
+            uint64_t bits = 0;
+            for (size_t index = 0; index < width; ++index) {
+                bits |= static_cast<uint64_t>((*bound)[index]) << (8 * index);
+            }
+            const auto value = width == 4 ? static_cast<int64_t>(std::bit_cast<int32_t>(static_cast<uint32_t>(bits)))
+                                          : std::bit_cast<int64_t>(bits);
+            coefficient = arrow::Decimal128(value);
+        } else {
+            coefficient = arrow::Decimal128::FromBigEndian(bound->data(), static_cast<int32_t>(bound->size()));
+        }
+        if (!coefficient.ok()) {
+            return nullptr;
+        }
+        const auto text =
+            FormatDecimal(Decimal{coefficient->high_bits(), coefficient->low_bits(), field.precision, field.scale});
+        return ParseDecimal(text, field.precision, field.scale) ? TJson(text) : TJson(nullptr);
+    }
+    if (type == FieldType::Date) {
+        if (bound->size() != 4) {
+            return nullptr;
+        }
+        uint32_t bits = 0;
+        for (size_t i = 0; i < bound->size(); ++i) {
+            bits |= static_cast<uint32_t>((*bound)[i]) << (8 * i);
+        }
+        const auto days = std::bit_cast<int32_t>(bits);
+        return days >= -719162 && days <= 2932896 ? TJson(FormatDate(Date{days})) : TJson(nullptr);
     }
     if (bound->size() != 8) {
         return nullptr;
@@ -126,19 +166,24 @@ TJson FieldStatistics(int32_t fieldID,
         "metadata contains an unknown field ID",
         "CORRUPTION");
     const auto& field = schema.fields[static_cast<size_t>(fieldID) - 1];
-    const std::array names{"string", "bool", "int64", "float64", "timestamp_us_utc"};
-    return {{"field_id", fieldID},
+    const std::array names{"string", "bool", "int64", "float64", "timestamp_us_utc", "decimal", "date"};
+    TJson result{{"field_id", fieldID},
         {"name", field.name},
         {"type", names.at(static_cast<size_t>(field.type) - 1)},
         {"nullable", field.nullable},
         {"distinct_count", nullptr},
-        {"lower_bound", DecodeBound(lower, field.type)},
-        {"upper_bound", DecodeBound(upper, field.type)},
+        {"lower_bound", DecodeBound(lower, field, encoding)},
+        {"upper_bound", DecodeBound(upper, field, encoding)},
         {"lower_bound_hex", BinaryHex(lower)},
         {"upper_bound_hex", BinaryHex(upper)},
         {"bound_encoding", encoding},
         {"lower_bound_exact", nullptr},
         {"upper_bound_exact", nullptr}};
+    if (field.type == FieldType::Decimal) {
+        result["precision"] = field.precision;
+        result["scale"] = field.scale;
+    }
+    return result;
 }
 TJson ManifestMetrics(const std::vector<TFileFieldMetrics>& fields, const SchemaSpec& schema)
 {

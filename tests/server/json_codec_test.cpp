@@ -514,6 +514,77 @@ TEST(JsonAppendParser, MatchesDomPathForHandWrittenBodies)
     }
 }
 
+TEST(JsonNativeScalars, DecimalAndDateSchemaAndExactRows)
+{
+    const auto wireSchema = ParseJson(R"({"fields":[{"name":"key","type":"string"},
+        {"name":"amount","type":"decimal","precision":38,"scale":4,"nullable":true},
+        {"name":"day","type":"date","nullable":true}]})");
+    const auto schema = ParseSchema(wireSchema);
+    const auto body = Body(R"([{"key":"a","amount":"9999999999999999999999999999999999.9999","day":"0001-01-01"},
+        {"key":"b","amount":"-000123.450000","day":"2000-02-29"},
+        {"key":"c","amount":"-00.00000","day":"9999-12-31"},{"key":"d"}])");
+    ExpectSameParse(schema, body);
+    const auto parsed = ParseNew(schema, body);
+    ASSERT_TRUE(parsed.Error.empty()) << parsed.Error;
+    ASSERT_TRUE(parsed.Batch);
+    EXPECT_TRUE(parsed.Batch->column(1)->type()->Equals(arrow::decimal128(38, 4)));
+    EXPECT_TRUE(parsed.Batch->column(2)->type()->Equals(arrow::date32()));
+    EXPECT_EQ(EncodeSchema(*parsed.Batch->schema())["fields"][1]["precision"], 38);
+    EXPECT_EQ(EncodeSchema(*parsed.Batch->schema())["fields"][1]["scale"], 4);
+    const auto encoded = EncodeRows(*parsed.Batch);
+    EXPECT_EQ(encoded[0]["amount"], "9999999999999999999999999999999999.9999");
+    EXPECT_EQ(encoded[1]["amount"], "-123.4500");
+    EXPECT_EQ(encoded[2]["amount"], "0.0000");
+    EXPECT_EQ(encoded[3]["amount"], nullptr);
+    EXPECT_EQ(encoded[0]["day"], "0001-01-01");
+    EXPECT_EQ(encoded[2]["day"], "9999-12-31");
+    ExpectSameEncodingOfSlices(parsed.Batch);
+}
+
+TEST(JsonNativeScalars, RejectsInvalidParametersAndInexactValues)
+{
+    for (const auto& field : {R"({"name":"n","type":"decimal"})",
+             R"({"name":"n","type":"decimal","precision":0,"scale":0})",
+             R"({"name":"n","type":"decimal","precision":39,"scale":0})",
+             R"({"name":"n","type":"decimal","precision":8,"scale":9})",
+             R"({"name":"n","type":"decimal","precision":8.0,"scale":2})",
+             R"({"name":"n","type":"date","precision":8,"scale":2})"})
+    {
+        EXPECT_THROW(ParseSchema(ParseJson(std::string("{\"fields\":[") + field + "]}")), TFailure);
+    }
+    const auto schema = ParseSchema(ParseJson(R"({"fields":[{"name":"key","type":"string"},
+        {"name":"n","type":"decimal","precision":8,"scale":2},{"name":"d","type":"date"}]})"));
+    for (const TJson& value : {TJson("+1"),
+             TJson("1e2"),
+             TJson(" 1"),
+             TJson("1."),
+             TJson(".1"),
+             TJson("1.001"),
+             TJson("1000000"),
+             TJson(std::string(129, '0')),
+             TJson(1.5)})
+    {
+        const auto body = Body(TJson::array({{{"key", "k"}, {"n", value}, {"d", "2026-11-12"}}}).dump());
+        ExpectSameParse(schema, body);
+        EXPECT_FALSE(ParseNew(schema, body).Error.empty());
+    }
+    for (const auto* value : {"0000-01-01", "1900-02-29", "2026-04-31", "2026-11-12T00:00:00Z", "2026-1-01"}) {
+        const auto body = Body(TJson::array({{{"key", "k"}, {"n", "1"}, {"d", value}}}).dump());
+        ExpectSameParse(schema, body);
+        EXPECT_FALSE(ParseNew(schema, body).Error.empty());
+    }
+    EXPECT_NO_THROW(ParseScan("c", schema, ParseJson(R"({"predicate":{"op":"eq","field":"n",
+        "value":{"type":"decimal","precision":8,"scale":2,"value":"1.00"}}})")));
+    EXPECT_NO_THROW(ParseScan("c", schema, ParseJson(R"({"predicate":{"op":"eq","field":"d",
+        "value":{"type":"date","value":null}}})")));
+    EXPECT_THROW(ParseScan("c", schema, ParseJson(R"({"predicate":{"op":"eq","field":"n",
+        "value":{"type":"decimal","precision":7,"scale":2,"value":"1.00"}}})")),
+        TFailure);
+    EXPECT_THROW(ParseScan("c", schema, ParseJson(R"({"predicate":{"op":"eq","field":"d",
+        "value":"2026-11-12"}})")),
+        TFailure);
+}
+
 TEST(JsonAppendParser, MatchesDomPathAtRowAndComplexityLimits)
 {
     const SchemaSpec schema{{{"key", FieldType::String, false}, {"x", FieldType::Int64, true}}};
@@ -608,6 +679,10 @@ std::string RandomValue(std::mt19937_64& random, FieldType type, bool valid)
                 "\"2026-06-01T00:00:00-12:00\""};
             return times[random() % times.size()];
         }
+        case FieldType::Decimal:
+            return "\"" + std::to_string(random() % 10000) + ".00\"";
+        case FieldType::Date:
+            return "\"2000-02-" + std::to_string(10 + random() % 20) + "\"";
     }
     return "null";
 }

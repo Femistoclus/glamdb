@@ -202,6 +202,10 @@ if(TARGET glamdb_server)
     add_test(NAME glamdb.native_http COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/server/native_http_test.py"
         "$<TARGET_FILE:glamdb_server>" "${glamdb_test_cli}" "${PROJECT_SOURCE_DIR}/ui")
+    add_test(NAME glamdb.native_scalar_types COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/server/native_scalar_types_test.py"
+        "$<TARGET_FILE:glamdb_server>" "${glamdb_test_cli}" "${PROJECT_SOURCE_DIR}/ui")
+    set_tests_properties(glamdb.native_scalar_types PROPERTIES LABELS "integration;http;scalar" TIMEOUT 180)
     add_test(NAME glamdb.http_review COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/server/http_review_test.py"
         "$<TARGET_FILE:glamdb_server>" "${glamdb_test_cli}" "${PROJECT_SOURCE_DIR}/ui")

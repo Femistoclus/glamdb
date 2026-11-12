@@ -17,6 +17,8 @@ explicit encoding while the column's dictionary is enabled and always falls
 back to PLAIN on dictionary overflow, so an explicit encoding requires the
 column's dictionary to be disabled; enabling a dictionary for a boolean column
 (which Arrow never dictionary-encodes) is rejected instead of ignored.
+Plain is supported for decimal at every precision (INT32, INT64 or fixed
+bytes); other decimal encodings are not exposed by GlamDB's type-level policy.
 
 Applies after 0002-parquet-column-compression.patch. Pinned revision:
 apache/iceberg-cpp 64dc66f159bd62c9817a96d74cbce767268934d0 (v0.4.0); upstream
@@ -83,7 +85,7 @@ index 8c4ee00..2ee4119 100644
 +  const auto kind = Physical(type);
 +  const bool integer = kind == PhysicalKind::kInt32 || kind == PhysicalKind::kInt64;
 +  const bool floating = kind == PhysicalKind::kFloat || kind == PhysicalKind::kDouble;
-+  if (name == "plain" && kind != PhysicalKind::kOther) {
++  if (name == "plain" && (kind != PhysicalKind::kOther || type == TypeId::kDecimal)) {
 +    return ::parquet::Encoding::PLAIN;
 +  }
 +  if (name == "delta_binary_packed" && integer) {

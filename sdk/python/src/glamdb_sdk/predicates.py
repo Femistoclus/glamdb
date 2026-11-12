@@ -25,15 +25,23 @@ class Predicate:
 
 
 class Column:
-    def __init__(self, name: str, logical_type: str):
+    def __init__(self, name: str, logical_type: str, *, precision: int | None = None, scale: int | None = None):
         # A predicate may compare NULL even if its source column is required.
         # Schema validates name/type; the special key requirement applies to
         # collection schemas, not the predicate literal's nullable allowance.
-        validated = Schema([Field(name, logical_type, False)]).fields[0]
-        self.field = Field(validated.name, validated.type, True, validated.field_id)
+        validated = Schema([Field(name, logical_type, False, None, precision, scale)]).fields[0]
+        self.field = Field(validated.name, validated.type, True, validated.field_id, validated.precision, validated.scale)
+
+    def _literal(self, value: Any) -> Any:
+        encoded = encode_scalar(self.field, value)
+        if self.field.type == "decimal":
+            return {"type": "decimal", "precision": self.field.precision, "scale": self.field.scale, "value": encoded}
+        if self.field.type == "date":
+            return {"type": "date", "value": encoded}
+        return encoded
 
     def _compare(self, op: str, value: Any) -> Predicate:
-        return Predicate({"op": op, "field": self.field.name, "value": encode_scalar(self.field, value)})
+        return Predicate({"op": op, "field": self.field.name, "value": self._literal(value)})
 
     def eq(self, value: Any) -> Predicate:
         return self._compare("eq", value)
@@ -57,7 +65,7 @@ class Column:
         if isinstance(values, (str, bytes)):
             raise ValidationError("IN values must be a sequence of typed literals")
         return Predicate({"op": "in", "field": self.field.name,
-                          "values": [encode_scalar(self.field, value) for value in values]})
+                          "values": [self._literal(value) for value in values]})
 
     def is_null(self) -> Predicate:
         return Predicate({"op": "is_null", "field": self.field.name})
@@ -66,8 +74,8 @@ class Column:
         return Predicate({"op": "is_not_null", "field": self.field.name})
 
 
-def col(name: str, logical_type: str) -> Column:
-    return Column(name, logical_type)
+def col(name: str, logical_type: str, *, precision: int | None = None, scale: int | None = None) -> Column:
+    return Column(name, logical_type, precision=precision, scale=scale)
 
 
 def _combine(op: str, predicates: tuple[Predicate, ...]) -> Predicate:

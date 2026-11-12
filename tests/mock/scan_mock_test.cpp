@@ -69,6 +69,11 @@ std::string RenderCell(const Cell& cell)
                 return value ? "true" : "false";
             } else if constexpr (std::is_same_v<T, TimestampUs>) {
                 return "ts:" + std::to_string(value.value);
+            } else if constexpr (std::is_same_v<T, Decimal>) {
+                return "decimal:" + std::to_string(value.coefficient_high) + ":" +
+                    std::to_string(value.coefficient_low);
+            } else if constexpr (std::is_same_v<T, Date>) {
+                return "date:" + std::to_string(value.days_since_epoch);
             } else {
                 return std::to_string(value);
             }

@@ -9,6 +9,24 @@ _COMPARISONS = {
 }
 
 
+def _literal(field, value):
+    if value is None:
+        return None
+    kind = field["type"]
+    if isinstance(value, dict):
+        if kind not in ('decimal', 'date'):
+            raise ValueError('legacy scalar predicates require primitive literals')
+        expected = {"type", "value", "precision", "scale"} if kind == "decimal" else {"type", "value"}
+        if set(value) != expected or value["type"] != kind:
+            raise ValueError("predicate literal shape/type differs from field")
+        if kind == "decimal" and any(type(value[name]) is not int or value[name] != field[name] for name in ("precision", "scale")):
+            raise ValueError("decimal predicate precision/scale differs from field")
+        value = value["value"]
+    elif kind in ("decimal", "date"):
+        raise ValueError("decimal/date predicates require typed literals")
+    return normalize_value(field, value, literal=True)
+
+
 def _compile(predicate, fields, depth=0):
     if predicate is None and depth == 0:
         return lambda row: True
@@ -56,7 +74,7 @@ def _compile(predicate, fields, depth=0):
         values = predicate.get("values")
         if set(predicate) != {"op", "field", "values"} or not isinstance(values, list):
             raise ValueError("in requires values array")
-        values = [normalize_value(field, value, literal=True) for value in values]
+        values = [_literal(field, value) for value in values]
 
         def contains(row):
             value = row[name]
@@ -69,7 +87,7 @@ def _compile(predicate, fields, depth=0):
         return contains
     if op not in _COMPARISONS or set(predicate) != {"op", "field", "value"}:
         raise ValueError("invalid comparison operator/shape")
-    value = normalize_value(field, predicate["value"], literal=True)
+    value = _literal(field, predicate["value"])
     compare = _COMPARISONS[op]
     return lambda row: None if row[name] is None or value is None else compare(row[name], value)
 

@@ -281,9 +281,10 @@ every type except `bool`), `enabled` (the same, rejected for `bool` columns) or
 `disabled`. A dictionary that outgrows `dictionary_page_size_limit` (4 KiB to
 8 MiB, default 1 MiB) is kept and the remaining data pages fall back to `plain`.
 A column `encoding` selects its non-dictionary value encoding and must fit the
-field type: `plain` (all), `delta_binary_packed` (`int64`, `timestamp_us_utc`),
+field type: `plain` (all), `delta_binary_packed` (`int64`, `timestamp_us_utc`, `date`),
 `delta_length_byte_array` and `delta_byte_array` (`string`), `byte_stream_split`
-(`int64`, `float64`, `timestamp_us_utc`) and `rle` (`bool`). An explicit encoding
+(`int64`, `float64`, `timestamp_us_utc`, `date`) and `rle` (`bool`). Decimal fields
+support `plain` and dictionary policies across precisions 1–38. An explicit encoding
 turns that column's dictionary off and overrides the collection policy, so it
 cannot be combined with `enabled` (or `auto` on a non-`bool` column). A
 collection `enabled` policy requires every `bool` column to set its own
@@ -328,8 +329,9 @@ back shows both `rle_dictionary` and `plain` data pages).
 
 ## Scalars, predicates and metadata
 
-`Field(name, type, nullable=False, field_id=None)` supports `string`, `bool`,
-`int64`, `float64`, and `timestamp_us_utc`. `Schema` assigns missing field IDs in
+`Field(name, type, nullable=False, field_id=None, precision=None, scale=None)`
+supports `string`, `bool`, `int64`, `float64`, `timestamp_us_utc`, `decimal`, and
+`date`. `Schema` assigns missing field IDs in
 order and preserves supplied stable IDs. Append accepts Python int64 integers
 or canonical decimal strings, finite floats, bools, strings, and UTC timestamps.
 An omitted nullable field becomes NULL; required, unknown or mismatched fields
@@ -358,11 +360,35 @@ values are decimal strings. `scan_json` decodes these to Python int and aware
 UTC datetime without passing through floats. NaN/infinity are rejected, bools
 are not integers, and append negative zero becomes positive zero.
 
+Decimal fields require integer `precision` (1–38) and `scale` (0–precision):
+`Field("amount", "decimal", True, precision=18, scale=2)`. Other field types
+forbid these schema parameters. Decimal inputs are plain strings matching
+`-?[0-9]+(\.[0-9]+)?` or finite `decimal.Decimal` objects; floats and integers are
+rejected. Plain text cannot contain exponents, signs other than a leading minus,
+or whitespace, and is limited to 128 characters. Decimal objects expand to plain
+text exactly within that bound, independently of the active Decimal context.
+Leading zeros and negative zero normalize; fractional zeros pad to the declared
+scale. Extra fractional digits must all be zero, so normalization never rounds.
+Wire values always use fixed-scale strings, and JSON scans decode to `Decimal`.
+
+Dates accept strict `YYYY-MM-DD` text or `datetime.date` excluding `datetime`.
+They cover calendar years 0001–9999 and decode to `date`. Arrow scans require
+`decimal128(precision, scale)` and `date32`; unsupported widths, scales, decimal
+coefficients outside the declared precision, and dates outside the calendar
+range are rejected. Schemas containing decimal/date use canonical schema
+version 2, while append/hash and ordinary append result receipts remain version 1.
+Bulk operation lookups may return result receipt version 2. Existing schema and
+append hashes retain their original bytes.
+
 `col(name, logical_type)` provides `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `in_`,
 `is_null` and `is_not_null`. Combine `Predicate` values with `&`, `|`, `~`,
 `and_(...)` and `or_(...)`. These serialize the public predicate tree; the
 server performs SQL three-valued filtering. A typed builder prevents implicit
 literal casts. A raw predicate JSON object may also be passed to scan/explain.
+Use `col("amount", "decimal", precision=18, scale=2).ge(Decimal("12.30"))`
+for decimals. Its literal includes `type`, matching `precision`/`scale`, and an
+exact fixed-scale `value`. Date literals use `{type: "date", value: "2026-11-12"}`.
+The builders retain those type parameters for NULL comparison and IN literals.
 
 Read methods are `capabilities`, `list_collections`, `resolve_collection`,
 `get_collection`, `get_schema`, `stats`, `snapshots`, `files`, `file`, `explain`,

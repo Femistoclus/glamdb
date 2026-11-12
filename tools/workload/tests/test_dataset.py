@@ -31,6 +31,42 @@ CONFIG = {
 }
 
 
+def test_decimal_and_date_generation_is_exact_bounded_and_reproducible(tmp_path):
+    from datetime import date
+    from decimal import Decimal
+    from glamdb_workload.dataset import Dataset, generate
+
+    config = {"schema": {"fields": [
+        {"name": "key", "type": "string", "nullable": False},
+        {"name": "amount", "type": "decimal", "precision": 38, "scale": 2, "nullable": True},
+        {"name": "day", "type": "date", "nullable": False},
+    ]}, "generation": {"fields": {
+        "amount": {"min": "9007199254740993.01", "max": "9007199254740993.09", "null_rate": 0.3},
+        "day": {"min": "2000-02-28", "max": "2000-03-01"},
+    }}}
+    first = generate(config, rows=97, seed=17, output=tmp_path / "a", part_rows=13)
+    second = generate(config, rows=97, seed=17, output=tmp_path / "b", part_rows=13)
+    assert first == second
+    rows = [row for part in Dataset(tmp_path / "a").iter_parts() for row in part]
+    amounts = [row["amount"] for row in rows if row["amount"] is not None]
+    assert amounts and len(amounts) < 97
+    assert all(type(value) is Decimal and Decimal("9007199254740993.01") <= value <= Decimal("9007199254740993.09") for value in amounts)
+    assert {row["day"] for row in rows} == {date(2000, 2, 28), date(2000, 2, 29), date(2000, 3, 1)}
+
+
+@pytest.mark.parametrize("precision,scale", [(1, 0), (1, 1), (38, 38)])
+def test_decimal_generation_defaults_support_integer_and_all_fractional_types(tmp_path, precision, scale):
+    from decimal import Decimal
+    from glamdb_workload.dataset import Dataset, generate
+
+    config = {"fields": [{"name": "key", "type": "string", "nullable": False},
+                         {"name": "v", "type": "decimal", "nullable": False,
+                          "precision": precision, "scale": scale}]}
+    generate(config, rows=5, seed=7, output=tmp_path / "generated")
+    rows = list(Dataset(tmp_path / "generated").iter_parts())[0]
+    assert all(type(row["v"]) is Decimal and row["v"].as_tuple().exponent == -scale for row in rows)
+
+
 def test_seed_parts_and_exact_types(tmp_path):
     from glamdb_workload.dataset import Dataset, generate
 

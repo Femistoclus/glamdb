@@ -1,20 +1,24 @@
 """RFC canonical encoding, independent of Arrow, Iceberg and engine code."""
 
 import hashlib
+import datetime
 import struct
 import uuid
 
-from .types import TYPE_IDS, normalize_rows, normalize_schema
+from .types import TYPE_IDS, decimal_coefficient, normalize_rows, normalize_schema
 
 
 def canonical_schema(schema: dict) -> bytes:
     fields = normalize_schema(schema)["fields"]
-    output = bytearray(b"COLUMNAR-SCHEMA\0" + struct.pack("<HH", 1, len(fields)))
+    version = 2 if any(field["type"] in ("decimal", "date") for field in fields) else 1
+    output = bytearray(b"COLUMNAR-SCHEMA\0" + struct.pack("<HH", version, len(fields)))
     for field in fields:
         name = field["name"].encode("utf-8")
         output.extend(struct.pack("<IH", field["field_id"], len(name)))
         output.extend(name)
         output.extend((TYPE_IDS[field["type"]], int(field["nullable"])))
+        if field["type"] == "decimal":
+            output.extend((field["precision"], field["scale"]))
     return bytes(output)
 
 
@@ -47,6 +51,10 @@ def canonical_append(schema: dict, collection_id: str, rows: list[dict]) -> byte
                 output.extend(encoded)
             elif kind == "bool":
                 output.append(int(value))
+            elif kind == "decimal":
+                output.extend(decimal_coefficient(field, value).to_bytes(16, "little", signed=True))
+            elif kind == "date":
+                output.extend(struct.pack("<i", (value - datetime.date(1970, 1, 1)).days))
             else:
                 output.extend(struct.pack("<d" if kind == "float64" else "<q", value))
         if len(output) - header_size > 16777216:

@@ -2,6 +2,8 @@
 
 #include "core/storage/iceberg_error_boundary.h"
 
+#include <arrow/type.h>
+#include <arrow/util/decimal.h>
 #include <arrow/util/utf8.h>
 #include <iceberg/file_io.h>
 #include <iceberg/schema.h>
@@ -12,6 +14,7 @@
 #include <parquet/metadata.h>
 #include <parquet/properties.h>
 #include <parquet/schema.h>
+#include <parquet/statistics.h>
 #include <zlib.h>
 
 #include <algorithm>
@@ -79,6 +82,7 @@ bool MatchesType(const parquet::schema::Node& node, const iceberg::Type& type)
     }
     auto logical = parquet::LogicalType::None();
     auto physical = parquet::Type::UNDEFINED;
+    int width = -1;
     switch (type.type_id()) {
         case iceberg::TypeId::kBoolean:
             physical = parquet::Type::BOOLEAN;
@@ -97,11 +101,86 @@ bool MatchesType(const parquet::schema::Node& node, const iceberg::Type& type)
             physical = parquet::Type::INT64;
             logical = parquet::LogicalType::Timestamp(true, parquet::LogicalType::TimeUnit::MICROS);
             break;
+        case iceberg::TypeId::kDecimal: {
+            const auto& decimal = static_cast<const iceberg::DecimalType&>(type);
+            if (decimal.precision() < 1 || decimal.precision() > 38 || decimal.scale() < 0 ||
+                decimal.scale() > decimal.precision())
+            {
+                return false;
+            }
+            physical = decimal.precision() <= 9 ? parquet::Type::INT32
+                : decimal.precision() <= 18     ? parquet::Type::INT64
+                                                : parquet::Type::FIXED_LEN_BYTE_ARRAY;
+            logical = parquet::LogicalType::Decimal(decimal.precision(), decimal.scale());
+            if (physical == parquet::Type::FIXED_LEN_BYTE_ARRAY) {
+                width = arrow::DecimalType::DecimalSize(decimal.precision());
+            }
+            break;
+        }
+        case iceberg::TypeId::kDate:
+            physical = parquet::Type::INT32;
+            logical = parquet::LogicalType::Date();
+            break;
         default:
             return false;
     }
-    return static_cast<const parquet::schema::PrimitiveNode&>(node).physical_type() == physical &&
-        node.logical_type()->Equals(*logical);
+    const auto& primitive = static_cast<const parquet::schema::PrimitiveNode&>(node);
+    return primitive.physical_type() == physical && node.logical_type()->Equals(*logical) &&
+        (width < 0 || primitive.type_length() == width);
+}
+
+iceberg::Result<arrow::Decimal128>
+DecimalBound(const parquet::Statistics& statistics, const parquet::ColumnDescriptor& column, bool lower)
+{
+    switch (column.physical_type()) {
+        case parquet::Type::INT32: {
+            const auto& values = static_cast<const parquet::Int32Statistics&>(statistics);
+            return arrow::Decimal128(lower ? values.min() : values.max());
+        }
+        case parquet::Type::INT64: {
+            const auto& values = static_cast<const parquet::Int64Statistics&>(statistics);
+            return arrow::Decimal128(lower ? values.min() : values.max());
+        }
+        case parquet::Type::FIXED_LEN_BYTE_ARRAY: {
+            const auto& values = static_cast<const parquet::FLBAStatistics&>(statistics);
+            const auto bound =
+                arrow::Decimal128::FromBigEndian((lower ? values.min() : values.max()).ptr, column.type_length());
+            if (!bound.ok()) {
+                return iceberg::Invalid("CORRUPTION: Invalid Parquet decimal bound.");
+            }
+            return *bound;
+        }
+        default:
+            return iceberg::Invalid("CORRUPTION: Invalid Parquet decimal physical type.");
+    }
+}
+
+iceberg::Status CheckNativeBounds(const parquet::ColumnChunkMetaData& chunk,
+    const parquet::ColumnDescriptor& column,
+    const iceberg::Type& type)
+{
+    if (type.type_id() != iceberg::TypeId::kDecimal && type.type_id() != iceberg::TypeId::kDate) {
+        return {};
+    }
+    const auto statistics = chunk.statistics();
+    if (!statistics || !statistics->HasMinMax()) {
+        return {};
+    }
+    if (type.type_id() == iceberg::TypeId::kDate) {
+        const auto& values = static_cast<const parquet::Int32Statistics&>(*statistics);
+        if (values.min() < -719162 || values.max() > 2932896 || values.min() > values.max()) {
+            return iceberg::Invalid("CORRUPTION: Parquet date bounds exceed the supported calendar range.");
+        }
+    } else {
+        const auto precision = static_cast<const iceberg::DecimalType&>(type).precision();
+        ICEBERG_ASSIGN_OR_RAISE(auto lower, DecimalBound(*statistics, column, true));
+        ICEBERG_ASSIGN_OR_RAISE(auto upper, DecimalBound(*statistics, column, false));
+        const auto maximum = arrow::Decimal128::GetMaxValue(precision);
+        if (lower < -maximum || lower > maximum || upper < -maximum || upper > maximum || lower > upper) {
+            return iceberg::Invalid("CORRUPTION: Parquet decimal bounds exceed their declared precision.");
+        }
+    }
+    return {};
 }
 
 iceberg::Result<std::shared_ptr<parquet::FileMetaData>> ParseFooter(std::span<const std::byte> bytes,
@@ -150,6 +229,8 @@ iceberg::Result<std::shared_ptr<parquet::FileMetaData>> ParseFooter(std::span<co
                 {
                     return iceberg::Invalid("CORRUPTION: Parquet column chunk does not match its schema.");
                 }
+                ICEBERG_RETURN_UNEXPECTED(
+                    CheckNativeBounds(*chunk, *descriptor, *fields[static_cast<std::size_t>(column)].type()));
             }
             rowCount += rows;
         }

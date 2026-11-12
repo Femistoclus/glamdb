@@ -3,6 +3,7 @@
 #include "core/api/canonical.h"
 #include "core/api/write_settings.h"
 #include "core/scan/predicate.h"
+#include "storage/scalars.h"
 
 #include <array>
 #include <bit>
@@ -15,7 +16,7 @@
 namespace glamdb::NTransport {
 namespace {
 constexpr size_t MaxJsonDepth = 160;
-const std::vector<std::string> TypeNames{"string", "bool", "int64", "float64", "timestamp_us_utc"};
+const std::vector<std::string> TypeNames{"string", "bool", "int64", "float64", "timestamp_us_utc", "decimal", "date"};
 
 // A single SAX pass constructs the DOM and rejects decoded duplicate keys.
 // Each frame owns its container; array growth cannot invalidate child frames.
@@ -398,9 +399,9 @@ int64_t ParseInt64Text(std::string_view text)
     return result;
 }
 
-std::shared_ptr<arrow::DataType> ArrowType(FieldType type)
+std::shared_ptr<arrow::DataType> ArrowType(const FieldSpec& field)
 {
-    switch (type) {
+    switch (field.type) {
         case FieldType::String:
             return arrow::utf8();
         case FieldType::Bool:
@@ -411,13 +412,29 @@ std::shared_ptr<arrow::DataType> ArrowType(FieldType type)
             return arrow::float64();
         case FieldType::TimestampUsUtc:
             return arrow::timestamp(arrow::TimeUnit::MICRO, "UTC");
+        case FieldType::Decimal:
+            return arrow::decimal128(field.precision, field.scale);
+        case FieldType::Date:
+            return arrow::date32();
     }
     throw TFailure({"INVALID_ARGUMENT", "unsupported field type"});
 }
 
-std::shared_ptr<arrow::Scalar> ParseScalar(FieldType type, const TJson& value)
+Decimal DecimalValue(const FieldSpec& field, const TJson& value)
 {
-    switch (type) {
+    Require(value.is_string(), "decimal values require decimal strings");
+    return Unwrap(ParseDecimal(value.get_ref<const std::string&>(), field.precision, field.scale));
+}
+
+Date DateValue(const TJson& value)
+{
+    Require(value.is_string(), "date values require YYYY-MM-DD strings");
+    return Unwrap(ParseDate(value.get_ref<const std::string&>()));
+}
+
+std::shared_ptr<arrow::Scalar> ParseScalar(const FieldSpec& field, const TJson& value)
+{
+    switch (field.type) {
         case FieldType::String:
             Require(value.is_string(), "expected string");
             return std::make_shared<arrow::StringScalar>(value.get<std::string>());
@@ -430,7 +447,15 @@ std::shared_ptr<arrow::Scalar> ParseScalar(FieldType type, const TJson& value)
             Require(value.is_number() && std::isfinite(value.get<double>()), "expected finite number");
             return std::make_shared<arrow::DoubleScalar>(value.get<double>());
         case FieldType::TimestampUsUtc:
-            return std::make_shared<arrow::TimestampScalar>(ParseTimestamp(value), ArrowType(type));
+            return std::make_shared<arrow::TimestampScalar>(ParseTimestamp(value), ArrowType(field));
+        case FieldType::Decimal: {
+            const auto decimal = DecimalValue(field, value);
+            return std::make_shared<arrow::Decimal128Scalar>(
+                arrow::Decimal128(decimal.coefficient_high, decimal.coefficient_low),
+                ArrowType(field));
+        }
+        case FieldType::Date:
+            return std::make_shared<arrow::Date32Scalar>(DateValue(value).days_since_epoch);
     }
     throw TFailure({"INVALID_ARGUMENT", "unsupported scalar type"});
 }
@@ -440,7 +465,22 @@ OptionalLiteral ParseOptionalLiteral(const FieldSpec& field, const TJson& value)
     if (value.is_null()) {
         return std::nullopt;
     }
-    const auto scalar = ParseScalar(field.type, value);
+    if (field.type == FieldType::Decimal || field.type == FieldType::Date) {
+        if (field.type == FieldType::Decimal) {
+            CheckKeys(value, {"type", "value", "precision", "scale"});
+            Require(value.contains("type") && value["type"] == "decimal" && value.contains("value") &&
+                    value.contains("precision") && value["precision"].is_number_integer() &&
+                    value["precision"] == field.precision && value.contains("scale") &&
+                    value["scale"].is_number_integer() && value["scale"] == field.scale,
+                "decimal literal parameters must match its field");
+            return value["value"].is_null() ? OptionalLiteral{} : OptionalLiteral{DecimalValue(field, value["value"])};
+        }
+        CheckKeys(value, {"type", "value"});
+        Require(value.contains("type") && value["type"] == "date" && value.contains("value"),
+            "date literal requires type and value");
+        return value["value"].is_null() ? OptionalLiteral{} : OptionalLiteral{DateValue(value["value"])};
+    }
+    const auto scalar = ParseScalar(field, value);
     switch (field.type) {
         case FieldType::String:
             return Literal{scalar->ToString()};
@@ -454,6 +494,9 @@ OptionalLiteral ParseOptionalLiteral(const FieldSpec& field, const TJson& value)
         }
         case FieldType::TimestampUsUtc:
             return Literal{TimestampUs{static_cast<const arrow::TimestampScalar&>(*scalar).value}};
+        case FieldType::Decimal:
+        case FieldType::Date:
+            break;
     }
     throw TFailure({"INVALID_ARGUMENT", "unsupported literal type"});
 }
@@ -656,7 +699,7 @@ SchemaSpec ParseSchema(const TJson& value)
     Require(fields.is_array() && !fields.empty() && fields.size() <= 256, "invalid schema fields");
     SchemaSpec result;
     for (const auto& field : fields) {
-        CheckKeys(field, {"name", "type", "nullable", "field_id"});
+        CheckKeys(field, {"name", "type", "nullable", "field_id", "precision", "scale"});
         const auto name = field.at("type").get<std::string>();
         const auto typeIt = std::find(TypeNames.begin(), TypeNames.end(), name);
         Require(typeIt != TypeNames.end(), "unsupported field type");
@@ -664,9 +707,21 @@ SchemaSpec ParseSchema(const TJson& value)
             Require(field["field_id"].is_number_integer() && field["field_id"] == result.fields.size() + 1,
                 "field IDs must follow declaration order");
         }
-        result.fields.push_back({field.at("name").get<std::string>(),
+        FieldSpec spec{field.at("name").get<std::string>(),
             static_cast<FieldType>(1 + typeIt - TypeNames.begin()),
-            field.value("nullable", false)});
+            field.value("nullable", false)};
+        if (spec.type == FieldType::Decimal) {
+            Require(field.contains("precision") && field["precision"].is_number_integer() && field["precision"] >= 1 &&
+                    field["precision"] <= 38 && field.contains("scale") && field["scale"].is_number_integer() &&
+                    field["scale"] >= 0 && field["scale"] <= field["precision"],
+                "decimal requires integer precision 1..38 and scale 0..precision");
+            spec.precision = field["precision"].get<int32_t>();
+            spec.scale = field["scale"].get<int32_t>();
+        } else {
+            Require(!field.contains("precision") && !field.contains("scale"),
+                "precision and scale are only valid for decimal fields");
+        }
+        result.fields.push_back(std::move(spec));
     }
     return result;
 }
@@ -744,7 +799,7 @@ std::shared_ptr<arrow::RecordBatch> ParseRows(const SchemaSpec& schema, const TJ
     std::vector<std::unique_ptr<arrow::ArrayBuilder>> builders;
     arrow::FieldVector fields;
     for (const auto& field : schema.fields) {
-        const auto type = ArrowType(field.type);
+        const auto type = ArrowType(field);
         fields.push_back(arrow::field(field.name, type, field.nullable));
         std::unique_ptr<arrow::ArrayBuilder> builder;
         CheckArrow(arrow::MakeBuilder(arrow::default_memory_pool(), type, &builder));
@@ -783,6 +838,16 @@ std::shared_ptr<arrow::RecordBatch> ParseRows(const SchemaSpec& schema, const TJ
                     case FieldType::TimestampUsUtc:
                         CheckArrow(static_cast<arrow::TimestampBuilder&>(builder).Append(ParseTimestamp(*value)));
                         break;
+                    case FieldType::Decimal: {
+                        const auto decimal = DecimalValue(field, *value);
+                        CheckArrow(static_cast<arrow::Decimal128Builder&>(builder).Append(
+                            arrow::Decimal128(decimal.coefficient_high, decimal.coefficient_low)));
+                        break;
+                    }
+                    case FieldType::Date:
+                        CheckArrow(
+                            static_cast<arrow::Date32Builder&>(builder).Append(DateValue(*value).days_since_epoch));
+                        break;
                 }
             }
         }
@@ -809,7 +874,7 @@ std::shared_ptr<arrow::RecordBatch> ParseRows(const SchemaSpec& schema, const TJ
     constexpr auto NoKey = std::numeric_limits<uint32_t>::max();
     std::vector<uint32_t> fieldKeys;
     for (const auto& field : schema.fields) {
-        const auto type = ArrowType(field.type);
+        const auto type = ArrowType(field);
         fields.push_back(arrow::field(field.name, type, field.nullable));
         std::unique_ptr<arrow::ArrayBuilder> builder;
         CheckArrow(arrow::MakeBuilder(arrow::default_memory_pool(), type, &builder));
@@ -880,6 +945,18 @@ std::shared_ptr<arrow::RecordBatch> ParseRows(const SchemaSpec& schema, const TJ
                 case FieldType::TimestampUsUtc:
                     Require(value->Kind == EKind::String, "timestamp must be an RFC3339 string");
                     CheckArrow(static_cast<arrow::TimestampBuilder&>(builder).Append(ParseTimestampText(text())));
+                    break;
+                case FieldType::Decimal: {
+                    Require(value->Kind == EKind::String, "decimal values require decimal strings");
+                    const auto decimal = Unwrap(ParseDecimal(text(), field.precision, field.scale));
+                    CheckArrow(static_cast<arrow::Decimal128Builder&>(builder).Append(
+                        arrow::Decimal128(decimal.coefficient_high, decimal.coefficient_low)));
+                    break;
+                }
+                case FieldType::Date:
+                    Require(value->Kind == EKind::String, "date values require YYYY-MM-DD strings");
+                    CheckArrow(
+                        static_cast<arrow::Date32Builder&>(builder).Append(Unwrap(ParseDate(text())).days_since_epoch));
                     break;
             }
         }
@@ -966,10 +1043,21 @@ TJson EncodeSchema(const arrow::Schema& schema)
             case arrow::Type::TIMESTAMP:
                 type = "timestamp_us_utc";
                 break;
+            case arrow::Type::DECIMAL128:
+                type = "decimal";
+                break;
+            case arrow::Type::DATE32:
+                type = "date";
+                break;
             default:
                 throw TFailure({"INTERNAL", "unsupported output type", RetryHint::OperatorAction});
         }
         TJson item{{"name", field->name()}, {"type", type}, {"nullable", field->nullable()}};
+        if (field->type()->id() == arrow::Type::DECIMAL128) {
+            const auto& decimal = static_cast<const arrow::Decimal128Type&>(*field->type());
+            item["precision"] = decimal.precision();
+            item["scale"] = decimal.scale();
+        }
         if (field->metadata()) {
             const auto id = field->metadata()->Get("PARQUET:field_id");
             if (id.ok()) {

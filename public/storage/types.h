@@ -47,13 +47,15 @@ struct StoreHealth
     bool durability_qualified = false;
 };
 
-enum class FieldType : uint8_t { String = 1, Bool, Int64, Float64, TimestampUsUtc };
+enum class FieldType : uint8_t { String = 1, Bool, Int64, Float64, TimestampUsUtc, Decimal, Date };
 
 struct FieldSpec
 {
     std::string name;
     FieldType type = FieldType::String;
     bool nullable = false;
+    int32_t precision = 0;
+    int32_t scale = 0;
     bool operator==(const FieldSpec&) const = default;
 };
 
@@ -135,7 +137,25 @@ struct TimestampUs
     bool operator==(const TimestampUs&) const = default;
 };
 
-using Cell = std::variant<std::monostate, std::string, bool, int64_t, double, TimestampUs>;
+// Signed 128-bit coefficient, without a dependency on an Arrow public header.
+struct DecimalValue
+{
+    int64_t coefficient_high = 0;
+    uint64_t coefficient_low = 0;
+    int32_t precision = 1;
+    int32_t scale = 0;
+    bool operator==(const DecimalValue&) const = default;
+};
+
+using Decimal = DecimalValue;
+
+struct Date
+{
+    int32_t days_since_epoch = 0;
+    bool operator==(const Date&) const = default;
+};
+
+using Cell = std::variant<std::monostate, std::string, bool, int64_t, double, TimestampUs, Decimal, Date>;
 using Row = std::vector<Cell>;
 
 struct BaseIdentity

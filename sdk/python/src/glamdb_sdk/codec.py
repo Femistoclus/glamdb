@@ -1,7 +1,8 @@
 """Exact v0 scalars. No engine or verification-tool code is imported here."""
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from functools import lru_cache
 import hashlib
 import math
@@ -15,11 +16,16 @@ MIN_TIMESTAMP_US = -62135596800000000
 MAX_TIMESTAMP_US = 253402300799999999
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _NAIVE_EPOCH = datetime(1970, 1, 1)
+_DATE_EPOCH = date(1970, 1, 1)
+MIN_DATE_DAYS = -719162
+MAX_DATE_DAYS = 2932896
 _DECIMAL = re.compile(r"(?:0|-[1-9][0-9]*|[1-9][0-9]*)\Z", re.ASCII)
+_FIXED_DECIMAL = re.compile(r"-?[0-9]+(?:\.[0-9]+)?\Z", re.ASCII)
+_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z", re.ASCII)
 _TIMESTAMP = re.compile(
     r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})"
     r"(?:\.([0-9]{1,6}))?(Z|[+-][0-9]{2}:[0-9]{2})\Z", re.ASCII)
-_TYPES = {"string", "bool", "int64", "float64", "timestamp_us_utc"}
+_TYPES = {"string", "bool", "int64", "float64", "timestamp_us_utc", "decimal", "date"}
 
 
 @dataclass(frozen=True)
@@ -28,6 +34,8 @@ class Field:
     type: str
     nullable: bool = False
     field_id: int | None = None
+    precision: int | None = None
+    scale: int | None = None
 
 
 @dataclass(frozen=True, init=False)
@@ -47,6 +55,10 @@ class Schema:
                 raise ValidationError("field name must have 1 through 128 UTF-8 bytes")
             if field.name in names or field.type not in _TYPES or type(field.nullable) is not bool:
                 raise ValidationError("duplicate field name, unsupported type, or invalid nullable flag")
+            if field.type == "decimal":
+                _decimal_parameters(field.precision, field.scale)
+            elif field.precision is not None or field.scale is not None:
+                raise ValidationError("precision and scale are only valid for decimal fields")
             field_id = index if field.field_id is None else field.field_id
             if type(field_id) is not int or not 1 <= field_id <= 2**31-1 or field_id in ids:
                 raise ValidationError("field IDs must be unique positive int32 values")
@@ -63,13 +75,19 @@ class Schema:
             fields = value["fields"]
             if not isinstance(fields, list):
                 raise ValidationError("schema fields must be an array")
-            return cls((Field(item["name"], item["type"], item["nullable"], item.get("field_id"))
-                        for item in fields), allow_empty=allow_empty)
+            assigned = []
+            for item in fields:
+                if item["type"] != "decimal" and ("precision" in item or "scale" in item):
+                    raise ValidationError("precision and scale are only valid for decimal fields")
+                assigned.append(Field(item["name"], item["type"], item["nullable"], item.get("field_id"),
+                                      item.get("precision"), item.get("scale")))
+            return cls(assigned, allow_empty=allow_empty)
         except (KeyError, TypeError, AttributeError) as exc:
             raise ValidationError("invalid schema object") from exc
 
     def to_dict(self) -> dict[str, Any]:
         return {"fields": [dict(field_id=f.field_id, name=f.name, type=f.type, nullable=f.nullable)
+                           | ({"precision": f.precision, "scale": f.scale} if f.type == "decimal" else {})
                            for f in self.fields]}
 
     def field(self, name: str) -> Field:
@@ -95,6 +113,63 @@ def int64(value: Any) -> int:
     if type(value) is not int or not -(2**63) <= value < 2**63:
         raise ValidationError("expected signed int64 or canonical decimal string")
     return value
+
+
+def _decimal_parameters(precision: Any, scale: Any) -> None:
+    if type(precision) is not int or not 1 <= precision <= 38 or type(scale) is not int or not 0 <= scale <= precision:
+        raise ValidationError("decimal requires integer precision 1..38 and scale 0..precision")
+
+
+def decimal_parts(value: Any, precision: int, scale: int) -> tuple[int, str]:
+    """Return an exact signed coefficient and fixed-scale text, without rounding."""
+    _decimal_parameters(precision, scale)
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ValidationError("decimal must be finite plain decimal text or Decimal")
+        sign, digits, exponent = value.as_tuple()
+        length = sign + (len(digits) + exponent if exponent >= 0 else max(len(digits), 1 - exponent) + 1)
+        if length > 128:
+            raise ValidationError("decimal input exceeds 128 characters")
+        # Fixed formatting is exact and independent of decimal.getcontext().
+        # Decimal's own str() uses scientific notation for small values.
+        value = format(value, "f")
+    if not isinstance(value, str) or len(value) > 128 or _FIXED_DECIMAL.fullmatch(value) is None:
+        raise ValidationError("decimal requires plain decimal text or Decimal of at most 128 characters")
+    negative = value.startswith("-")
+    whole, _, fraction = value.lstrip("-").partition(".")
+    if any(digit != "0" for digit in fraction[scale:]):
+        raise ValidationError("decimal cannot be rescaled exactly")
+    digits = (whole + fraction[:scale].ljust(scale, "0")).lstrip("0") or "0"
+    if len(digits) > precision:
+        raise ValidationError("decimal exceeds declared precision")
+    coefficient = int(digits)
+    if negative and coefficient:
+        coefficient = -coefficient
+    return coefficient, format_decimal_coefficient(coefficient, scale)
+
+
+def format_decimal_coefficient(coefficient: int, scale: int) -> str:
+    """Format a validated coefficient without using the Decimal context."""
+    digits = str(abs(coefficient)).rjust(scale + 1, "0")
+    text = digits if scale == 0 else digits[:-scale] + "." + digits[-scale:]
+    return "-" + text if coefficient < 0 else text
+
+
+def date_days(value: Any) -> int:
+    if isinstance(value, str):
+        if _DATE.fullmatch(value) is None:
+            raise ValidationError("date requires strict YYYY-MM-DD text or a date")
+        try:
+            value = date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValidationError("invalid calendar date in years 0001 through 9999") from exc
+    if not isinstance(value, date) or isinstance(value, datetime):
+        raise ValidationError("date requires strict YYYY-MM-DD text or a date excluding datetime")
+    return (value - _DATE_EPOCH).days
+
+
+def format_date(value: Any) -> str:
+    return (_DATE_EPOCH + timedelta(days=date_days(value))).isoformat()
 
 
 def timestamp_us(value: Any) -> int:
@@ -171,6 +246,10 @@ def encode_scalar(field: Field, value: Any) -> Any:
         return str(int64(value))
     if field.type == "timestamp_us_utc":
         return format_timestamp(value)
+    if field.type == "decimal":
+        return decimal_parts(value, field.precision, field.scale)[1]
+    if field.type == "date":
+        return format_date(value)
     if field.type == "float64":
         if type(value) not in (int, float):
             raise ValidationError(f"field {field.name} requires a finite number")
@@ -192,13 +271,15 @@ def _canonical_row_size(schema: Schema, row: Mapping[str, Any]) -> int:
         size += 1
         if value is not None:
             size += (4 + len(_utf8(value)) if field.type == "string"
-                     else 1 if field.type == "bool" else 8)
+                     else 1 if field.type == "bool" else 16 if field.type == "decimal"
+                     else 4 if field.type == "date" else 8)
     return size
 
 
 ROW_CANONICAL_LIMIT = 2 * 1024 * 1024
-_TAGS = {"string": 1, "bool": 2, "int64": 3, "float64": 4, "timestamp_us_utc": 5}
+_TAGS = {"string": 1, "bool": 2, "int64": 3, "float64": 4, "timestamp_us_utc": 5, "decimal": 6, "date": 7}
 _KIND_STRING, _KIND_BOOL, _KIND_INT64, _KIND_TIMESTAMP = 1, 2, 3, 5
+_KIND_DECIMAL, _KIND_DATE = 6, 7
 _INT64_MIN, _INT64_MAX = -(2**63), 2**63 - 1
 # Canonical v1 scalar encodings: NULL is one 0x00 byte; a present value is
 # 0x01 followed by its payload, so a field's canonical size is its chunk length.
@@ -208,6 +289,7 @@ _FALSE_CHUNK = b"\1\0"
 _PACK_INT = struct.Struct("<Bq").pack
 _PACK_FLOAT = struct.Struct("<Bd").pack
 _PACK_LEN = struct.Struct("<BI").pack
+_PACK_DATE = struct.Struct("<Bi").pack
 _CANONICAL_TIMESTAMP_MATCH = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z", re.ASCII).fullmatch
 _FROM_ISO = datetime.fromisoformat
@@ -268,23 +350,27 @@ class _RowPlan:
     """
 
     __slots__ = ("fields", "names", "order", "fingerprint", "wire_template", "chunk_template",
-                 "strings", "int64s", "float64s", "bools", "timestamps")
+                 "strings", "int64s", "float64s", "bools", "timestamps", "decimals", "dates", "parameters")
 
-    def __init__(self, key: tuple[tuple[str, str, bool, int], ...]):
+    def __init__(self, key: tuple[tuple[str, str, bool, int, int | None, int | None], ...]):
         # Declaration order defines wire-object key order and error order;
         # field-ID order defines canonical hash order.
         self.fields = tuple((name, _TAGS[kind], nullable, 1024 if name == "key" else 1024 * 1024)
-                            for name, kind, nullable, _ in key)
+                            for name, kind, nullable, *_ in key)
+        self.parameters = {name: (precision, scale) for name, kind, _, _, precision, scale in key if kind == "decimal"}
         self.names = frozenset(name for name, *_ in key)
         order = tuple(sorted(range(len(key)), key=lambda index: key[index][3]))
         self.order = None if order == tuple(range(len(key))) else order
         digest = hashlib.sha256()
-        digest.update(b"COLUMNAR-SCHEMA\0" + struct.pack("<HH", 1, len(key)))
+        version = 2 if any(kind in ("decimal", "date") for _, kind, *_ in key) else 1
+        digest.update(b"COLUMNAR-SCHEMA\0" + struct.pack("<HH", version, len(key)))
         for index in order:
-            name, kind, nullable, field_id = key[index]
+            name, kind, nullable, field_id, precision, scale = key[index]
             encoded = name.encode("utf-8")
             digest.update(struct.pack("<IH", field_id, len(encoded)) + encoded)
             digest.update(bytes([_TAGS[kind], int(nullable)]))
+            if kind == "decimal":
+                digest.update(bytes([precision, scale]))
         self.fingerprint = digest.digest()
         # Grouped fast path: fields of one type with their field-ID-order slot.
         self.wire_template = dict.fromkeys(name for name, *_ in key)
@@ -298,6 +384,8 @@ class _RowPlan:
         self.float64s = tuple(groups["float64"])
         self.bools = tuple(groups["bool"])
         self.timestamps = tuple(groups["timestamp_us_utc"])
+        self.decimals = tuple(groups["decimal"])
+        self.dates = tuple(groups["date"])
 
     def encode_row(self, row: Any) -> tuple[dict[str, Any], bytes]:
         """Validate one caller row once; return its wire object and canonical bytes.
@@ -387,6 +475,23 @@ class _RowPlan:
                     chunks[slot] = _PACK_INT(1, converted[0])
                 else:
                     return None
+            for name, slot, nullable, _ in self.decimals:
+                value = get(name)
+                if value is None:
+                    if not nullable:
+                        return None
+                else:
+                    coefficient, wire[name] = decimal_parts(value, *self.parameters[name])
+                    chunks[slot] = b"\1" + coefficient.to_bytes(16, "little", signed=True)
+            for name, slot, nullable, _ in self.dates:
+                value = get(name)
+                if value is None:
+                    if not nullable:
+                        return None
+                else:
+                    days = date_days(value)
+                    wire[name] = (_DATE_EPOCH + timedelta(days=days)).isoformat()
+                    chunks[slot] = _PACK_DATE(1, days)
         except Exception:  # noqa: BLE001 - the ordered path owns every error
             return None
         return wire, b"".join(chunks)
@@ -432,6 +537,13 @@ class _RowPlan:
                     raise ValidationError(f"field {name} requires bool")
                 wire[name] = value
                 append(_TRUE_CHUNK if value else _FALSE_CHUNK)
+            elif kind == _KIND_DECIMAL:
+                coefficient, wire[name] = decimal_parts(value, *self.parameters[name])
+                append(b"\1" + coefficient.to_bytes(16, "little", signed=True))
+            elif kind == _KIND_DATE:
+                days = date_days(value)
+                wire[name] = (_DATE_EPOCH + timedelta(days=days)).isoformat()
+                append(_PACK_DATE(1, days))
             else:
                 if type(value) not in (int, float):
                     raise ValidationError(f"field {name} requires a finite number")
@@ -449,7 +561,7 @@ class _RowPlan:
 
 
 @lru_cache(maxsize=128)
-def _compile(key: tuple[tuple[str, str, bool, int], ...]) -> _RowPlan:
+def _compile(key: tuple[tuple[str, str, bool, int, int | None, int | None], ...]) -> _RowPlan:
     return _RowPlan(key)
 
 
@@ -459,7 +571,7 @@ def row_plan(schema: Schema) -> _RowPlan:
     The cache key is a value snapshot of every field, not object identity, so
     equal schemas share a plan and a plan can never describe other fields.
     """
-    return _compile(tuple((f.name, f.type, f.nullable, f.field_id) for f in schema.fields))
+    return _compile(tuple((f.name, f.type, f.nullable, f.field_id, f.precision, f.scale) for f in schema.fields))
 
 
 def encode_rows(schema: Schema, rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -493,6 +605,16 @@ def decode_rows(schema: Schema, rows: Iterable[Mapping[str, Any]]) -> list[dict[
                 if format_timestamp(micros) != value:
                     raise ValidationError("wire timestamp must be six-digit UTC RFC3339 text")
                 decoded[field.name] = _EPOCH + timedelta(microseconds=micros)
+                sized[field.name] = 0
+            elif field.type == "decimal":
+                if not isinstance(value, str) or decimal_parts(value, field.precision, field.scale)[1] != value:
+                    raise ValidationError("wire decimal must be canonical fixed-scale text")
+                decoded[field.name] = Decimal(value)
+                sized[field.name] = 0
+            elif field.type == "date":
+                if not isinstance(value, str):
+                    raise ValidationError("wire date must be strict YYYY-MM-DD text")
+                decoded[field.name] = _DATE_EPOCH + timedelta(days=date_days(value))
                 sized[field.name] = 0
             else:
                 decoded[field.name] = sized[field.name] = encode_scalar(field, value)

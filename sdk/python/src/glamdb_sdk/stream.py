@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from .cleanup import CleanupQueue
-from .codec import MAX_TIMESTAMP_US, MIN_TIMESTAMP_US, Field, Schema, int64
+from .codec import MAX_DATE_DAYS, MIN_DATE_DAYS, MAX_TIMESTAMP_US, MIN_TIMESTAMP_US, Field, Schema, int64
 from .errors import IntegrityError, ProtocolError, SDKError, ValidationError
 from .transport import Deadline, translate_transport
 
@@ -193,6 +193,7 @@ class ScanStream:
         fields = []
         for field in self.schema:
             logical_type = None
+            precision = scale = None
             if pa.types.is_string(field.type):
                 logical_type = "string"
             elif pa.types.is_boolean(field.type):
@@ -203,9 +204,14 @@ class ScanStream:
                 logical_type = "float64"
             elif pa.types.is_timestamp(field.type) and field.type.unit == "us" and field.type.tz == "UTC":
                 logical_type = "timestamp_us_utc"
+            elif pa.types.is_decimal128(field.type):
+                logical_type = "decimal"
+                precision, scale = field.type.precision, field.type.scale
+            elif pa.types.is_date32(field.type):
+                logical_type = "date"
             if logical_type is None:
                 raise ProtocolError(f"unsupported Arrow logical type for field {field.name}")
-            fields.append(Field(field.name, logical_type, field.nullable))
+            fields.append(Field(field.name, logical_type, field.nullable, None, precision, scale))
         if fields:
             try:
                 Schema(fields)
@@ -221,6 +227,25 @@ class ScanStream:
                 bounds = pc.min_max(values.cast(pa.int64())).as_py()
                 if bounds["min"] is not None and (bounds["min"] < MIN_TIMESTAMP_US or bounds["max"] > MAX_TIMESTAMP_US):
                     raise ProtocolError("Arrow timestamp is outside UTC years 0001 through 9999")
+            elif pa.types.is_date32(field.type):
+                bounds = pc.min_max(values.cast(pa.int32())).as_py()
+                if bounds["min"] is not None and (bounds["min"] < MIN_DATE_DAYS or bounds["max"] > MAX_DATE_DAYS):
+                    raise ProtocolError("Arrow date is outside years 0001 through 9999")
+            elif pa.types.is_decimal128(field.type):
+                # Arrow validates buffers but does not enforce the coefficient's
+                # declared precision. Inspect signed128 directly without any
+                # Decimal arithmetic or caller-context rounding.
+                payload = memoryview(values.buffers()[1])
+                validity = memoryview(values.buffers()[0]) if values.null_count else None
+                maximum = 10 ** field.type.precision
+                for index in range(len(values)):
+                    position = values.offset + index
+                    if validity is not None and not validity[position // 8] & (1 << (position % 8)):
+                        continue
+                    offset = position * 16
+                    coefficient = int.from_bytes(payload[offset:offset + 16], "little", signed=True)
+                    if not -maximum < coefficient < maximum:
+                        raise ProtocolError("Arrow decimal exceeds declared precision")
             elif pa.types.is_float64(field.type):
                 if pc.all(pc.is_finite(values)).as_py() is False:
                     raise ProtocolError("Arrow float64 contains NaN or infinity")

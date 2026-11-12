@@ -1,6 +1,7 @@
 #include "core/scan/predicate.h"
 
 #include "core/api/canonical.h"
+#include "core/api/scalar_validation.h"
 #include "core/engine/storage_mapping.h"
 #include "storage/resources.h"
 
@@ -14,6 +15,7 @@
 #include <new>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 namespace glamdb {
@@ -279,6 +281,23 @@ Result<Literal> CheckLiteral(const FieldSpec& field, const Literal& value)
             }
             return value;
         }
+        case FieldType::Decimal: {
+            const auto* decimal = std::get_if<Decimal>(&value);
+            if (decimal == nullptr || decimal->precision != field.precision || decimal->scale != field.scale ||
+                !FitsDecimalPrecision(arrow::Decimal128(decimal->coefficient_high, decimal->coefficient_low),
+                    field.precision))
+            {
+                break;
+            }
+            return value;
+        }
+        case FieldType::Date: {
+            const auto* date = std::get_if<Date>(&value);
+            if (date == nullptr || date->days_since_epoch < -719162 || date->days_since_epoch > 2932896) {
+                break;
+            }
+            return value;
+        }
     }
     return std::unexpected(InvalidPredicate("literal type or value does not match field " + field.name));
 }
@@ -319,12 +338,21 @@ Result<TBoundInSet> BuildInSet(const FieldSpec& field, std::span<const OptionalL
             case FieldType::TimestampUsUtc:
                 set.Ints.push_back(std::get<TimestampUs>(*checked).value);
                 break;
+            case FieldType::Decimal: {
+                const auto& value = std::get<Decimal>(*checked);
+                set.Decimals.emplace_back(value.coefficient_high, value.coefficient_low);
+                break;
+            }
+            case FieldType::Date:
+                set.Ints.push_back(std::get<Date>(*checked).days_since_epoch);
+                break;
         }
     }
     SortAndDeduplicate(set.Strings);
     SortAndDeduplicate(set.Bools);
     SortAndDeduplicate(set.Ints);
     SortAndDeduplicate(set.Doubles);
+    SortAndDeduplicate(set.Decimals);
     return set;
 }
 
@@ -361,7 +389,12 @@ void EvalCompareTyped(const arrow::Array& column,
         if (array.IsNull(row)) {
             out[i] = ETruthValue::Unknown;
         } else {
-            out[i] = Matches<TValue>(op, array.GetView(row), literal) ? ETruthValue::True : ETruthValue::False;
+            if constexpr (std::is_same_v<TArray, arrow::Decimal128Array>) {
+                out[i] = Matches<TValue>(op, arrow::Decimal128(array.GetValue(row)), literal) ? ETruthValue::True
+                                                                                              : ETruthValue::False;
+            } else {
+                out[i] = Matches<TValue>(op, array.GetView(row), literal) ? ETruthValue::True : ETruthValue::False;
+            }
         }
     }
 }
@@ -395,6 +428,22 @@ void EvalCompareStrip(const arrow::Array& column,
                 offset,
                 op,
                 std::get<TimestampUs>(value).value,
+                out);
+            return;
+        case FieldType::Decimal: {
+            const auto& decimal = std::get<Decimal>(value);
+            EvalCompareTyped<arrow::Decimal128Array, arrow::Decimal128>(column,
+                offset,
+                op,
+                arrow::Decimal128(decimal.coefficient_high, decimal.coefficient_low),
+                out);
+            return;
+        }
+        case FieldType::Date:
+            EvalCompareTyped<arrow::Date32Array, int32_t>(column,
+                offset,
+                op,
+                std::get<Date>(value).days_since_epoch,
                 out);
             return;
     }
@@ -477,6 +526,29 @@ void EvalInStrip(const arrow::Array& column, int64_t offset, const TBoundInSet& 
                 set.HasNull,
                 [](int64_t v) {
                     return v;
+                },
+                out);
+            return;
+        case FieldType::Decimal:
+            EvalInTyped<arrow::Decimal128Array, std::pair<int64_t, uint64_t>>(
+                column,
+                offset,
+                set.Decimals,
+                set.HasNull,
+                [](std::string_view bytes) {
+                    const arrow::Decimal128 value(reinterpret_cast<const uint8_t*>(bytes.data()));
+                    return std::pair{value.high_bits(), value.low_bits()};
+                },
+                out);
+            return;
+        case FieldType::Date:
+            EvalInTyped<arrow::Date32Array, int64_t>(
+                column,
+                offset,
+                set.Ints,
+                set.HasNull,
+                [](int32_t value) {
+                    return static_cast<int64_t>(value);
                 },
                 out);
             return;
@@ -809,9 +881,9 @@ BindPredicate(const Predicate& predicate, const SchemaSpec& schema, const std::s
         }
 
         SortAndDeduplicate(bound.ReferencedFields);
-        bound.ReferencedTypes.reserve(bound.ReferencedFields.size());
+        bound.ReferencedSpecs.reserve(bound.ReferencedFields.size());
         for (const auto fieldIndex : bound.ReferencedFields) {
-            bound.ReferencedTypes.push_back(schema.fields[fieldIndex].type);
+            bound.ReferencedSpecs.push_back(schema.fields[fieldIndex]);
         }
         for (auto& op : bound.Ops) {
             if (op.Kind == EBoundOpKind::PushCompare || op.Kind == EBoundOpKind::PushCompareNull ||
@@ -840,7 +912,7 @@ Result<std::vector<int64_t>> SelectRows(const TBoundPredicate& predicate,
             return std::unexpected(Internal("bound predicate has no instructions"));
         }
         if (referencedColumns.size() != predicate.ReferencedFields.size() ||
-            predicate.ReferencedTypes.size() != predicate.ReferencedFields.size())
+            predicate.ReferencedSpecs.size() != predicate.ReferencedFields.size())
         {
             return std::unexpected(Internal("predicate column count does not match bound fields"));
         }
@@ -848,7 +920,7 @@ Result<std::vector<int64_t>> SelectRows(const TBoundPredicate& predicate,
             if (!referencedColumns[i] || referencedColumns[i]->length() != numRows) {
                 return std::unexpected(Internal("predicate column length does not match batch length"));
             }
-            if (!referencedColumns[i]->type()->Equals(*MakeArrowType(predicate.ReferencedTypes[i]))) {
+            if (!referencedColumns[i]->type()->Equals(*MakeArrowType(predicate.ReferencedSpecs[i]))) {
                 return std::unexpected(Internal("predicate column has an unexpected Arrow type"));
             }
         }
@@ -1004,6 +1076,10 @@ TakeRows(const arrow::Array& column, std::span<const int64_t> rows, arrow::Memor
                 return TakeTyped<arrow::DoubleArray, arrow::DoubleBuilder>(column, rows, pool);
             case arrow::Type::TIMESTAMP:
                 return TakeTyped<arrow::TimestampArray, arrow::TimestampBuilder>(column, rows, pool);
+            case arrow::Type::DECIMAL128:
+                return TakeTyped<arrow::Decimal128Array, arrow::Decimal128Builder>(column, rows, pool);
+            case arrow::Type::DATE32:
+                return TakeTyped<arrow::Date32Array, arrow::Date32Builder>(column, rows, pool);
             default:
                 return std::unexpected(Internal("unsupported column type for row selection"));
         }

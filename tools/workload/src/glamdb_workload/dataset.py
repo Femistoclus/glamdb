@@ -1,6 +1,7 @@
 """Bounded, versioned Mimesis datasets using the SDK's exact scalar codecs."""
 
 import hashlib
+from datetime import date, timedelta
 import json
 import math
 import platform
@@ -8,7 +9,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 from glamdb_sdk import Schema
-from glamdb_sdk.codec import decode_rows, encode_rows, int64, timestamp_us
+from glamdb_sdk.codec import date_days, decimal_parts, decode_rows, encode_rows, format_decimal_coefficient, int64, timestamp_us
 from glamdb_sdk.request import json_bytes
 
 MAX_PART_BYTES = 8 * 1024**2
@@ -36,7 +37,7 @@ def _settings(config, schema):
         opts = dict(fields.get(field.name, {}))
         allowed = {"null_rate"} | (
             {"min", "max"}
-            if field.type in {"int64", "float64", "timestamp_us_utc"}
+            if field.type in {"int64", "float64", "timestamp_us_utc", "decimal", "date"}
             else {"length", "alphabet"} if field.type == "string" else set()
         )
         if set(opts) - allowed:
@@ -56,6 +57,13 @@ def _settings(config, schema):
         elif field.type == "timestamp_us_utc":
             opts["min"] = timestamp_us(opts.get("min", "2020-01-01T00:00:00.000000Z"))
             opts["max"] = timestamp_us(opts.get("max", "2021-01-01T00:00:00.000000Z"))
+        elif field.type == "date":
+            opts["min"] = date_days(opts.get("min", "2020-01-01"))
+            opts["max"] = date_days(opts.get("max", "2021-01-01"))
+        elif field.type == "decimal":
+            maximum = format_decimal_coefficient(10 ** field.precision - 1, field.scale)
+            opts["min"] = decimal_parts(opts.get("min", "-" + maximum), field.precision, field.scale)[0]
+            opts["max"] = decimal_parts(opts.get("max", maximum), field.precision, field.scale)[0]
         elif field.type == "float64":
             for name, default in (("min", -1000.0), ("max", 1000.0)):
                 value = opts.get(name, default)
@@ -140,6 +148,12 @@ def generate(
                 value = field(
                     "numeric.integer_number", start=opts["min"], end=opts["max"]
                 )
+            elif spec.type == "decimal":
+                coefficient = field("numeric.integer_number", start=opts["min"], end=opts["max"])
+                value = format_decimal_coefficient(coefficient, spec.scale)
+            elif spec.type == "date":
+                days = field("numeric.integer_number", start=opts["min"], end=opts["max"])
+                value = date(1970, 1, 1) + timedelta(days=days)
             elif spec.type == "float64":
                 value = field(
                     "numeric.float_number", start=opts["min"], end=opts["max"]

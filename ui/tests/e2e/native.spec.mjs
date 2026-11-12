@@ -504,3 +504,75 @@ test('native creation resolution clears cached pending requests after a database
     await expect(page.getByLabel('Access token')).toBeVisible();
     await expect(page.getByRole('dialog')).not.toBeVisible();
 });
+
+test('native decimal and date creation, exact write and typed filters survive reload', async ({
+    page,
+}) => {
+    await connect(page);
+    await page.getByLabel('Database name').fill('scalar_browser_database');
+    await page.getByRole('button', { name: 'Create database', exact: true }).click();
+    await page.getByRole('button', { name: 'New collection', exact: true }).first().click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel('Collection name').fill('scalar_browser');
+    await dialog.getByLabel('Column name 2', { exact: true }).fill('day');
+    await dialog.getByLabel('Column type 2', { exact: true }).selectOption('date');
+    await dialog.getByLabel('Column type 3', { exact: true }).selectOption('decimal');
+    await dialog.getByLabel('Decimal precision 3').fill('38');
+    await dialog.getByLabel('Decimal scale 3').fill('4');
+    const createRequest = page.waitForRequest(
+        (request) =>
+            request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/collections'),
+    );
+    await dialog.getByRole('button', { name: 'Create collection', exact: true }).click();
+    expect((await createRequest).postDataJSON().schema.fields[2]).toEqual({
+        name: 'amount',
+        type: 'decimal',
+        nullable: true,
+        precision: 38,
+        scale: 4,
+    });
+    await expect(dialog).not.toBeVisible();
+    await navigate(page, 'Data studio');
+    const write = page.locator('#write-form');
+    const amount = '9999999999999999999999999999999999.9999';
+    await write.getByLabel('key row 1', { exact: true }).fill('exact-money');
+    await write.getByLabel('day row 1', { exact: true }).fill('0001-01-01');
+    await write.getByLabel('amount row 1 NULL', { exact: true }).uncheck();
+    await write.getByLabel('amount row 1', { exact: true }).fill(amount);
+    await write.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await expect(write.getByText('Append committed', { exact: true })).toBeVisible();
+    await page.locator('#run-query').click();
+    const results = page.getByRole('table', { name: 'Query results' });
+    await expect(results).toContainText(amount);
+    await expect(results).toContainText('0001-01-01');
+    await page.getByRole('button', { name: '+ Add a condition', exact: true }).click();
+    await page.getByLabel('Filter column 1').selectOption('amount');
+    await page.getByLabel('Filter value 1').fill(amount);
+    const scanRequest = page.waitForRequest(
+        (request) =>
+            request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/scan/open'),
+    );
+    await page.locator('#run-query').click();
+    expect((await scanRequest).postDataJSON().predicate.value).toEqual({
+        type: 'decimal',
+        precision: 38,
+        scale: 4,
+        value: amount,
+    });
+    await expect(results.locator('tbody tr')).toHaveCount(1);
+    await page.reload();
+    await page.getByLabel('Access token').fill(token);
+    await page.getByRole('button', { name: 'Open my workspace' }).click();
+    await useDatabase(page, 'scalar_browser_database');
+    await navigate(page, 'Data studio');
+    await page.locator('#run-query').click();
+    await expect(results).toContainText(amount);
+    await expect(results).toContainText('0001-01-01');
+    await navigate(page, 'Schema');
+    await expect(
+        page
+            .getByRole('table', { name: 'Collection schema' })
+            .getByRole('row')
+            .filter({ hasText: 'amount' }),
+    ).toContainText('decimal(38,4)');
+});

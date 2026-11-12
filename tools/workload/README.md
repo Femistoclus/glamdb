@@ -95,11 +95,19 @@ glamdb-cli generate --schema schema.json --rows 1000000 --seed 42 --output datas
 ```
 
 A plain SDK schema is also accepted, with deterministic defaults. Supported
-types are `string`, `bool`, `int64`, `float64`, `timestamp_us_utc`. Numeric fields
+types are `string`, `bool`, `int64`, `float64`, `timestamp_us_utc`, `decimal`, and
+`date`. Numeric fields
 accept `min`/`max`; timestamps accept exact microsecond integers or timezone-aware
 RFC3339 values. Default dates cover 2020-01-01 through 2021-01-01, independent of
 the clock. Floats must stay finite. Strings accept `length` (0–4096) and an
 explicit Unicode `alphabet`. `null_rate` is allowed only on nullable fields.
+Decimals require schema `precision`/`scale` and exact plain-text `min`/`max`
+bounds. Generation samples integer coefficients and formats fixed-scale text,
+including precisions above 2^53, without binary float conversion. Default
+decimal bounds span the full declared precision. Date bounds use strict ISO
+calendar text; generation samples whole days. Normalized manifest generation
+bounds store decimal coefficients and date epoch-day counts as integers.
+This is the existing scalar workload generator; no TPC-H adapter is provided.
 For duplicate keys use `{"profile":"duplicates","distinct":100,"prefix":"key-"}`;
 all duplicates are intended append rows, not replacements.
 

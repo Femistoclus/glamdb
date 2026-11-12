@@ -50,7 +50,7 @@ struct SnapshotSelector
 enum class CompareOp : uint8_t { Eq, Ne, Lt, Le, Gt, Ge };
 
 // A literal must have exactly the field type: no implicit casts.
-using Literal = std::variant<std::string, bool, int64_t, double, TimestampUs>;
+using Literal = std::variant<std::string, bool, int64_t, double, TimestampUs, Decimal, Date>;
 using OptionalLiteral = std::optional<Literal>;
 
 // SQL three-valued logic (True, False, Unknown) predicate tree; only rows

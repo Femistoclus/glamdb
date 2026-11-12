@@ -233,6 +233,15 @@ Preserve these boundaries when adding or changing engine behavior:
   Scan buffers share an owned Arrow pool and retain the engine and read-only
   FileIO, including after filtering. Cancellation is checked after reads and
   before delivering a batch or EOS; use I/O barriers in concurrency tests.
+- **Exact decimal and date types.** Decimal128 precision/scale are immutable;
+  use exact coefficients and strict calendar days, never float or timestamp
+  substitutes. See [scalar types](docs/development/SCALAR_TYPES.md) for JSON,
+  typed predicates, native file annotations and schema-version compatibility.
+  Scalar-only schema/hash fixtures remain byte-for-byte version 1; extended
+  schemas use version 2 while append/hash formats remain unchanged. Ordinary
+  append result receipts remain version 1; bulk result receipts use version 2.
+  Check decimal bounds against signed limits: absolute-value precision checks
+  can overflow for the minimum physical signed 128-bit coefficient.
 - **Bounded resources and retained data.** Account for data, metadata, and
   control memory separately, including allocations outside Arrow. Check that a
   published state can be reopened within the same limits. Capacity exhaustion

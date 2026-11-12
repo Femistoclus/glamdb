@@ -19,7 +19,9 @@ concurrent snapshot readers. Power-loss durability qualification is still pendin
 ## Features
 
 - **Typed collections.** Fixed schemas with strings, booleans, int64, float64,
-  UTC microsecond timestamps, and nullable fields. Appends preserve every row,
+  UTC microsecond timestamps, exact decimal128 amounts and calendar dates,
+  and nullable fields. See [scalar types and compatibility](docs/development/SCALAR_TYPES.md).
+  Appends preserve every row,
   including duplicate keys.
 - **Snapshot reads.** Query the latest committed view or a retained historical
   snapshot. Select columns, limit results, and combine comparisons, membership,

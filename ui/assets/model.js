@@ -3,6 +3,66 @@ const BOOL_OPERATORS = new Set(['eq', 'ne', 'in', 'is_null', 'is_not_null']);
 const INTEGER = /^-?(?:0|[1-9]\d*)$/;
 const TIMESTAMP =
     /^(?!0000)\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
+const LEGACY_TYPES = ['string', 'int64', 'float64', 'bool', 'timestamp_us_utc'];
+const NATIVE_TYPES = [...LEGACY_TYPES, 'decimal', 'date'];
+
+function decimalParameters(field) {
+    if (
+        !Number.isInteger(field.precision) ||
+        field.precision < 1 ||
+        field.precision > 38 ||
+        !Number.isInteger(field.scale) ||
+        field.scale < 0 ||
+        field.scale > field.precision
+    )
+        throw new Error(`${field.name}: decimal requires precision 1..38 and scale 0..precision`);
+}
+
+function decimalScalar(field, value) {
+    decimalParameters(field);
+    if (typeof value !== 'string' || value.length > 128)
+        throw new Error(`${field.name}: decimal values require strings of at most 128 characters`);
+    const match = /^(-?)([0-9]+)(?:\.([0-9]+))?$/.exec(value);
+    if (!match) throw new Error(`${field.name}: use decimal digits without exponent or whitespace`);
+    const fraction = match[3] ?? '';
+    if (/[^0]/.test(fraction.slice(field.scale)))
+        throw new Error(`${field.name}: decimal exceeds its scale`);
+    const fixed = fraction.slice(0, field.scale).padEnd(field.scale, '0');
+    const integer = match[2].replace(/^0+/, '') || '0';
+    const coefficient = (integer + fixed).replace(/^0+/, '') || '0';
+    if (coefficient.length > field.precision)
+        throw new Error(`${field.name}: decimal exceeds its precision`);
+    return `${match[1] && coefficient !== '0' ? '-' : ''}${integer}${field.scale ? '.' + fixed : ''}`;
+}
+
+function dateScalar(field, value) {
+    if (typeof value !== 'string' || !/^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(value))
+        throw new Error(`${field.name}: date must use YYYY-MM-DD in years 0001..9999`);
+    const year = Number(value.slice(0, 4)),
+        month = Number(value.slice(5, 7)),
+        day = Number(value.slice(8, 10));
+    const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if (month < 1 || month > 12 || day < 1 || day > days[month - 1])
+        throw new Error(`${field.name}: invalid calendar date`);
+    return value;
+}
+
+export function schemaTypes(capabilities) {
+    return Array.isArray(capabilities?.schema_types)
+        ? NATIVE_TYPES.filter((type) => capabilities.schema_types.includes(type))
+        : [...LEGACY_TYPES];
+}
+
+export function creationSchema(fields, capabilities) {
+    const schema = { fields };
+    pendingSchema(schema);
+    const supported = schemaTypes(capabilities);
+    for (const field of fields)
+        if (!supported.includes(field.type))
+            throw new Error(`This server does not support ${field.type} fields`);
+    return schema;
+}
 
 export const selectionKey = (collectionId, snapshotId) =>
     JSON.stringify([collectionId, snapshotId]);
@@ -131,6 +191,10 @@ function scalar(field, value, fromForm = false) {
             if (typeof value !== 'string' || !TIMESTAMP.test(value))
                 throw new Error(`${field.name}: use a timezone and at most 6 fractional digits`);
             return value;
+        case 'decimal':
+            return decimalScalar(field, value);
+        case 'date':
+            return dateScalar(field, value);
         default:
             throw new Error(`Unsupported type ${field.type}`);
     }
@@ -209,14 +273,22 @@ export function buildPredicate(clauses, join = 'and', negate = false, fields = [
             if (!Array.isArray(values) || values.length > 1000)
                 throw new Error('IN expects an array of up to 1000 values');
             if (values.some((value) => value === null)) throw new Error('Use is null to test NULL');
-            return { ...leaf, values: values.map((value) => scalar(field, value, true)) };
+            return { ...leaf, values: values.map((value) => predicateScalar(field, value)) };
         }
         if (clause.value === null) throw new Error('Use is null to test NULL');
-        return { ...leaf, value: scalar(field, clause.value, true) };
+        return { ...leaf, value: predicateScalar(field, clause.value) };
     });
     if (!nodes.length) return null;
     const result = nodes.length === 1 ? nodes[0] : { op: join, args: nodes };
     return negate ? { op: 'not', arg: result } : result;
+}
+
+function predicateScalar(field, value) {
+    const parsed = scalar(field, value, true);
+    if (field.type === 'decimal')
+        return { type: 'decimal', value: parsed, precision: field.precision, scale: field.scale };
+    if (field.type === 'date') return { type: 'date', value: parsed };
+    return parsed;
 }
 
 export function prepareMutation(previous, body, idFactory = () => crypto.randomUUID()) {
@@ -282,7 +354,7 @@ export const PARQUET_ENCODINGS = [
     'byte_stream_split',
     'rle',
 ];
-const FIELD_TYPES = ['string', 'bool', 'int64', 'float64', 'timestamp_us_utc'];
+const FIELD_TYPES = NATIVE_TYPES;
 const PARQUET_KEYS = ['compression', 'dictionary', 'dictionary_page_size_limit', 'columns'];
 const COLUMN_KEYS = ['field', 'compression', 'dictionary', 'encoding'];
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -690,7 +762,7 @@ export const creationFingerprint = (body) =>
     });
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const TYPES = new Set(['string', 'int64', 'float64', 'bool', 'timestamp_us_utc']);
+const TYPES = new Set(NATIVE_TYPES);
 function requirePending(condition, message = 'Invalid pending request file') {
     if (!condition) throw new Error(message);
 }
@@ -706,7 +778,7 @@ function pendingSchema(schema) {
     const names = new Set(),
         ids = new Set();
     schema.fields.forEach((field, index) => {
-        pendingObject(field, ['name', 'type', 'nullable', 'field_id']);
+        pendingObject(field, ['name', 'type', 'nullable', 'field_id', 'precision', 'scale']);
         requirePending(
             typeof field.name === 'string' &&
                 field.name.length > 0 &&
@@ -716,6 +788,8 @@ function pendingSchema(schema) {
         requirePending(
             !names.has(field.name) && TYPES.has(field.type) && typeof field.nullable === 'boolean',
         );
+        if (field.type === 'decimal') decimalParameters(field);
+        else requirePending(!Object.hasOwn(field, 'precision') && !Object.hasOwn(field, 'scale'));
         const id = field.field_id ?? index + 1;
         requirePending(Number.isInteger(id) && id > 0 && id < 2 ** 31 && !ids.has(id));
         names.add(field.name);
@@ -736,6 +810,7 @@ export function schemaSignature(schema) {
             type: field.type,
             nullable: field.nullable,
             field_id: field.field_id ?? index + 1,
+            ...(field.type === 'decimal' ? { precision: field.precision, scale: field.scale } : {}),
         })),
     );
 }

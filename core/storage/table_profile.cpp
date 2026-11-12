@@ -15,9 +15,9 @@ namespace {
 
 constexpr std::size_t MaxSchemaFields = 64;
 
-std::shared_ptr<iceberg::Type> IcebergType(EFieldType type)
+std::shared_ptr<iceberg::Type> IcebergType(const TFieldSpec& field)
 {
-    switch (type) {
+    switch (field.Type) {
         case EFieldType::String:
             return iceberg::string();
         case EFieldType::Bool:
@@ -28,6 +28,10 @@ std::shared_ptr<iceberg::Type> IcebergType(EFieldType type)
             return iceberg::float64();
         case EFieldType::TimestampUsUtc:
             return iceberg::timestamp_tz();
+        case EFieldType::Decimal:
+            return iceberg::decimal(field.Precision, field.Scale);
+        case EFieldType::Date:
+            return iceberg::date();
     }
     return {};
 }
@@ -58,7 +62,14 @@ iceberg::Result<TTableProfile> MakeTableProfile(const TSchemaSpec& spec)
             {
                 return iceberg::InvalidArgument("Duplicate field name at index {}", index);
             }
-            auto type = IcebergType(field.Type);
+            if (field.Type == EFieldType::Decimal) {
+                if (field.Precision < 1 || field.Precision > 38 || field.Scale < 0 || field.Scale > field.Precision) {
+                    return iceberg::InvalidArgument("Invalid decimal precision or scale at index {}", index);
+                }
+            } else if (field.Precision != 0 || field.Scale != 0) {
+                return iceberg::InvalidArgument("Only decimal fields accept precision and scale at index {}", index);
+            }
+            auto type = IcebergType(field);
             if (!type) {
                 return iceberg::InvalidArgument("Unsupported field type at index {}", index);
             }
@@ -98,27 +109,37 @@ iceberg::Status CheckTableProfile(const TTableProfile& profile)
             if (!field.type() || !field.doc().empty()) {
                 return iceberg::ValidationFailed("Unsupported table profile field.");
             }
-            EFieldType type;
+            TFieldSpec specField{std::string(field.name()), {}, field.optional()};
             switch (field.type()->type_id()) {
                 case iceberg::TypeId::kString:
-                    type = EFieldType::String;
+                    specField.Type = EFieldType::String;
                     break;
                 case iceberg::TypeId::kBoolean:
-                    type = EFieldType::Bool;
+                    specField.Type = EFieldType::Bool;
                     break;
                 case iceberg::TypeId::kLong:
-                    type = EFieldType::Int64;
+                    specField.Type = EFieldType::Int64;
                     break;
                 case iceberg::TypeId::kDouble:
-                    type = EFieldType::Float64;
+                    specField.Type = EFieldType::Float64;
                     break;
                 case iceberg::TypeId::kTimestampTz:
-                    type = EFieldType::TimestampUsUtc;
+                    specField.Type = EFieldType::TimestampUsUtc;
+                    break;
+                case iceberg::TypeId::kDecimal: {
+                    const auto& decimal = static_cast<const iceberg::DecimalType&>(*field.type());
+                    specField.Type = EFieldType::Decimal;
+                    specField.Precision = decimal.precision();
+                    specField.Scale = decimal.scale();
+                    break;
+                }
+                case iceberg::TypeId::kDate:
+                    specField.Type = EFieldType::Date;
                     break;
                 default:
                     return iceberg::ValidationFailed("Unsupported table profile field type.");
             }
-            spec.Fields.push_back({std::string(field.name()), type, field.optional()});
+            spec.Fields.push_back(std::move(specField));
         }
         ICEBERG_ASSIGN_OR_RAISE(auto expected, MakeTableProfile(spec));
         if (*profile.Schema != *expected.Schema || profile.Properties != expected.Properties) {

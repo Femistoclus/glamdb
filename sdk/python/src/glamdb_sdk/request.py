@@ -7,7 +7,7 @@ import struct
 from typing import Any, Iterable, Mapping
 from uuid import UUID
 
-from .codec import Schema, _canonical_row_size, row_plan, timestamp_us
+from .codec import Schema, _canonical_row_size, date_days, decimal_parts, row_plan, timestamp_us
 from .errors import ValidationError
 from .models import ANY
 
@@ -56,6 +56,11 @@ def canonical_payload_hash(collection_id: str, schema: Schema, rows: list[dict[s
                 chunk = b"\1" + struct.pack("<q", int(value))
             elif field.type == "timestamp_us_utc":
                 chunk = b"\1" + struct.pack("<q", timestamp_us(value))
+            elif field.type == "decimal":
+                coefficient, _ = decimal_parts(value, field.precision, field.scale)
+                chunk = b"\1" + coefficient.to_bytes(16, "little", signed=True)
+            elif field.type == "date":
+                chunk = b"\1" + struct.pack("<i", date_days(value))
             else:
                 chunk = b"\1" + struct.pack("<d", value)
             digest.update(chunk)

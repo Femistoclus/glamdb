@@ -75,6 +75,68 @@ TEST(TableProfile, RejectsEmptyOversizedAndUnknownTypeSchemas)
     ExpectInvalid({{{"invalid", static_cast<EFieldType>(255)}}});
 }
 
+TEST(TableProfile, RecoversNativeDecimalAndDateParameters)
+{
+    auto profile = MakeTableProfile({{{"amount", EFieldType::String}, {"day", EFieldType::Int64, true}}});
+    ASSERT_TRUE(profile);
+    profile->Schema = std::make_shared<iceberg::Schema>(
+        std::vector{iceberg::SchemaField::MakeRequired(1, "amount", iceberg::decimal(38, 2)),
+            iceberg::SchemaField::MakeOptional(2, "day", iceberg::date())});
+    const auto checked = CheckTableProfile(*profile);
+    EXPECT_TRUE(checked) << checked.error().message;
+}
+
+TEST(TableProfile, CreatesNativeDecimalAndDateWithExactParameters)
+{
+    const auto profile = MakeTableProfile({{{"amount", EFieldType::Decimal, false, 38, 2},
+        {"fraction", EFieldType::Decimal, true, 38, 38},
+        {"whole", EFieldType::Decimal, true, 1, 0},
+        {"day", EFieldType::Date, true}}});
+    ASSERT_TRUE(profile) << profile.error().message;
+    ASSERT_TRUE(CheckTableProfile(*profile));
+    const auto fields = profile->Schema->fields();
+    ASSERT_EQ(fields.size(), 4);
+    for (std::size_t index = 0; index < fields.size(); ++index) {
+        EXPECT_EQ(fields[index].field_id(), index + 1);
+    }
+    const auto& decimal = static_cast<const iceberg::DecimalType&>(*fields[0].type());
+    EXPECT_EQ(decimal.precision(), 38);
+    EXPECT_EQ(decimal.scale(), 2);
+    EXPECT_EQ(fields[3].type()->type_id(), iceberg::TypeId::kDate);
+}
+
+TEST(TableProfile, RejectsInvalidDecimalParametersAndParametersOnOtherTypes)
+{
+    for (const auto& [precision, scale] : std::array<std::pair<std::int32_t, std::int32_t>, 7>{
+             {{0, 0}, {-1, 0}, {39, 0}, {9, -1}, {9, 10}, {38, 39}, {1, 2}}})
+    {
+        ExpectInvalid({{{"amount", EFieldType::Decimal, true, precision, scale}}});
+    }
+    for (const auto type : {EFieldType::String,
+             EFieldType::Bool,
+             EFieldType::Int64,
+             EFieldType::Float64,
+             EFieldType::TimestampUsUtc,
+             EFieldType::Date})
+    {
+        ExpectInvalid({{{"value", type, true, 1, 0}}});
+        ExpectInvalid({{{"value", type, true, 0, 1}}});
+    }
+    ExpectInvalid({{{"key", EFieldType::Decimal, false, 9, 2}}});
+    ExpectInvalid({{{"key", EFieldType::Date}}});
+}
+
+TEST(TableProfile, RejectsUnsupportedRecoveredDecimalScale)
+{
+    auto profile = MakeTableProfile({{{"amount", EFieldType::String}}});
+    ASSERT_TRUE(profile);
+    for (const int scale : {-1, 10}) {
+        profile->Schema = std::make_shared<iceberg::Schema>(
+            std::vector{iceberg::SchemaField::MakeRequired(1, "amount", iceberg::decimal(9, scale))});
+        EXPECT_FALSE(CheckTableProfile(*profile));
+    }
+}
+
 TEST(TableProfile, ValidatesNamesAsExactUtf8Bytes)
 {
     const std::string invalidNames[]{"",

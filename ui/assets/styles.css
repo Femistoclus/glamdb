@@ -1239,6 +1239,18 @@ dialog::backdrop {
     width: auto;
     accent-color: var(--color-accent);
 }
+.schema-type-controls {
+    min-width: 0;
+}
+.decimal-parameters {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 5px;
+    margin-top: 5px;
+}
+.decimal-parameters label {
+    display: block;
+}
 /* Parquet value compression (data files), not HTTP content coding. */
 /* Parquet options sit on a second line of each column row. */
 .schema-editor-row.with-parquet {

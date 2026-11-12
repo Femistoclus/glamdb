@@ -113,5 +113,32 @@ TEST(StorageMapping, RecordBatchByteEstimateBoundsArrowBuffers)
     check(dense);
 }
 
+TEST(StorageMapping, NativeOwnedColumnsAndWriterCopiesPreserveTypesAndAccountEveryBuffer)
+{
+    const SchemaSpec schema{{{"amount", FieldType::Decimal, true, 38, 2}, {"day", FieldType::Date, true}}};
+    const std::vector<Row> rows{{Decimal{0, 12345, 38, 2}, Date{-719162}}, {std::monostate{}, std::monostate{}}};
+    const auto batch = MakeRecordBatch(schema, rows);
+    ASSERT_TRUE(batch) << batch.error().message;
+    // Two values of 16 and four bytes, plus one bitmap byte per column.
+    EXPECT_EQ(EstimateRecordBatchBytes(schema, rows), 42);
+    EXPECT_EQ(EstimateRecordBatchBytes(schema, **batch), 42);
+    EXPECT_EQ(arrow::util::TotalBufferSize(**batch), 42);
+    arrow::ProxyMemoryPool pool(arrow::default_memory_pool());
+    const auto copied = CopyRecordBatch(**batch, &pool);
+    ASSERT_TRUE(copied) << copied.error().message;
+    EXPECT_TRUE((*copied)->Equals(**batch));
+    EXPECT_GT(pool.bytes_allocated(), 0);
+    for (int column = 0; column < 2; ++column) {
+        const auto& original = (*batch)->column_data(column)->buffers;
+        const auto& own = (*copied)->column_data(column)->buffers;
+        ASSERT_EQ(original.size(), own.size());
+        for (size_t buffer = 0; buffer < original.size(); ++buffer) {
+            ASSERT_NE(original[buffer], nullptr);
+            ASSERT_NE(own[buffer], nullptr);
+            EXPECT_NE(original[buffer]->data(), own[buffer]->data());
+        }
+    }
+}
+
 } // namespace
 } // namespace glamdb::detail

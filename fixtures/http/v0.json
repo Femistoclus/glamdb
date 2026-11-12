@@ -35,7 +35,10 @@
         "features": "object",
         "predicate_ops": "array",
         "limits": "object",
-        "parquet": "object|null"
+        "parquet": "object|null",
+        "schema_types": "array",
+        "decimal": "object",
+        "date": "object"
       },
       "response_schema": "capabilities"
     },

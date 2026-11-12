@@ -40,6 +40,7 @@ Result<WriteSettings> DecodeWriteSettings(const SchemaSpec& schema, std::string_
 std::vector<ParquetCodecCapability> ParquetCodecCapabilities();
 
 // Encodings with their field types, dictionary types and page size limits.
+// Decimal uses plain for every precision; date supports the INT32 encodings.
 void AddEncodingCapabilities(EngineCapabilities& capabilities);
 
 struct TEffectiveColumnSettings

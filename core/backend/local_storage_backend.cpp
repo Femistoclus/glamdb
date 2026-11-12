@@ -409,7 +409,11 @@ void CheckWriterInput(const SchemaSpec& schema, const NormalizedInput& input, co
     }
     int64_t fixedRowBytes = 0;
     for (const auto& field : schema.fields) {
-        fixedRowBytes += 1 + (field.type == FieldType::String ? 4 : field.type == FieldType::Bool ? 1 : 8);
+        fixedRowBytes += 1 +
+            (field.type == FieldType::Decimal                                          ? 16
+                    : field.type == FieldType::String || field.type == FieldType::Date ? 4
+                    : field.type == FieldType::Bool                                    ? 1
+                                                                                       : 8);
     }
     // Per row: the fixed slots plus the string bytes.
     std::vector<int64_t> rowBytes(rows, fixedRowBytes);

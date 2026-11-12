@@ -179,6 +179,9 @@ joins a writer attempt or holds a SQLite read transaction.
   Strings compare by unsigned UTF-8 bytes (`key` literals `<= 1024` bytes, other
   strings `<= 1 MiB`); literal `-0.0` normalizes to `0.0`; NaN/Inf and
   out-of-range timestamps are `INVALID_ARGUMENT`.
+  DECIMAL compares exact signed coefficients with matching precision/scale;
+  DATE compares calendar days without timestamp conversion. Their typed
+  Compare/IN literals retain SQL NULL semantics. See [scalar types](SCALAR_TYPES.md).
 - Before opening a candidate Parquet file, conservative SQL three-valued zone
   pruning (`TZoneTruth` in `core/scan/pruning.h`) evaluates the predicate over
   manifest column bounds and null/value counts (`ExtractFileZoneStats`). Only
@@ -195,6 +198,10 @@ joins a writer attempt or holds a SQLite read transaction.
   code points (`truncate(16)`) are also omitted at the manifest level while exact
   Parquet row-group statistics still prune, and `Float64` bounds require a
   confirmed zero manifest `nan_value_counts` entry.
+  DECIMAL and DATE range bounds remain unknown to pruning; valid null counts
+  retain their usual SQL three-valued meaning. A nonempty native scalar IN set
+  cannot be ruled out from counts alone. Exact decoded predicates handle these
+  values after candidate files and row groups are selected.
 - Surviving files open through positional `TScanRandomAccessFile` (`pread` over
   `IReadOnlyFileIO`, recording exact `BytesRead` and validating `Close()`,
   including when `limit` completes a scan inside an open file; only cancellation
@@ -217,7 +224,8 @@ joins a writer attempt or holds a SQLite read transaction.
   value is returned, every decoded projection and filter-only column is
   validated: Arrow `ValidateFull` (offsets and UTF-8), string limits (1024 bytes
   for `key`, 1 MiB otherwise), finite non-negative-zero floats and timestamps in
-  years 0001..9999. Then rows are filtered in bounded strips, projected (dropping
+  years 0001..9999, decimal coefficients within schema precision and calendar
+  dates within years 0001..9999. Then rows are filtered in bounded strips, projected (dropping
   non-projected filter columns) and limited. Batches have at most `batch_rows`
   rows and the exact `Info().output_schema`. `limit = 0` and empty views return
   `nullptr` from the first `Next()`.

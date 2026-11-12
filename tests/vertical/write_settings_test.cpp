@@ -481,7 +481,12 @@ TEST_F(TWriteSettingsTest, DefaultsUseDictionariesExceptForBool)
     const auto capabilities = Engine_->GetCapabilities();
     EXPECT_EQ(capabilities.parquet_encodings.size(), 6U);
     EXPECT_EQ(capabilities.dictionary_types,
-        (std::vector<FieldType>{FieldType::String, FieldType::Int64, FieldType::Float64, FieldType::TimestampUsUtc}));
+        (std::vector<FieldType>{FieldType::String,
+            FieldType::Int64,
+            FieldType::Float64,
+            FieldType::TimestampUsUtc,
+            FieldType::Decimal,
+            FieldType::Date}));
     EXPECT_EQ(capabilities.default_dictionary_page_size_limit, 1 << 20);
 }
 
@@ -659,6 +664,50 @@ TEST(WriteSettingsCodec, BlobRoundTripsAndRejectsUnknownOptions)
     EXPECT_EQ(detail::DecodeWriteSettings(Schema, *fullBytes).value_or(WriteSettings{}), full);
     // Field IDs bind the blob to its schema.
     EXPECT_FALSE(detail::DecodeWriteSettings(SchemaSpec{{{"key", FieldType::String, false}}}, *encoded));
+}
+
+TEST(WriteSettingsCodec, NativeScalarPoliciesRoundTripAndMatchAdvertisedEncodings)
+{
+    const SchemaSpec schema{{{"amount", FieldType::Decimal, true, 38, 2}, {"day", FieldType::Date, true}}};
+    for (const auto encoding :
+        {ParquetEncoding::Plain, ParquetEncoding::DeltaBinaryPacked, ParquetEncoding::ByteStreamSplit})
+    {
+        WriteSettings settings;
+        settings.columns = {{"amount", std::nullopt, DictionaryPolicy::Disabled, ParquetEncoding::Plain},
+            {"day", std::nullopt, DictionaryPolicy::Disabled, encoding}};
+        const auto canonical = detail::CanonicalWriteSettings(schema, settings);
+        ASSERT_TRUE(canonical) << canonical.error().message;
+        const auto encoded = detail::EncodeWriteSettings(schema, *canonical);
+        ASSERT_TRUE(encoded) << encoded.error().message;
+        const auto decoded = detail::DecodeWriteSettings(schema, *encoded);
+        ASSERT_TRUE(decoded) << decoded.error().message;
+        EXPECT_EQ(*decoded, *canonical);
+    }
+    for (const auto encoding : {ParquetEncoding::DeltaBinaryPacked,
+             ParquetEncoding::DeltaLengthByteArray,
+             ParquetEncoding::DeltaByteArray,
+             ParquetEncoding::ByteStreamSplit,
+             ParquetEncoding::Rle})
+    {
+        WriteSettings invalid;
+        invalid.columns = {{"amount", std::nullopt, DictionaryPolicy::Disabled, encoding}};
+        EXPECT_FALSE(detail::CanonicalWriteSettings(schema, invalid));
+    }
+    WriteSettings dictionary;
+    dictionary.columns = {{"amount", std::nullopt, DictionaryPolicy::Enabled, std::nullopt},
+        {"day", std::nullopt, DictionaryPolicy::Enabled, std::nullopt}};
+    EXPECT_TRUE(detail::CanonicalWriteSettings(schema, dictionary));
+    EngineCapabilities capabilities;
+    detail::AddEncodingCapabilities(capabilities);
+    EXPECT_TRUE(std::ranges::contains(capabilities.dictionary_types, FieldType::Decimal));
+    EXPECT_TRUE(std::ranges::contains(capabilities.dictionary_types, FieldType::Date));
+    for (const auto& encoding : capabilities.parquet_encodings) {
+        EXPECT_EQ(std::ranges::contains(encoding.types, FieldType::Decimal),
+            encoding.encoding == ParquetEncoding::Plain);
+        EXPECT_EQ(std::ranges::contains(encoding.types, FieldType::Date),
+            encoding.encoding == ParquetEncoding::Plain || encoding.encoding == ParquetEncoding::DeltaBinaryPacked ||
+                encoding.encoding == ParquetEncoding::ByteStreamSplit);
+    }
 }
 
 } // namespace

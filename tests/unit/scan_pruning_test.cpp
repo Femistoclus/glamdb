@@ -99,6 +99,19 @@ int CompareSameType(FieldType type, const Literal& lhs, const Literal& rhs)
             const auto b = std::get<TimestampUs>(rhs).value;
             return a < b ? -1 : (a > b ? 1 : 0);
         }
+        case FieldType::Decimal: {
+            const auto& a = std::get<Decimal>(lhs);
+            const auto& b = std::get<Decimal>(rhs);
+            if (a.coefficient_high != b.coefficient_high) {
+                return a.coefficient_high < b.coefficient_high ? -1 : 1;
+            }
+            return a.coefficient_low < b.coefficient_low ? -1 : (a.coefficient_low > b.coefficient_low ? 1 : 0);
+        }
+        case FieldType::Date: {
+            const auto a = std::get<Date>(lhs).days_since_epoch;
+            const auto b = std::get<Date>(rhs).days_since_epoch;
+            return a < b ? -1 : (a > b ? 1 : 0);
+        }
     }
     return 0;
 }

@@ -95,7 +95,7 @@ std::shared_ptr<arrow::RecordBatch> MakeBatch(const SchemaSpec& schema, std::siz
 {
     std::vector<std::shared_ptr<arrow::Array>> columns;
     for (std::size_t field = 0; field < schema.fields.size(); ++field) {
-        const auto type = detail::MakeArrowType(schema.fields[field].type);
+        const auto type = detail::MakeArrowType(schema.fields[field]);
         std::unique_ptr<arrow::ArrayBuilder> builder;
         EXPECT_TRUE(arrow::MakeBuilder(arrow::default_memory_pool(), type, &builder).ok());
         for (std::size_t row = 0; row < rows; ++row) {
@@ -122,6 +122,13 @@ std::shared_ptr<arrow::RecordBatch> MakeBatch(const SchemaSpec& schema, std::siz
                 case FieldType::TimestampUsUtc:
                     status = static_cast<arrow::TimestampBuilder&>(*builder).Append(
                         1700000000000000LL + static_cast<int64_t>(value));
+                    break;
+                case FieldType::Decimal:
+                    status = static_cast<arrow::Decimal128Builder&>(*builder).Append(
+                        arrow::Decimal128(static_cast<int64_t>(value) - 500));
+                    break;
+                case FieldType::Date:
+                    status = static_cast<arrow::Date32Builder&>(*builder).Append(static_cast<int32_t>(value % 36525));
                     break;
             }
             EXPECT_TRUE(status.ok());
@@ -439,6 +446,18 @@ std::vector<Row> ToRows(const SchemaSpec& schema, const arrow::RecordBatch& batc
                     break;
                 case FieldType::TimestampUsUtc:
                     cells.emplace_back(TimestampUs{static_cast<const arrow::TimestampArray&>(array).Value(row)});
+                    break;
+                case FieldType::Decimal: {
+                    const arrow::Decimal128 coefficient(
+                        static_cast<const arrow::Decimal128Array&>(array).GetValue(row));
+                    cells.emplace_back(Decimal{coefficient.high_bits(),
+                        coefficient.low_bits(),
+                        schema.fields[field].precision,
+                        schema.fields[field].scale});
+                    break;
+                }
+                case FieldType::Date:
+                    cells.emplace_back(Date{static_cast<const arrow::Date32Array&>(array).Value(row)});
                     break;
             }
         }

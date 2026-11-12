@@ -163,7 +163,7 @@ class NativeMetadataHTTP(NativeHTTP):
         capabilities = self.api('/databases/' + self.store_id + '/capabilities')['parquet']
         encodings = {item['encoding']: item['types'] for item in capabilities['encodings']}
         self.assertEqual(encodings['delta_byte_array'], ['string'])
-        self.assertEqual(encodings['byte_stream_split'], ['int64', 'float64', 'timestamp_us_utc'])
+        self.assertEqual(encodings['byte_stream_split'], ['int64', 'float64', 'timestamp_us_utc', 'date'])
         self.assertEqual(capabilities['dictionary']['page_size_limit'], {'min': 4096, 'max': 8388608, 'default': 1048576})
         self.assertEqual(capabilities['dictionary']['fallback_encoding'], 'plain')
 

@@ -313,3 +313,62 @@ def test_token_provider_preserves_prefix_and_real_arrow_stream_ownership():
     assert seen[0].url.path == f"/databases/{CID}/collections/{CID}/scan"
     assert seen[0].method == "POST" and body.closed
     assert batches[0].column(0)[0].as_py() == 9007199254740993
+
+
+def test_arrow_decimal128_and_date32_preserve_boundaries_and_nulls_after_close():
+    from datetime import date
+    from decimal import Decimal
+
+    schema = pa.schema([pa.field("amount", pa.decimal128(38, 2)), pa.field("day", pa.date32())])
+    values = [Decimal("-999999999999999999999999999999999999.99"),
+              Decimal("999999999999999999999999999999999999.99"), None]
+    batch = pa.record_batch([pa.array(values, type=schema[0].type),
+                             pa.array([date(1, 1, 1), date(9999, 12, 31), None], type=pa.date32())], schema=schema)
+    client, body = connection(ipc_bytes([batch]))
+    with client, client.scan_batches(CID) as stream:
+        retained = list(stream)
+        assert stream.integrity == "verified"
+    assert body.closed and retained[0].to_pylist() == [
+        {"amount": values[0], "day": date(1, 1, 1)},
+        {"amount": values[1], "day": date(9999, 12, 31)}, {"amount": None, "day": None}]
+
+
+@pytest.mark.parametrize("arrow_type,values", [
+    (pa.decimal256(39, 2), [None]), (pa.decimal128(8, -1), [None]),
+    (pa.decimal128(8, 9), [None]), (pa.date64(), [0]),
+    (pa.date32(), [-719163]), (pa.date32(), [2932897]),
+])
+def test_arrow_rejects_unsupported_decimal_or_date_schema_and_calendar_range(arrow_type, values):
+    batch = pa.record_batch([pa.array(values, type=arrow_type)], names=["v"])
+    client, body = connection(ipc_bytes([batch]))
+    with client:
+        with pytest.raises(ProtocolError):
+            with client.scan_batches(CID) as stream:
+                list(stream)
+    assert body.closed
+
+
+def test_arrow_decimal_coefficient_must_fit_declared_precision():
+    # Arrow's full buffer validation accepts this coefficient although 1000
+    # needs four digits. The SDK must enforce the declared decimal(3,0).
+    values = pa.Array.from_buffers(pa.decimal128(3, 0), 1,
+                                  [None, pa.py_buffer((1000).to_bytes(16, "little", signed=True))])
+    client, body = connection(ipc_bytes([pa.record_batch([values], names=["v"])]))
+    with client:
+        with pytest.raises(ProtocolError):
+            with client.scan_batches(CID) as stream:
+                list(stream)
+    assert body.closed
+
+
+def test_arrow_decimal_validation_honors_sliced_null_bitmap_and_value_offsets():
+    from decimal import Decimal
+
+    values = pa.Array.from_buffers(pa.decimal128(3, 0), 4, [
+        pa.py_buffer(bytes([0b1101])),
+        pa.py_buffer(b"".join(value.to_bytes(16, "little", signed=True) for value in [1000, 1000, -999, 999]))])
+    batch = pa.record_batch([values.slice(1)], names=["v"])
+    client, body = connection(ipc_bytes([batch]))
+    with client, client.scan_batches(CID) as stream:
+        rows = [row for result in stream for row in result.to_pylist()]
+    assert body.closed and rows == [{"v": None}, {"v": Decimal("-999")}, {"v": Decimal("999")}]

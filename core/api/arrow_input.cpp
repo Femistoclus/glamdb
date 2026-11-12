@@ -1,6 +1,7 @@
 #include "core/api/canonical.h"
 
 #include "core/api/binary.h"
+#include "core/api/scalar_validation.h"
 #include "core/engine/storage_mapping.h"
 
 #include <arrow/api.h>
@@ -63,6 +64,15 @@ std::vector<int> MapFields(const SchemaSpec& schema, const arrow::RecordBatch& b
                     matches = timestamp.unit() == arrow::TimeUnit::MICRO && timestamp.timezone() == "UTC";
                 }
                 break;
+            case FieldType::Decimal:
+                if (type->id() == arrow::Type::DECIMAL128) {
+                    const auto& decimal = static_cast<const arrow::Decimal128Type&>(*type);
+                    matches = decimal.precision() == field.precision && decimal.scale() == field.scale;
+                }
+                break;
+            case FieldType::Date:
+                matches = type->id() == arrow::Type::DATE32;
+                break;
         }
         Require(matches, "INVALID_ARGUMENT", "Arrow field type does not match fixed schema");
         columns.push_back(found->second);
@@ -84,6 +94,7 @@ struct TColumnView
 {
     FieldType Type = FieldType::String;
     bool Nullable = true;
+    int32_t Precision = 0;
     // Omitted nullable field: every value is NULL.
     bool Present = false;
     // Without a validity bitmap Array::IsNull reports null_count == length.
@@ -137,6 +148,7 @@ ResolveColumns(const SchemaSpec& schema, const arrow::RecordBatch& batch, const 
         TColumnView column;
         column.Type = schema.fields[field].type;
         column.Nullable = schema.fields[field].nullable;
+        column.Precision = schema.fields[field].precision;
         column.MaxLength = schema.fields[field].name == "key" ? 1024 : 1024 * 1024;
         if (mapping[field] >= 0) {
             const auto& data = *batch.column_data(mapping[field]);
@@ -177,9 +189,10 @@ Shape Inspect(const SchemaSpec& schema, const std::vector<std::shared_ptr<arrow:
             for (const auto& column : columns) {
                 if (column.IsNull(row)) {
                     Require(column.Nullable, "INVALID_ARGUMENT", "NULL in required Arrow field");
-                    shape.null_slot_bytes += column.Type == FieldType::String ? 4
-                        : column.Type == FieldType::Bool                      ? 1
-                                                                              : 8;
+                    shape.null_slot_bytes += column.Type == FieldType::Decimal               ? 16
+                        : column.Type == FieldType::String || column.Type == FieldType::Date ? 4
+                        : column.Type == FieldType::Bool                                     ? 1
+                                                                                             : 8;
                     continue;
                 }
                 if (column.Type == FieldType::String) {
@@ -189,7 +202,10 @@ Shape Inspect(const SchemaSpec& schema, const std::vector<std::shared_ptr<arrow:
                         "oversized Arrow string");
                     bytes += 4 + static_cast<size_t>(length);
                 } else {
-                    bytes += column.Type == FieldType::Bool ? 1 : 8;
+                    bytes += column.Type == FieldType::Decimal ? 16
+                        : column.Type == FieldType::Date       ? 4
+                        : column.Type == FieldType::Bool       ? 1
+                                                               : 8;
                 }
             }
             shape.decoded_bytes += bytes;
@@ -244,6 +260,21 @@ void HashRows(TCanonicalHasher& hash, const std::vector<TColumnView>& columns, i
                         value = 0.0;
                     }
                     hash.AddNumber(std::bit_cast<uint64_t>(value));
+                    break;
+                }
+                case FieldType::Decimal: {
+                    const arrow::Decimal128 value(column.Values + (column.Offset + row) * 16);
+                    Require(FitsDecimalPrecision(value, column.Precision),
+                        "INVALID_ARGUMENT",
+                        "decimal coefficient exceeds field precision");
+                    hash.AddNumber(value.low_bits());
+                    hash.AddNumber(value.high_bits());
+                    break;
+                }
+                case FieldType::Date: {
+                    const auto value = column.GetValue<int32_t>(row);
+                    Require(value >= -719162 && value <= 2932896, "INVALID_ARGUMENT", "date outside years 0001..9999");
+                    hash.AddNumber(value);
                     break;
                 }
             }
@@ -340,6 +371,14 @@ void CopyRows(TOwnedColumn& owned, const TColumnView& column, FieldType type, in
                 std::memcpy(values + row * 8, &value, 8);
                 break;
             }
+            case FieldType::Decimal:
+                std::memcpy(values + row * 16, column.Values + (column.Offset + source) * 16, 16);
+                break;
+            case FieldType::Date: {
+                const auto value = column.GetValue<int32_t>(source);
+                std::memcpy(values + row * 4, &value, 4);
+                break;
+            }
         }
     }
 }
@@ -390,6 +429,12 @@ std::shared_ptr<arrow::RecordBatch> OwnBatches(const SchemaSpec& schema,
             case FieldType::TimestampUsUtc:
                 column.Values = Allocate(rows * 8, pool);
                 break;
+            case FieldType::Decimal:
+                column.Values = Allocate(rows * 16, pool);
+                break;
+            case FieldType::Date:
+                column.Values = Allocate(rows * 4, pool);
+                break;
         }
     }
     int64_t first = 0;
@@ -411,10 +456,8 @@ std::shared_ptr<arrow::RecordBatch> OwnBatches(const SchemaSpec& schema,
             buffers.push_back(std::move(column.Data));
         }
         column.Validity.reset();
-        arrays.push_back(arrow::MakeArray(arrow::ArrayData::Make(MakeArrowType(schema.fields[field].type),
-            rows,
-            std::move(buffers),
-            column.NullCount)));
+        arrays.push_back(arrow::MakeArray(
+            arrow::ArrayData::Make(MakeArrowType(schema.fields[field]), rows, std::move(buffers), column.NullCount)));
     }
     return arrow::RecordBatch::Make(MakeArrowSchema(schema), rows, std::move(arrays));
 }

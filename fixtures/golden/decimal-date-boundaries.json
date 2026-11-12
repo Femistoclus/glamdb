@@ -1,0 +1,54 @@
+{
+  "fixture_version": 1,
+  "evidence_kind": "fixture",
+  "power_durability": "NOT VALIDATED",
+  "provenance": "Explicit schema v2 and row hex; hashes calculated independently with stdlib hashlib without SDK or verifier imports.",
+  "schema": {
+    "fields": [
+      {
+        "name": "key",
+        "type": "string",
+        "nullable": false
+      },
+      {
+        "name": "amount",
+        "type": "decimal",
+        "nullable": true,
+        "precision": 38,
+        "scale": 2
+      },
+      {
+        "name": "day",
+        "type": "date",
+        "nullable": true
+      }
+    ]
+  },
+  "collection_id": "00112233-4455-6677-8899-aabbccddeeff",
+  "rows": [
+    {
+      "key": "min",
+      "amount": "-999999999999999999999999999999999999.99",
+      "day": "0001-01-01"
+    },
+    {
+      "key": "max",
+      "amount": "999999999999999999999999999999999999.99",
+      "day": "9999-12-31"
+    },
+    {
+      "key": "zero",
+      "amount": "-000.0000",
+      "day": "1970-01-01"
+    },
+    {
+      "key": "null",
+      "amount": null,
+      "day": null
+    }
+  ],
+  "schema_canonical_hex": "434f4c554d4e41522d534348454d4100020003000100000003006b65790100020000000600616d6f756e74060126020300000003006461790701",
+  "schema_fingerprint": "9604413bcbf96f2c63a749c7aa9dee2dcc5fe2224a7c712e9e88cb382731dfb6",
+  "canonical_hex": "434f4c554d4e41522d415050454e4400010000112233445566778899aabbccddeeff9604413bcbf96f2c63a749c7aa9dee2dcc5fe2224a7c712e9e88cb382731dfb6040000000000000001030000006d696e0101000000c0dd75f6853b79a557b3c4b401c606f5ff01030000006d617801ffffffff3f228a097ac4865aa84c3b4b01a0c02c0001040000007a65726f0100000000000000000000000000000000010000000001040000006e756c6c0000",
+  "payload_sha256": "e3dce310f241d4479f7bf5ed508ebf2a5661e2cc6424cc910658bea647ca0144"
+}
