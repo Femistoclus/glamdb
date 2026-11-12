@@ -1241,12 +1241,15 @@ TEST(SnapshotArchiveCost, RootAndCatalogWorkPerAppendDoNotDependOnArchivedHistor
         (*opened)->GetSnapshotArchive(test::collection_id)->archived_snapshots);
 }
 
-// The same measurement without the setting: the root grows with history.
+// The same measurement without the setting: the root grows with history. The
+// default history.max_snapshots of 4096 would refuse appends; lift it here.
 TEST(SnapshotArchiveCost, DISABLED_BaselineWithoutArchiveGrowsWithHistory)
 {
     test::TempDir directory;
     const auto root = directory.path / "store";
-    auto created = CreateStore({test::store_id, root.string(), "local-delete-extra-v1", CostLimits()});
+    auto limits = CostLimits();
+    limits.history.max_snapshots = 8192;
+    auto created = CreateStore({test::store_id, root.string(), "local-delete-extra-v1", limits});
     ASSERT_TRUE(created) << created.error().message;
     auto engine = std::move(*created);
     ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", Schema}).disposition,
@@ -1258,7 +1261,7 @@ TEST(SnapshotArchiveCost, DISABLED_BaselineWithoutArchiveGrowsWithHistory)
     ASSERT_TRUE(engine->Shutdown(std::chrono::seconds(5)));
     engine.reset();
     const auto start = std::chrono::steady_clock::now();
-    auto opened = OpenExisting({root.string(), test::store_id, "local-delete-extra-v1", CostLimits()});
+    auto opened = OpenExisting({root.string(), test::store_id, "local-delete-extra-v1", limits});
     ASSERT_TRUE(opened) << opened.error().message;
     std::cout << std::format("archive_cost baseline reopen_ms={}\n",
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count());
