@@ -31,6 +31,10 @@ with a coherent per-store snapshot vector; default 1.0 negotiation stays compati
 Read [read views](docs/development/READ_VIEWS.md) for TTL, quotas, release semantics
 and the private planning bridge. Contract 1.2 adds bounded [native scan splits](docs/development/SCAN_SPLITS.md)
 with repeatable independent workers over the original verified membership.
+Contract 1.3 adds [scan negotiation](docs/development/SCAN_NEGOTIATION.md): opaque
+compute expressions keep their identities and residuals; typed necessary conditions
+never discharge the original expression. Serial limits push only without residuals
+or ordering; splits retain the global limit in compute.
 Staged sessions, remote read views,
 stable C ABI and Flight are explicitly unsupported. Keep publication on the existing Engine path.
 Independent durable I/O and Arrow/Parquet/Iceberg
@@ -560,7 +564,9 @@ appends and scans report `DEPENDENCY_UNAVAILABLE`.
 only installed public targets, and runs independent write/reopen processes.
 It requires real A/B appends, latest/A/initial rows, persisted receipts and
 idempotent retries when storage is enabled, and explicit dependency errors
-when disabled. Run it in both builds with `ctest --test-dir <build-dir> -R
+when disabled. Its public-only source/compute adapter compares negotiated scans
+against a full-scan independent scalar oracle, including residuals, global limits,
+concurrent splits and real truncated/missing bounds. Run it in both builds with `ctest --test-dir <build-dir> -R
 '^glamdb.installed_consumer$' --output-on-failure`; mock tests are separate.
 Core protocol tests use a test-only backend through `EngineFactory::Create/Open`;
 the real SqlCatalog test verifies the catalog integration separately. Neither

@@ -50,7 +50,8 @@ enum class EStorageOperation : uint16_t {
     PlanScan,
     NextScanSplits,
     ReadSplit,
-    CancelScanPlan
+    CancelScanPlan,
+    NegotiateScan
 };
 
 enum class EStorageFeature : uint16_t {
@@ -64,7 +65,7 @@ enum class EStorageFeature : uint16_t {
     IndependentReadView,
     // Native splits are advertised only from contract 1.2.
     ScanSplits,
-    // Proposed capabilities: never advertised by contracts 1.0 through 1.2.
+    // Proposed capabilities: never advertised by contracts 1.0 through 1.3.
     StagedWrites,
     StableCAbi,
     ArrowFlight,
@@ -73,7 +74,9 @@ enum class EStorageFeature : uint16_t {
     Merge,
     SqlMutations,
     SchemaEvolution,
-    CrossCollectionTransactions
+    CrossCollectionTransactions,
+    // Native scan negotiation is advertised only from contract 1.3.
+    ScanNegotiation
 };
 
 struct TStorageContractRequest

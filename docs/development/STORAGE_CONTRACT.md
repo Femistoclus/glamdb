@@ -1,6 +1,6 @@
 # Compute-facing native storage contract
 
-The installed `storage/contract.h` defines native semantic contracts **1.0**, **1.1** and **1.2**.
+The installed `storage/contract.h` defines native semantic contracts **1.0**, **1.1**, **1.2** and **1.3**.
 `Engine::NegotiateStorageContract(request)` describes supported operations for an
 intended collection mode and returns the engine's effective limits. It is a
 convenience over the pure `glamdb::NegotiateStorageContract(request,
@@ -44,8 +44,8 @@ auto contract = engine.NegotiateStorageContract(request);
 
 Versions are `(Major, Minor)` pairs ordered lexicographically. The request range
 is inclusive and negotiation selects the highest implemented version in it.
-Versions 1.0, 1.1 and 1.2 are implemented; a range spanning several majors selects
-1.2. The default request range remains [1.0, 1.0], preserving existing negotiation
+Versions 1.0 through 1.3 are implemented; a range spanning several majors selects
+1.3. The default request range remains [1.0, 1.0], preserving existing negotiation
 and feature results. New view consumers must include 1.1 and require
 `IndependentReadView`; a 1.0-only request with that requirement fails.
 A new major denotes incompatible semantics; a minor may add optional capabilities
@@ -102,6 +102,7 @@ operations are conservatively withheld from custom backends.
 | `ScanReadView` | `ScanReadView` by captured entry index (1.1, native only) | Yes | Yes |
 | `RenewReadView` / `ReleaseReadView` / `CancelReadView` | Corresponding Engine methods (1.1, native only) | Yes | Yes |
 | `PlanScan` / `NextScanSplits` | Bounded opaque split planning (1.2, native only) | Yes | Yes |
+| `NegotiateScan` | Pure typed pushdown negotiation (1.3, native scan support) | Yes | Yes |
 | `ReadSplit` / `CancelScanPlan` | Repeatable split cursors / plan cancellation (1.2, native only) | Yes | Yes |
 | `Append` | `AppendDurable` | Yes | No |
 | `BulkAppend` | `BulkAppendDurable` | Yes | No |
@@ -182,7 +183,8 @@ The vector is a coherent per-store cut, not atomic multi-table writes or a
 cross-store timestamp. See [read views](READ_VIEWS.md) for public signatures,
 trusted authorization scopes, fixed quotas, bounded expiry/renewal, release and
 cancellation, independent Arrow buffer lifetime and distinct restart errors.
-Remote views and split execution remain unimplemented.
+Contract 1.2 adds native split execution; remote views and remote split execution
+remain unimplemented.
 
 ## Writes, publication and outcomes
 
@@ -241,11 +243,16 @@ Version 1.0 advertises neither `IndependentReadView` nor `ScanSplits`. Version
 1.1 adds `IndependentReadView` only for the local scanner; version 1.2 also adds
 `ScanSplits` and `EffectiveLimits.ScanSplits`. See [scan splits](SCAN_SPLITS.md)
 for paging, whole-file target size, original-view lifetime, quotas and explicit
-rejection of global LIMIT.
+rejection of global LIMIT. Version 1.3 adds `ScanNegotiation` and `NegotiateScan`
+for native scans; versions 1.0–1.2 never advertise them. See
+[scan negotiation](SCAN_NEGOTIATION.md) for exact/necessary-condition/residual
+classification, trusted translation assertions, stable field mapping, compute
+projection inputs and legal limits. The pure scan planner uses bounded shared
+metadata admission; this is separate from pure capability discovery above.
 
 `StagedWrites`, `StableCAbi`, `ArrowFlight`, `RemoteDescriptors`, `Overwrite`,
 `Merge`, `SqlMutations`, `SchemaEvolution` and `CrossCollectionTransactions`
-remain reserved and unimplemented. Requiring one fails explicitly in all three
+remain reserved and unimplemented. Requiring one fails explicitly in all four
 versions. Native scan cursors and bulk sources do not imply these protocols.
 
 ## Executable evidence

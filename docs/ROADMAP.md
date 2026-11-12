@@ -18,12 +18,14 @@ Parquet data files, manifests, manifest lists and metadata JSON through the
 production storage backend before the outer SQLite commit. `Engine::Scan` reads
 fixed snapshots, and `Engine::GetHealth` reports read and write admission. The facade also exposes
 [capabilities, snapshot history, selected-view statistics, file/row-group details, fixed-view pages, explain and cursor profiles](development/METADATA.md). The
-[native storage contracts 1.0–1.2](development/STORAGE_CONTRACT.md) adds version/feature
+[native storage contracts 1.0–1.3](development/STORAGE_CONTRACT.md) add version/feature
 negotiation, operation support by collection mode and effective limits over the
 same Engine operations. Contract 1.1 implements bounded
 [native pinned read views](development/READ_VIEWS.md) with coherent per-store vectors
 and delayed planning across retention/compaction. Contract 1.2 adds
-[bounded native split planning and replay](development/SCAN_SPLITS.md). Staged sessions,
+[bounded native split planning and replay](development/SCAN_SPLITS.md). Contract 1.3 adds
+[typed scan pushdown negotiation](development/SCAN_NEGOTIATION.md) with preserved
+opaque residuals, auxiliary compute fields and explicit global limit placement. Staged sessions,
 remote read views, stable C ABI and Flight remain unsupported. The
 native HTTP server (`glamdb --data-dir`), the network CLI (`glamdb-cli`), the
 Python SDK and the browser workbench use that same core. The disposable mock and

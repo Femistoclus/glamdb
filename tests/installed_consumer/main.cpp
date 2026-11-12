@@ -18,6 +18,8 @@
 #include <utility>
 #include <vector>
 
+void CheckNegotiation(glamdb::Engine& engine, bool write);
+
 namespace {
 
 constexpr char StoreId[] = "00000000-0000-0000-0000-000000000001";
@@ -80,7 +82,7 @@ void CheckContract(glamdb::Engine& engine, bool storage)
             glamdb::EStorageFeature::PreserveAppendDuplicates};
     }
     const auto contract = Take(engine.NegotiateStorageContract(request), "negotiate native contract");
-    Check(contract.Version == glamdb::TStorageContractVersion{1, 2} &&
+    Check(contract.Version == glamdb::TStorageContractVersion{1, 3} &&
             contract.EffectiveLimits.Engine.max_collections == engine.GetLimits().max_collections &&
             contract.EffectiveLimits.SchemaFields == 128 && contract.EffectiveLimits.AppendRows == 10000 &&
             contract.HasOperation(glamdb::EStorageOperation::Scan) == storage &&
@@ -93,6 +95,15 @@ void CheckContract(glamdb::Engine& engine, bool storage)
             contract.HasOperation(glamdb::EStorageOperation::ReadSplit) == storage &&
             contract.EffectiveLimits.ScanSplits.has_value() == storage,
         "native split discovery and limits are gated together");
+    Check(contract.HasFeature(glamdb::EStorageFeature::ScanNegotiation) == storage &&
+            contract.HasOperation(glamdb::EStorageOperation::NegotiateScan) == storage,
+        "native scan negotiation is gated by storage support");
+    auto version12 = request;
+    version12.MaxVersion = {1, 2};
+    const auto oldScan = Take(engine.NegotiateStorageContract(version12), "negotiate version 1.2");
+    Check(!oldScan.HasFeature(glamdb::EStorageFeature::ScanNegotiation) &&
+            !oldScan.HasOperation(glamdb::EStorageOperation::NegotiateScan),
+        "version 1.2 excludes negotiation");
     auto version11 = request;
     version11.MaxVersion = {1, 1};
     const auto previous = Take(engine.NegotiateStorageContract(version11), "negotiate version 1.1");
@@ -368,7 +379,7 @@ void Reopen(glamdb::Engine& engine, const std::string& receiptPath)
     Check(!stale && stale.error().code == "INVALID_CURSOR", "restart explicitly invalidates metadata cursors");
     const auto collection = Take(engine.GetCollection(CollectionId), "get reopened collection");
     Check(collection.schema == Schema && collection.name == "events", "persisted collection schema and name");
-    Check(Take(engine.ListCollections(), "list reopened collections").size() == 2, "persisted collection count");
+    Check(Take(engine.ListCollections(), "list reopened collections").size() == 3, "persisted collection count");
     const auto a = Take(engine.FindAppendOutcome(CollectionId, OperationA), "find receipt A");
     const auto b = Take(engine.FindAppendOutcome(CollectionId, OperationB), "find receipt B");
     if (!a || !b) {
@@ -509,9 +520,11 @@ try {
         Check(Take(engine->ListCollections(), "list initial collections").empty(), "new store is empty");
         Write(*engine, argv[3]);
         WriteKV(*engine);
+        CheckNegotiation(*engine, true);
     } else {
         Reopen(*engine, argv[3]);
         ReopenKV(*engine);
+        CheckNegotiation(*engine, false);
     }
     const auto shutdown = engine->Shutdown(std::chrono::milliseconds(1000));
     Check(shutdown.has_value(), "shutdown");

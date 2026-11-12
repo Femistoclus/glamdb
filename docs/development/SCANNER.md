@@ -333,3 +333,11 @@ not implemented). HTTP metadata, SDK
 and workbench use the same facade. The [installed system recipe](NATIVE_ACCEPTANCE.md)
 checks latest=1,010, historical A=1,000, initial=0, JSON/Arrow/EOS and retained
 batches, then repeats them after restart and source-independent restore.
+
+## External compute negotiation
+
+Contract 1.3 adds [scan negotiation](SCAN_NEGOTIATION.md) over these same typed
+predicates and conservative pruning rules. Necessary conditions may eliminate
+rows as well as files/groups, but always retain the original opaque residual.
+The installed source/compute adapter tests full-scan oracle equivalence; this is
+a native C++ integration, not DataFusion or Flight.

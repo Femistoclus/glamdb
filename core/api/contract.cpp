@@ -7,7 +7,7 @@
 namespace glamdb {
 namespace {
 
-constexpr TStorageContractVersion CurrentVersion{1, 2};
+constexpr TStorageContractVersion CurrentVersion{1, 3};
 
 void AddOperations(TStorageContract& contract, std::initializer_list<EStorageOperation> operations)
 {
@@ -70,6 +70,10 @@ TStorageContract DescribeContract(TStorageContractVersion version,
                     EStorageOperation::CancelScanPlan});
             contract.Features.push_back(EStorageFeature::ScanSplits);
             contract.EffectiveLimits.ScanSplits = TScanSplitLimits{};
+        }
+        if (native && version >= TStorageContractVersion{1, 3}) {
+            contract.Operations.push_back(EStorageOperation::NegotiateScan);
+            contract.Features.push_back(EStorageFeature::ScanNegotiation);
         }
         if (mode == CollectionMode::KeyValue) {
             contract.Operations.push_back(EStorageOperation::Lookup);

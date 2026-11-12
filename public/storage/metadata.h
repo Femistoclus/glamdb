@@ -125,10 +125,14 @@ struct TFileFieldMetrics
 {
     int32_t FieldID = 0;
     std::optional<int64_t> CompressedBytes{};
+    // Present counts are metadata counts; absent means unknown, never zero.
     std::optional<int64_t> ValueCount{};
     std::optional<int64_t> NullCount{};
     std::optional<int64_t> NanCount{};
-    // Iceberg single-value binary encoding; string bounds may be truncated.
+    // Advisory Iceberg single-value bytes, not exact scalar extrema. String
+    // bounds may be truncated; absence means unknown. Consumers must validate
+    // type/encoding and truncation semantics before conservative pruning; never
+    // use these bytes as equality proofs, exact aggregates or residual results.
     std::optional<std::vector<uint8_t>> LowerBound{};
     std::optional<std::vector<uint8_t>> UpperBound{};
     bool operator==(const TFileFieldMetrics&) const = default;
@@ -179,7 +183,9 @@ struct TColumnChunkMetadata
     // both rle_dictionary and plain data pages. Empty when not recorded.
     std::vector<TPageEncodingCount> EncodingStats{};
     std::optional<int64_t> NullCount{};
-    // Parquet plain encoding, independent of the manifest's Iceberg bounds.
+    // Advisory Parquet plain bytes, independent of the manifest's Iceberg
+    // bounds. Absence means unknown. No exactness flag is exposed here; use
+    // validated conservative bounds, never equality/aggregate substitutions.
     std::optional<std::vector<uint8_t>> LowerBound{};
     std::optional<std::vector<uint8_t>> UpperBound{};
     bool HasColumnIndex = false;

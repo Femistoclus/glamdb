@@ -3,7 +3,7 @@ if(NOT DEFINED TEST_STORAGE_ENABLED)
 endif()
 file(REMOVE_RECURSE "${TEST_BINARY_DIR}")
 file(MAKE_DIRECTORY "${TEST_BINARY_DIR}/work")
-file(COPY "${TEST_SOURCE_DIR}/CMakeLists.txt" "${TEST_SOURCE_DIR}/main.cpp"
+file(COPY "${TEST_SOURCE_DIR}/CMakeLists.txt" "${TEST_SOURCE_DIR}/main.cpp" "${TEST_SOURCE_DIR}/negotiation.cpp"
     DESTINATION "${TEST_BINARY_DIR}/source")
 execute_process(COMMAND "${CMAKE_COMMAND}" --install "${ENGINE_BINARY_DIR}"
     --prefix "${TEST_BINARY_DIR}/prefix" RESULT_VARIABLE result OUTPUT_QUIET)
