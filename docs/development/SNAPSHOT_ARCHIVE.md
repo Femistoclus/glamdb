@@ -238,7 +238,24 @@ sequence is the row's; a tampered row is `CORRUPTION`, never other data.
 Scrubbing remains explicit: `VerifyStoreFull`, `Reconcile` or `verify_full`.
 Detected `CORRUPTION` (during recovery or by any read) deletes every
 checkpoint, so the next open verifies fully and finds it again instead of
-reopening ready; a successful full verification re-establishes them.
+reopening ready; a successful full verification re-establishes them. The
+deletion is durable before the error is returned: the report first closes
+readiness through the commit gate, releases it, then waits for a publication
+running on another thread to end (that publication never waits for the
+report, so this cannot deadlock) and commits the deletion. A report raised
+inside the reporting thread's own publication deletes them right after that
+outer transaction ends, before the error leaves the catalog. Only a catalog
+that cannot write (after an uncertain COMMIT or an I/O failure) leaves the
+request pending for the next recovery.
+
+The receipt chain is recorded but not verified at open. Its head exists only
+in the checkpoint row (there is no independent copy to compare in O(1)), it
+restarts at every reseed, and recomputing it needs the digest of every root
+since then, which are deleted once superseded; a full recomputation would also
+be O(publications). On the checkpoint path the SQLite file is trusted as a
+whole (see above), so a second copy in the same file would add no independent
+evidence. The chain is kept for a future design whose checkpoints may lag
+behind the receipts and must be extended over that tail.
 
 The physical inventory (`GetStorageFootprint`) reads each archived list with
 its recorded size and SHA-256 and counts it and its manifests as referenced

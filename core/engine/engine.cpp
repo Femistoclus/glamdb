@@ -980,9 +980,12 @@ struct Engine::Impl
     }
 
     // Detected corruption must be found again by the next open, which the
-    // checkpoint path (no footers, no history) might not do.
-    // Never waits for the catalog: a busy catalog leaves the request pending
-    // for the next recovery (Reconcile, or Shutdown of an unready engine).
+    // checkpoint path (no footers, no history) might not do. Called without
+    // the commit gate, so it may wait for an in-flight publication (which
+    // never waits for this report) and the corruption error is returned only
+    // after the deletion is durable. A catalog that cannot write leaves the
+    // request pending for the next recovery (Reconcile, or Shutdown of an
+    // unready engine).
     void ForgetCheckpoints() noexcept
     {
         try {

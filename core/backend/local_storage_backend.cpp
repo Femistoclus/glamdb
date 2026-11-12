@@ -2569,6 +2569,11 @@ Status TLocalStorageBackend::OpenFromCheckpoints(const StoreInfo& store,
         CheckStore(store);
         CheckIO(Dirs_->CheckIdentity(), EStoragePath::Read, "verify store directories");
         Require(collections.size() == checkpoints.size(), "CORRUPTION", "checkpoints differ from the registry");
+        // As full verification: physical retained files, orphans included,
+        // fit the warehouse cap (a size walk, no file is read).
+        (void)TakeIO(NStorage::MeasureWarehouse(*Dirs_, Options_.Storage),
+            EStoragePath::Read,
+            "retained warehouse capacity");
         const std::shared_ptr<iceberg::FileIO> view =
             TakeIceberg(FileIO_->ReadOnlyView(), "IO_ERROR", "open read-only FileIO");
         std::map<std::string, TCollectionState, std::less<>> verified;

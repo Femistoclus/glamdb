@@ -381,6 +381,7 @@ void DurableSqliteCatalogStore::Transaction(const std::function<void()>& body)
         database_.Execute("COMMIT");
         Require(database_.Autocommit(), "IO_ERROR", "COMMIT left a transaction active");
         transaction_ = false;
+        DropCheckpointsAfterTransaction();
     } catch (...) {
         auto first = std::current_exception();
         bool unknown = commit_started;
@@ -394,6 +395,7 @@ void DurableSqliteCatalogStore::Transaction(const std::function<void()>& body)
         }
         transaction_ = false;
         uncertain_ = unknown;
+        DropCheckpointsAfterTransaction();
         try {
             std::rethrow_exception(first);
         } catch (const Failure& error) {
@@ -715,17 +717,43 @@ void DurableSqliteCatalogStore::CheckCheckpoints(std::span<const CollectionCheck
 
 bool DurableSqliteCatalogStore::DropCheckpoints()
 {
-    std::unique_lock lock(mutex_, std::try_to_lock);
-    if (!lock.owns_lock() || uncertain_ || transaction_ || publication_ != nullptr) {
+    // Blocks while another thread publishes; that publication never waits
+    // for a corruption report (which releases the commit gate first).
+    std::lock_guard lock(mutex_);
+    if (uncertain_) {
         return false;
     }
-    if (!HasCheckpoints()) {
-        return true;
+    if (transaction_ || publication_ != nullptr) {
+        // The recursive lock is ours: reported from inside this thread's
+        // publication. Transaction() deletes them once it has ended.
+        drop_checkpoints_after_transaction_ = true;
+        return false;
+    }
+    DeleteCheckpoints();
+    return true;
+}
+
+void DurableSqliteCatalogStore::DeleteCheckpoints()
+{
+    if (!HasCheckpoints() || database_.Query("SELECT 1 FROM collection_checkpoints LIMIT 1").empty()) {
+        return;
     }
     Transaction([&] {
         database_.Execute("DELETE FROM collection_checkpoints");
     });
-    return true;
+}
+
+void DurableSqliteCatalogStore::DropCheckpointsAfterTransaction() noexcept
+{
+    if (!drop_checkpoints_after_transaction_ || uncertain_ || transaction_) {
+        return;
+    }
+    drop_checkpoints_after_transaction_ = false;
+    try {
+        DeleteCheckpoints();
+    } catch (...) {
+        // The engine keeps its own request pending for the next recovery.
+    }
 }
 
 std::optional<ArchivedSnapshotRecord> DurableSqliteCatalogStore::NewestArchivedSnapshot(std::string_view id)
