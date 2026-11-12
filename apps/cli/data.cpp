@@ -55,6 +55,10 @@ std::vector<CLI::App*> AddDataCommands(CLI::App& app, TDataCommand& data)
              "schema",
              "append",
              "bulk-append",
+             "upsert",
+             "delete",
+             "lookup",
+             "compact",
              "scan",
              "operation",
              "snapshots",
@@ -76,6 +80,8 @@ std::vector<CLI::App*> AddDataCommands(CLI::App& app, TDataCommand& data)
             command->add_option("--name", data.Name, "Exact collection name")->required();
         }
         if (action == "create-collection") {
+            command->add_option("--mode", data.Mode, "Immutable collection mode: append or kv")
+                ->check(CLI::IsMember({"append", "kv"}));
             command->add_option("--schema", data.SchemaFile, "Schema JSON file, or - for stdin")->required();
             command->add_option("--write-settings",
                 data.WriteSettingsFile,
@@ -90,9 +96,11 @@ std::vector<CLI::App*> AddDataCommands(CLI::App& app, TDataCommand& data)
                     "Parquet write settings JSON file for later appends, or - for stdin")
                 ->required();
         }
-        if (action == "append" || action == "scan") {
+        if (action == "append" || action == "upsert" || action == "delete" || action == "lookup" ||
+            action == "compact" || action == "scan")
+        {
             auto* body = command->add_option("--body", data.BodyFile, "Native JSON request file, or - for stdin");
-            if (action == "append") {
+            if (action != "scan") {
                 body->required();
             }
         }
@@ -100,7 +108,7 @@ std::vector<CLI::App*> AddDataCommands(CLI::App& app, TDataCommand& data)
             command->add_option("--body", data.BodyFile, "Replayable NDJSON bulk request file")->required();
         }
         if (action == "operation") {
-            command->add_option("--operation-id", data.OperationID, "Original append UUID")->required();
+            command->add_option("--operation-id", data.OperationID, "Original mutation UUID")->required();
         }
         if (action == "file") {
             command->add_option("--file-id", data.FileID, "Opaque ID returned by files")->required();
@@ -161,6 +169,7 @@ TRequest BuildDataRequest(const TDataCommand& data)
         Require(data.SchemaFile != "-" || data.WriteSettingsFile != "-", "only one input can be read from stdin");
         request.Body = "{\"collection_id\":" + TJson(data.CollectionID).dump() +
             ",\"name\":" + TJson(data.Name).dump() + ",\"schema\":" + ReadDataFile(data.SchemaFile) +
+            (data.Mode == "append" ? "" : ",\"mode\":" + TJson(data.Mode).dump()) +
             (data.WriteSettingsFile.empty() ? "" : ",\"write_settings\":" + ReadDataFile(data.WriteSettingsFile)) + "}";
     } else if (data.Command == "collections") {
         request.Url += "?page_size=1000";
@@ -183,7 +192,9 @@ TRequest BuildDataRequest(const TDataCommand& data)
             request.Method = "POST";
             request.ContentType = "application/x-ndjson";
             request.BodyFile = data.BodyFile;
-        } else if (data.Command == "append" || data.Command == "scan") {
+        } else if (data.Command == "append" || data.Command == "upsert" || data.Command == "delete" ||
+            data.Command == "lookup" || data.Command == "compact" || data.Command == "scan")
+        {
             request.Method = "POST";
             request.Body = data.BodyFile.empty() ? "{}" : ReadDataFile(data.BodyFile);
         } else if (data.Command == "snapshots" || data.Command == "files" || data.Command == "file") {

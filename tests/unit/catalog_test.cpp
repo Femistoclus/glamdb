@@ -500,4 +500,98 @@ TEST_F(CatalogTest, CleanupBacklogUsesBoundedBatchesAndAnExactCount)
 }
 
 } // namespace
+TEST_F(CatalogTest, KVModeAndNoOpReceiptSurviveReopenWithoutPointerChange)
+{
+    CollectionInfo definition{collection_id,
+        "keys",
+        test::table_uuid,
+        SchemaSpec{{{"key", FieldType::String, false}}},
+        0,
+        std::nullopt};
+    definition.mode = CollectionMode::KeyValue;
+    const auto created = catalog->PublishCreate(
+        definition,
+        [](std::string_view) -> Status {
+            return {};
+        },
+        [&] {
+            return catalog->InsertTable("columnar", "keys", Location("initial"));
+        });
+    EXPECT_EQ(created.mode, CollectionMode::KeyValue);
+    const auto binding = Bind();
+    AppendResult receipt;
+    receipt.collection_id = collection_id;
+    receipt.operation_id = operation_id;
+    receipt.payload_hash = binding.payload_hash;
+    receipt.durability_profile = info.profile_id;
+    receipt.receipt_version = 3;
+    receipt.mutation_kind = MutationKind::Delete;
+    receipt.snapshot_created = false;
+    receipt.input_rows = 2;
+    catalog->PublishNoOp(binding, receipt, [](std::string_view) -> Status {
+        return {};
+    });
+    EXPECT_EQ(catalog->Base(collection_id), binding.base);
+    catalog->Close();
+    catalog = DurableSqliteCatalogStore::Open(temporary.path / "catalog.sqlite", info, {});
+    EXPECT_EQ(catalog->Collection(collection_id).mode, CollectionMode::KeyValue);
+    const auto recorded = catalog->FindOperation(collection_id, operation_id);
+    ASSERT_TRUE(recorded);
+    ASSERT_TRUE(test::Present(recorded).outcome);
+    EXPECT_EQ(test::Present(test::Present(recorded).outcome).result, receipt);
+}
+
+TEST_F(CatalogTest, MigrationOwnershipReservesThePopulationAndValidatesItsBindingOnReopen)
+{
+    CollectionInfo definition{collection_id,
+        "keys",
+        test::table_uuid,
+        SchemaSpec{{{"key", FieldType::String, false}}},
+        0,
+        std::nullopt};
+    definition.mode = CollectionMode::KeyValue;
+    const std::string owner(64, 'b');
+    catalog->PublishCreate(
+        definition,
+        [](std::string_view) -> Status {
+            return {};
+        },
+        [&] {
+            return catalog->InsertTable("columnar", "keys", Location("initial"));
+        },
+        owner,
+        operation_id);
+    BoundOperation binding{collection_id,
+        operation_id,
+        std::string(64, 'a'),
+        1,
+        catalog->Base(collection_id),
+        test::attempt_id};
+    const auto createdOnly = catalog->TryMigrationReplay(collection_id, operation_id, owner);
+    ASSERT_TRUE(createdOnly);
+    EXPECT_EQ(test::Present(createdOnly).first.mode, CollectionMode::KeyValue);
+    EXPECT_FALSE(test::Present(createdOnly).second);
+    EXPECT_THROW(catalog->BindOperation(binding), Failure);
+    EXPECT_FALSE(catalog->FindOperation(collection_id, operation_id));
+    catalog->BindOperation(binding, owner);
+    const auto replay = catalog->TryMigrationReplay(collection_id, operation_id, owner);
+    ASSERT_TRUE(replay);
+    EXPECT_EQ(test::Present(test::Present(replay).second).binding, binding);
+    const auto transaction = catalog->RunInTransaction([&]() -> iceberg::Status {
+        EXPECT_THROW(catalog->TryMigrationReplay(collection_id, operation_id, owner), Failure);
+        return {};
+    });
+    ASSERT_TRUE(transaction);
+    catalog->Close();
+    catalog = DurableSqliteCatalogStore::Open(temporary.path / "catalog.sqlite", info, {});
+    EXPECT_TRUE(catalog->TryMigrationReplay(collection_id, operation_id, owner));
+    catalog->Close();
+    sqlite3* connection = nullptr;
+    ASSERT_EQ(sqlite3_open((temporary.path / "catalog.sqlite").c_str(), &connection), SQLITE_OK);
+    const auto query = "UPDATE migration_targets SET population_hash='" + std::string(64, 'c') + "'";
+    ASSERT_EQ(sqlite3_exec(connection, query.c_str(), nullptr, nullptr, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_close(connection), SQLITE_OK);
+    EXPECT_THROW(DurableSqliteCatalogStore::Open(temporary.path / "catalog.sqlite", info, {}), Failure);
+}
+
 } // namespace glamdb::detail

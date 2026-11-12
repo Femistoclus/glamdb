@@ -4,8 +4,11 @@
 
 #include "core/api/binary.h"
 #include "core/api/canonical.h"
+#include "core/api/kv_input.h"
 #include "core/api/write_settings.h"
+#include "core/backend/file_window.h"
 #include "core/backend/inert_catalog.h"
+#include "core/backend/kv_producer.h"
 #include "core/backend/storage_errors.h"
 #include "core/engine/storage_mapping.h"
 #include "core/engine/store_lease.h"
@@ -61,6 +64,10 @@ constexpr std::string_view CatalogNamespace = "columnar";
 constexpr std::string_view OperationKey = "glamdb.operation-id";
 constexpr std::string_view ContentHashKey = "glamdb.content-hash";
 constexpr std::string_view BulkVersionKey = "glamdb.bulk-version";
+constexpr std::string_view KvVersionKey = "glamdb.kv-version";
+constexpr std::string_view KvKindKey = "glamdb.kv-kind";
+constexpr std::string_view KvInputRowsKey = "glamdb.kv-input-rows";
+constexpr std::string_view KvAffectedRowsKey = "glamdb.kv-affected-rows";
 
 // Arrow buffers borrow their pool. The aliasing batch handle keeps the pool
 // alive even if a backend caller retains it after releasing the backend.
@@ -113,7 +120,7 @@ uint64_t DataFileMemory(const iceberg::DataFile& file)
     return bytes;
 }
 
-uint64_t ScanIndexMemory(const NStorage::TBaseState& state)
+uint64_t ScanIndexMemory(const NStorage::TBaseState& state, const std::function<void()>& check = {})
 {
     if (!state.ScanIndex) {
         return 0;
@@ -123,6 +130,9 @@ uint64_t ScanIndexMemory(const NStorage::TBaseState& state)
     AddMemory(bytes, state.ExpiredSnapshotIDs.capacity(), sizeof(int64_t));
     AddMemory(bytes, state.RetainedManifestPaths.size() * 2, sizeof(std::string));
     for (const auto& path : state.RetainedManifestPaths) {
+        if (check) {
+            check();
+        }
         AddMemory(bytes, path.capacity() + 1, 1);
     }
     // Copy-and-grow publication and reserve-and-grow recovery can give the
@@ -132,6 +142,9 @@ uint64_t ScanIndexMemory(const NStorage::TBaseState& state)
     AddMemory(bytes, index.Files.size(), 2 * sizeof(NStorage::TScanDataFile));
     AddMemory(bytes, index.Snapshots.size(), 2 * sizeof(NStorage::TSnapshotBoundary));
     for (const auto& file : index.Files) {
+        if (check) {
+            check();
+        }
         AddMemory(bytes, file.Path.capacity() + 1);
         if (file.DataFile) {
             AddMemory(bytes, DataFileMemory(*file.DataFile));
@@ -326,9 +339,11 @@ int64_t SnapshotTimeUs(const iceberg::Snapshot& snapshot, std::string_view code)
     return ms * 1000;
 }
 
-NStorage::TTableProfile MakeProfile(const SchemaSpec& schema, std::string_view code)
+NStorage::TTableProfile
+MakeProfile(const SchemaSpec& schema, std::string_view code, CollectionMode mode = CollectionMode::Append)
 {
-    auto profile = NStorage::MakeTableProfile(ToStorageSchema(schema));
+    auto profile = mode == CollectionMode::KeyValue ? NStorage::MakeKVTableProfile(ToStorageSchema(schema))
+                                                    : NStorage::MakeTableProfile(ToStorageSchema(schema));
     if (!profile) {
         Fail(code, "table profile", profile.error().message);
     }
@@ -488,6 +503,58 @@ void CheckBulkInput(const NormalizedInput& input, const NStorage::TDataWriterLim
         "data writer limits must be positive");
 }
 
+std::string_view MutationName(MutationKind kind)
+{
+    switch (kind) {
+        case MutationKind::Upsert:
+            return "upsert";
+        case MutationKind::Delete:
+            return "delete";
+        case MutationKind::Compact:
+            return "compact";
+        case MutationKind::None:
+            break;
+    }
+    Fail("INVALID_ARGUMENT", "KV mutation", "unknown mutation kind");
+}
+
+SchemaSpec MutationSchema(const CollectionInfo& collection, const NormalizedInput& input)
+{
+    return input.kv->Kind == MutationKind::Delete ? SchemaSpec{{{"key", FieldType::String, false}}} : collection.schema;
+}
+
+void CheckKvInput(const CollectionInfo& collection,
+    const NormalizedInput& input,
+    const NStorage::TDataWriterLimits& limits)
+{
+    Require(collection.mode == CollectionMode::KeyValue && input.kv && input.kv->InputRows >= 0 &&
+            input.kv->InputRows <= BulkAppendLimits::MaxRows && input.kv->MaxFiles > 0 && input.kv->MaxFiles <= 256 &&
+            input.kv->TargetFileBytes > 0 && input.kv->TargetFileBytes <= (16LL << 20) &&
+            input.kv->Duplicates >= DuplicatePolicy::Reject && input.kv->Duplicates <= DuplicatePolicy::LastWins,
+        "INVALID_ARGUMENT",
+        "KV mutation has an invalid mode, identity or finite limits");
+    (void)MutationName(input.kv->Kind);
+    if (input.kv->Kind == MutationKind::Compact) {
+        Require(input.kv->InputRows == 0 && input.GetRowCount() == 0 && !input.bulk,
+            "INVALID_ARGUMENT",
+            "KV compaction requires empty input");
+        return;
+    }
+    if (input.bulk) {
+        Require(input.kv->Kind == MutationKind::Upsert && input.bulk->Rows == input.kv->InputRows,
+            "INVALID_ARGUMENT",
+            "KV bulk input has an invalid kind or row count");
+        CheckBulkInput(input, limits);
+        return;
+    }
+    Require(input.GetRowCount() == static_cast<size_t>(input.kv->InputRows),
+        "INVALID_ARGUMENT",
+        "KV mutation row count differs from its identity");
+    if (input.GetRowCount() != 0) {
+        CheckWriterInput(MutationSchema(collection, input), input, limits);
+    }
+}
+
 void CheckIdentity(const NStorage::TBaseState& state, const BaseIdentity& base)
 {
     Require(state.Metadata != nullptr && state.MetadataLocation == base.metadata_location &&
@@ -497,11 +564,21 @@ void CheckIdentity(const NStorage::TBaseState& state, const BaseIdentity& base)
         "retained table root does not match the catalog identity");
 }
 
-void CheckSchema(const iceberg::TableMetadata& metadata, const SchemaSpec& schema)
+void CheckSchema(const iceberg::TableMetadata& metadata, const SchemaSpec& schema, CollectionMode mode)
 {
-    const auto profile = MakeProfile(schema, "CORRUPTION");
+    Require(NStorage::IsKVMetadata(metadata) == (mode == CollectionMode::KeyValue),
+        "CORRUPTION",
+        "retained table mode differs from the catalog mode");
+    const auto profile = MakeProfile(schema, "CORRUPTION", mode);
     const auto current = TakeRetained(metadata.Schema(), "retained schema");
-    Require(*current == *profile.Schema, "CORRUPTION", "retained table schema differs from the catalog schema");
+    Require(*current == *profile.Schema &&
+            std::ranges::equal(current->fields(),
+                profile.Schema->fields(),
+                [](const auto& actual, const auto& expected) {
+                    return actual.doc() == expected.doc();
+                }),
+        "CORRUPTION",
+        "retained table schema differs from the catalog schema");
 }
 
 bool SummaryMatches(const iceberg::Snapshot& snapshot, const std::string& key, bool required, std::string_view expected)
@@ -516,6 +593,44 @@ bool SummaryMatches(const iceberg::Snapshot& snapshot, const std::string& key, b
 void CheckReceipt(const iceberg::Snapshot& snapshot, const AppendResult& receipt)
 {
     using Fields = iceberg::SnapshotSummaryFields;
+    if (receipt.receipt_version == 3) {
+        const auto metric = [&](const std::string& key, int64_t value) {
+            return value >= 0 && SummaryMatches(snapshot, key, value != 0, std::to_string(value));
+        };
+        Require(receipt.snapshot_created && receipt.hash_version == 1 && receipt.rows_appended == 0 &&
+                receipt.snapshot_id == snapshot.snapshot_id &&
+                receipt.parent_snapshot_id == snapshot.parent_snapshot_id &&
+                receipt.snapshot_created_at_us == SnapshotTimeUs(snapshot, "CORRUPTION") &&
+                snapshot.summary.find(std::string(BulkVersionKey)) == snapshot.summary.end() &&
+                SummaryMatches(snapshot, std::string(KvVersionKey), true, "1") &&
+                receipt.mutation_kind >= MutationKind::Upsert && receipt.mutation_kind <= MutationKind::Compact &&
+                SummaryMatches(snapshot, std::string(KvKindKey), true, MutationName(receipt.mutation_kind)) &&
+                SummaryMatches(snapshot, std::string(ContentHashKey), true, receipt.payload_hash) &&
+                receipt.input_rows >= 0 && receipt.rows_affected >= 0 &&
+                SummaryMatches(snapshot, std::string(KvInputRowsKey), true, std::to_string(receipt.input_rows)) &&
+                SummaryMatches(snapshot, std::string(KvAffectedRowsKey), true, std::to_string(receipt.rows_affected)) &&
+                metric(Fields::kAddedRecords, receipt.rows_written) &&
+                metric(Fields::kDeletedRecords, receipt.rows_removed) &&
+                metric(Fields::kAddedDataFiles, receipt.data_files_added) &&
+                metric(Fields::kDeletedDataFiles, receipt.data_files_removed) &&
+                metric(Fields::kAddedFileSize, receipt.compressed_data_bytes_added) &&
+                metric(Fields::kRemovedFileSize, receipt.compressed_data_bytes_removed) &&
+                (receipt.mutation_kind == MutationKind::Compact
+                        ? receipt.input_rows == 0 && receipt.rows_affected == 0 &&
+                            receipt.rows_written == receipt.rows_removed && receipt.data_files_removed >= 4 &&
+                            receipt.data_files_added <= receipt.data_files_removed / 4
+                        : receipt.input_rows > 0 && receipt.rows_affected > 0 &&
+                            receipt.rows_affected <= receipt.input_rows) &&
+                (receipt.mutation_kind != MutationKind::Upsert ||
+                    (receipt.rows_written >= receipt.rows_removed &&
+                        receipt.rows_written - receipt.rows_removed <= receipt.rows_affected)) &&
+                (receipt.mutation_kind != MutationKind::Delete ||
+                    (receipt.rows_removed >= receipt.rows_written &&
+                        receipt.rows_removed - receipt.rows_written == receipt.rows_affected)),
+            "CORRUPTION",
+            "retained KV snapshot differs from its committed receipt");
+        return;
+    }
     const auto marker = snapshot.summary.find(std::string(BulkVersionKey));
     const auto profileMatches = receipt.receipt_version == 2
         ? marker != snapshot.summary.end() && marker->second == "1"
@@ -537,6 +652,9 @@ std::vector<std::shared_ptr<iceberg::Snapshot>> ExpiredHistory(const CollectionV
     if (view.expired_snapshots.empty()) {
         return {};
     }
+    Require(view.info.mode == CollectionMode::Append,
+        "CORRUPTION",
+        "KV collection has an unsupported expiration ledger");
     std::map<std::string, AppendResult, std::less<>> byOperation;
     readOperations(view.info.collection_id, [&](const auto& operation) {
         if (operation.state == OperationState::Committed && operation.outcome && operation.outcome->result) {
@@ -575,23 +693,147 @@ std::vector<std::shared_ptr<iceberg::Snapshot>> ExpiredHistory(const CollectionV
     return result;
 }
 
-// Bidirectional: every retained snapshot has exactly one committed receipt of
-// this collection, and every committed receipt has exactly one snapshot.
-// Bound and Failed operations therefore have no retained snapshot.
+void CheckNoOpRootPrefix(const iceberg::TableMetadata& historical, const iceberg::TableMetadata& current)
+{
+    Require(historical.snapshots.size() <= current.snapshots.size() &&
+            historical.snapshot_log.size() == historical.snapshots.size() &&
+            historical.snapshot_log.size() <= current.snapshot_log.size() &&
+            std::equal(historical.snapshot_log.begin(), historical.snapshot_log.end(), current.snapshot_log.begin()),
+        "CORRUPTION",
+        "KV no-op historical root does not retain a prefix of the confirmed snapshot log");
+    for (size_t i = 0; i < historical.snapshots.size(); ++i) {
+        const auto& old = historical.snapshots[i];
+        const auto& retained = current.snapshots[i];
+        Require(old && retained && *old == *retained && old->summary == retained->summary &&
+                old->manifest_list == retained->manifest_list,
+            "CORRUPTION",
+            "KV no-op historical root changes a retained snapshot");
+    }
+    const auto expectedSnapshot =
+        historical.snapshots.empty() ? iceberg::kInvalidSnapshotId : historical.snapshots.back()->snapshot_id;
+    const auto expectedSequence = historical.snapshots.empty() ? 0 : historical.snapshots.back()->sequence_number;
+    Require(historical.current_snapshot_id == expectedSnapshot && historical.last_sequence_number == expectedSequence,
+        "CORRUPTION",
+        "KV no-op historical root has an inconsistent selected snapshot");
+    auto normalized = current;
+    normalized.snapshots = historical.snapshots;
+    normalized.snapshot_log = historical.snapshot_log;
+    normalized.current_snapshot_id = historical.current_snapshot_id;
+    normalized.last_sequence_number = historical.last_sequence_number;
+    normalized.last_updated_ms = historical.last_updated_ms;
+    if (historical.snapshots.empty()) {
+        normalized.refs.erase("main");
+    } else {
+        const auto main = normalized.refs.find("main");
+        Require(main != normalized.refs.end() && main->second, "CORRUPTION", "confirmed KV root has no main reference");
+        auto restored = std::make_shared<iceberg::SnapshotRef>(*main->second);
+        restored->snapshot_id = historical.current_snapshot_id;
+        main->second = std::move(restored);
+    }
+    Require(normalized == historical,
+        "CORRUPTION",
+        "KV no-op historical root differs from immutable confirmed metadata");
+}
+
+void CheckNoOpReceipt(const iceberg::TableMetadata& metadata,
+    const CollectionInfo& collection,
+    std::string_view root,
+    const OperationRecord& operation,
+    const std::shared_ptr<iceberg::FileIO>& fileIO,
+    uint64_t rootLimit,
+    std::map<std::string, BaseIdentity, std::less<>>& verifiedRoots)
+{
+    if (!operation.outcome || !operation.outcome->result) {
+        Fail("CORRUPTION", "KV no-op history", "committed operation has no receipt");
+    }
+    const auto& receipt = *operation.outcome->result;
+    const auto& base = operation.binding.base;
+    const auto baseUri = NIO::TStoreUri::Parse(base.metadata_location, base.store_id);
+    const auto rootUri = NIO::TStoreUri::Parse(root, base.store_id);
+    Require(collection.mode == CollectionMode::KeyValue && NStorage::IsKVMetadata(metadata) &&
+            receipt.receipt_version == 3 && receipt.hash_version == 1 && !receipt.snapshot_created &&
+            receipt.mutation_kind >= MutationKind::Upsert && receipt.mutation_kind <= MutationKind::Compact &&
+            receipt.collection_id == collection.collection_id &&
+            receipt.operation_id == operation.binding.operation_id &&
+            receipt.payload_hash == operation.binding.payload_hash && receipt.rows_appended == 0 &&
+            receipt.snapshot_id == base.current_snapshot_id.value_or(0) &&
+            receipt.parent_snapshot_id == base.current_snapshot_id && receipt.snapshot_created_at_us == 0 &&
+            receipt.input_rows >= 0 && receipt.rows_affected == 0 && receipt.rows_written == 0 &&
+            receipt.rows_removed == 0 && receipt.data_files_added == 0 && receipt.data_files_removed == 0 &&
+            receipt.compressed_data_bytes_added == 0 && receipt.compressed_data_bytes_removed == 0 &&
+            base.collection_id == collection.collection_id && base.table_uuid == collection.table_uuid &&
+            base.schema_id == 0 && base.spec_id == 0 && baseUri && rootUri &&
+            rootUri.Value().CollectionId() == collection.collection_id &&
+            baseUri.Value().Kind() == NIO::EFileKind::Metadata &&
+            baseUri.Value().CollectionId() == collection.collection_id &&
+            MetadataVersion(base.metadata_location) <= MetadataVersion(root) &&
+            (receipt.mutation_kind != MutationKind::Compact || receipt.input_rows == 0),
+        "CORRUPTION",
+        "committed KV no-op differs from its retained exact base");
+    const auto found = verifiedRoots.find(base.metadata_location);
+    if (found != verifiedRoots.end()) {
+        Require(found->second == base, "CORRUPTION", "KV no-op receipts disagree on the same historical root identity");
+        return;
+    }
+    if (base.current_snapshot_id) {
+        const auto snapshot = metadata.SnapshotById(*base.current_snapshot_id);
+        Require(snapshot && *snapshot, "CORRUPTION", "committed KV no-op base snapshot is not retained");
+    }
+    auto historical = TakeRetained(
+        NStorage::ReadTableMetadata(*fileIO, base.metadata_location, std::nullopt, static_cast<int64_t>(rootLimit)),
+        "verify exact KV no-op historical root");
+    NStorage::TBaseState old{.MetadataLocation = base.metadata_location,
+        .Metadata = std::shared_ptr<const iceberg::TableMetadata>(std::move(historical)),
+        .CurrentManifests = {},
+        .Usage = {},
+        .ScanIndex = {}};
+    CheckIdentity(old, base);
+    CheckSchema(*old.Metadata, collection.schema, collection.mode);
+    CheckNoOpRootPrefix(*old.Metadata, metadata);
+    verifiedRoots.emplace(base.metadata_location, base);
+}
+
+// Snapshot-producing receipts and retained snapshots form a bijection. KV
+// no-ops retain their prepared base separately and never claim a new snapshot.
 void CheckHistory(const iceberg::TableMetadata& metadata,
-    std::string_view collectionID,
+    const CollectionInfo& collection,
+    std::string_view root,
     const std::function<void(std::string_view, const DurableSqliteCatalogStore::OperationConsumer&)>& readOperations,
+    const std::shared_ptr<iceberg::FileIO>& fileIO,
+    uint64_t rootLimit,
     std::span<const ExpiredSnapshotRecord> expired)
 {
+    Require(collection.mode != CollectionMode::KeyValue || expired.empty(),
+        "CORRUPTION",
+        "KV collection has an unsupported expiration ledger");
+    Require(expired.size() <= std::numeric_limits<size_t>::max() - metadata.snapshots.size(),
+        "CORRUPTION",
+        "snapshot inventory size overflows");
+    const auto snapshotCount = metadata.snapshots.size() + expired.size();
+    std::map<std::string, BaseIdentity, std::less<>> verifiedRoots;
     std::map<std::string, AppendResult, std::less<>> committed;
-    readOperations(collectionID, [&](const auto& operation) {
-        if (operation.binding.collection_id != collectionID || operation.state != OperationState::Committed) {
+    readOperations(collection.collection_id, [&](const auto& operation) {
+        if (operation.binding.collection_id != collection.collection_id || operation.state != OperationState::Committed)
+        {
             return;
         }
         if (!operation.outcome.has_value() || !operation.outcome->result.has_value()) {
             Fail("CORRUPTION", "history", "committed operation has no receipt");
         }
-        committed.emplace(operation.binding.operation_id, *operation.outcome->result);
+        const auto& receipt = *operation.outcome->result;
+        if (receipt.receipt_version == 3 && !receipt.snapshot_created) {
+            CheckNoOpReceipt(metadata, collection, root, operation, fileIO, rootLimit, verifiedRoots);
+            return;
+        }
+        Require((collection.mode == CollectionMode::KeyValue) == (receipt.receipt_version == 3),
+            "CORRUPTION",
+            "committed receipt version differs from the collection mode");
+        Require(committed.size() < snapshotCount,
+            "CORRUPTION",
+            "committed snapshot receipts exceed retained and expired snapshots");
+        Require(committed.emplace(operation.binding.operation_id, receipt).second,
+            "CORRUPTION",
+            "committed operation identity is duplicated");
     });
     std::set<std::string, std::less<>> seen;
     std::set<int64_t> ids;
@@ -615,6 +857,44 @@ void CheckHistory(const iceberg::TableMetadata& metadata,
     }
     Require(seen.size() == committed.size(), "CORRUPTION", "committed receipt has no retained snapshot");
 }
+
+class TStagedNoOp final : public StagedAppend
+{
+public:
+    TStagedNoOp(AppendResult receipt, std::string root, std::function<Status()> verify)
+        : Receipt_(std::move(receipt))
+        , Root_(std::move(root))
+        , Verify_(std::move(verify))
+    { }
+
+    AppendResult Receipt() const override
+    {
+        return Receipt_;
+    }
+
+    bool IsNoOp() const override
+    {
+        return true;
+    }
+
+    iceberg::Status Publish(iceberg::sql::CatalogStore&) override
+    {
+        return iceberg::Invalid("KV no-op cannot publish an Iceberg pointer.");
+    }
+
+    Status VerifyClosure(std::string_view location) override
+    {
+        if (location != Root_) {
+            return std::unexpected(ErrorDetail{"CORRUPTION", "KV no-op exact base changed", RetryHint::OperatorAction});
+        }
+        return Verify_();
+    }
+
+private:
+    const AppendResult Receipt_;
+    const std::string Root_;
+    const std::function<Status()> Verify_;
+};
 
 class TStagedCreate final : public StagedCreate
 {
@@ -851,6 +1131,7 @@ EngineCapabilities TLocalStorageBackend::GetCapabilities() const
         .row_group_pruning = Options_.EnablePruning,
         .write_settings = true,
         .parquet_codecs = ParquetCodecCapabilities()};
+    capabilities.key_value = true;
     AddEncodingCapabilities(capabilities);
     capabilities.storage_footprint = true;
     return capabilities;
@@ -898,7 +1179,7 @@ Result<std::unique_ptr<StagedCreate>> TLocalStorageBackend::PrepareCreate(const 
     return Guarded<Result<std::unique_ptr<StagedCreate>>>([&]() -> Result<std::unique_ptr<StagedCreate>> {
         CheckStore(store);
         CheckWriteLatch(*Dirs_);
-        auto profile = MakeProfile(request.schema, "INVALID_ARGUMENT");
+        auto profile = MakeProfile(request.schema, "INVALID_ARGUMENT", request.mode);
         (void)TakeIO(CheckWriteCapacity(false, false), EStoragePath::Preflight, "storage preflight");
         const auto minUsage =
             TakeUsage(NStorage::ReplaceUsage(ComputeStoreUsage(), {.Previous = {}, .Next = {.RootBytes = 1}}),
@@ -937,7 +1218,9 @@ Result<std::unique_ptr<StagedCreate>> TLocalStorageBackend::PrepareCreate(const 
             request.schema,
             0,
             {},
-            request.write_settings};
+            request.write_settings,
+            0,
+            request.mode};
         NStorage::TPublicationContext context{.Directories = Dirs_,
             .FileIO = FileIO_,
             .Attempt = attempt,
@@ -971,7 +1254,31 @@ Status TLocalStorageBackend::CheckAppendAdmissible(const StoreInfo& store,
                 base.store_id == Store_.store_id,
             "INVALID_ARGUMENT",
             "base does not match the collection");
-        (void)MakeProfile(collection.schema, "INVALID_ARGUMENT");
+        Require((collection.mode == CollectionMode::KeyValue) == static_cast<bool>(input.kv),
+            "INVALID_ARGUMENT",
+            "collection mode does not support the requested mutation");
+        (void)MakeProfile(collection.schema, "INVALID_ARGUMENT", collection.mode);
+        if (input.kv) {
+            CheckKvInput(collection, input, Options_.Writer);
+            InitializeInventory();
+            (void)TakeIO(CheckWriteCapacity(true, false, deadline, cancelled),
+                EStoragePath::Preflight,
+                "KV storage preflight");
+            const auto current = ResolveBase(base);
+            CheckSchema(*current->Metadata, collection.schema, collection.mode);
+            if (input.bulk || input.GetRowCount() == 0) {
+                return {};
+            }
+            const auto schema = MutationSchema(collection, input);
+            auto batch = input.Columns ? CopyRecordBatch(*input.Columns, Options_.InputPool.get())
+                                       : MakeRecordBatch(schema, input.rows, Options_.InputPool.get());
+            if (!batch) {
+                throw Failure(batch.error());
+            }
+            auto owner = std::make_shared<TAdmittedBatch>(Options_.InputPool, std::move(*batch));
+            input.writer_batch = std::shared_ptr<arrow::RecordBatch>(owner, owner->Batch.get());
+            return {};
+        }
         if (input.bulk) {
             CheckBulkInput(input, Options_.Writer);
         } else {
@@ -1043,6 +1350,12 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
                 binding.base.table_uuid == collection.table_uuid && binding.base.store_id == Store_.store_id,
             "INVALID_ARGUMENT",
             "binding does not match the collection");
+        Require((collection.mode == CollectionMode::KeyValue) == static_cast<bool>(input.kv),
+            "INVALID_ARGUMENT",
+            "collection mode does not support the requested mutation");
+        if (input.kv) {
+            return PrepareKvAppend(binding, collection, input, deadline);
+        }
         if (input.bulk) {
             CheckBulkInput(input, Options_.Writer);
         } else {
@@ -1113,59 +1426,55 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
             limits.MaxRowGroupBytes = std::min<int64_t>(limits.MaxRowGroupBytes, 8LL << 20);
             limits.MaxFileBytes = std::min<int64_t>(limits.MaxFileBytes, 32LL << 20);
             dataFiles.reserve(static_cast<size_t>(BulkAppendLimits::MaxFiles));
-            std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
-            batches.reserve(128);
-            int64_t fileRows = 0;
-            int64_t fileBytes = 0;
             int64_t totalRows = 0;
             uint64_t descriptorBytes = dataFiles.capacity() * sizeof(std::shared_ptr<iceberg::DataFile>);
-            const auto flush = [&] {
-                if (batches.empty()) {
-                    return;
-                }
-                if (dataFiles.size() >= static_cast<size_t>(BulkAppendLimits::MaxFiles)) {
-                    Fail("RESOURCE_EXHAUSTED", "bulk append", "operation exceeds its data file limit");
-                }
-                CheckDeadline(deadline);
-                const auto path = std::format("{}/data/{}-{}-{:05}.parquet",
-                    location,
-                    binding.operation_id,
-                    binding.attempt_id,
-                    dataFiles.size());
-                auto data = TakeIceberg(NStorage::WriteDataFile(FileIO_,
-                                            attempt,
-                                            *base->Metadata,
-                                            path,
-                                            batches,
-                                            limits,
-                                            WriterSpec(collection.schema, collection.write_settings)),
-                    "IO_ERROR",
-                    "write bulk data file");
-                Require(data.DataFile && data.DataFile->record_count == fileRows,
-                    "IO_ERROR",
-                    "bulk data file does not contain every input row");
-                AddMemory(descriptorBytes, DataFileMemory(*data.DataFile));
-                Require(descriptorBytes <= bulkMemory->GetBytes(),
-                    "RESOURCE_EXHAUSTED",
-                    "bulk data file metadata exceeds its memory envelope");
-                dataFiles.push_back(std::move(data.DataFile));
-                batches.clear();
-                fileRows = 0;
-                fileBytes = 0;
-                // All files produced so far are durable, so the same physical
-                // accounting used by final publication can bound the stream.
-                CheckIO(Dirs_->CheckIdentity(), EStoragePath::Preflight, "bulk storage capacity");
-                const auto physical =
-                    TakeIO(NStorage::EstimateAttemptWarehouse(*Dirs_, *productionBaseline, *attempt, Options_.Storage),
+            TBoundedFileWindow window(
+                {limits.MaxRows, limits.MaxInputBytes, BulkAppendLimits::TargetFileBytes},
+                Options_.InputPool.get(),
+                [&](const TBoundedFileWindow::TBatches& batches, int64_t fileRows) {
+                    if (dataFiles.size() >= static_cast<size_t>(BulkAppendLimits::MaxFiles)) {
+                        Fail("RESOURCE_EXHAUSTED", "bulk append", "operation exceeds its data file limit");
+                    }
+                    CheckDeadline(deadline);
+                    const auto path = std::format("{}/data/{}-{}-{:05}.parquet",
+                        location,
+                        binding.operation_id,
+                        binding.attempt_id,
+                        dataFiles.size());
+                    auto data = TakeIceberg(NStorage::WriteDataFile(FileIO_,
+                                                attempt,
+                                                *base->Metadata,
+                                                path,
+                                                batches,
+                                                limits,
+                                                WriterSpec(collection.schema, collection.write_settings)),
+                        "IO_ERROR",
+                        "write bulk data file");
+                    Require(data.DataFile && data.DataFile->record_count == fileRows,
+                        "IO_ERROR",
+                        "bulk data file does not contain every input row");
+                    AddMemory(descriptorBytes, DataFileMemory(*data.DataFile));
+                    Require(descriptorBytes <= bulkMemory->GetBytes(),
+                        "RESOURCE_EXHAUSTED",
+                        "bulk data file metadata exceeds its memory envelope");
+                    dataFiles.push_back(std::move(data.DataFile));
+                    // All files produced so far are durable, so the same physical
+                    // accounting used by final publication can bound the stream.
+                    CheckIO(Dirs_->CheckIdentity(), EStoragePath::Preflight, "bulk storage capacity");
+                    const auto physical = TakeIO(
+                        NStorage::EstimateAttemptWarehouse(*Dirs_, *productionBaseline, *attempt, Options_.Storage),
                         EStoragePath::Preflight,
                         "bulk storage capacity");
-                const auto space =
-                    TakeIO(Dirs_->Fs()->StatFs(Dirs_->Root()), EStoragePath::Preflight, "bulk storage capacity");
-                CheckIO(NStorage::CheckDiskReserve(space, physical, Options_.Storage),
-                    EStoragePath::Preflight,
-                    "bulk storage capacity");
-                CheckDeadline(deadline);
-            };
+                    const auto space =
+                        TakeIO(Dirs_->Fs()->StatFs(Dirs_->Root()), EStoragePath::Preflight, "bulk storage capacity");
+                    CheckIO(NStorage::CheckDiskReserve(space, physical, Options_.Storage),
+                        EStoragePath::Preflight,
+                        "bulk storage capacity");
+                    CheckDeadline(deadline);
+                },
+                [&] {
+                    CheckDeadline(deadline);
+                });
             while (true) {
                 CheckDeadline(deadline);
                 auto next = input.bulk->Next();
@@ -1188,45 +1497,10 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
                 }
                 next->Columns.reset();
                 next->rows.clear();
-                const auto& batch = *built;
-                const auto bytes = arrow::util::TotalBufferSize(*batch);
-                if (bytes < 0 || bytes > limits.MaxInputBytes) {
-                    Fail("RESOURCE_EXHAUSTED", "bulk append", "source chunk exceeds the file input byte limit");
-                }
-                for (int64_t offset = 0; offset < rows;) {
-                    const auto count = std::min(rows - offset, limits.MaxRows - fileRows);
-                    auto piece = offset == 0 && count == rows ? batch : batch->Slice(offset, count);
-                    const auto retainedBytes = arrow::util::TotalBufferSize(*piece);
-                    if (retainedBytes > limits.MaxInputBytes - fileBytes) {
-                        flush();
-                        continue;
-                    }
-                    batches.push_back(std::move(piece));
-                    fileRows += count;
-                    fileBytes += retainedBytes;
-                    offset += count;
-                    // Descriptor count is bounded independently of caller
-                    // chunk size; tiny batches never force an early file.
-                    if (batches.size() >= 128) {
-                        auto combined = arrow::ConcatenateRecordBatches(batches, Options_.InputPool.get());
-                        if (!combined.ok()) {
-                            Fail(combined.status().IsOutOfMemory() ? "RESOURCE_EXHAUSTED" : "INTERNAL",
-                                "coalesce bulk batches",
-                                combined.status().ToString());
-                        }
-                        batches.assign(1, *combined);
-                        fileBytes = arrow::util::TotalBufferSize(*batches.front());
-                        Require(fileBytes >= 0 && fileBytes <= limits.MaxInputBytes,
-                            "RESOURCE_EXHAUSTED",
-                            "coalesced bulk buffers exceed the file input byte limit");
-                    }
-                    if (fileRows == limits.MaxRows || fileBytes >= BulkAppendLimits::TargetFileBytes) {
-                        flush();
-                    }
-                }
+                window.Add(*built);
                 totalRows += rows;
             }
-            flush();
+            window.Flush();
         }
         CheckDeadline(deadline);
 
@@ -1312,15 +1586,220 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
     });
 }
 
+Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareKvAppend(const BoundOperation& binding,
+    const CollectionInfo& collection,
+    const NormalizedInput& input,
+    std::chrono::steady_clock::time_point deadline)
+{
+    CheckKvInput(collection, input, Options_.Writer);
+    const auto base = ResolveBase(binding.base);
+    CheckSchema(*base->Metadata, collection.schema, collection.mode);
+    const auto cancelled = [&] {
+        return input.kv->Cancellation && input.kv->Cancellation->load(std::memory_order_relaxed);
+    };
+    const auto check = [&] {
+        CheckDeadline(deadline);
+        Require(!cancelled(), "CANCELLED", "KV mutation was cancelled");
+    };
+    check();
+    const auto warehouseBytes =
+        TakeIO(CheckWriteCapacity(false, true, deadline, cancelled), EStoragePath::Preflight, "KV storage preflight");
+    const auto productionBaseline = NStorage::TWarehouseBaseline{.Bytes = warehouseBytes,
+        .Directories = TakeIO(NStorage::MeasureCollectionDirs(*Dirs_, binding.collection_id),
+            EStoragePath::Preflight,
+            "KV storage preflight")};
+    // Routing copies scale with configured history. The existing index's
+    // complete charged envelope conservatively covers live range copies;
+    // scratch, pending rows and output descriptors retain their fixed margin.
+    uint64_t temporaryBytes = 128ULL << 20;
+    AddMemory(temporaryBytes, ScanIndexMemory(*base, check));
+    auto memory = Options_.Resources->Reserve(ResourceClass::Metadata, temporaryBytes);
+    if (!memory) {
+        throw Failure(memory.error());
+    }
+    auto attempt = TakeIO(NIO::TIOAttempt::Make({Store_.store_id,
+                                                    binding.collection_id,
+                                                    binding.attempt_id,
+                                                    NIO::EAttemptKind::Append,
+                                                    binding.operation_id},
+                              Dirs_->Latch(),
+                              NIO::TAttemptLimits::KeyValue()),
+        EStoragePath::Write,
+        "create KV attempt");
+    auto scope = TakeIceberg(FileIO_->BindAttempt(attempt), "IO_ERROR", "bind KV attempt");
+    const auto capacity = [&]() -> Status {
+        return Guarded<Status>([&]() -> Status {
+            CheckIO(Dirs_->CheckIdentity(), EStoragePath::Preflight, "KV storage capacity");
+            const auto physical =
+                TakeIO(NStorage::EstimateAttemptWarehouse(*Dirs_, productionBaseline, *attempt, Options_.Storage),
+                    EStoragePath::Preflight,
+                    "KV storage capacity");
+            const auto space =
+                TakeIO(Dirs_->Fs()->StatFs(Dirs_->Root()), EStoragePath::Preflight, "KV storage capacity");
+            CheckIO(NStorage::CheckDiskReserve(space, physical, Options_.Storage),
+                EStoragePath::Preflight,
+                "KV storage capacity");
+            CheckDeadline(deadline);
+            return {};
+        });
+    };
+    auto production = ProduceKvMutation({.Collection = collection,
+        .Binding = binding,
+        .Input = input,
+        .Base = *base,
+        .FileIO = FileIO_,
+        .Attempt = attempt,
+        .Pool = Options_.InputPool.get(),
+        .ScratchDirectory = Dirs_->Path(),
+        .Writer = Options_.Writer,
+        .WriteSpec = WriterSpec(collection.schema, collection.write_settings),
+        .Deadline = deadline,
+        .CheckCapacity = capacity});
+    const bool noOp = production.Added.empty() && production.Removed.empty();
+    AppendResult receipt{.collection_id = binding.collection_id,
+        .operation_id = binding.operation_id,
+        .payload_hash = binding.payload_hash,
+        .hash_version = 1,
+        .snapshot_id = binding.base.current_snapshot_id.value_or(0),
+        .parent_snapshot_id = binding.base.current_snapshot_id,
+        .rows_appended = 0,
+        .data_files_added = static_cast<int64_t>(production.Added.size()),
+        .compressed_data_bytes_added = 0,
+        .snapshot_created_at_us = 0,
+        .durability_profile = Store_.profile_id,
+        .receipt_version = 3,
+        .mutation_kind = input.kv->Kind,
+        .snapshot_created = !noOp,
+        .input_rows = input.kv->InputRows,
+        .rows_affected = production.RowsAffected,
+        .rows_written = production.RowsWritten,
+        .rows_removed = production.RowsRemoved,
+        .data_files_removed = static_cast<int64_t>(production.Removed.size()),
+        .compressed_data_bytes_removed = 0};
+    if (noOp) {
+        CheckIO(attempt->Seal(), EStoragePath::Write, "seal KV no-op verification");
+        return std::make_unique<TStagedNoOp>(std::move(receipt),
+            binding.base.metadata_location,
+            [owner = shared_from_this(),
+                expected = binding.base,
+                schema = collection.schema,
+                mode = collection.mode]() {
+                return Guarded<Status>([&]() -> Status {
+                    CheckWriteLatch(*owner->Dirs_);
+                    CheckIO(owner->Dirs_->CheckIdentity(), EStoragePath::Read, "verify KV no-op base");
+                    const auto confirmed = owner->ResolveBase(expected);
+                    CheckSchema(*confirmed->Metadata, schema, mode);
+                    const std::shared_ptr<iceberg::FileIO> view =
+                        TakeIceberg(owner->FileIO_->ReadOnlyView(), "IO_ERROR", "open KV no-op base verification");
+                    auto actual = TakeRetained(NStorage::ReadTableMetadata(*view,
+                                                   expected.metadata_location,
+                                                   std::nullopt,
+                                                   static_cast<int64_t>(owner->Options_.Storage.RootBytes)),
+                        "verify durable KV no-op base");
+                    Require(actual->table_uuid == expected.table_uuid &&
+                            CurrentSnapshot(*actual) == expected.current_snapshot_id,
+                        "CORRUPTION",
+                        "durable KV no-op root differs from its prepared identity");
+                    CheckSchema(*actual, schema, mode);
+                    CheckNoOpRootPrefix(*actual, *confirmed->Metadata);
+                    owner->PinNoOpRoot(expected.metadata_location);
+                    return {};
+                });
+            });
+    }
+    uint64_t descriptorBytes = 0;
+    const auto count = [&](const auto& files, int64_t& compressed) {
+        for (const auto& file : files) {
+            Require(file && file->file_size_in_bytes > 0 && file->file_size_in_bytes <= (32LL << 20) &&
+                    file->file_size_in_bytes <= std::numeric_limits<int64_t>::max() - compressed,
+                "IO_ERROR",
+                "KV producer returned an invalid data file length");
+            compressed += file->file_size_in_bytes;
+            AddMemory(descriptorBytes, DataFileMemory(*file));
+        }
+    };
+    count(production.Added, receipt.compressed_data_bytes_added);
+    count(production.Removed, receipt.compressed_data_bytes_removed);
+    Require(descriptorBytes <= (*memory)->GetBytes(),
+        "RESOURCE_EXHAUSTED",
+        "KV data file descriptors exceed the metadata memory envelope");
+    auto table =
+        TakeIceberg(iceberg::Table::Make(
+                        iceberg::TableIdentifier{.ns = iceberg::Namespace{.levels = {std::string(CatalogNamespace)}},
+                            .name = collection.name},
+                        std::make_shared<iceberg::TableMetadata>(*base->Metadata),
+                        base->MetadataLocation,
+                        FileIO_,
+                        Catalog_),
+            "IO_ERROR",
+            "load KV base table");
+    const std::unordered_map<std::string, std::string> summary{{std::string(OperationKey), binding.operation_id},
+        {std::string(ContentHashKey), binding.payload_hash},
+        {std::string(KvVersionKey), "1"},
+        {std::string(KvKindKey), std::string(MutationName(input.kv->Kind))},
+        {std::string(KvInputRowsKey), std::to_string(input.kv->InputRows)},
+        {std::string(KvAffectedRowsKey), std::to_string(production.RowsAffected)}};
+    auto staged = TakeIceberg(NStorage::StageKVOverwrite(std::move(table),
+                                  production.Added,
+                                  production.Removed,
+                                  summary,
+                                  attempt,
+                                  input.kv->Kind == MutationKind::Compact),
+        "IO_ERROR",
+        "stage KV mutation");
+    const auto location = TableLocation(Store_.store_id, binding.collection_id);
+    auto root = MetadataLocation(location, MetadataVersion(base->MetadataLocation) + 1, binding.attempt_id);
+    auto stagedMetadata = std::make_shared<const iceberg::TableMetadata>(staged.Transaction->current());
+    auto stagedBytes = std::make_shared<const std::string>(
+        TakeIceberg(NStorage::SerializeTableMetadata(*stagedMetadata), "IO_ERROR", "serialize KV metadata"));
+    CheckIceberg(FileIO_->WriteFile(root, *stagedBytes), "IO_ERROR", "write KV metadata");
+    const auto snapshot = TakeIceberg(staged.Transaction->current().SnapshotById(staged.SnapshotID),
+        "IO_ERROR",
+        "read staged KV snapshot");
+    Require(staged.ParentID == binding.base.current_snapshot_id,
+        "IO_ERROR",
+        "staged KV snapshot has an unexpected parent");
+    receipt.snapshot_id = staged.SnapshotID;
+    receipt.parent_snapshot_id = staged.ParentID;
+    receipt.snapshot_created_at_us = SnapshotTimeUs(*snapshot, "IO_ERROR");
+    NStorage::TPublicationContext context{.Directories = Dirs_,
+        .FileIO = FileIO_,
+        .Attempt = attempt,
+        .Namespace = std::string(CatalogNamespace),
+        .Name = collection.name,
+        .Profile = MakeProfile(collection.schema, "CORRUPTION", collection.mode),
+        .Base = base,
+        .ExpectedSummary = summary,
+        .StoreUsage = ComputeStoreUsage(),
+        .Limits = Options_.Storage,
+        .Warehouse = Options_.WalkWarehouseAtPublication ? std::nullopt : std::optional(productionBaseline),
+        .StagedRoot = NStorage::TStagedRoot{.Metadata = std::move(stagedMetadata), .Bytes = std::move(stagedBytes)},
+        .VerifyStagedRoot = Options_.VerifyStagedRoot};
+    context.StoreLimits = Options_.Storage;
+    return std::make_unique<TStagedAppend>(shared_from_this(),
+        binding.collection_id,
+        collection.name,
+        binding.base.metadata_location,
+        std::move(root),
+        std::move(receipt),
+        std::move(context),
+        std::move(*memory),
+        std::move(scope));
+}
+
 Result<std::unique_ptr<StagedExpiration>> TLocalStorageBackend::PrepareExpiration(const StoreInfo& store,
     const CollectionInfo& collection,
     const BaseIdentity& identity,
     const std::optional<SnapshotRetentionPolicy>& requested)
 {
     return Guarded<Result<std::unique_ptr<StagedExpiration>>>([&]() -> Result<std::unique_ptr<StagedExpiration>> {
+        Require(collection.mode == CollectionMode::Append,
+            "COLLECTION_MODE_MISMATCH",
+            "snapshot retention is unsupported for KV collections");
         CheckStore(store);
         CheckWriteLatch(*Dirs_);
         const auto base = ResolveBase(identity);
+        Require(!NStorage::IsKVMetadata(*base->Metadata), "CORRUPTION", "snapshot retention requires append metadata");
         auto policy = TakeRetained(NStorage::ReadRetentionPolicy(*base->Metadata), "read snapshot retention");
         if (requested) {
             policy = {requested->keep_last, requested->min_age.count()};
@@ -1414,6 +1893,9 @@ Status TLocalStorageBackend::RemoveExpiredMetadata(std::string_view collectionID
             Require(found != Collections_.end() && found->second.Confirmed,
                 "CORRUPTION",
                 "cleanup collection is missing");
+            Require(!NStorage::IsKVMetadata(*found->second.Confirmed->Metadata),
+                "CORRUPTION",
+                "KV collection has unsupported metadata cleanup");
             Require(!std::ranges::binary_search(found->second.Confirmed->RetainedManifestPaths, path),
                 "CORRUPTION",
                 "cleanup manifest is still referenced");
@@ -1597,6 +2079,17 @@ Status TLocalStorageBackend::VerifyRetainedImpl(const StoreInfo& store,
         (void)TakeIO(NStorage::MeasureWarehouse(*Dirs_, Options_.Storage),
             EStoragePath::Read,
             "retained warehouse capacity");
+        const std::shared_ptr<iceberg::FileIO> historyIO =
+            TakeIceberg(FileIO_->ReadOnlyView(), "IO_ERROR", "open no-op history FileIO");
+        std::set<std::string, std::less<>> retainedNoOpRoots;
+        readOperations({}, [&](const auto& operation) {
+            if (operation.state == OperationState::Committed && operation.outcome && operation.outcome->result &&
+                operation.outcome->result->receipt_version == 3 && !operation.outcome->result->snapshot_created)
+            {
+                retainedNoOpRoots.insert(operation.binding.base.metadata_location);
+                PinNoOpRoot(operation.binding.base.metadata_location);
+            }
+        });
         std::map<std::string, TCollectionState, std::less<>> verified;
         NStorage::TStorageUsage totalUsage;
         for (const auto& view : collections) {
@@ -1607,10 +2100,19 @@ Status TLocalStorageBackend::VerifyRetainedImpl(const StoreInfo& store,
                 "collection view identity is inconsistent");
             // The full reachable closure on open and Reconcile; terminal
             // receipt lookups reuse this verified generation.
+            Require(view.info.mode != CollectionMode::KeyValue || view.expired_snapshots.empty(),
+                "CORRUPTION",
+                "KV collection has an unsupported expiration ledger");
             auto expired = ExpiredHistory(view, readOperations);
             auto state = VerifyCollection(view.base, expired);
-            CheckSchema(*state->Metadata, view.info.schema);
-            CheckHistory(*state->Metadata, view.info.collection_id, readOperations, view.expired_snapshots);
+            CheckSchema(*state->Metadata, view.info.schema, view.info.mode);
+            CheckHistory(*state->Metadata,
+                view.info,
+                state->MetadataLocation,
+                readOperations,
+                historyIO,
+                Options_.Storage.RootBytes,
+                view.expired_snapshots);
             totalUsage = TakeUsage(NStorage::ReplaceUsage(totalUsage, {.Previous = {}, .Next = state->Usage}),
                 "CORRUPTION",
                 "aggregate storage usage");
@@ -1631,6 +2133,9 @@ Status TLocalStorageBackend::VerifyRetainedImpl(const StoreInfo& store,
         });
         std::lock_guard lock(Mutex_);
         Collections_ = std::move(verified);
+        std::erase_if(NoOpRoots_, [&](const auto& item) {
+            return !retainedNoOpRoots.contains(item.first);
+        });
         std::erase_if(CacheMemory_, [&](const auto& item) {
             return !Collections_.contains(item.first);
         });
@@ -1652,7 +2157,7 @@ void TLocalStorageBackend::RetireRoot(const BaseIdentity& superseded)
         // Never remove the confirmed or a tentative root of this collection.
         std::lock_guard lock(Mutex_);
         const auto state = Collections_.find(superseded.collection_id);
-        if (state == Collections_.end() || !state->second.Confirmed ||
+        if (NoOpRoots_.contains(location) || state == Collections_.end() || !state->second.Confirmed ||
             state->second.Confirmed->MetadataLocation == location ||
             (state->second.Tentative && state->second.Tentative->MetadataLocation == location))
         {
@@ -1699,6 +2204,19 @@ void TLocalStorageBackend::RecordCandidate(std::string_view collectionID,
     }
     it->second.Tentative = std::move(candidate);
     it->second.TentativeMemory = std::move(memory);
+}
+
+void TLocalStorageBackend::PinNoOpRoot(std::string_view location)
+{
+    std::lock_guard lock(Mutex_);
+    if (NoOpRoots_.contains(location)) {
+        return;
+    }
+    auto memory = Options_.Resources->Reserve(ResourceClass::Metadata, 512 + location.size());
+    if (!memory) {
+        throw Failure(memory.error());
+    }
+    NoOpRoots_.emplace(std::string(location), std::move(*memory));
 }
 
 void TLocalStorageBackend::CheckStore(const StoreInfo& store) const

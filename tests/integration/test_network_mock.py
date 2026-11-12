@@ -79,3 +79,14 @@ def test_real_http_mock_lost_response_returns_original_receipt_without_second_ap
         assert client.stats(cid)["rows"] == 3
         assert [op for op, body in transport.requests] == [operation, operation]
         assert transport.requests[0][1] == transport.requests[1][1]
+
+
+def test_mock_explicitly_declines_kv_mode_and_mutations(server):
+    with Client(server.url, TOKEN) as client:
+        capabilities = client.capabilities()
+        assert capabilities["collection_modes"] == ["append"]
+        for feature in ("key_value", "upsert", "delete", "lookup", "compact", "bulk_upsert", "migration"):
+            assert capabilities["features"][feature] is False
+        with pytest.raises(HTTPError) as unsupported:
+            client.create_collection("unsupported_kv", SCHEMA, collection_id=uuid4(), mode="kv")
+        assert unsupported.value.detail.code == "UNSUPPORTED_OPERATION"

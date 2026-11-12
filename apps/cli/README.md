@@ -189,7 +189,8 @@ single-store root calls `OpenExisting`; it never creates a missing store.
 
 Named scans complete fixed-view HTTP continuations automatically, up to 10,000
 rows and 16 MiB of JSON. Use predicates, projections or `limit` for larger data;
-use `request` and its explicit cursor/Arrow protocol for larger exports. Named
+use `request` and its explicit cursor/Arrow protocol for larger exports, or
+`bench tpch scan` to drain a TPC-H workload through the SDK. Named
 snapshot/file inventories also complete HTTP continuations within 16 MiB.
 An oversized result or failed continuation produces no partial JSON result;
 unfinished remote scans are cancelled on a best-effort basis, with server expiry
@@ -241,10 +242,14 @@ Offline `glamdb-admin` commands and legacy `glamdb --root ... --store-id ...`
 servers accept `--max-collections 64`; supply the same value on every reopen.
 See [collection profiles](../../docs/development/COLLECTION_PROFILES.md).
 
-# Workload commands
+## Workload commands
 
-The same executable also offers `generate` and `bench write/read/verify/resolve`
-through an optional Python environment. See the
+The same executable also offers `generate`, `bench write/read/verify/resolve`
+and `bench tpch generate/init/load/resolve/verify/scan/status/clean` through an
+optional Python environment. The standalone client keeps its existing C++
+dependencies; the bridge runs the local SDK, DBGEN adapter and Locust/PyArrow
+workloads in the interpreter selected by `GLAMDB_PYTHON`.
+See the
 [workload guide](../../tools/workload/README.md) for installation, exact outcome
 journals, Locust reports and native E2E. Ordinary requests do not require Python.
 
@@ -267,3 +272,49 @@ available; offline bulk upload is unsupported. The generic buffered `request`
 command keeps its 16 MiB limit. See the [bulk contract](../../docs/development/BULK_INGESTION.md#native-http-sdk-and-cli)
 for per-record limits, deadlines and interrupted-upload behavior. UI import and
 the organization gateway upload adapter remain outside this native route.
+
+## KV collection commands
+
+`create-collection --mode kv` creates an immutable key-value collection; omission
+keeps append mode. The named network commands `upsert`, `delete`, `compact`, and
+`lookup` each take `--collection-id UUID --body FILE` and optional
+`--database-id UUID`. Bodies match the native HTTP contract: upsert uses
+`{operation_id,rows}`, delete `{operation_id,keys}`, compact
+`{operation_id,max_files?,target_file_bytes?}`, and lookup `{keys,snapshot_id?}`.
+Mutations may include `expected_snapshot`. Preserve the exact body and operation
+ID after an uncertain result; the CLI never retries automatically. Operation
+lookup reads all receipt versions, including durable KV no-ops. Bulk upsert and
+migration remain native C++ facade operations. See the
+[KV HTTP contract](../../docs/development/HTTP_SERVER.md#explicit-kv-routes-and-receipts).
+
+## TPC-H workloads
+
+```sh
+glamdb-cli bench tpch generate --scale-factor 0.01 --dbgen /path/to/dbgen \
+  --type-profile native --output tpch-data/
+glamdb-cli bench tpch init --url http://127.0.0.1:8080 --dataset tpch-data/ \
+  --name tpch-small --state tpch-run.json
+glamdb-cli bench tpch load --state tpch-run.json
+glamdb-cli bench tpch scan --state tpch-run.json --queries all --mode scan \
+  --format arrow --consume batches --report tpch-scans/
+glamdb-cli bench tpch clean --state tpch-run.json
+```
+
+Generation requires explicit `native` or `legacy-scaled` type selection and
+reference TPC-H Tools 3.0.1 provenance. `init --limits FILE` reads an explicit
+JSON limits object; commands never raise limits automatically. `load --resume`
+retains the original immutable plan and journal, while `resolve` only looks up
+outcomes unless `--retry` is explicit. Completed loads pin all eight table views.
+Q1–Q22 `scan` runs reproduce source access patterns; complete Q1/Q6 results use
+`--mode reduce` and explicitly measured client computation. These modes are
+described in [the TPC-H guide](../../docs/development/TPC_H.md), including fixed
+views, recovery, resource dependencies and **NOT RUN** SF=1/SF=10 HTTP acceptance.
+
+TPC-H network commands take credentials exclusively from `GLAMDB_TOKEN`, accept
+`--ca-file`, and require verified HTTPS outside loopback. Their SDK deadline is
+`--timeout 30` seconds by default, or 300 for verify/scan. Workload exits are
+`0` PASS, `1` FAIL, `2` invalid configuration/usage, `3` INCOMPLETE, `4` missing
+interpreter/dependency, `130` interrupted by SIGINT, and `143` by SIGTERM.
+Generation returns `0` only after
+publishing a completed manifest; cleanup validates the exact saved deletion
+identity before returning success.

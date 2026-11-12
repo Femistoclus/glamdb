@@ -106,3 +106,27 @@ and browser tests in sequence. SDK JUnit evidence is written separately to
 `artifacts/e2e/<backend>/results`. Report mock and native results separately.
 These checks do not replace restart/restore acceptance, sanitizers or G4
 power-loss qualification.
+
+## KV client coverage
+
+KV behavior is native-only. `glamdb.native_kv` runs the compiled server and
+network CLI with the Python SDK against disposable persistent stores. It covers
+immutable create mode, append rejection, last-input-wins full-row replacement,
+keys outside the first column, exact int64/decimal/date/bool/float64/timestamp
+values, streaming bulk append alongside KV with distinct receipts, ordered lookup
+with repeated hits and explicit misses, fixed initial/historical views,
+duplicate/missing-key delete, no-op receipts, compaction no-op, operation lookup,
+CLI parity, and fresh-process exact retries. Its direct command is:
+
+```sh
+.venv/bin/python tests/server/native_kv_test.py   build/local/apps/server/glamdb build/local/apps/cli/glamdb-cli ui
+```
+
+The native browser suite in `ui/tests/e2e/native.spec.mjs` exercises mode-aware
+creation and writes, lookup, full-row replacement and no-op history. Shared
+`fixtures/http/kv-v3.json` literals are consumed by native transport, Python SDK,
+and workbench unit tests. They test all v3 fields and exact scalar types; the
+SDK also recomputes their canonical request hashes. Old `outcomes-v0.json`
+version-1/2 vectors are unchanged. Serialization doubles are protocol evidence,
+not storage durability qualification. Mock/static capabilities explicitly report
+KV operations false, and their shared append scenarios remain applicable.

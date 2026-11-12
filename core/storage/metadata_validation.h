@@ -21,6 +21,9 @@ CheckCreateMetadata(const iceberg::TableMetadata& candidate, const TTableProfile
 iceberg::Status CheckAppendMetadata(const iceberg::TableMetadata& base,
     const iceberg::TableMetadata& candidate,
     const std::unordered_map<std::string, std::string>& expectedSummary);
+iceberg::Status CheckKVMetadata(const iceberg::TableMetadata& base,
+    const iceberg::TableMetadata& candidate,
+    const std::unordered_map<std::string, std::string>& expectedSummary);
 bool EqualManifest(const iceberg::ManifestFile& left, const iceberg::ManifestFile& right);
 
 }

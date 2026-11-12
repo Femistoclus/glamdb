@@ -47,6 +47,7 @@ struct EngineCapabilities
     int64_t min_dictionary_page_size_limit = 0;
     int64_t max_dictionary_page_size_limit = 0;
     int64_t default_dictionary_page_size_limit = 0;
+    bool key_value = false;
     bool storage_footprint = false;
 };
 

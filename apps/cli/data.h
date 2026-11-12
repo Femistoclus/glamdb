@@ -18,6 +18,7 @@ struct TDataCommand
     // Parquet write settings JSON file (or - for stdin) and its expected version.
     std::string WriteSettingsFile, ExpectedVersion;
     std::string Snapshot = "latest";
+    std::string Mode = "append";
 };
 
 // The command grammar and request builder have no embedded-engine dependency.

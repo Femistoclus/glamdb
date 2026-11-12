@@ -16,7 +16,9 @@ function integer(value, mock = false) {
 }
 
 export function validateCommittedReceipt(payload, status, path, body) {
-    const match = path.match(/\/collections\/([^/]+)\/(?:append|operations\/([^/?]+))$/);
+    const match = path.match(
+        /\/collections\/([^/]+)\/(?:append|upsert|delete|compact|operations\/([^/?]+))$/,
+    );
     if (!match) return;
     const result = payload.result;
     require(status === 200 && result && typeof result === 'object' && !Array.isArray(result));
@@ -28,7 +30,21 @@ export function validateCommittedReceipt(payload, status, path, body) {
     require(payload.operation_id === undefined || payload.operation_id === operation);
     require(typeof result.payload_hash === 'string' && DIGEST.test(result.payload_hash));
     require(result.hash_version === 1);
-    require(result.receipt_version === 1 || result.receipt_version === 2);
+    require([1, 2, 3].includes(result.receipt_version));
+    if (result.receipt_version === 3) {
+        require(
+            payload.phase === 'complete' &&
+                (payload.recovery_required === undefined || payload.recovery_required === false) &&
+                !Object.hasOwn(payload, 'recovery'),
+        );
+        require(!path.endsWith('/append'));
+        const action = path.split('/').at(-1);
+        if (['upsert', 'delete', 'compact'].includes(action))
+            require(result.mutation_kind === action);
+        validateMutationReceipt(result);
+        return;
+    }
+    require(!['upsert', 'delete', 'compact'].some((action) => path.endsWith('/' + action)));
     const bulk = result.receipt_version === 2;
     const rows = integer(result.rows_appended, mock);
     require(rows >= 1n && rows <= (bulk ? 25600000n : 10000n));
@@ -62,4 +78,93 @@ export function validateCommittedReceipt(payload, status, path, body) {
                 result.durability_profile.length > 0 &&
                 new TextEncoder().encode(result.durability_profile).length <= 128,
         );
+}
+
+function validateMutationReceipt(result) {
+    require(['upsert', 'delete', 'compact'].includes(result.mutation_kind));
+    require(typeof result.snapshot_created === 'boolean');
+    const values = Object.fromEntries(
+        [
+            'snapshot_id',
+            'rows_appended',
+            'snapshot_created_at_us',
+            'input_rows',
+            'rows_affected',
+            'rows_written',
+            'rows_removed',
+            'data_files_added',
+            'data_files_removed',
+            'compressed_data_bytes_added',
+            'compressed_data_bytes_removed',
+        ].map((name) => [name, integer(result[name])]),
+    );
+    require(Object.hasOwn(result, 'parent_snapshot_id'));
+    const parent = result.parent_snapshot_id === null ? null : integer(result.parent_snapshot_id);
+    require(
+        typeof result.durability_profile === 'string' &&
+            result.durability_profile.length > 0 &&
+            new TextEncoder().encode(result.durability_profile).length <= 128,
+    );
+    require(values.rows_appended === 0n);
+    for (const name of ['input_rows', 'rows_written', 'rows_removed'])
+        require(values[name] >= 0n && values[name] <= 25600000n);
+    require(values.rows_affected >= 0n && values.rows_affected <= values.input_rows);
+    for (const suffix of ['added', 'removed']) {
+        const files = values['data_files_' + suffix];
+        require(files >= 0n && files <= 256n);
+        require(
+            values['compressed_data_bytes_' + suffix] >= 0n &&
+                values['compressed_data_bytes_' + suffix] <= files * 33554432n,
+        );
+    }
+    if (result.mutation_kind === 'compact') require(values.input_rows === 0n);
+    if (!result.snapshot_created) {
+        require(values.snapshot_id === (parent ?? 0n) && values.snapshot_created_at_us === 0n);
+        for (const name of [
+            'rows_affected',
+            'rows_written',
+            'rows_removed',
+            'data_files_added',
+            'data_files_removed',
+            'compressed_data_bytes_added',
+            'compressed_data_bytes_removed',
+        ])
+            require(values[name] === 0n);
+        return;
+    }
+    require(values.snapshot_id !== 0n && values.snapshot_id !== parent);
+    require(
+        values.snapshot_created_at_us >= -62135596800000000n &&
+            values.snapshot_created_at_us <= 253402300799999999n &&
+            values.snapshot_created_at_us % 1000n === 0n,
+    );
+    const added = values.data_files_added,
+        removed = values.data_files_removed;
+    require(added > 0n || removed > 0n);
+    for (const [suffix, name] of [
+        ['added', 'rows_written'],
+        ['removed', 'rows_removed'],
+    ]) {
+        const files = values['data_files_' + suffix];
+        require((files === 0n) === (values[name] === 0n));
+        require((files === 0n) === (values['compressed_data_bytes_' + suffix] === 0n));
+        require(values[name] <= files * 100000n);
+    }
+    if (result.mutation_kind === 'compact') {
+        require(
+            values.input_rows === 0n &&
+                values.rows_affected === 0n &&
+                values.rows_written === values.rows_removed,
+        );
+        require(added >= 1n && removed >= added * 4n);
+    } else {
+        require(values.input_rows > 0n && values.rows_affected > 0n);
+        if (result.mutation_kind === 'delete')
+            require(values.rows_removed - values.rows_written === values.rows_affected);
+        else
+            require(
+                values.rows_written >= values.rows_removed &&
+                    values.rows_written - values.rows_removed <= values.rows_affected,
+            );
+    }
 }

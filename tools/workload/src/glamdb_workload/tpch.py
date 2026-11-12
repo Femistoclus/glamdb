@@ -7,6 +7,7 @@ from pathlib import Path
 from glamdb_sdk.request import uuid_string
 
 from .runtime import client_for, validate_url
+from .tpch_state import run_lock
 
 
 def _object(pairs):
@@ -23,6 +24,11 @@ def _invalid_number(value):
 
 
 def clean(state, *, timeout=30.0, ca_file=None):
+    with run_lock(state):
+        return _clean(state, timeout=timeout, ca_file=ca_file)
+
+
+def _clean(state, *, timeout=30.0, ca_file=None):
     """Send one drop using the original endpoint/IDs; never rewrite the state."""
     if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be positive finite seconds")

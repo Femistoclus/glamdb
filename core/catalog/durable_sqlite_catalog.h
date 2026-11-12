@@ -76,14 +76,22 @@ public:
     void ForEachOperation(const OperationConsumer& consume, std::string_view collection_id = {});
     std::optional<OperationRecord> FindOperation(std::string_view collection_id, std::string_view operation_id);
     std::optional<OperationRecord> TryFindOperation(std::string_view collection_id, std::string_view operation_id);
-    void BindOperation(const BoundOperation& binding);
+    void BindOperation(const BoundOperation& binding, std::string_view migrationOwner = {});
     void RecordFailure(const BoundOperation& binding, const AppendOutcome& outcome);
-    CollectionInfo PublishCreate(CollectionInfo collection, const Guard& guard, const Body& body);
+    CollectionInfo PublishCreate(CollectionInfo collection,
+        const Guard& guard,
+        const Body& body,
+        std::string_view migrationIdentity = {},
+        std::string_view migrationOperation = {});
+    std::optional<std::string> MigrationIdentity(std::string_view id);
+    std::optional<std::pair<CollectionInfo, std::optional<OperationRecord>>>
+    TryMigrationReplay(std::string_view id, std::string_view operation, std::string_view identity);
     // Settings the collection was created with (empty when none were given).
     WriteSettings CreatedWriteSettings(std::string_view id);
     // Compare-and-set of canonical settings; see UpdateWriteSettingsRequest.
     CollectionInfo UpdateWriteSettings(std::string_view id, int64_t expected_version, WriteSettings settings);
     void PublishAppend(const BoundOperation& binding, const AppendResult& result, const Guard& guard, const Body& body);
+    void PublishNoOp(const BoundOperation& binding, const AppendResult& result, const Guard& guard);
     void PublishExpiration(const BaseIdentity& base,
         std::span<const ExpiredSnapshotRecord> expired,
         std::span<const std::string> garbage,
@@ -146,6 +154,7 @@ private:
     void CheckFreeBytes();
     bool HasWriteSettings();
     void EnsureWriteSettings();
+    void EnsureKVModes();
     void EnsureRetention();
     void CheckBinding(const BoundOperation& binding);
     void Complete(const BoundOperation& binding, const AppendOutcome& outcome);

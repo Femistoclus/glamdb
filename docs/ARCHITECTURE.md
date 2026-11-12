@@ -258,3 +258,20 @@ Durability claims apply only to the
 [qualified environment](ROADMAP.md#g4-local-release-qualification). Disk loss,
 devices that falsely acknowledge flushes, and later media corruption are not
 made recoverable by `fsync`; backup and replication are separate capabilities.
+
+## Explicit KV mutation path
+
+[KV mode](development/KV_MODE.md) is an immutable collection profile, selected in
+SQLite and verified against Iceberg metadata. It adds sorted disjoint ranges,
+COW overwrite/rewrite staging and interval-based historical membership through
+the existing coordinator, durable FileIO and exact-base publication guard.
+Version-3 no-op receipts complete under the same outer SQLite transaction while
+leaving the pointer unchanged; lost COMMIT replies still require reconciliation.
+Append validation and old receipt encodings remain strict and unchanged.
+
+Append-to-KV migration creates a distinct target with its migration identity
+recorded in that creation transaction, then populates it through one bounded
+mutation. Its two outcomes are explicit; it does not promise atomic creation
+and population. Compaction changes latest membership while retaining historical
+files. No secondary index, payload WAL, queue, garbage collection or new write
+authority is introduced.

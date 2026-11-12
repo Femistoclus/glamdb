@@ -33,7 +33,7 @@ struct TBaseState
     std::vector<std::int64_t> ExpiredSnapshotIDs{};
     // Sorted union across every retained snapshot, including merged-out inputs.
     std::vector<std::string> RetainedManifestPaths{};
-    // The latest verified append's list and manifest inputs/outputs, excluding
+    // The latest data publication's list and manifest inputs/outputs, excluding
     // the root. Maintenance preserves this conservative recovery byte charge.
     std::uint64_t CurrentCommitMetadataBytes = 0;
 };

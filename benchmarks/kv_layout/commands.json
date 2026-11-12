@@ -1,0 +1,754 @@
+{
+  "measured_reference_revision": "37b58faec3704e00a69d253eaaaff3c682a1d8ed",
+  "measurement_date": "2026-11-12",
+  "actual_scratch_directory": "/tmp/glamdb-101-layout",
+  "initial_case_commands": [
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "case",
+        "--style",
+        "ordered",
+        "--gib",
+        "16",
+        "--layout",
+        "disjoint",
+        "--repeats",
+        "5",
+        "--scatter-repeats",
+        "1",
+        "--clean"
+      ],
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "case",
+        "--style",
+        "ordered",
+        "--gib",
+        "16",
+        "--layout",
+        "overlap",
+        "--repeats",
+        "5",
+        "--scatter-repeats",
+        "1",
+        "--clean"
+      ],
+      "exit_code": 0
+    }
+  ],
+  "matrix_commands": [
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "case",
+        "--style",
+        "ordered",
+        "--gib",
+        "4",
+        "--layout",
+        "overlap",
+        "--repeats",
+        "5",
+        "--scatter-repeats",
+        "1",
+        "--clean"
+      ],
+      "cwd": "/tmp/glamdb-101-layout",
+      "exit_code": 0,
+      "started_unix_seconds": 1794489191.8312275,
+      "elapsed_seconds": 87.87020826339722,
+      "log": "/tmp/glamdb-101-layout/4g-ordered-overlap.log"
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "case",
+        "--style",
+        "ordered",
+        "--gib",
+        "4",
+        "--layout",
+        "disjoint",
+        "--repeats",
+        "5",
+        "--scatter-repeats",
+        "1",
+        "--clean"
+      ],
+      "cwd": "/tmp/glamdb-101-layout",
+      "exit_code": 0,
+      "started_unix_seconds": 1794489279.7019093,
+      "elapsed_seconds": 65.39124250411987,
+      "log": "/tmp/glamdb-101-layout/4g-ordered-disjoint.log"
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "case",
+        "--style",
+        "clustered",
+        "--gib",
+        "4",
+        "--layout",
+        "disjoint",
+        "--repeats",
+        "5",
+        "--scatter-repeats",
+        "1",
+        "--clean"
+      ],
+      "cwd": "/tmp/glamdb-101-layout",
+      "exit_code": 0,
+      "started_unix_seconds": 1794489345.0937002,
+      "elapsed_seconds": 63.14409637451172,
+      "log": "/tmp/glamdb-101-layout/4g-clustered-disjoint.log"
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "case",
+        "--style",
+        "clustered",
+        "--gib",
+        "4",
+        "--layout",
+        "overlap",
+        "--repeats",
+        "5",
+        "--scatter-repeats",
+        "1",
+        "--clean"
+      ],
+      "cwd": "/tmp/glamdb-101-layout",
+      "exit_code": 0,
+      "started_unix_seconds": 1794489408.2385705,
+      "elapsed_seconds": 40.62010335922241,
+      "log": "/tmp/glamdb-101-layout/4g-clustered-overlap.log"
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "case",
+        "--style",
+        "clustered",
+        "--gib",
+        "16",
+        "--layout",
+        "disjoint",
+        "--repeats",
+        "5",
+        "--scatter-repeats",
+        "1",
+        "--clean"
+      ],
+      "cwd": "/tmp/glamdb-101-layout",
+      "exit_code": 0,
+      "started_unix_seconds": 1794489448.8597765,
+      "elapsed_seconds": 100.38810777664185,
+      "log": "/tmp/glamdb-101-layout/16g-clustered-disjoint.log"
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "case",
+        "--style",
+        "clustered",
+        "--gib",
+        "16",
+        "--layout",
+        "overlap",
+        "--repeats",
+        "5",
+        "--scatter-repeats",
+        "1",
+        "--clean"
+      ],
+      "cwd": "/tmp/glamdb-101-layout",
+      "exit_code": 0,
+      "started_unix_seconds": 1794489549.2483668,
+      "elapsed_seconds": 102.01713752746582,
+      "log": "/tmp/glamdb-101-layout/16g-clustered-overlap.log"
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "case",
+        "--style",
+        "random",
+        "--gib",
+        "4",
+        "--layout",
+        "disjoint",
+        "--repeats",
+        "5",
+        "--scatter-repeats",
+        "1",
+        "--clean"
+      ],
+      "cwd": "/tmp/glamdb-101-layout",
+      "exit_code": 0,
+      "started_unix_seconds": 1794489651.2660704,
+      "elapsed_seconds": 69.1936891078949,
+      "log": "/tmp/glamdb-101-layout/4g-random-disjoint.log"
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "case",
+        "--style",
+        "random",
+        "--gib",
+        "4",
+        "--layout",
+        "overlap",
+        "--repeats",
+        "5",
+        "--scatter-repeats",
+        "1",
+        "--clean"
+      ],
+      "cwd": "/tmp/glamdb-101-layout",
+      "exit_code": 0,
+      "started_unix_seconds": 1794489720.4604034,
+      "elapsed_seconds": 42.486088275909424,
+      "log": "/tmp/glamdb-101-layout/4g-random-overlap.log"
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "case",
+        "--style",
+        "random",
+        "--gib",
+        "16",
+        "--layout",
+        "disjoint",
+        "--repeats",
+        "5",
+        "--scatter-repeats",
+        "1",
+        "--clean"
+      ],
+      "cwd": "/tmp/glamdb-101-layout",
+      "exit_code": 0,
+      "started_unix_seconds": 1794489762.9471705,
+      "elapsed_seconds": 6.513639688491821,
+      "log": "/tmp/glamdb-101-layout/16g-random-disjoint.log"
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "case",
+        "--style",
+        "random",
+        "--gib",
+        "16",
+        "--layout",
+        "overlap",
+        "--repeats",
+        "5",
+        "--scatter-repeats",
+        "1",
+        "--clean"
+      ],
+      "cwd": "/tmp/glamdb-101-layout",
+      "exit_code": 0,
+      "started_unix_seconds": 1794489769.4617164,
+      "elapsed_seconds": 160.89132833480835,
+      "log": "/tmp/glamdb-101-layout/16g-random-overlap.log"
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "case",
+        "--style",
+        "prefix",
+        "--gib",
+        "4",
+        "--layout",
+        "disjoint",
+        "--repeats",
+        "5",
+        "--scatter-repeats",
+        "1",
+        "--clean"
+      ],
+      "cwd": "/tmp/glamdb-101-layout",
+      "exit_code": 0,
+      "started_unix_seconds": 1794489930.353618,
+      "elapsed_seconds": 64.93884897232056,
+      "log": "/tmp/glamdb-101-layout/4g-prefix-disjoint.log"
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "case",
+        "--style",
+        "prefix",
+        "--gib",
+        "4",
+        "--layout",
+        "overlap",
+        "--repeats",
+        "5",
+        "--scatter-repeats",
+        "1",
+        "--clean"
+      ],
+      "cwd": "/tmp/glamdb-101-layout",
+      "exit_code": 0,
+      "started_unix_seconds": 1794489995.293094,
+      "elapsed_seconds": 50.55268931388855,
+      "log": "/tmp/glamdb-101-layout/4g-prefix-overlap.log"
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "case",
+        "--style",
+        "prefix",
+        "--gib",
+        "16",
+        "--layout",
+        "disjoint",
+        "--repeats",
+        "5",
+        "--scatter-repeats",
+        "1",
+        "--clean"
+      ],
+      "cwd": "/tmp/glamdb-101-layout",
+      "exit_code": 0,
+      "started_unix_seconds": 1794490045.846737,
+      "elapsed_seconds": 5.896585941314697,
+      "log": "/tmp/glamdb-101-layout/16g-prefix-disjoint.log"
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "case",
+        "--style",
+        "prefix",
+        "--gib",
+        "16",
+        "--layout",
+        "overlap",
+        "--repeats",
+        "5",
+        "--scatter-repeats",
+        "1",
+        "--clean"
+      ],
+      "cwd": "/tmp/glamdb-101-layout",
+      "exit_code": 0,
+      "started_unix_seconds": 1794490051.743978,
+      "elapsed_seconds": 120.3337390422821,
+      "log": "/tmp/glamdb-101-layout/16g-prefix-overlap.log"
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "case",
+        "--style",
+        "utf8",
+        "--gib",
+        "4",
+        "--layout",
+        "disjoint",
+        "--repeats",
+        "5",
+        "--scatter-repeats",
+        "1",
+        "--clean"
+      ],
+      "cwd": "/tmp/glamdb-101-layout",
+      "exit_code": 0,
+      "started_unix_seconds": 1794490172.0784183,
+      "elapsed_seconds": 70.93621063232422,
+      "log": "/tmp/glamdb-101-layout/4g-utf8-disjoint.log"
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "case",
+        "--style",
+        "utf8",
+        "--gib",
+        "4",
+        "--layout",
+        "overlap",
+        "--repeats",
+        "5",
+        "--scatter-repeats",
+        "1",
+        "--clean"
+      ],
+      "cwd": "/tmp/glamdb-101-layout",
+      "exit_code": 0,
+      "started_unix_seconds": 1794490243.0154266,
+      "elapsed_seconds": 46.404226303100586,
+      "log": "/tmp/glamdb-101-layout/4g-utf8-overlap.log"
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "case",
+        "--style",
+        "utf8",
+        "--gib",
+        "16",
+        "--layout",
+        "disjoint",
+        "--repeats",
+        "5",
+        "--scatter-repeats",
+        "1",
+        "--clean"
+      ],
+      "cwd": "/tmp/glamdb-101-layout",
+      "exit_code": 0,
+      "started_unix_seconds": 1794490289.4208744,
+      "elapsed_seconds": 6.327186346054077,
+      "log": "/tmp/glamdb-101-layout/16g-utf8-disjoint.log"
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "case",
+        "--style",
+        "utf8",
+        "--gib",
+        "16",
+        "--layout",
+        "overlap",
+        "--repeats",
+        "5",
+        "--scatter-repeats",
+        "1",
+        "--clean"
+      ],
+      "cwd": "/tmp/glamdb-101-layout",
+      "exit_code": 0,
+      "started_unix_seconds": 1794490295.749057,
+      "elapsed_seconds": 84.04158663749695,
+      "log": "/tmp/glamdb-101-layout/16g-utf8-overlap.log"
+    }
+  ],
+  "full_value_supplement_commands": [
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "lookup-supplement",
+        "--style",
+        "ordered",
+        "--gib",
+        "4",
+        "--layout",
+        "disjoint"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 25.166069984436035
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "lookup-supplement",
+        "--style",
+        "ordered",
+        "--gib",
+        "4",
+        "--layout",
+        "overlap"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 27.68848443031311
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "lookup-supplement",
+        "--style",
+        "clustered",
+        "--gib",
+        "4",
+        "--layout",
+        "disjoint"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 24.75271248817444
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "lookup-supplement",
+        "--style",
+        "clustered",
+        "--gib",
+        "4",
+        "--layout",
+        "overlap"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 26.985769271850586
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "lookup-supplement",
+        "--style",
+        "random",
+        "--gib",
+        "4",
+        "--layout",
+        "disjoint"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 23.42827868461609
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "lookup-supplement",
+        "--style",
+        "random",
+        "--gib",
+        "4",
+        "--layout",
+        "overlap"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 24.232520580291748
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "lookup-supplement",
+        "--style",
+        "prefix",
+        "--gib",
+        "4",
+        "--layout",
+        "disjoint"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 22.175158739089966
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "lookup-supplement",
+        "--style",
+        "prefix",
+        "--gib",
+        "4",
+        "--layout",
+        "overlap"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 25.071836948394775
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "lookup-supplement",
+        "--style",
+        "ordered",
+        "--gib",
+        "16",
+        "--layout",
+        "overlap"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 100.97463631629944
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "lookup-supplement",
+        "--style",
+        "clustered",
+        "--gib",
+        "16",
+        "--layout",
+        "disjoint"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 95.81334805488586
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "lookup-supplement",
+        "--style",
+        "random",
+        "--gib",
+        "16",
+        "--layout",
+        "disjoint"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 92.62823605537415
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "lookup-supplement",
+        "--style",
+        "clustered",
+        "--gib",
+        "16",
+        "--layout",
+        "overlap"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 103.0299563407898
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "lookup-supplement",
+        "--style",
+        "prefix",
+        "--gib",
+        "16",
+        "--layout",
+        "disjoint"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 103.31580352783203
+    },
+    {
+      "argv": [
+        "/home/ditimizhev/glam/5glamdb/.venv/bin/python",
+        "/tmp/glamdb-101-layout/layout_experiment.py",
+        "lookup-supplement",
+        "--style",
+        "random",
+        "--gib",
+        "16",
+        "--layout",
+        "overlap"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 116.89121222496033
+    }
+  ],
+  "additional_full_value_operations": [
+    {
+      "style": "ordered",
+      "gib": 16,
+      "layout": "disjoint",
+      "action": "lookup-supplement",
+      "exit_code": 0
+    },
+    {
+      "style": "prefix",
+      "gib": 16,
+      "layout": "overlap",
+      "action": "repeated_full_value_point(existing_full_fixture,5)",
+      "exit_code": 0
+    }
+  ],
+  "pregeneration": [
+    [
+      {
+        "action": "generate",
+        "style": "clustered",
+        "gib": 16,
+        "layout": "disjoint",
+        "elapsed_seconds": 87.86839842796326,
+        "exit_code": 0
+      },
+      {
+        "action": "generate",
+        "style": "clustered",
+        "gib": 16,
+        "layout": "overlap",
+        "elapsed_seconds": 90.28599762916565,
+        "exit_code": 0
+      },
+      {
+        "action": "generate",
+        "style": "random",
+        "gib": 16,
+        "layout": "disjoint",
+        "elapsed_seconds": 77.67335152626038,
+        "exit_code": 0
+      }
+    ],
+    [
+      {
+        "action": "generate",
+        "style": "prefix",
+        "gib": 16,
+        "layout": "disjoint",
+        "elapsed_seconds": 88.76169323921204,
+        "exit_code": 0
+      },
+      {
+        "action": "generate",
+        "style": "prefix",
+        "gib": 16,
+        "layout": "overlap",
+        "elapsed_seconds": 88.53252744674683,
+        "exit_code": 0
+      },
+      {
+        "action": "generate",
+        "style": "utf8",
+        "gib": 16,
+        "layout": "disjoint",
+        "elapsed_seconds": 85.6994481086731,
+        "exit_code": 0
+      }
+    ],
+    [
+      {
+        "action": "generate",
+        "style": "utf8",
+        "gib": 16,
+        "layout": "overlap",
+        "elapsed_seconds": 88.35885190963745,
+        "exit_code": 0
+      }
+    ]
+  ],
+  "packaged_source_changes": "C ABI helper renamed FillPayload and formatted; one-off pregeneration waiting removed; no payload/Parquet/measurement algorithm change. Packaged helper matched245 recorded physical row hashes. Final case harness includes full-value point lookup directly; historical supplements are unnecessary for a fresh rerun."
+}

@@ -117,6 +117,16 @@ if(NOT GLAMDB_IO_ONLY)
             "$<TARGET_FILE:glamdb_bulk_ingestion_bench>")
         set_tests_properties(glamdb.bulk_ingestion PROPERTIES LABELS "integration;bulk" TIMEOUT 240)
 
+        add_library(glamdb_kv_layout_payload SHARED EXCLUDE_FROM_ALL
+            "${PROJECT_SOURCE_DIR}/benchmarks/kv_layout/payload_generator.cpp")
+        target_link_libraries(glamdb_kv_layout_payload PRIVATE glamdb_build_options)
+
+        add_executable(glamdb_kv_mode_bench "${PROJECT_SOURCE_DIR}/benchmarks/kv_mode.cpp")
+        set_target_properties(glamdb_kv_mode_bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/benchmarks")
+        target_include_directories(glamdb_kv_mode_bench PRIVATE "${PROJECT_SOURCE_DIR}")
+        target_include_directories(glamdb_kv_mode_bench SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party/json/single_include")
+        target_link_libraries(glamdb_kv_mode_bench PRIVATE glamdb::core glamdb_storage glamdb_build_options)
+
         add_executable(glamdb_parquet_settings_bench "${PROJECT_SOURCE_DIR}/benchmarks/parquet_settings.cpp")
         target_include_directories(glamdb_parquet_settings_bench PRIVATE "${PROJECT_SOURCE_DIR}")
         target_link_libraries(glamdb_parquet_settings_bench PRIVATE glamdb::core glamdb_build_options Arrow::arrow_static)
@@ -228,6 +238,10 @@ if(TARGET glamdb_server)
     add_test(NAME glamdb.native_scalar_types COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/server/native_scalar_types_test.py"
         "$<TARGET_FILE:glamdb_server>" "${glamdb_test_cli}" "${PROJECT_SOURCE_DIR}/ui")
+    add_test(NAME glamdb.native_kv COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/server/native_kv_test.py"
+        "$<TARGET_FILE:glamdb_server>" "${glamdb_test_cli}" "${PROJECT_SOURCE_DIR}/ui")
+    set_tests_properties(glamdb.native_kv PROPERTIES LABELS "integration;http;kv" TIMEOUT 180)
     set_tests_properties(glamdb.native_scalar_types PROPERTIES LABELS "integration;http;scalar" TIMEOUT 180)
     add_test(NAME glamdb.bulk_http COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/server/bulk_http_test.py"

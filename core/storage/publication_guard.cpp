@@ -4,6 +4,7 @@
 #include "core/io/store_uri.h"
 #include "core/storage/format_verifier.h"
 #include "core/storage/iceberg_error_boundary.h"
+#include "core/storage/kv_state.h"
 #include "core/storage/metadata_validation.h"
 
 #include <iceberg/file_io.h>
@@ -32,6 +33,14 @@ iceberg::Status TStoragePublicationGuard::CheckContext(const TPointerChange& cha
         Context_.Limits.RootBytes > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
     {
         return iceberg::InvalidArgument("Invalid publication context.");
+    }
+    const auto mode = Context_.Profile.Properties.find("glamdb.collection-mode");
+    const bool kv = (mode != Context_.Profile.Properties.end() && mode->second == "kv1") ||
+        (Context_.Base &&
+            ((Context_.Base->Metadata && IsKVMetadata(*Context_.Base->Metadata)) ||
+                (Context_.Base->ScanIndex && Context_.Base->ScanIndex->KeyValue)));
+    if (kv && (Context_.RetentionPolicy || Context_.Attempt->Kind() == NIO::EAttemptKind::Maintenance)) {
+        return iceberg::ValidationFailed("Snapshot retention is unsupported for KV collections.");
     }
     const auto isAppend = Context_.Attempt->Kind() != NIO::EAttemptKind::CreateCollection;
     if (isAppend != static_cast<bool>(Context_.Base) ||
@@ -146,8 +155,9 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
                 return iceberg::ValidationFailed("Expiration changes immutable metadata.");
             }
         } else {
-            ICEBERG_RETURN_UNEXPECTED(
-                CheckAppendMetadata(*Context_.Base->Metadata, *candidate.Metadata, Context_.ExpectedSummary));
+            ICEBERG_RETURN_UNEXPECTED((IsKVMetadata(*Context_.Base->Metadata)
+                    ? CheckKVMetadata(*Context_.Base->Metadata, *candidate.Metadata, Context_.ExpectedSummary)
+                    : CheckAppendMetadata(*Context_.Base->Metadata, *candidate.Metadata, Context_.ExpectedSummary)));
             if (std::ranges::binary_search(Context_.Base->ExpiredSnapshotIDs, candidate.Metadata->current_snapshot_id))
             {
                 return iceberg::ValidationFailed("Append reuses an expired snapshot identity.");
@@ -162,7 +172,9 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
         const auto location = "store://" + std::string(Context_.Attempt->StoreId()) + "/warehouse/" +
             std::string(Context_.Attempt->CollectionId());
         ICEBERG_RETURN_UNEXPECTED(CheckCreateMetadata(*candidate.Metadata, Context_.Profile, location));
-        candidate.ScanIndex = std::make_shared<const TScanMembership>();
+        auto membership = std::make_shared<TScanMembership>();
+        membership->KeyValue = IsKVMetadata(*candidate.Metadata);
+        candidate.ScanIndex = std::move(membership);
     }
     candidate.Usage.RootBytes = record.Value().Length;
     candidate.Usage.Snapshots = candidate.Metadata->snapshots.size();
@@ -172,11 +184,16 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
     }
     if (Context_.Base && !Context_.RetentionPolicy) {
         ICEBERG_ASSIGN_OR_RAISE(candidate,
-            CheckAppendClosure(Context_.FileIO,
-                std::move(candidate),
-                Context_.Base->CurrentManifests,
-                Context_.Attempt,
-                Context_.Limits));
+            (IsKVMetadata(*candidate.Metadata) ? CheckKVClosure(Context_.FileIO,
+                                                     std::move(candidate),
+                                                     *Context_.Base,
+                                                     Context_.Attempt,
+                                                     Context_.Limits)
+                                               : CheckAppendClosure(Context_.FileIO,
+                                                     std::move(candidate),
+                                                     Context_.Base->CurrentManifests,
+                                                     Context_.Attempt,
+                                                     Context_.Limits)));
     }
     if (Context_.RetentionPolicy) {
         // Recovery charges the final root with the latest append's metadata.

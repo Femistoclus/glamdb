@@ -1,5 +1,6 @@
 #pragma once
 
+#include "storage/kv.h"
 #include "storage/metadata.h"
 #include "storage/scan.h"
 #include "storage/types.h"
@@ -13,6 +14,8 @@ class Schema;
 namespace glamdb {
 namespace detail {
 struct EngineFactory;
+struct TKvInput;
+class TReadBudget;
 }
 
 // Synchronous facade. Storage production and scanning are separate components;
@@ -75,6 +78,12 @@ public:
     Result<SchemaSpec> SchemaForAppend(std::string_view collection_id) const;
     AppendOutcome AppendDurable(const AppendRequest& request);
     AppendOutcome BulkAppendDurable(const BulkAppendRequest& request);
+    AppendOutcome UpsertDurable(const AppendRequest& request);
+    AppendOutcome DeleteDurable(const DeleteRequest& request);
+    AppendOutcome BulkUpsertDurable(const BulkAppendRequest& request);
+    AppendOutcome CompactDurable(const CompactionRequest& request);
+    MigrationOutcome MigrateAppendToKV(const MigrationRequest& request);
+    Result<LookupResult> Lookup(const LookupRequest& request) const;
     Result<std::optional<AppendOutcome>> FindAppendOutcome(std::string_view collection_id,
         std::string_view operation_id) const;
     // Reads one fixed view. The cursor retains the store until it is released.
@@ -83,7 +92,15 @@ public:
     Status Shutdown(std::chrono::milliseconds timeout);
 
 private:
-    AppendOutcome AppendDurableImpl(const AppendRequest& request, const BulkAppendRequest* bulk);
+    CreateOutcome CreateCollectionImpl(const CreateCollectionRequest& request,
+        std::string_view migrationIdentity,
+        std::string_view migrationOperation = {});
+    AppendOutcome AppendDurableImpl(const AppendRequest& request,
+        const BulkAppendRequest* bulk,
+        const detail::TKvInput* kv = nullptr);
+    Result<std::shared_ptr<ScanCursor>> ScanImpl(const ScanRequest& request,
+        std::shared_ptr<detail::TReadBudget> budget,
+        bool chronologicalFiles = false) const;
     explicit Engine(std::shared_ptr<Impl> implementation);
     std::shared_ptr<Impl> impl_;
     friend struct detail::EngineFactory;
