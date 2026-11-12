@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <string>
 #include <system_error>
 
 namespace NGlamDB::NTelemetry {
@@ -48,6 +49,8 @@ struct TLogOptions
 {
     std::uint64_t SuccessSampleEvery = 100;
     std::uint32_t MaxSuccessPerSecond = 20;
+    // Empty retains the existing stderr sink. A directory selects bounded Quill JSONL files.
+    std::string Directory;
 };
 
 struct TLogStats
@@ -78,6 +81,8 @@ public:
     static constexpr std::size_t QueueCapacityBytes = 64ULL * 1024;
     static constexpr std::size_t MaxProducerThreads = 16;
     static constexpr std::size_t MaxRecordBytes = 1024;
+    static constexpr std::size_t MaxFileBytes = 8ULL * 1024 * 1024;
+    static constexpr std::uint32_t MaxBackupFiles = 3;
 
     // One active logger per process. Open preallocates the calling producer.
     static std::expected<std::unique_ptr<TStructuredLogger>, std::error_code> Open(const TLogOptions& options = {});

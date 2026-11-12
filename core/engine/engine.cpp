@@ -9,6 +9,7 @@
 #include "core/engine/metadata_pages.h"
 #include "core/engine/storage_mapping.h"
 #include "core/engine/store_lease.h"
+#include "core/telemetry/metrics.h"
 
 #if GLAMDB_HAS_STORAGE
 #include "core/backend/local_storage_backend.h"
@@ -1090,6 +1091,7 @@ Result<SchemaSpec> Engine::SchemaForAppend(std::string_view id) const
 
 CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
 {
+    NGlamDB::NTelemetry::TOperationScope<CreateOutcome> metrics(NGlamDB::NTelemetry::EOperation::CreateCollection);
     const auto impl = impl_;
     std::unique_lock writer_lock(impl->writer, std::defer_lock);
     Impl::TAttemptRelease release{*impl, writer_lock};
@@ -1115,29 +1117,29 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
             std::lock_guard state_lock(impl->state_mutex);
             const auto blocked = impl->BlockedCreate(*context);
             if (blocked) {
-                return *blocked;
+                return metrics.Finish(*blocked);
             }
         }
         if (!writer_lock.try_lock_for(impl->limits.writer_wait)) {
             std::lock_guard state_lock(impl->state_mutex);
             const auto blocked = impl->BlockedCreate(*context);
             if (blocked) {
-                return *blocked;
+                return metrics.Finish(*blocked);
             }
-            return {CommitDisposition::CommitUnknown,
+            return metrics.Finish({CommitDisposition::CommitUnknown,
                 CommitPhase::Reconciling,
                 std::nullopt,
                 ErrorDetail{"RESOURCE_EXHAUSTED",
                     "writer busy; original creation outcome was not resolved",
                     RetryHint::SameIdAfterReconcile},
-                context};
+                context});
         }
         uint64_t expected_generation = 0;
         {
             std::lock_guard state_lock(impl->state_mutex);
             const auto blocked = impl->BlockedCreate(*context);
             if (blocked) {
-                return *blocked;
+                return metrics.Finish(*blocked);
             }
             expected_generation = impl->health_generation;
         }
@@ -1163,7 +1165,8 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
                     true};
                 committed = true;
                 impl->VerifyStorage();
-                return {CommitDisposition::Committed, CommitPhase::Complete, collection, std::nullopt, std::nullopt};
+                return metrics.Finish(
+                    {CommitDisposition::Committed, CommitPhase::Complete, collection, std::nullopt, std::nullopt});
             }
         }
         Require(existing.size() < static_cast<size_t>(impl->limits.max_collections),
@@ -1186,6 +1189,7 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
             std::nullopt,
             false};
         impl->ReserveAttempt();
+        metrics.EnterPhase(CommitPhase::Data);
         auto canonical = request;
         canonical.write_settings = settings;
         auto staged = Take(impl->backend->PrepareCreate(impl->info, canonical, attempt));
@@ -1205,6 +1209,7 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
         // Held from the final health check through the outer COMMIT or
         // rollback; see Impl::commit_gate.
         std::unique_lock gate(impl->commit_gate, std::defer_lock);
+        metrics.EnterPhase(CommitPhase::CatalogTransaction);
         auto created = impl->catalog->PublishCreate(
             info,
             [&](std::string_view location) -> Status {
@@ -1235,7 +1240,8 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
         if (gate.owns_lock()) {
             gate.unlock();
         }
-        return {CommitDisposition::Committed, CommitPhase::Complete, created, std::nullopt, std::nullopt};
+        return metrics.Finish(
+            {CommitDisposition::Committed, CommitPhase::Complete, created, std::nullopt, std::nullopt});
     } catch (const Failure& error) {
         if (publication_started && context && context->candidate_metadata_location) {
             impl->backend->PublicationFinished(context->collection_id,
@@ -1245,15 +1251,15 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
         }
         impl->CloseOnCorruption(error.detail);
         if ((error.uncertain || committed) && context) {
-            return impl->UnknownCreate(*context,
+            return metrics.Finish(impl->UnknownCreate(*context,
                 committed ? CommitPhase::Reconciling : error.phase.value_or(CommitPhase::CatalogTransaction),
-                error.detail);
+                error.detail));
         }
-        return {CommitDisposition::DefinitelyNotCommitted,
+        return metrics.Finish({CommitDisposition::DefinitelyNotCommitted,
             publication_started ? CommitPhase::CatalogTransaction : CommitPhase::Validation,
             std::nullopt,
             error.detail,
-            std::nullopt};
+            std::nullopt});
     } catch (const std::exception& error) {
         if (publication_started && context && context->candidate_metadata_location) {
             impl->backend->PublicationFinished(context->collection_id,
@@ -1261,13 +1267,13 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
                 CommitDisposition::CommitUnknown);
         }
         if ((publication_started || committed) && context) {
-            return impl->UnknownCreate(*context, CommitPhase::Reconciling, ExceptionError(error));
+            return metrics.Finish(impl->UnknownCreate(*context, CommitPhase::Reconciling, ExceptionError(error)));
         }
-        return {CommitDisposition::DefinitelyNotCommitted,
+        return metrics.Finish({CommitDisposition::DefinitelyNotCommitted,
             CommitPhase::Validation,
             std::nullopt,
             ExceptionError(error),
-            std::nullopt};
+            std::nullopt});
     }
 }
 
@@ -1340,6 +1346,7 @@ Result<CollectionInfo> Engine::UpdateWriteSettings(const UpdateWriteSettingsRequ
 
 AppendOutcome Engine::AppendDurable(const AppendRequest& request)
 {
+    NGlamDB::NTelemetry::TOperationScope<AppendOutcome> metrics(NGlamDB::NTelemetry::EOperation::Append);
     const auto impl = impl_;
     const auto deadline = std::chrono::steady_clock::now() + impl->limits.append_deadline;
     // Retain the writer across catch handlers: recording a failure and setting
@@ -1357,6 +1364,7 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
                 std::lock_guard lock(owner->state_mutex);
                 --owner->pending_calls;
                 owner->owned_input_bytes -= bytes;
+                NGlamDB::NTelemetry::AdjustAdmission(-1, -static_cast<int64_t>(bytes));
             }
         }
     } admission;
@@ -1379,7 +1387,7 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         }
         const auto payload_hash = Take(FingerprintBatches(collection.schema, request.collection_id, request.batches));
         if (unresolved) {
-            return UnresolvedAppend(*unresolved, payload_hash);
+            return metrics.Finish(UnresolvedAppend(*unresolved, payload_hash));
         }
         if (writer_lock.try_lock()) {
             // The writer holder is an admitted call as well. Count it before
@@ -1391,16 +1399,17 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
                 full = impl->pending_calls >= impl->limits.max_pending_calls;
                 if (!full) {
                     ++impl->pending_calls;
+                    NGlamDB::NTelemetry::AdjustAdmission(1, 0);
                     admission.owner = impl;
                 }
             }
             if (full) {
                 writer_lock.unlock();
-                return impl->ResolveUnadmitted(request,
+                return metrics.Finish(impl->ResolveUnadmitted(request,
                     payload_hash,
                     {"RESOURCE_EXHAUSTED",
                         "pending budget is full; original operation outcome was not resolved",
-                        RetryHint::SameIdAfterReconcile});
+                        RetryHint::SameIdAfterReconcile}));
             }
         } else {
             bool full = false;
@@ -1410,27 +1419,28 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
                 full = impl->pending_calls >= impl->limits.max_pending_calls;
                 if (!unresolved && !full) {
                     ++impl->pending_calls;
+                    NGlamDB::NTelemetry::AdjustAdmission(1, 0);
                     admission.owner = impl;
                 }
             }
             if (unresolved) {
-                return UnresolvedAppend(*unresolved, payload_hash);
+                return metrics.Finish(UnresolvedAppend(*unresolved, payload_hash));
             }
             if (full) {
-                return impl->ResolveUnadmitted(request,
+                return metrics.Finish(impl->ResolveUnadmitted(request,
                     payload_hash,
                     {"RESOURCE_EXHAUSTED",
                         "pending budget is full; original operation outcome was not resolved",
-                        RetryHint::SameIdAfterReconcile});
+                        RetryHint::SameIdAfterReconcile}));
             }
             if (!writer_lock.try_lock_until(
                     std::min(deadline, std::chrono::steady_clock::now() + impl->limits.writer_wait)))
             {
-                return impl->ResolveUnadmitted(request,
+                return metrics.Finish(impl->ResolveUnadmitted(request,
                     payload_hash,
                     {"RESOURCE_EXHAUSTED",
                         "writer wait expired; original operation outcome was not resolved",
-                        RetryHint::SameIdAfterReconcile});
+                        RetryHint::SameIdAfterReconcile}));
             }
         }
         uint64_t expected_generation = 0;
@@ -1446,17 +1456,17 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
             }
         }
         if (unresolved) {
-            return UnresolvedAppend(*unresolved, payload_hash);
+            return metrics.Finish(UnresolvedAppend(*unresolved, payload_hash));
         }
         std::optional<OperationRecord> previous;
         try {
             previous = impl->catalog->FindOperation(request.collection_id, request.operation_id);
         } catch (const Failure& error) {
             context.first_error = error.detail;
-            return impl->Unknown(context, CommitPhase::Reconciling, error.detail);
+            return metrics.Finish(impl->Unknown(context, CommitPhase::Reconciling, error.detail));
         } catch (const std::exception& error) {
             context.first_error = ExceptionError(error);
-            return impl->Unknown(context, CommitPhase::Reconciling, context.first_error);
+            return metrics.Finish(impl->Unknown(context, CommitPhase::Reconciling, context.first_error));
         }
         if (previous) {
             Require(previous->binding.payload_hash == payload_hash,
@@ -1472,19 +1482,21 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
                         "RECOVERY_REQUIRED",
                         "authoritative reconciliation is required");
                 } catch (const Failure& error) {
-                    return impl->Unknown(Context(previous->binding, error.detail, true),
+                    return metrics.Finish(impl->Unknown(Context(previous->binding, error.detail, true),
                         CommitPhase::Reconciling,
-                        error.detail);
+                        error.detail));
                 } catch (const std::exception& error) {
                     const auto detail = ExceptionError(error);
-                    return impl->Unknown(Context(previous->binding, detail, true), CommitPhase::Reconciling, detail);
+                    return metrics.Finish(
+                        impl->Unknown(Context(previous->binding, detail, true), CommitPhase::Reconciling, detail));
                 }
-                return *previous->outcome;
+                return metrics.Finish(*previous->outcome);
             }
             const ErrorDetail error{"RECOVERY_REQUIRED",
                 "pending binding requires reconciliation",
                 RetryHint::SameIdAfterReconcile};
-            return impl->Unknown(Context(previous->binding, error, false), CommitPhase::Reconciling, error);
+            return metrics.Finish(
+                impl->Unknown(Context(previous->binding, error, false), CommitPhase::Reconciling, error));
         }
         // Only a new operation needs owned payload memory. A retry has already
         // returned its original terminal receipt, even under a lower input cap.
@@ -1496,6 +1508,7 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
                 "RESOURCE_EXHAUSTED",
                 "owned input budget is full");
             impl->owned_input_bytes += reservation;
+            NGlamDB::NTelemetry::AdjustAdmission(0, static_cast<int64_t>(reservation));
             admission.bytes = reservation;
         }
         admission.shared_input = Take(impl->resources->Reserve(ResourceClass::Data, reservation));
@@ -1520,12 +1533,13 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
             {"RECOVERY_REQUIRED", "append outcome is unresolved", RetryHint::SameIdAfterReconcile},
             false);
         phase = CommitPhase::Binding;
+        metrics.EnterPhase(CommitPhase::Binding);
         try {
             impl->catalog->BindOperation(*binding);
         } catch (const Failure& error) {
             if (error.uncertain) {
                 context.first_error = error.detail;
-                return impl->Unknown(context, phase, error.detail);
+                return metrics.Finish(impl->Unknown(context, phase, error.detail));
             }
             binding.reset();
             throw;
@@ -1549,6 +1563,7 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
             "DEADLINE_EXCEEDED",
             "append deadline expired before execution");
         phase = CommitPhase::Data;
+        metrics.EnterPhase(CommitPhase::Data);
         auto staged = Take(impl->backend->PrepareAppend(impl->info, *binding, collection, input, deadline));
         Require(staged != nullptr, "IO_ERROR", "producer returned no staged append");
         const auto receipt = staged->Receipt();
@@ -1570,6 +1585,7 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
             "DEADLINE_EXCEEDED",
             "append deadline expired before publication");
         phase = CommitPhase::CatalogTransaction;
+        metrics.EnterPhase(CommitPhase::CatalogTransaction);
         publication_started = true;
         context.publication_started = true;
         context.candidate_snapshot_id = receipt.snapshot_id;
@@ -1607,6 +1623,7 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         if (gate.owns_lock()) {
             gate.unlock();
         }
+        metrics.EnterPhase(CommitPhase::Complete);
         {
             std::lock_guard state_lock(impl->state_mutex);
             impl->active.reset();
@@ -1617,7 +1634,7 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         {
             impl->RetireRoot(binding->base);
         }
-        return committed;
+        return metrics.Finish(committed);
     } catch (const Failure& error) {
         if (publication_started && binding && context.candidate_metadata_location) {
             impl->backend->PublicationFinished(binding->collection_id,
@@ -1627,13 +1644,13 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         }
         impl->CloseOnCorruption(error.detail);
         if (!binding) {
-            return Rejected(request.operation_id, phase, error.detail);
+            return metrics.Finish(Rejected(request.operation_id, phase, error.detail));
         }
         context.first_error = error.detail;
         if (error.uncertain || phase == CommitPhase::Complete) {
-            return impl->Unknown(context, error.phase.value_or(CommitPhase::Reconciling), error.detail);
+            return metrics.Finish(impl->Unknown(context, error.phase.value_or(CommitPhase::Reconciling), error.detail));
         }
-        return impl->FailBound(*binding, phase, error.detail, publication_started);
+        return metrics.Finish(impl->FailBound(*binding, phase, error.detail, publication_started));
     } catch (const std::exception& error) {
         const auto detail = ExceptionError(error);
         if (publication_started && binding && context.candidate_metadata_location) {
@@ -1642,13 +1659,13 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
                 CommitDisposition::CommitUnknown);
         }
         if (!binding) {
-            return Rejected(request.operation_id, phase, detail);
+            return metrics.Finish(Rejected(request.operation_id, phase, detail));
         }
         if (publication_started) {
             context.first_error = detail;
-            return impl->Unknown(context, CommitPhase::Reconciling, detail);
+            return metrics.Finish(impl->Unknown(context, CommitPhase::Reconciling, detail));
         }
-        return impl->FailBound(*binding, phase, detail);
+        return metrics.Finish(impl->FailBound(*binding, phase, detail));
     }
 }
 

@@ -3,6 +3,10 @@
 
 #include "storage/resources.h"
 
+#include "apps/server/metrics.h"
+
+#include "core/telemetry/structured_log.h"
+
 #include <asio.hpp>
 
 #include <algorithm>
@@ -114,6 +118,7 @@ public:
         , Socket_(std::move(socket))
         , Timer_(state.IO)
         , State_(state)
+        , Metrics_(nullptr)
         , RequestID_(state.Logger ? state.Logger->NewRequestID() : 0)
     { }
     template <class F>
@@ -289,6 +294,7 @@ private:
             return;
         }
         Closed_ = true;
+        Metrics_.Finish(static_cast<int>(StatusCode_), ResponseSent_);
         LogCompletion();
         ++Generation_;
         std::error_code ignored;
@@ -326,6 +332,7 @@ private:
         }
         Request_ = ParseHeaders(std::string_view(Input_).substr(0, size));
         Operation_ = ClassifyOperation(Request_);
+        Metrics_.SetRequest(Request_.Method, Request_.Target);
         if (!State_.Routes.IsAuthorized(Request_)) {
             Write(ErrorResponse(401, "UNAUTHORIZED", "bearer token required"));
             return;
@@ -587,7 +594,7 @@ private:
         const auto elapsed =
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - Started_).count();
         State_.Logger->TryLog({.Event = ELogEvent::RequestCompleted,
-            .Operation = Operation_,
+            .Operation = StatusCode_ == 401 || StatusCode_ == 403 ? ELogOperation::Auth : Operation_,
             .Outcome = outcome,
             .RequestID = RequestID_,
             .DurationUs = static_cast<std::uint64_t>(elapsed),
@@ -612,6 +619,7 @@ private:
     TTcp::socket Socket_;
     asio::steady_timer Timer_;
     TState& State_;
+    THttpScope Metrics_;
     TRequest Request_;
     std::array<char, 4096> ReadBuffer_{};
     std::string Input_, Header_, Output_, Peer_, Database_;

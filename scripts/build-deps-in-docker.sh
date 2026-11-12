@@ -6,9 +6,9 @@ if [ "$#" -ne 0 ]; then
     exit 2
 fi
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-for source in arrow/cpp iceberg-cpp googletest; do
+for source in arrow/cpp iceberg-cpp googletest prometheus-cpp prometheus-cpp/3rdparty/civetweb; do
     if [ ! -f "$root/third_party/$source/CMakeLists.txt" ]; then
-        printf '%s\n' "Initialize dependencies first: git submodule update --init third_party/${source%%/*}" >&2
+        printf '%s\n' "Initialize dependencies first: git submodule update --init --recursive third_party/${source%%/*}" >&2
         exit 1
     fi
 done
@@ -23,7 +23,7 @@ exec docker run --rm --name glamdb-deps-build --volume "$root:/src:ro" \
         if [ "$GLAMDB_DEPS_CLEAN" = 1 ]; then
             rm -rf /deps/build /deps/install
         fi
-        for dependency in arrow iceberg-cpp googletest; do
+        for dependency in arrow iceberg-cpp googletest cli11 prometheus-cpp prometheus-cpp/3rdparty/civetweb; do
             git config --global --add safe.directory "/src/third_party/$dependency"
         done
         cmake --preset deps-local -B /deps/build \

@@ -275,6 +275,8 @@ bash scripts/check-workbench.sh
 On Linux, add `--with-deps` to the Playwright install command to install browser
 system dependencies. Tests use localhost sockets and disposable stores.
 
+See [Metrics, Grafana dashboards and operator setup](docs/development/MONITORING.md) for monitoring.
+
 ## Contributing
 
 Bug reports, documentation improvements, tests, and code contributions are welcome.

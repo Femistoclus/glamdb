@@ -1,0 +1,63 @@
+name: Monitoring checks
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  monitoring:
+    name: Metric clients, rules, dashboards, and chart
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the proposed change
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - name: Build the locked client
+        run: |
+          git submodule update --init third_party/prometheus-cpp
+          git -C third_party/prometheus-cpp submodule update --init 3rdparty/civetweb
+          cmake -DSOURCE="$PWD/third_party/prometheus-cpp" \
+            -DDESTINATION="$PWD/build/prometheus-src" \
+            -DPATCH_DIR="$PWD/cmake/dependencies/patches/prometheus-cpp" \
+            -P cmake/dependencies/PrepareSource.cmake
+          cmake -S build/prometheus-src -B build/prometheus-cpp \
+            -DCMAKE_INSTALL_PREFIX="$PWD/.deps/install" -DCMAKE_INSTALL_LIBDIR=lib \
+            -DCMAKE_BUILD_TYPE=Release -DENABLE_PUSH=OFF -DENABLE_TESTING=OFF \
+            -DENABLE_COMPRESSION=OFF -DTHIRDPARTY_CIVETWEB_WITH_SSL=OFF \
+            -DOVERRIDE_CXX_STANDARD_FLAGS=OFF -DCMAKE_CXX_STANDARD=23
+          cmake --build build/prometheus-cpp --parallel 2
+          cmake --install build/prometheus-cpp
+          python3 -m pip install --require-hashes -r tools/monitoring/requirements.txt
+      - name: Fetch and verify pinned validators
+        run: |
+          python3 tools/monitoring/fetch_tool.py prometheus
+          python3 tools/monitoring/fetch_tool.py helm
+          curl --fail --location --output artifacts/monitoring/kube-prometheus-stack-92.7.0.tgz \
+            https://github.com/prometheus-community/helm-charts/releases/download/kube-prometheus-stack-92.7.0/kube-prometheus-stack-92.7.0.tgz
+      - name: Test clients, native endpoint, rules, dashboards, and chart
+        run: >-
+          python3 tools/monitoring/check.py
+          --promtool artifacts/monitoring/bin/promtool
+          --cxx g++
+          --helm artifacts/monitoring/bin/helm
+          --chart artifacts/monitoring/kube-prometheus-stack-92.7.0.tgz

@@ -1,0 +1,128 @@
+#include "core/telemetry/metrics.h"
+
+#include <prometheus/collectable.h>
+#include <prometheus/text_serializer.h>
+
+#include <cmath>
+#include <initializer_list>
+#include <iostream>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+namespace {
+void Check(bool condition, const char* message)
+{
+    if (!condition) {
+        throw std::runtime_error(message);
+    }
+}
+
+const prometheus::ClientMetric& Find(const std::vector<prometheus::MetricFamily>& families,
+    const std::string& name,
+    std::initializer_list<std::pair<std::string, std::string>> labels)
+{
+    for (const auto& family : families) {
+        if (family.name != name) {
+            continue;
+        }
+        for (const auto& metric : family.metric) {
+            bool matches = true;
+            for (const auto& [key, value] : labels) {
+                bool found = false;
+                for (const auto& label : metric.label) {
+                    found |= label.name == key && label.value == value;
+                }
+                matches &= found;
+            }
+            if (matches) {
+                return metric;
+            }
+        }
+    }
+    throw std::runtime_error("expected metric not found: " + name);
+}
+} // namespace
+
+int main()
+{
+    using namespace NGlamDB::NTelemetry;
+    using namespace glamdb;
+    const auto collectable = GetMetricsCollectable();
+    const auto before = collectable->Collect();
+    Check(Find(before, "glamdb_operations_total", {{"operation", "append"}, {"outcome", "committed"}}).counter.value ==
+            0,
+        "new process counter did not reset");
+    Check(Find(before, "glamdb_phase_duration_seconds", {{"operation", "append"}, {"phase", "data"}})
+                .histogram.sample_count == 0,
+        "pre-registered phase has observations");
+    {
+        TOperationScope<AppendOutcome> scope(EOperation::Append);
+        scope.EnterPhase(CommitPhase::Data);
+        (void)scope.Finish({"sensitive-operation-id",
+            CommitDisposition::CommitUnknown,
+            CommitPhase::Data,
+            std::nullopt,
+            ErrorDetail{"unbounded-secret-error", "private-message"},
+            std::nullopt});
+    }
+    {
+        TOperationScope<CreateOutcome> scope(EOperation::CreateCollection);
+    }
+    std::vector<std::thread> writers;
+    for (int thread = 0; thread < 8; ++thread) {
+        writers.emplace_back([] {
+            for (int call = 0; call < 10000; ++call) {
+                RecordFinished(EOperation::Append, CommitDisposition::Committed, CommitPhase::Complete, {}, 0.01);
+            }
+        });
+    }
+    for (auto& writer : writers) {
+        writer.join();
+    }
+    AdjustAdmission(1, 8192);
+    Check(Find(collectable->Collect(), "glamdb_admission_owned_input_bytes", {}).gauge.value == 8192,
+        "admission ownership missing");
+    AdjustAdmission(-1, -8192);
+    const auto after = collectable->Collect();
+    Check(Find(after, "glamdb_operations_total", {{"operation", "append"}, {"outcome", "committed"}}).counter.value ==
+            80000,
+        "concurrent increments were lost");
+    const auto& histogram =
+        Find(after, "glamdb_operation_duration_seconds", {{"operation", "append"}, {"outcome", "committed"}}).histogram;
+    Check(histogram.sample_count == 80000 && std::abs(histogram.sample_sum - 800) < 1e-7,
+        "histogram count or sum incorrect");
+    Check(histogram.bucket[1].cumulative_count == 0 && histogram.bucket[4].upper_bound == 0.01 &&
+            histogram.bucket[4].cumulative_count == 80000,
+        "histogram boundary incorrect");
+    Check(Find(after, "glamdb_operations_total", {{"operation", "create_collection"}, {"outcome", "incomplete"}})
+                .counter.value == 1,
+        "incomplete scope hidden");
+    Check(Find(after, "glamdb_operation_errors_total", {{"operation", "append"}, {"phase", "data"}, {"error", "other"}})
+                .counter.value == 1,
+        "error label unbounded");
+    Check(Find(after, "glamdb_operations_in_flight", {{"operation", "append"}}).gauge.value == 0,
+        "scope did not release in-flight gauge");
+    prometheus::TextSerializer serializer;
+    const auto snapshot = serializer.Serialize(after);
+    Check(snapshot.find("sensitive") == std::string::npos && snapshot.find("secret") == std::string::npos &&
+            snapshot.find("private") == std::string::npos,
+        "identifier or diagnostic leaked");
+    Check(snapshot.find("snapshot_timestamp") == std::string::npos, "stale textfile protocol retained");
+    auto count = [](const auto& text) {
+        size_t result = 0;
+        bool start = true;
+        for (char character : text) {
+            if (start && character != '#') {
+                ++result;
+            }
+            start = character == '\n';
+        }
+        return result;
+    };
+    Check(count(snapshot) == count(serializer.Serialize(before)) && count(snapshot) == 714,
+        "pre-registered series budget changed");
+    std::cout << snapshot;
+}

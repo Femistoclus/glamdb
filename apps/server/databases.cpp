@@ -571,6 +571,32 @@ StoreHealth TDatabases::Health(const std::string& id) const
     return health;
 }
 
+bool TDatabases::IsReady() const noexcept
+try {
+    if (!Impl_->Healthy) {
+        return false;
+    }
+    bool open = false;
+    for (const auto& entry : Impl_->Snapshot()) {
+        const auto descriptor = std::atomic_load(&entry->Descriptor);
+        const auto state = descriptor->at("state").get<std::string>();
+        if (state == "closed" || state == "discarded") {
+            continue;
+        }
+        std::shared_lock lock(entry->Gate, std::try_to_lock);
+        if (state != "open" || !lock.owns_lock() || !entry->Accepting || entry->RegistryFence || !entry->Instance) {
+            return false;
+        }
+        if (!entry->Instance->GetHealth().write_ready) {
+            return false;
+        }
+        open = true;
+    }
+    return open;
+} catch (...) {
+    return false;
+}
+
 TJson TDatabases::Create(const TJson& body)
 {
     CheckKeys(body, {"name", "database_id", "limits"});

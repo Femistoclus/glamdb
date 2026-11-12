@@ -1,0 +1,99 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+  external_labels:
+    cluster: local
+rule_files:
+  - /etc/prometheus/rules/*.yml
+  - /etc/prometheus/alerting/*.yml
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+        labels: {cluster: local, service: monitoring}
+  - job_name: glamdb-edge
+    sample_limit: 20000
+    label_limit: 20
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/edge.json']
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'caddy_http_.*|caddy_reverse_proxy_.*|process_.*|go_.*'
+        action: keep
+  - job_name: glamdb-gateway
+    sample_limit: 20000
+    label_limit: 20
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/gateway.json']
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'glamdb_gateway_.*|glamdb_python_log_.*|process_.*|python_.*'
+        action: keep
+  - job_name: glamdb-core
+    sample_limit: 10000
+    label_limit: 20
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/core.json']
+  - job_name: node
+    sample_limit: 50000
+    label_limit: 20
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/node.json']
+  - job_name: cadvisor
+    honor_timestamps: true
+    track_timestamps_staleness: true
+    sample_limit: 100000
+    label_limit: 25
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/cadvisor.json']
+    metric_relabel_configs:
+      - source_labels: [container_label_io_kubernetes_pod_namespace]
+        regex: '(.+)'
+        target_label: namespace
+      - source_labels: [container_label_io_kubernetes_pod_name]
+        regex: '(.+)'
+        target_label: pod
+      - source_labels: [container_label_io_kubernetes_container_name]
+        regex: '(.+)'
+        target_label: container
+      - regex: 'container_label_.*|image'
+        action: labeldrop
+  - job_name: loki
+    sample_limit: 20000
+    label_limit: 25
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/loki.json']
+  - job_name: alloy
+    sample_limit: 20000
+    label_limit: 25
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/alloy.json']
+  - job_name: alertmanager
+    static_configs:
+      - targets: ['alertmanager:9093']
+        labels: {cluster: local, service: alerting}
+  - job_name: macos-node
+    sample_limit: 50000
+    label_limit: 30
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/macos.json']
+  - job_name: podman
+    sample_limit: 50000
+    label_limit: 30
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/podman.json']
+  - job_name: cgroup
+    sample_limit: 50000
+    label_limit: 30
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/cgroup.json']
+  - job_name: grafana
+    sample_limit: 50000
+    label_limit: 30
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/grafana.json']
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']

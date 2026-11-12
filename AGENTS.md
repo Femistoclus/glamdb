@@ -241,6 +241,7 @@ Preserve these boundaries when adding or changing engine behavior:
 | `tools/workload/` | Mimesis datasets, SDK/Locust workloads, per-worker SQLite outcome journals and full verification. |
 | `probes/`, `benchmarks/` | Installed-dependency/compatibility probes and workload measurements. |
 | `scripts/` | Developer tooling, including quality checks. |
+| `core/telemetry/metrics.*`, `deploy/monitoring/`, `tools/monitoring/` | Library-backed native/Python telemetry, standard collectors/chart, application panels and checks. |
 | `third_party/` | Pinned upstream submodules and `lock.json`. |
 
 Read [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md) when placing new
@@ -257,6 +258,28 @@ Preserve the supplied PNGs unchanged. Brand paths must be local assets; sizes
 belong in theme.json. Asset URLs must support both / and /glamdb/.
 
 ## Build and development commands
+
+For real host/container/Kubernetes monitoring, private application endpoints,
+source gaps and deployment steps, read [MONITORING](docs/development/MONITORING.md).
+Install `tools/monitoring/requirements.txt` with hash verification and build the pinned
+prometheus-cpp core/pull installation through `cmake/dependencies` (including
+the recorded CivetWeb atomic stop-flag patch) before `python3 tools/monitoring/check.py
+--promtool PATH`. See the coverage matrix linked from that runbook. Keep missing
+collectors/unsupported fields as NoData; exporter reachability does not establish
+native database health or durability. The short-lived CLI publishes no textfile.
+`GLAMDB_BUILD_METRICS=ON` enables the standalone metric target in IO-only mode;
+the normal engine build always includes its domain instrumentation.
+The native server's `--metrics-listen-address IP:port` opts into a separate private
+Exposer; omission disables the listener. `glamdb_server_ready` samples actual
+managed engine health, without database identifiers. Run `glamdb.native_metrics`
+for real storage/counter/readiness/restart coverage; `GLAMDB_TEST_TMPDIR` selects
+its disposable test parent when `/tmp` cannot meet the storage disk reserve.
+The listener includes bounded native HTTP request/status counters, duration and
+in-flight metrics through asynchronous response completion/cancellation.
+`--log-directory DIR` opts into the existing Quill 13 structured logger with
+8 MiB JSONL rotation and three backups; requests never log tokens, URLs or data.
+Native builds, including IO-only metrics builds, consume the pinned header-only
+`third_party/quill` for the shared structured logger.
 
 Client/mock development uses Python 3.13 and Node 22+:
 
@@ -511,6 +534,14 @@ mechanical rules; vendor and generated code are excluded.
   of application changes.
 - Keep generated builds, dependencies, and experiment output in the ignored
   `build/`, `.deps/`, and `artifacts/` directories.
+
+The optional monitoring profile in `deploy/monitoring/collectors/` uses actual
+macOS node_exporter, named Podman inventory and narrow read-only cgroup-v2
+exporters. Its pinned collectors keep Mac, VM and container measurements separate
+from Kubernetes. The live Grafana overview separates transport, engine outcomes
+and edge/gateway layers. `tools/monitoring/extend_checks.py` applies optional
+source checks to alerting config; unavailable producers remain NODATA. Validate
+Prometheus and Loki dashboard queries with their respective engines.
 
 ## Validation and reporting
 

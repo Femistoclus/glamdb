@@ -27,7 +27,7 @@ class CmakeConfigurationTest(unittest.TestCase):
         self.source.mkdir()
         self.build = self.root / "build"
         shutil.copyfile(ROOT / "CMakeLists.txt", self.source / "CMakeLists.txt")
-        for directory in ("core", "apps", "cmake", "tests", "scripts"):
+        for directory in ("core", "apps", "cmake", "tests", "scripts", "public"):
             shutil.copytree(ROOT / directory, self.source / directory,
                             ignore=shutil.ignore_patterns("__pycache__"))
 
@@ -173,7 +173,6 @@ target_link_libraries(consumer PRIVATE logging::logging)
         self.assertIn(str(added), {entry["file"] for entry in commands})
 
     def test_storage_off_configures_core_without_storage_targets(self):
-        shutil.copytree(ROOT / "public", self.source / "public")
         for name in ("cli11", "asio", "json", "reproc"):
             (self.source / "third_party" / name).symlink_to(ROOT / "third_party" / name, target_is_directory=True)
         # Keep source preparation covered even without the optional installed prefix.

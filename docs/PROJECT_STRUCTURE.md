@@ -49,6 +49,8 @@ glamdb/
 │   └── installed_consumer/
 ├── fixtures/
 ├── tools/verification/
+├── tools/monitoring/
+├── deploy/monitoring/
 ├── probes/
 ├── benchmarks/
 ├── sdk/

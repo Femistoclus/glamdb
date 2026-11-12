@@ -142,6 +142,9 @@ if(NOT GLAMDB_IO_ONLY)
 endif()
 
 if(TARGET glamdb_server)
+    add_test(NAME glamdb.native_metrics COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/server/metrics_test.py" "$<TARGET_FILE:glamdb_server>")
+    set_tests_properties(glamdb.native_metrics PROPERTIES LABELS "integration;http;metrics" TIMEOUT 120)
     set(GLAMDB_TEST_CLI_EXECUTABLE "" CACHE FILEPATH "Optional external CLI for server integration tests")
     set(glamdb_test_cli "$<TARGET_FILE:glamdb_cli>")
     if(GLAMDB_TEST_CLI_EXECUTABLE)

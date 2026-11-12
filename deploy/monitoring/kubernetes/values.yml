@@ -1,0 +1,95 @@
+# kube-prometheus-stack 92.7.0. The chart includes the pinned upstream
+# Kubernetes Mixin dashboards/rules; do not run a second cAdvisor DaemonSet.
+grafana:
+  defaultDashboardsEnabled: true
+  env:
+    GF_PLUGINS_PREINSTALL_DISABLED: "true"
+    GF_PLUGINS_PREINSTALL_AUTO_UPDATE: "false"
+  admin:
+    existingSecret: monitoring-grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  persistence:
+    enabled: true
+    size: 2Gi
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: 500m, memory: 512Mi}
+  service:
+    type: ClusterIP
+kubelet:
+  serviceMonitor:
+    cAdvisor: true
+    honorTimestamps: true
+    trackTimestampsStaleness: true
+    resource: false
+    interval: 30s
+    sampleLimit: 100000
+    # The chart defaults discard the exact CFS throttle-time metric.
+    # Keep it for the explicitly named throttling panel/check.
+    cAdvisorMetricRelabelings: []
+    tlsConfig:
+      insecureSkipVerify: false
+      ca:
+        configMap: {name: kube-root-ca.crt, key: ca.crt}
+    relabelings:
+      - targetLabel: cluster
+        replacement: local
+prometheus:
+  service:
+    type: ClusterIP
+  prometheusSpec:
+    retention: 7d
+    retentionSize: 5GB
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+    resources:
+      requests: {cpu: 250m, memory: 512Mi}
+      limits: {cpu: 1, memory: 1Gi}
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests: {storage: 8Gi}
+    externalLabels:
+      cluster: local
+    # Additional application ServiceMonitors are selected explicitly.
+    serviceMonitorSelector:
+      matchLabels: {release: monitoring}
+    serviceMonitorNamespaceSelector:
+      matchNames: [monitoring, glamdb]
+nodeExporter:
+  enabled: true
+kubeStateMetrics:
+  enabled: true
+prometheus-node-exporter:
+  resources:
+    requests: {cpu: 20m, memory: 32Mi}
+    limits: {cpu: 200m, memory: 128Mi}
+  prometheus:
+    monitor:
+      relabelings:
+        - targetLabel: cluster
+          replacement: local
+kube-state-metrics:
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+  prometheus:
+    monitor:
+      relabelings:
+        - targetLabel: cluster
+          replacement: local
+kubeControllerManager:
+  serviceMonitor:
+    tlsConfig:
+      insecureSkipVerify: false
+      ca:
+        configMap: {name: kube-root-ca.crt, key: ca.crt}
+kubeScheduler:
+  serviceMonitor:
+    tlsConfig:
+      insecureSkipVerify: false
+      ca:
+        configMap: {name: kube-root-ca.crt, key: ca.crt}

@@ -1,0 +1,15 @@
+[Unit]
+Description=GlamDB private Podman metrics collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/podman start glamdb-collectors-podman
+ExecStop=/usr/bin/podman stop --ignore --time 10 glamdb-collectors-podman
+TimeoutStartSec=60
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

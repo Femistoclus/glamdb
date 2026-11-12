@@ -4,6 +4,7 @@
 #include <quill/Frontend.h>
 #include <quill/Logger.h>
 #include <quill/sinks/JsonSink.h>
+#include <quill/sinks/RotatingJsonFileSink.h>
 
 #include <atomic>
 #include <cerrno>
@@ -11,6 +12,7 @@
 #include <chrono>
 #include <cstdio>
 #include <fcntl.h>
+#include <filesystem>
 #include <mutex>
 #include <pthread.h>
 #include <signal.h>
@@ -251,7 +253,7 @@ struct TStructuredLogger::TImpl
         static_cast<std::uint64_t>(std::chrono::system_clock::now().time_since_epoch().count());
 
     explicit TImpl(TLogOptions options)
-        : Options(options)
+        : Options(std::move(options))
     { }
 
     bool AdmitSuccess() noexcept
@@ -319,7 +321,23 @@ std::expected<std::unique_ptr<TStructuredLogger>, std::error_code> TStructuredLo
         if (masked) {
             ::pthread_sigmask(SIG_SETMASK, &previous, nullptr);
         }
-        auto sink = TFrontend::create_or_get_sink<TStderrJsonSink>("glamdb.stderr");
+        std::shared_ptr<quill::Sink> sink;
+        if (options.Directory.empty()) {
+            sink = TFrontend::create_or_get_sink<TStderrJsonSink>("glamdb.stderr");
+        } else {
+            const std::filesystem::path directory(options.Directory);
+            if (std::filesystem::create_directories(directory)) {
+                std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
+            }
+            quill::RotatingFileSinkConfig config;
+            config.set_open_mode('a');
+            config.set_rotation_max_file_size(MaxFileBytes);
+            config.set_max_backup_files(MaxBackupFiles);
+            config.set_overwrite_rolled_files(true);
+            config.set_write_buffer_size(0);
+            sink = TFrontend::create_or_get_sink<quill::RotatingJsonFileSink>((directory / "glamdb.jsonl").string(),
+                config);
+        }
         impl->Logger = TFrontend::create_or_get_logger("glamdb",
             std::move(sink),
             quill::PatternFormatterOptions{"", "%H:%M:%S.%Qns", quill::Timezone::GmtTime},

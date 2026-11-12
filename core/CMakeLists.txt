@@ -13,6 +13,19 @@ add_library(glamdb_io STATIC
 target_link_libraries(glamdb_io PRIVATE "$<BUILD_INTERFACE:glamdb_build_options>")
 target_include_directories(glamdb_io PRIVATE "${PROJECT_SOURCE_DIR}")
 
+find_package(Threads REQUIRED)
+if(NOT GLAMDB_IO_ONLY OR GLAMDB_BUILD_METRICS)
+    find_package(prometheus-cpp 1.3.0 EXACT CONFIG REQUIRED GLOBAL)
+    add_library(glamdb_metrics STATIC telemetry/metrics.cpp)
+    target_link_libraries(glamdb_metrics PRIVATE "$<BUILD_INTERFACE:glamdb_build_options>"
+        Threads::Threads prometheus-cpp::core)
+    target_include_directories(glamdb_metrics PRIVATE "${PROJECT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/public")
+    if(TARGET glamdb_logging)
+        target_link_libraries(glamdb_metrics PRIVATE glamdb_logging)
+        target_compile_definitions(glamdb_metrics PRIVATE GLAMDB_METRICS_WITH_LOGGING=1)
+    endif()
+endif()
+
 if(NOT GLAMDB_IO_ONLY)
     find_package(SQLite3 CONFIG REQUIRED GLOBAL)
     find_package(iceberg CONFIG REQUIRED GLOBAL)
@@ -24,7 +37,7 @@ if(NOT GLAMDB_IO_ONLY)
         scan/predicate.cpp)
     add_library(glamdb::core ALIAS glamdb_core)
     target_link_libraries(glamdb_core PRIVATE "$<BUILD_INTERFACE:glamdb_build_options>" SQLite::SQLite3
-        iceberg::iceberg_sql_catalog_static Arrow::arrow_static glamdb_logging)
+        iceberg::iceberg_sql_catalog_static Arrow::arrow_static glamdb_logging glamdb_metrics)
     target_include_directories(glamdb_core
         PUBLIC "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/public>"
                "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
@@ -42,9 +55,11 @@ if(NOT GLAMDB_IO_ONLY)
         set_target_properties(glamdb_io PROPERTIES EXPORT_NAME io)
         install(TARGETS glamdb_io EXPORT GlamDBTargets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
     endif()
-    set_target_properties(glamdb_logging PROPERTIES EXPORT_NAME logging)
-    install(TARGETS glamdb_logging EXPORT GlamDBTargets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
-    install(TARGETS glamdb_core EXPORT GlamDBTargets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+    install(TARGETS glamdb_core glamdb_metrics EXPORT GlamDBTargets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+    if(TARGET glamdb_logging)
+        set_target_properties(glamdb_logging PROPERTIES EXPORT_NAME logging)
+        install(TARGETS glamdb_logging EXPORT GlamDBTargets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+    endif()
     install(DIRECTORY "${PROJECT_SOURCE_DIR}/public/storage" DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
         FILES_MATCHING PATTERN "*.h")
     install(EXPORT GlamDBTargets NAMESPACE glamdb:: DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/GlamDB")
