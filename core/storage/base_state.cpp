@@ -642,7 +642,8 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
         ICEBERG_ASSIGN_OR_RAISE(auto state, ReadRecoveryRoot(fileIO, rootLocation, storeID, collectionID, limits));
         const auto original = state.Metadata;
         ICEBERG_ASSIGN_OR_RAISE(auto view, EmptyHistoryView(*original));
-        ICEBERG_ASSIGN_OR_RAISE(auto visited, TRecoveryVisited::Make(256ULL << 20, workspaceDirectory));
+        ICEBERG_ASSIGN_OR_RAISE(auto visited,
+            TRecoveryVisited::Make(limits.RecoveryWorkspaceBytes, workspaceDirectory));
         auto scanIndex = std::make_shared<TScanMembership>();
         scanIndex->Files.reserve(original->snapshots.size());
         scanIndex->Snapshots.reserve(original->snapshots.size());

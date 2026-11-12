@@ -61,6 +61,11 @@ public:
     CollectionInfo Resolve(std::string_view name);
     BaseIdentity Base(std::string_view id);
     std::vector<OperationRecord> Operations();
+    using OperationConsumer = std::function<void(const OperationRecord&)>;
+    // Keyset pages hold at most 256 serialized records. The callback runs
+    // under the catalog lock, with no live SQLite statement between pages.
+    // It may update terminal state, but must not change keys or membership.
+    void ForEachOperation(const OperationConsumer& consume, std::string_view collection_id = {});
     std::optional<OperationRecord> FindOperation(std::string_view collection_id, std::string_view operation_id);
     std::optional<OperationRecord> TryFindOperation(std::string_view collection_id, std::string_view operation_id);
     void BindOperation(const BoundOperation& binding);

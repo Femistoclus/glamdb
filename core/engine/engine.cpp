@@ -80,11 +80,26 @@ void ValidateConfig(const StoreInfo& info, const Limits& limits)
         "invalid writer resource limits");
     // Catalog limits are also enforced by the catalog itself; checking them
     // here rejects a configuration before the store root is created.
-    Require(limits.max_catalog_bytes >= 65536 && limits.max_catalog_bytes <= 256LL * 1024 * 1024 &&
-            limits.max_operations > 0 && limits.max_operations <= 4096 && limits.max_collections > 0 &&
-            limits.max_collections <= Limits::MaxSupportedCollections,
+    Require(limits.max_catalog_bytes >= 65536 && limits.max_catalog_bytes <= (1LL << 40) && limits.max_operations > 0 &&
+            limits.max_collections > 0 && limits.max_collections <= Limits::MaxSupportedCollections,
         "INVALID_ARGUMENT",
         "invalid catalog limits");
+    const auto& history = limits.history;
+    for (const auto value : {history.max_snapshots,
+             history.max_manifests,
+             history.max_data_files,
+             history.max_root_bytes,
+             history.max_manifest_bytes,
+             history.max_manifest_list_bytes,
+             history.max_footer_bytes})
+    {
+        Require(value > 0 && value <= (1LL << 40), "INVALID_ARGUMENT", "invalid history budget");
+    }
+    Require(history.max_root_file_bytes > 0 && history.max_root_file_bytes <= (64LL << 20) &&
+            history.max_commit_bytes > 0 && history.max_commit_bytes <= (256LL << 20) &&
+            history.max_recovery_workspace_bytes >= 8192 && history.max_recovery_workspace_bytes <= (1LL << 40),
+        "INVALID_ARGUMENT",
+        "invalid history recovery or file budget");
 }
 
 RecoveryContext Context(const BoundOperation& binding, const ErrorDetail& first, bool publication)
@@ -130,12 +145,15 @@ MakeBackend(const BackendFactory& factory, const std::filesystem::path& root, co
     return Take(factory(root, info));
 }
 
-BackendFactory DefaultBackendFactory(std::shared_ptr<ResourceOwner> resources)
+BackendFactory DefaultBackendFactory(std::shared_ptr<ResourceOwner> resources, HistoryLimits history)
 {
 #if GLAMDB_HAS_STORAGE
-    return [resources = std::move(resources)](const std::filesystem::path& root,
+    return [resources = std::move(resources), history](const std::filesystem::path& root,
                const StoreInfo& info) -> Result<std::shared_ptr<StorageBackend>> {
-        auto backend = TLocalStorageBackend::Open(root, info, {.Resources = resources});
+        TLocalStorageOptions options;
+        options.Resources = resources;
+        options.ApplyHistoryLimits(history);
+        auto backend = TLocalStorageBackend::Open(root, info, std::move(options));
         if (!backend) {
             return std::unexpected(backend.error());
         }
@@ -143,6 +161,7 @@ BackendFactory DefaultBackendFactory(std::shared_ptr<ResourceOwner> resources)
     };
 #else
     (void)resources;
+    (void)history;
     return {};
 #endif
 }
@@ -216,7 +235,8 @@ struct Engine::Impl
         // Catalog growth/journal and a bounded recovery workspace on this
         // exact device stay protected for the entire engine lifetime.
         store_resources.push_back(Take(resources->ReserveDevice(root,
-            2 * static_cast<uint64_t>(limits.max_catalog_bytes) + WorkspaceDiskBytes + (8ULL << 20),
+            2 * static_cast<uint64_t>(limits.max_catalog_bytes) +
+                static_cast<uint64_t>(limits.history.max_recovery_workspace_bytes) + (8ULL << 20),
             32)));
     }
 
@@ -226,7 +246,8 @@ struct Engine::Impl
         reserved.push_back(Take(resources->Reserve(ResourceClass::Control, ControlMemoryBytes)));
         reserved.push_back(Take(resources->Reserve(ResourceClass::Completion, CompletionMemoryBytes)));
         reserved.push_back(Take(resources->Reserve(ResourceClass::Data, WriteDataMemoryBytes)));
-        reserved.push_back(Take(resources->Reserve(ResourceClass::Metadata, MetadataWorkBytes)));
+        reserved.push_back(
+            Take(resources->Reserve(ResourceClass::Metadata, MetadataWorkForRoot(limits.history.max_root_file_bytes))));
         reserved.push_back(Take(resources->ReserveDevice(lease->Root().string(),
             bulk ? BulkAppendLimits::AttemptDiskBytes : AttemptDiskBytes,
             bulk ? BulkAppendLimits::AttemptInodes : 64)));
@@ -606,6 +627,7 @@ struct Engine::Impl
         try {
             Require(ValidUuid(id), "INVALID_ARGUMENT", "metadata requires a canonical collection UUID");
             TScanContext context;
+            context.RootBytes = limits.history.max_root_file_bytes;
             {
                 std::lock_guard lock(state_mutex);
                 CheckReady();
@@ -620,7 +642,8 @@ struct Engine::Impl
                 leased = true;
             }
             Require(backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
-            auto memory = Take(resources->Reserve(ResourceClass::Metadata, MetadataWorkBytes));
+            auto memory = Take(
+                resources->Reserve(ResourceClass::Metadata, MetadataWorkForRoot(limits.history.max_root_file_bytes)));
             const auto capabilities = backend->GetCapabilities();
             context.Resources = resources;
             context.PlanningMemory = memory;
@@ -696,7 +719,7 @@ struct Engine::Impl
                 "DEPENDENCY_UNAVAILABLE",
                 "storage recovery validator is not installed");
             if (backend) {
-                const auto verified = backend->VerifyRetained(info, views, catalog->Operations());
+                const auto verified = backend->VerifyRetainedCatalog(info, views, *catalog);
                 if (!verified) {
                     throw Failure(verified.error());
                 }
@@ -763,9 +786,9 @@ struct Engine::Impl
         }
         VerifyStorage();
         catalog->DurabilityFence();
-        for (const auto& operation : catalog->Operations()) {
+        catalog->ForEachOperation([&](const auto& operation) {
             if (operation.state != OperationState::Bound) {
-                continue;
+                return;
             }
             AppendOutcome failure = Rejected(operation.binding.operation_id,
                 CommitPhase::Reconciling,
@@ -784,7 +807,7 @@ struct Engine::Impl
                 }
             }
             catalog->RecordFailure(operation.binding, failure);
-        }
+        });
         catalog->ValidateInventory();
         RefreshCache();
         std::lock_guard lock(state_mutex);
@@ -958,11 +981,11 @@ Engine::~Engine() = default;
 
 Result<std::shared_ptr<Engine>> CreateStore(const CreateStoreRequest& request)
 {
-    return detail::EngineFactory::CreateWith(request, DefaultBackendFactory(request.resources));
+    return detail::EngineFactory::CreateWith(request, DefaultBackendFactory(request.resources, request.limits.history));
 }
 Result<std::shared_ptr<Engine>> OpenExisting(const OpenStoreRequest& request)
 {
-    return detail::EngineFactory::OpenWith(request, DefaultBackendFactory(request.resources));
+    return detail::EngineFactory::OpenWith(request, DefaultBackendFactory(request.resources, request.limits.history));
 }
 const StoreInfo& Engine::GetStoreInfo() const
 {
@@ -1819,11 +1842,13 @@ Result<SnapshotHistory> Engine::ListSnapshots(std::string_view id) const
         id,
         [&](const TScanContext& context) {
             std::vector<AppendResult> receipts;
-            for (const auto& record : impl->catalog->Operations()) {
-                if (record.state == OperationState::Committed && record.outcome && record.outcome->result) {
-                    receipts.push_back(*record.outcome->result);
-                }
-            }
+            impl->catalog->ForEachOperation(
+                [&](const auto& record) {
+                    if (record.state == OperationState::Committed && record.outcome && record.outcome->result) {
+                        receipts.push_back(*record.outcome->result);
+                    }
+                },
+                id);
             return ReadHistory(context, receipts);
         },
         false);
@@ -1915,6 +1940,7 @@ Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) con
         Require(ValidUuid(request.collection_id), "INVALID_ARGUMENT", "scan requires a canonical collection UUID");
 #if GLAMDB_HAS_STORAGE
         TScanContext context;
+        context.RootBytes = impl->limits.history.max_root_file_bytes;
         {
             // Latest is resolved here exactly once, from the confirmed view;
             // no SQLite read transaction is held while files are read.

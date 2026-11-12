@@ -28,7 +28,8 @@ class TSnapshotMetadataCache;
 
 Result<std::shared_ptr<const iceberg::TableMetadata>> ReadScanRoot(const std::shared_ptr<iceberg::FileIO>& io,
     const BaseIdentity& base,
-    TSnapshotMetadataCache* cache = nullptr);
+    TSnapshotMetadataCache* cache = nullptr,
+    int64_t root_bytes = HistoryLimits{}.max_root_file_bytes);
 
 using TScanFile = NGlamDB::NStorage::TScanDataFile;
 
@@ -59,7 +60,8 @@ struct TScanManifests
 Result<TScanManifests> PlanManifests(const std::shared_ptr<iceberg::FileIO>& io,
     const BaseIdentity& base,
     const SnapshotSelector& selector,
-    TSnapshotMetadataCache* cache = nullptr);
+    TSnapshotMetadataCache* cache = nullptr,
+    int64_t root_bytes = HistoryLimits{}.max_root_file_bytes);
 
 Result<TScanManifests> PlanVerifiedScan(const NGlamDB::NStorage::TBaseState& state,
     const BaseIdentity& base,
@@ -81,6 +83,7 @@ Result<std::shared_ptr<const std::vector<std::shared_ptr<const iceberg::DataFile
 Result<TScanPlan> PlanScan(const std::shared_ptr<iceberg::FileIO>& io,
     const BaseIdentity& base,
     const SnapshotSelector& selector,
-    TSnapshotMetadataCache* cache = nullptr);
+    TSnapshotMetadataCache* cache = nullptr,
+    int64_t root_bytes = HistoryLimits{}.max_root_file_bytes);
 
 } // namespace glamdb::detail

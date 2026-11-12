@@ -15,7 +15,7 @@ using iceberg::Error;
 namespace {
 
 constexpr std::uint64_t PageBytes = 4096;
-constexpr std::uint64_t MaxWorkspaceBytes = 256ULL << 20;
+constexpr std::uint64_t MaxWorkspaceBytes = 1ULL << 40;
 constexpr std::size_t MaxPathBytes = 2048;
 
 iceberg::Status SqliteError(int code)
@@ -75,7 +75,7 @@ iceberg::Result<std::unique_ptr<TRecoveryVisited>> TRecoveryVisited::Make(std::u
 {
     return CatchIcebergExceptions([&]() -> iceberg::Result<std::unique_ptr<TRecoveryVisited>> {
         if (maxBytes < 2 * PageBytes || maxBytes > MaxWorkspaceBytes) {
-            return iceberg::InvalidArgument("Recovery visited workspace must be between 8 KiB and 256 MiB.");
+            return iceberg::InvalidArgument("Recovery visited workspace must be between 8 KiB and 1 TiB.");
         }
         // Empty-name databases select their backing store before PRAGMA temp_store can run.
         if (!sqlite3_compileoption_used("TEMP_STORE=0") && !sqlite3_compileoption_used("TEMP_STORE=1")) {

@@ -42,13 +42,13 @@ TEST(RecoveryVisited, DistinguishesExactDuplicatesAndKinds)
 
 TEST(RecoveryVisited, RejectsInvalidWorkspaceLimits)
 {
-    for (const auto limit : {0ULL, 8191ULL, (256ULL << 20) + 1, std::numeric_limits<unsigned long long>::max()}) {
+    for (const auto limit : {0ULL, 8191ULL, (1ULL << 40) + 1, std::numeric_limits<unsigned long long>::max()}) {
         const auto visited = TRecoveryVisited::Make(limit);
         ASSERT_FALSE(visited);
         EXPECT_EQ(visited.error().kind, iceberg::ErrorKind::kInvalidArgument);
     }
     EXPECT_TRUE(TRecoveryVisited::Make(8192));
-    EXPECT_TRUE(TRecoveryVisited::Make(256ULL << 20));
+    EXPECT_TRUE(TRecoveryVisited::Make(512ULL << 20));
 }
 
 TEST(RecoveryVisited, PreservesTheFirstInvalidInputError)

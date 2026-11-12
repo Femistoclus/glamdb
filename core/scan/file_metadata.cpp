@@ -284,7 +284,8 @@ std::vector<TRowGroupMetadata> DescribeRowGroups(const parquet::FileMetaData& fo
 
 TFileListing ReadFiles(const TScanContext& context, const SnapshotSelector& selector)
 {
-    const auto plan = Take(PlanManifests(context.FileIO, context.Base, selector, context.Cache.get()));
+    const auto plan =
+        Take(PlanManifests(context.FileIO, context.Base, selector, context.Cache.get(), context.RootBytes));
     TFileListing listing{.Identity = context.Base, .SelectorResolved = ResolveSelector(plan)};
     std::set<std::string> seen;
     for (size_t index = 0; index < plan.Manifests.size(); ++index) {
@@ -310,7 +311,8 @@ TFileDetails ReadFileDetails(const TScanContext& context, std::string_view fileI
                 }),
         "INVALID_ARGUMENT",
         "File ID must be an opaque ID returned by ListFiles.");
-    const auto plan = Take(PlanManifests(context.FileIO, context.Base, selector, context.Cache.get()));
+    const auto plan =
+        Take(PlanManifests(context.FileIO, context.Base, selector, context.Cache.get(), context.RootBytes));
     std::shared_ptr<const iceberg::DataFile> selected;
     for (size_t index = 0; index < plan.Manifests.size(); ++index) {
         const auto files = Take(ReadManifestDataFiles(context.FileIO, plan, index, context.Cache.get()));

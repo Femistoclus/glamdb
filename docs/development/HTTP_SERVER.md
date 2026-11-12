@@ -118,13 +118,19 @@ entry and open again with sufficient limits; data is never discarded.
 
 | Limit | Range | Default |
 | --- | --- | --- |
-| `max_operations` | 1–4096 | 4096 |
+| `max_operations` | 1–9223372036854775807 | 4096 |
 | `max_collections` | 1–64 | 8 |
-| `max_catalog_bytes` | 65536–268435456 | 268435456 |
+| `max_catalog_bytes` | 65536–1099511627776 | 268435456 |
 | `max_pending_calls` | 1–16 | 16 |
 | `max_owned_input_bytes` | 1–134217728 | 134217728 |
 | `writer_wait_ms` | 0–5000 | 5000 |
 | `append_deadline_ms` | 1–60000 | 60000 |
+
+`limits.history` configures aggregate snapshot, manifest, data-file, root,
+manifest-list and footer budgets, individual root/commit bytes and recovery
+workspace bytes. See the [field ranges and SF=10 profile](SCALABLE_HISTORY.md).
+Defaults remain conservative; normalized descriptors include every history field.
+Complete legacy persisted limits objects receive default history values.
 
 Values are JSON integers; booleans, fractions, unknown fields and values outside
 these bounds are rejected before reserving a database. Every database response

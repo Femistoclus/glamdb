@@ -114,6 +114,14 @@ public:
     virtual Status VerifyRetained(const StoreInfo& store,
         std::span<const CollectionView> collections,
         std::span<const OperationRecord> operations) = 0;
+    // Production backends stream catalog records. The fallback preserves the
+    // existing seam for small test/custom backends.
+    virtual Status VerifyRetainedCatalog(const StoreInfo& store,
+        std::span<const CollectionView> collections,
+        DurableSqliteCatalogStore& catalog)
+    {
+        return VerifyRetained(store, collections, catalog.Operations());
+    }
     // Independent read-only view for scans; it never joins a writer attempt.
     virtual Result<std::shared_ptr<iceberg::FileIO>> ReadOnlyFileIO()
     {

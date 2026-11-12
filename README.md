@@ -292,6 +292,13 @@ provides one command for Prometheus, Grafana, Loki, Alloy, Alertmanager and host
 collectors. Real application endpoints and a dedicated Loki filesystem are inputs;
 repeated deployment preserves owned data and credentials.
 
+An opt-in [retained-history profile](docs/development/SCALABLE_HISTORY.md) lifts
+the default 4,096-operation/snapshot horizon with explicit aggregate storage and
+recovery budgets. The linked SF=10 recipe uses ordinary appends and preserves
+permanent outcomes, duplicate rows, historical views and exact retries.
+The [validation report](docs/development/SCALABLE_HISTORY_VALIDATION.md) records
+the measured campaign and its remaining limits.
+
 ### Client and UI tests
 
 The workbench development environment requires Python 3.13, Node.js 22+, and

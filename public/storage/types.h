@@ -337,6 +337,23 @@ struct BulkAppendLimits
     static constexpr uint64_t AttemptInodes = 320;
 };
 
+// Finite retained-history budgets. Counts and serialized bytes are store-wide;
+// a root file and a commit also have individual byte limits. These budgets do
+// not expire snapshots or permanent operation outcomes.
+struct HistoryLimits
+{
+    int64_t max_snapshots = 4096;
+    int64_t max_manifests = 4096;
+    int64_t max_data_files = 16384;
+    int64_t max_root_bytes = 64LL << 20;
+    int64_t max_root_file_bytes = 16LL << 20;
+    int64_t max_manifest_bytes = 256LL << 20;
+    int64_t max_manifest_list_bytes = 512LL << 20;
+    int64_t max_footer_bytes = 256LL << 20;
+    int64_t max_commit_bytes = 32LL << 20;
+    int64_t max_recovery_workspace_bytes = 256LL << 20;
+};
+
 struct Limits
 {
     // Finite supported profile; larger selections also require shared resources.
@@ -348,6 +365,7 @@ struct Limits
     int64_t max_owned_input_bytes = 128LL * 1024 * 1024;
     std::chrono::milliseconds writer_wait{5000};
     std::chrono::milliseconds append_deadline{60000};
+    HistoryLimits history{};
 };
 
 struct StoreInfo

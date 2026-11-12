@@ -529,6 +529,18 @@ deduplication uses a bounded temporary SQLite database, separate from the catalo
 See [qualification preparation](docs/development/QUALIFICATION.md) for commands,
 temporary-workspace prerequisites and the remaining qualification boundaries.
 
+The opt-in [scalable history profile](docs/development/SCALABLE_HISTORY.md)
+coordinates public engine/HTTP operation and retained-storage budgets, including
+recovery workspace and larger metadata roots. Defaults stay at 4,096 operations
+and snapshots. Catalog inventory/recovery use 256-record keyset pages; healthy
+outcome lookup remains indexed. `glamdb_history_bench` and `benchmarks/history.py`
+exercise all eight SF=10 tables through ordinary appends and verify exact typed
+row multisets in a fresh process with a bounded external-sort oracle.
+The [validation report](docs/development/SCALABLE_HISTORY_VALIDATION.md) records
+fresh-process checkpoint recovery, physical bytes, current-image RSS and review findings.
+`glamdb.history_campaign` covers duplicates, original failed/successful outcomes,
+retry/history, lowered budgets, restoration and oracle negative controls.
+
 `glamdb_capacity_bench` and `benchmarks/capacity.py` measure native aggregate
 ingestion, retained history/outcomes, physical orphan space, retained slices and
 fresh-process reopen. The default campaign budgets 5,000 attempts of 1,000 rows

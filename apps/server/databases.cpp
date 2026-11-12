@@ -7,10 +7,12 @@
 
 #include "storage/resources.h"
 
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <dirent.h>
 #include <fcntl.h>
+#include <limits>
 #include <mutex>
 #include <shared_mutex>
 #include <sys/file.h>
@@ -29,15 +31,31 @@ template <class T>
 using TAtomicSharedPtr = std::shared_ptr<T>;
 #endif
 
+constexpr std::array HistoryFields{std::pair{"max_snapshots", &HistoryLimits::max_snapshots},
+    std::pair{"max_manifests", &HistoryLimits::max_manifests},
+    std::pair{"max_data_files", &HistoryLimits::max_data_files},
+    std::pair{"max_root_bytes", &HistoryLimits::max_root_bytes},
+    std::pair{"max_root_file_bytes", &HistoryLimits::max_root_file_bytes},
+    std::pair{"max_manifest_bytes", &HistoryLimits::max_manifest_bytes},
+    std::pair{"max_manifest_list_bytes", &HistoryLimits::max_manifest_list_bytes},
+    std::pair{"max_footer_bytes", &HistoryLimits::max_footer_bytes},
+    std::pair{"max_commit_bytes", &HistoryLimits::max_commit_bytes},
+    std::pair{"max_recovery_workspace_bytes", &HistoryLimits::max_recovery_workspace_bytes}};
+
 TJson EncodeLimits(const Limits& limits)
 {
+    TJson history = TJson::object();
+    for (const auto& [name, field] : HistoryFields) {
+        history[name] = limits.history.*field;
+    }
     return {{"max_operations", limits.max_operations},
         {"max_collections", limits.max_collections},
         {"max_catalog_bytes", limits.max_catalog_bytes},
         {"max_pending_calls", limits.max_pending_calls},
         {"max_owned_input_bytes", limits.max_owned_input_bytes},
         {"writer_wait_ms", limits.writer_wait.count()},
-        {"append_deadline_ms", limits.append_deadline.count()}};
+        {"append_deadline_ms", limits.append_deadline.count()},
+        {"history", std::move(history)}};
 }
 Limits ParseLimits(const TJson& value, Limits limits = {})
 {
@@ -53,10 +71,11 @@ Limits ParseLimits(const TJson& value, Limits limits = {})
             "max_pending_calls",
             "max_owned_input_bytes",
             "writer_wait_ms",
-            "append_deadline_ms"});
-    const auto read = [&](const char* name, int64_t current, TBounds bounds) {
-        const auto found = value.find(name);
-        if (found == value.end()) {
+            "append_deadline_ms",
+            "history"});
+    const auto readValue = [&](const TJson& source, const char* name, int64_t current, TBounds bounds) {
+        const auto found = source.find(name);
+        if (found == source.end()) {
             return current;
         }
         Require(found->is_number_integer(), std::string(name) + " must be an integer");
@@ -70,15 +89,38 @@ Limits ParseLimits(const TJson& value, Limits limits = {})
         Require(number >= bounds.Minimum && number <= bounds.Maximum, std::string(name) + " outside supported range");
         return number;
     };
-    limits.max_operations = read("max_operations", limits.max_operations, {1, 4096});
+    const auto read = [&](const char* name, int64_t current, TBounds bounds) {
+        return readValue(value, name, current, bounds);
+    };
+    limits.max_operations = read("max_operations", limits.max_operations, {1, std::numeric_limits<int64_t>::max()});
     limits.max_collections = read("max_collections", limits.max_collections, {1, Limits::MaxSupportedCollections});
-    limits.max_catalog_bytes = read("max_catalog_bytes", limits.max_catalog_bytes, {65536, 256LL * 1024 * 1024});
+    limits.max_catalog_bytes = read("max_catalog_bytes", limits.max_catalog_bytes, {65536, 1LL << 40});
     limits.max_pending_calls = read("max_pending_calls", limits.max_pending_calls, {1, 16});
     limits.max_owned_input_bytes =
         read("max_owned_input_bytes", limits.max_owned_input_bytes, {1, 128LL * 1024 * 1024});
     limits.writer_wait = std::chrono::milliseconds(read("writer_wait_ms", limits.writer_wait.count(), {0, 5000}));
     limits.append_deadline =
         std::chrono::milliseconds(read("append_deadline_ms", limits.append_deadline.count(), {1, 60000}));
+    if (const auto history = value.find("history"); history != value.end()) {
+        CheckKeys(*history,
+            {"max_snapshots",
+                "max_manifests",
+                "max_data_files",
+                "max_root_bytes",
+                "max_root_file_bytes",
+                "max_manifest_bytes",
+                "max_manifest_list_bytes",
+                "max_footer_bytes",
+                "max_commit_bytes",
+                "max_recovery_workspace_bytes"});
+        for (const auto& [name, field] : HistoryFields) {
+            const int64_t maximum = field == &HistoryLimits::max_root_file_bytes ? (64LL << 20)
+                : field == &HistoryLimits::max_commit_bytes                      ? (256LL << 20)
+                                                                                 : (1LL << 40);
+            const int64_t minimum = field == &HistoryLimits::max_recovery_workspace_bytes ? 8192 : 1;
+            limits.history.*field = readValue(*history, name, limits.history.*field, {minimum, maximum});
+        }
+    }
     return limits;
 }
 struct TDirectoryLock
@@ -681,7 +723,14 @@ TDatabases::TDatabases(const std::filesystem::path& directory,
         try {
             const auto stored = ParseJson(detail::Required(row, 4));
             entry->ResourceLimits = ParseLimits(stored);
-            Require(stored == EncodeLimits(entry->ResourceLimits), "incomplete persisted limits", "CORRUPTION");
+            auto expected = EncodeLimits(entry->ResourceLimits);
+            // Version-2 registries written before history budgets contain all
+            // seven original fields. Accept that complete legacy shape only;
+            // a present history object must still be fully persisted.
+            if (!stored.contains("history")) {
+                expected.erase("history");
+            }
+            Require(stored == expected, "incomplete persisted limits", "CORRUPTION");
         } catch (const TFailure&) {
             throw TFailure({"CORRUPTION", "invalid persisted database limits", RetryHint::OperatorAction});
         } catch (const TJson::exception&) {

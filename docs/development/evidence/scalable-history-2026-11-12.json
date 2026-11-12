@@ -1,0 +1,1885 @@
+{
+  "date": "2026-11-12",
+  "base_commit": "0dbffa72b683d34704a73f1900ae54445df5ed8d",
+  "source_patch_sha256": "b9b1854efe258959032c817bc9f75b520f1e176ed218a693fa9c8ad63ea726b9",
+  "driver_sha256": "6aadb4fb417ec272329714464a1e563fd919475bce3e58a2604dc9e6c8db085f",
+  "platform": "Linux-5.4.210-39.1.pagevecsize-x86_64-with-glibc2.39",
+  "machine": "x86_64",
+  "filesystem": {
+    "filesystems": [
+      {
+        "target": "/home/ditimizhev/glam",
+        "source": "/dev/vda1[/home/ditimizhev/glam]",
+        "fstype": "ext4",
+        "options": "rw,nosuid,nodev,relatime,errors=panic"
+      }
+    ]
+  },
+  "toolchain": "clang++-18, C++23, libc++18, Release -O3 -DNDEBUG; pinned dependency prefix",
+  "input_source": "YDB vendored TPC-H dbgen 2.17.2 at 03e5c5e370aeeee02b81d0ce87b7a3cde8ed3d83",
+  "input_generation": "dbgen -s 10 -b dists.dss; Linux, TPCH, VECTORWISE, RNG_TEST, _FILE_OFFSET_BITS=64",
+  "inputs": {
+    "customer.tbl": {
+      "bytes": 244847642,
+      "sha256": "d4ba00a59ddb3bdaabeb1bcf560a182f8874366c9db51cedc3bd5ec9d64d03bd"
+    },
+    "lineitem.tbl": {
+      "bytes": 7775727688,
+      "sha256": "9a7b308b6ca31a88880421f5d1a8a540c6b9ff377d698b0401ed688534c7344d"
+    },
+    "nation.tbl": {
+      "bytes": 2224,
+      "sha256": "66f96949939fa8fdf1c4ffed1e5f6c2842fe11a14b51fdc6ed1e17460031e8c5"
+    },
+    "orders.tbl": {
+      "bytes": 1749195031,
+      "sha256": "f226ed1f69337bfd0dd2db00aa1c53d31ffb58dc03aa9386a80c7efcc24802c2"
+    },
+    "part.tbl": {
+      "bytes": 243336157,
+      "sha256": "0eba8e6d7787f4dda40916bc4e01871498f3a5c29b9711c00c13bf2231ba2904"
+    },
+    "partsupp.tbl": {
+      "bytes": 1204850769,
+      "sha256": "0c66a4409078d92b2a1c1f66f5349468c32ce4016e4c2d198e1916552b361a60"
+    },
+    "region.tbl": {
+      "bytes": 389,
+      "sha256": "6022658d673924389b54dcb70fa8c3d6da1b0d7afa3c1c017bab62a019df404f"
+    },
+    "supplier.tbl": {
+      "bytes": 14176368,
+      "sha256": "5de31112f00febc38aaa35581a7acf269b55f77b368c6ec3179fc138bf1fc996"
+    }
+  },
+  "public_profile": {
+    "max_operations": 20000,
+    "max_catalog_bytes": 536870912,
+    "history": {
+      "max_snapshots": 12000,
+      "max_manifests": 12000,
+      "max_data_files": 16384,
+      "max_root_bytes": 134217728,
+      "max_root_file_bytes": 33554432,
+      "max_manifest_bytes": 536870912,
+      "max_manifest_list_bytes": 4294967296,
+      "max_footer_bytes": 536870912,
+      "max_commit_bytes": 67108864,
+      "max_recovery_workspace_bytes": 536870912
+    }
+  },
+  "benchmark_options": {
+    "batch_rows": 10000,
+    "table_row_limit": 0,
+    "checkpoint_every": 500,
+    "checkpoint_reopen": true
+  },
+  "load": {
+    "all_rows_verified": false,
+    "append_ms": 3268823.386340991,
+    "append_p50_ms": 376.976143,
+    "append_p95_ms": 744.076963,
+    "append_p99_ms": 965.467425,
+    "checkpoint_reopens": 17,
+    "committed": 8661,
+    "mode": "load",
+    "open_ms": 54.2371,
+    "opened": true,
+    "operations": 8669,
+    "rows": [
+      5,
+      25,
+      100000,
+      1500000,
+      2000000,
+      8000000,
+      15000000,
+      59986052
+    ],
+    "usage": {
+      "catalog_bytes": 7983104,
+      "manifest_bytes": 35097006,
+      "manifest_list_bytes": 748296987,
+      "peak_rss_bytes": 185999360,
+      "root_bytes": 7996128,
+      "warehouse_file_bytes": 4167892639,
+      "warehouse_physical_bytes": 4231270400
+    },
+    "verified": false,
+    "wall_ms": 5480446.860287
+  },
+  "checkpoints": [
+    {
+      "append_ms": 53899.94955499995,
+      "cold_reopen": {
+        "open_ms": 1264.977235,
+        "opened": true,
+        "process_ms": 1286.608409,
+        "usage": {
+          "catalog_bytes": 512000,
+          "manifest_bytes": 1793441,
+          "manifest_list_bytes": 2263904,
+          "peak_rss_bytes": 29224960,
+          "root_bytes": 464907,
+          "warehouse_file_bytes": 227886023,
+          "warehouse_physical_bytes": 230584320
+        }
+      },
+      "committed": 500,
+      "operations": 506,
+      "rows": [
+        5,
+        25,
+        100000,
+        1500000,
+        2000000,
+        1380000,
+        0,
+        0
+      ],
+      "usage": {
+        "catalog_bytes": 512000,
+        "manifest_bytes": 1793441,
+        "manifest_list_bytes": 2263904,
+        "peak_rss_bytes": 88203264,
+        "root_bytes": 464907,
+        "warehouse_file_bytes": 227886023,
+        "warehouse_physical_bytes": 230584320
+      }
+    },
+    {
+      "append_ms": 114539.012361,
+      "cold_reopen": {
+        "open_ms": 2860.560064,
+        "opened": true,
+        "process_ms": 2899.320983,
+        "usage": {
+          "catalog_bytes": 966656,
+          "manifest_bytes": 3468192,
+          "manifest_list_bytes": 10227899,
+          "peak_rss_bytes": 35061760,
+          "root_bytes": 924636,
+          "warehouse_file_bytes": 459487975,
+          "warehouse_physical_bytes": 465006592
+        }
+      },
+      "committed": 1000,
+      "operations": 1006,
+      "rows": [
+        5,
+        25,
+        100000,
+        1500000,
+        2000000,
+        6380000,
+        0,
+        0
+      ],
+      "usage": {
+        "catalog_bytes": 966656,
+        "manifest_bytes": 3468192,
+        "manifest_list_bytes": 10227899,
+        "peak_rss_bytes": 88203264,
+        "root_bytes": 924636,
+        "warehouse_file_bytes": 459487975,
+        "warehouse_physical_bytes": 465006592
+      }
+    },
+    {
+      "append_ms": 171059.46471899998,
+      "cold_reopen": {
+        "open_ms": 4354.049259,
+        "opened": true,
+        "process_ms": 4401.28099,
+        "usage": {
+          "catalog_bytes": 1429504,
+          "manifest_bytes": 5256109,
+          "manifest_list_bytes": 17422638,
+          "peak_rss_bytes": 38305792,
+          "root_bytes": 1385077,
+          "warehouse_file_bytes": 667633758,
+          "warehouse_physical_bytes": 675434496
+        }
+      },
+      "committed": 1500,
+      "operations": 1507,
+      "rows": [
+        5,
+        25,
+        100000,
+        1500000,
+        2000000,
+        8000000,
+        3380000,
+        0
+      ],
+      "usage": {
+        "catalog_bytes": 1429504,
+        "manifest_bytes": 5256109,
+        "manifest_list_bytes": 17422638,
+        "peak_rss_bytes": 88203264,
+        "root_bytes": 1385077,
+        "warehouse_file_bytes": 667633758,
+        "warehouse_physical_bytes": 675434496
+      }
+    },
+    {
+      "append_ms": 237170.62207300006,
+      "cold_reopen": {
+        "open_ms": 7100.446676,
+        "opened": true,
+        "process_ms": 7158.345818,
+        "usage": {
+          "catalog_bytes": 1884160,
+          "manifest_bytes": 7098875,
+          "manifest_list_bytes": 29083071,
+          "peak_rss_bytes": 42246144,
+          "root_bytes": 1844873,
+          "warehouse_file_bytes": 869392501,
+          "warehouse_physical_bytes": 879202304
+        }
+      },
+      "committed": 2000,
+      "operations": 2007,
+      "rows": [
+        5,
+        25,
+        100000,
+        1500000,
+        2000000,
+        8000000,
+        8380000,
+        0
+      ],
+      "usage": {
+        "catalog_bytes": 1884160,
+        "manifest_bytes": 7098875,
+        "manifest_list_bytes": 29083071,
+        "peak_rss_bytes": 88203264,
+        "root_bytes": 1844873,
+        "warehouse_file_bytes": 869392501,
+        "warehouse_physical_bytes": 879202304
+      }
+    },
+    {
+      "append_ms": 314571.958868999,
+      "cold_reopen": {
+        "open_ms": 9357.3365,
+        "opened": true,
+        "process_ms": 9437.743271,
+        "usage": {
+          "catalog_bytes": 2347008,
+          "manifest_bytes": 8942072,
+          "manifest_list_bytes": 50071918,
+          "peak_rss_bytes": 48955392,
+          "root_bytes": 2305985,
+          "warehouse_file_bytes": 1080474382,
+          "warehouse_physical_bytes": 1092337664
+        }
+      },
+      "committed": 2500,
+      "operations": 2507,
+      "rows": [
+        5,
+        25,
+        100000,
+        1500000,
+        2000000,
+        8000000,
+        13380000,
+        0
+      ],
+      "usage": {
+        "catalog_bytes": 2347008,
+        "manifest_bytes": 8942072,
+        "manifest_list_bytes": 50071918,
+        "peak_rss_bytes": 90697728,
+        "root_bytes": 2305985,
+        "warehouse_file_bytes": 1080474382,
+        "warehouse_physical_bytes": 1092337664
+      }
+    },
+    {
+      "append_ms": 479821.6455959991,
+      "cold_reopen": {
+        "open_ms": 26059.653809,
+        "opened": true,
+        "process_ms": 26242.614459,
+        "usage": {
+          "catalog_bytes": 2809856,
+          "manifest_bytes": 10978542,
+          "manifest_list_bytes": 61522968,
+          "peak_rss_bytes": 47132672,
+          "root_bytes": 2767494,
+          "warehouse_file_bytes": 1284664449,
+          "warehouse_physical_bytes": 1300013056
+        }
+      },
+      "committed": 3000,
+      "operations": 3008,
+      "rows": [
+        5,
+        25,
+        100000,
+        1500000,
+        2000000,
+        8000000,
+        15000000,
+        3380000
+      ],
+      "usage": {
+        "catalog_bytes": 2809856,
+        "manifest_bytes": 10978542,
+        "manifest_list_bytes": 61522968,
+        "peak_rss_bytes": 90697728,
+        "root_bytes": 2767494,
+        "warehouse_file_bytes": 1284664449,
+        "warehouse_physical_bytes": 1300013056
+      }
+    },
+    {
+      "append_ms": 600750.7522719987,
+      "cold_reopen": {
+        "open_ms": 14516.146525,
+        "opened": true,
+        "process_ms": 14627.864344,
+        "usage": {
+          "catalog_bytes": 3264512,
+          "manifest_bytes": 13107951,
+          "manifest_list_bytes": 73368528,
+          "peak_rss_bytes": 59367424,
+          "root_bytes": 3227238,
+          "warehouse_file_bytes": 1490514501,
+          "warehouse_physical_bytes": 1510105088
+        }
+      },
+      "committed": 3500,
+      "operations": 3508,
+      "rows": [
+        5,
+        25,
+        100000,
+        1500000,
+        2000000,
+        8000000,
+        15000000,
+        8380000
+      ],
+      "usage": {
+        "catalog_bytes": 3264512,
+        "manifest_bytes": 13107951,
+        "manifest_list_bytes": 73368528,
+        "peak_rss_bytes": 90697728,
+        "root_bytes": 3227238,
+        "warehouse_file_bytes": 1490514501,
+        "warehouse_physical_bytes": 1510105088
+      }
+    },
+    {
+      "append_ms": 697316.5924989978,
+      "cold_reopen": {
+        "open_ms": 19816.305364,
+        "opened": true,
+        "process_ms": 19974.909231,
+        "usage": {
+          "catalog_bytes": 3719168,
+          "manifest_bytes": 15237546,
+          "manifest_list_bytes": 94650783,
+          "peak_rss_bytes": 66121728,
+          "root_bytes": 3688426,
+          "warehouse_file_bytes": 1705814433,
+          "warehouse_physical_bytes": 1729650688
+        }
+      },
+      "committed": 4000,
+      "operations": 4008,
+      "rows": [
+        5,
+        25,
+        100000,
+        1500000,
+        2000000,
+        8000000,
+        15000000,
+        13380000
+      ],
+      "usage": {
+        "catalog_bytes": 3719168,
+        "manifest_bytes": 15237546,
+        "manifest_list_bytes": 94650783,
+        "peak_rss_bytes": 97673216,
+        "root_bytes": 3688426,
+        "warehouse_file_bytes": 1705814433,
+        "warehouse_physical_bytes": 1729650688
+      }
+    },
+    {
+      "append_ms": 900290.587918997,
+      "cold_reopen": {
+        "open_ms": 48764.022492,
+        "opened": true,
+        "process_ms": 49085.209487,
+        "usage": {
+          "catalog_bytes": 4177920,
+          "manifest_bytes": 17367371,
+          "manifest_list_bytes": 125377278,
+          "peak_rss_bytes": 72355840,
+          "root_bytes": 4150126,
+          "warehouse_file_bytes": 1930548711,
+          "warehouse_physical_bytes": 1958653952
+        }
+      },
+      "committed": 4500,
+      "operations": 4508,
+      "rows": [
+        5,
+        25,
+        100000,
+        1500000,
+        2000000,
+        8000000,
+        15000000,
+        18380000
+      ],
+      "usage": {
+        "catalog_bytes": 4177920,
+        "manifest_bytes": 17367371,
+        "manifest_list_bytes": 125377278,
+        "peak_rss_bytes": 108478464,
+        "root_bytes": 4150126,
+        "warehouse_file_bytes": 1930548711,
+        "warehouse_physical_bytes": 1958653952
+      }
+    },
+    {
+      "append_ms": 1160523.0156239974,
+      "cold_reopen": {
+        "open_ms": 62566.279145,
+        "opened": true,
+        "process_ms": 62892.501611,
+        "usage": {
+          "catalog_bytes": 4632576,
+          "manifest_bytes": 19497402,
+          "manifest_list_bytes": 165593270,
+          "peak_rss_bytes": 80998400,
+          "root_bytes": 4611890,
+          "warehouse_file_bytes": 2164761705,
+          "warehouse_physical_bytes": 2197053440
+        }
+      },
+      "committed": 5000,
+      "operations": 5008,
+      "rows": [
+        5,
+        25,
+        100000,
+        1500000,
+        2000000,
+        8000000,
+        15000000,
+        23380000
+      ],
+      "usage": {
+        "catalog_bytes": 4632576,
+        "manifest_bytes": 19497402,
+        "manifest_list_bytes": 165593270,
+        "peak_rss_bytes": 121040896,
+        "root_bytes": 4611890,
+        "warehouse_file_bytes": 2164761705,
+        "warehouse_physical_bytes": 2197053440
+      }
+    },
+    {
+      "append_ms": 1454416.269564,
+      "cold_reopen": {
+        "open_ms": 62873.390608,
+        "opened": true,
+        "process_ms": 63247.903095,
+        "usage": {
+          "catalog_bytes": 5091328,
+          "manifest_bytes": 21627691,
+          "manifest_list_bytes": 215312258,
+          "peak_rss_bytes": 93978624,
+          "root_bytes": 5073828,
+          "warehouse_file_bytes": 2408495314,
+          "warehouse_physical_bytes": 2445107200
+        }
+      },
+      "committed": 5500,
+      "operations": 5508,
+      "rows": [
+        5,
+        25,
+        100000,
+        1500000,
+        2000000,
+        8000000,
+        15000000,
+        28380000
+      ],
+      "usage": {
+        "catalog_bytes": 5091328,
+        "manifest_bytes": 21627691,
+        "manifest_list_bytes": 215312258,
+        "peak_rss_bytes": 127614976,
+        "root_bytes": 5073828,
+        "warehouse_file_bytes": 2408495314,
+        "warehouse_physical_bytes": 2445107200
+      }
+    },
+    {
+      "append_ms": 1740654.2422869992,
+      "cold_reopen": {
+        "open_ms": 86537.653282,
+        "opened": true,
+        "process_ms": 86876.973903,
+        "usage": {
+          "catalog_bytes": 5550080,
+          "manifest_bytes": 23757837,
+          "manifest_list_bytes": 274469565,
+          "peak_rss_bytes": 104755200,
+          "root_bytes": 5536068,
+          "warehouse_file_bytes": 2661666021,
+          "warehouse_physical_bytes": 2702503936
+        }
+      },
+      "committed": 6000,
+      "operations": 6008,
+      "rows": [
+        5,
+        25,
+        100000,
+        1500000,
+        2000000,
+        8000000,
+        15000000,
+        33380000
+      ],
+      "usage": {
+        "catalog_bytes": 5550080,
+        "manifest_bytes": 23757837,
+        "manifest_list_bytes": 274469565,
+        "peak_rss_bytes": 137678848,
+        "root_bytes": 5536068,
+        "warehouse_file_bytes": 2661666021,
+        "warehouse_physical_bytes": 2702503936
+      }
+    },
+    {
+      "append_ms": 2038734.4112139975,
+      "cold_reopen": {
+        "open_ms": 95877.480314,
+        "opened": true,
+        "process_ms": 96298.807377,
+        "usage": {
+          "catalog_bytes": 6004736,
+          "manifest_bytes": 25888016,
+          "manifest_list_bytes": 343013652,
+          "peak_rss_bytes": 109338624,
+          "root_bytes": 5998336,
+          "warehouse_file_bytes": 2924225227,
+          "warehouse_physical_bytes": 2969292800
+        }
+      },
+      "committed": 6500,
+      "operations": 6508,
+      "rows": [
+        5,
+        25,
+        100000,
+        1500000,
+        2000000,
+        8000000,
+        15000000,
+        38380000
+      ],
+      "usage": {
+        "catalog_bytes": 6004736,
+        "manifest_bytes": 25888016,
+        "manifest_list_bytes": 343013652,
+        "peak_rss_bytes": 151384064,
+        "root_bytes": 5998336,
+        "warehouse_file_bytes": 2924225227,
+        "warehouse_physical_bytes": 2969292800
+      }
+    },
+    {
+      "append_ms": 2382662.711977995,
+      "cold_reopen": {
+        "open_ms": 115835.655756,
+        "opened": true,
+        "process_ms": 116232.887073,
+        "usage": {
+          "catalog_bytes": 6463488,
+          "manifest_bytes": 28018361,
+          "manifest_list_bytes": 421018725,
+          "peak_rss_bytes": 117391360,
+          "root_bytes": 6460588,
+          "warehouse_file_bytes": 3196250741,
+          "warehouse_physical_bytes": 3245547520
+        }
+      },
+      "committed": 7000,
+      "operations": 7008,
+      "rows": [
+        5,
+        25,
+        100000,
+        1500000,
+        2000000,
+        8000000,
+        15000000,
+        43380000
+      ],
+      "usage": {
+        "catalog_bytes": 6463488,
+        "manifest_bytes": 28018361,
+        "manifest_list_bytes": 421018725,
+        "peak_rss_bytes": 159309824,
+        "root_bytes": 6460588,
+        "warehouse_file_bytes": 3196250741,
+        "warehouse_physical_bytes": 3245547520
+      }
+    },
+    {
+      "append_ms": 2758018.4275929974,
+      "cold_reopen": {
+        "open_ms": 137262.14469,
+        "opened": true,
+        "process_ms": 137807.464472,
+        "usage": {
+          "catalog_bytes": 6918144,
+          "manifest_bytes": 30149073,
+          "manifest_list_bytes": 508531707,
+          "peak_rss_bytes": 162115584,
+          "root_bytes": 6922808,
+          "warehouse_file_bytes": 3477777851,
+          "warehouse_physical_bytes": 3531235328
+        }
+      },
+      "committed": 7500,
+      "operations": 7508,
+      "rows": [
+        5,
+        25,
+        100000,
+        1500000,
+        2000000,
+        8000000,
+        15000000,
+        48380000
+      ],
+      "usage": {
+        "catalog_bytes": 6918144,
+        "manifest_bytes": 30149073,
+        "manifest_list_bytes": 508531707,
+        "peak_rss_bytes": 167510016,
+        "root_bytes": 6922808,
+        "warehouse_file_bytes": 3477777851,
+        "warehouse_physical_bytes": 3531235328
+      }
+    },
+    {
+      "append_ms": 2952588.434052992,
+      "cold_reopen": {
+        "open_ms": 101089.642899,
+        "opened": true,
+        "process_ms": 101607.857637,
+        "usage": {
+          "catalog_bytes": 7376896,
+          "manifest_bytes": 32279988,
+          "manifest_list_bytes": 605524221,
+          "peak_rss_bytes": 142942208,
+          "root_bytes": 7385084,
+          "warehouse_file_bytes": 3768786328,
+          "warehouse_physical_bytes": 3826532352
+        }
+      },
+      "committed": 8000,
+      "operations": 8008,
+      "rows": [
+        5,
+        25,
+        100000,
+        1500000,
+        2000000,
+        8000000,
+        15000000,
+        53380000
+      ],
+      "usage": {
+        "catalog_bytes": 7376896,
+        "manifest_bytes": 32279988,
+        "manifest_list_bytes": 605524221,
+        "peak_rss_bytes": 174710784,
+        "root_bytes": 7385084,
+        "warehouse_file_bytes": 3768786328,
+        "warehouse_physical_bytes": 3826532352
+      }
+    },
+    {
+      "append_ms": 3192855.92697199,
+      "cold_reopen": {
+        "open_ms": 111154.058278,
+        "opened": true,
+        "process_ms": 111480.572386,
+        "usage": {
+          "catalog_bytes": 7831552,
+          "manifest_bytes": 34410820,
+          "manifest_list_bytes": 711993996,
+          "peak_rss_bytes": 178540544,
+          "root_bytes": 7847272,
+          "warehouse_file_bytes": 4069265889,
+          "warehouse_physical_bytes": 4131303424
+        }
+      },
+      "committed": 8500,
+      "operations": 8508,
+      "rows": [
+        5,
+        25,
+        100000,
+        1500000,
+        2000000,
+        8000000,
+        15000000,
+        58380000
+      ],
+      "usage": {
+        "catalog_bytes": 7831552,
+        "manifest_bytes": 34410820,
+        "manifest_list_bytes": 711993996,
+        "peak_rss_bytes": 183377920,
+        "root_bytes": 7847272,
+        "warehouse_file_bytes": 4069265889,
+        "warehouse_physical_bytes": 4131303424
+      }
+    }
+  ],
+  "fresh_process_full_verification": {
+    "all_rows_verified": true,
+    "append_ms": 0.0,
+    "append_p50_ms": 0.0,
+    "append_p95_ms": 0.0,
+    "append_p99_ms": 0.0,
+    "checkpoint_reopens": 0,
+    "committed": 8661,
+    "mode": "verify",
+    "open_ms": 112546.471277,
+    "opened": true,
+    "operations": 8669,
+    "rows": [
+      5,
+      25,
+      100000,
+      1500000,
+      2000000,
+      8000000,
+      15000000,
+      59986052
+    ],
+    "usage": {
+      "catalog_bytes": 7983104,
+      "manifest_bytes": 35097006,
+      "manifest_list_bytes": 748296987,
+      "peak_rss_bytes": 229056512,
+      "root_bytes": 7996128,
+      "warehouse_file_bytes": 4167892639,
+      "warehouse_physical_bytes": 4231270400
+    },
+    "verified": true,
+    "wall_ms": 2473396.411101
+  },
+  "table_verification": [
+    {
+      "retry_mean_us": 104.5895,
+      "table": "region",
+      "verified_rows": 5
+    },
+    {
+      "retry_mean_us": 67.7167,
+      "table": "nation",
+      "verified_rows": 25
+    },
+    {
+      "retry_mean_us": 15295.592700000001,
+      "table": "supplier",
+      "verified_rows": 100000
+    },
+    {
+      "retry_mean_us": 14799.744100000002,
+      "table": "customer",
+      "verified_rows": 1500000
+    },
+    {
+      "retry_mean_us": 14800.9851,
+      "table": "part",
+      "verified_rows": 2000000
+    },
+    {
+      "retry_mean_us": 15371.888500000001,
+      "table": "partsupp",
+      "verified_rows": 8000000
+    },
+    {
+      "retry_mean_us": 15154.7626,
+      "table": "orders",
+      "verified_rows": 15000000
+    },
+    {
+      "retry_mean_us": 14767.5489,
+      "table": "lineitem",
+      "verified_rows": 59986052
+    }
+  ],
+  "lowered_limits": [
+    {
+      "label": "lower-max_operations",
+      "result": {
+        "error": "CONFIG_TOO_SMALL",
+        "message": "operation count exceeds configured capacity",
+        "opened": false
+      }
+    },
+    {
+      "label": "lower-max_catalog_bytes",
+      "result": {
+        "error": "CONFIG_TOO_SMALL",
+        "message": "catalog exceeds configured capacity",
+        "opened": false
+      }
+    },
+    {
+      "label": "lower-max_snapshots",
+      "result": {
+        "error": "CORRUPTION",
+        "message": "retained storage capacity: No space left on device",
+        "opened": false
+      }
+    },
+    {
+      "label": "lower-max_manifests",
+      "result": {
+        "error": "CORRUPTION",
+        "message": "retained storage capacity: No space left on device",
+        "opened": false
+      }
+    },
+    {
+      "label": "lower-max_data_files",
+      "result": {
+        "error": "CORRUPTION",
+        "message": "retained storage capacity: No space left on device",
+        "opened": false
+      }
+    },
+    {
+      "label": "lower-max_manifest_bytes",
+      "result": {
+        "error": "CORRUPTION",
+        "message": "verify retained collection: CAPACITY: Append exceeds storage capacity.",
+        "opened": false
+      }
+    },
+    {
+      "label": "lower-max_manifest_list_bytes",
+      "result": {
+        "error": "CORRUPTION",
+        "message": "verify retained collection: CAPACITY: Append exceeds storage capacity.",
+        "opened": false
+      }
+    },
+    {
+      "label": "lower-max_footer_bytes",
+      "result": {
+        "error": "CORRUPTION",
+        "message": "verify retained collection: CAPACITY: Append exceeds storage capacity.",
+        "opened": false
+      }
+    },
+    {
+      "label": "lower-max_root_bytes",
+      "result": {
+        "error": "CORRUPTION",
+        "message": "verify retained collection: Recovery metadata exceeds storage capacity.",
+        "opened": false
+      }
+    },
+    {
+      "label": "lower-max_root_file_bytes",
+      "result": {
+        "error": "CORRUPTION",
+        "message": "inspect retained root: CORRUPTION: store://15600000-0000-4000-8000-000000000001/warehouse/15600000-0000-4000-8100-000000000000/metadata/00001-01a1cf94-714f-7418-b8ec-cca6ac4740aa.metadata.json: File too large",
+        "opened": false
+      }
+    },
+    {
+      "label": "lower-max_commit_bytes",
+      "result": {
+        "error": "CORRUPTION",
+        "message": "verify retained collection: CAPACITY: Append exceeds file or accumulator limits.",
+        "opened": false
+      }
+    },
+    {
+      "label": "lower-max_recovery_workspace_bytes",
+      "result": {
+        "error": "CORRUPTION",
+        "message": "verify retained collection: Recovery metadata exceeds storage capacity.",
+        "opened": false
+      }
+    }
+  ],
+  "restored_profile": {
+    "all_rows_verified": false,
+    "append_ms": 0.0,
+    "append_p50_ms": 0.0,
+    "append_p95_ms": 0.0,
+    "append_p99_ms": 0.0,
+    "checkpoint_reopens": 0,
+    "committed": 8661,
+    "mode": "verify",
+    "open_ms": 116627.127894,
+    "opened": true,
+    "operations": 8669,
+    "rows": [
+      5,
+      25,
+      100000,
+      1500000,
+      2000000,
+      8000000,
+      15000000,
+      59986052
+    ],
+    "usage": {
+      "catalog_bytes": 7983104,
+      "manifest_bytes": 35097006,
+      "manifest_list_bytes": 748296987,
+      "peak_rss_bytes": 203169792,
+      "root_bytes": 7996128,
+      "warehouse_file_bytes": 4167892639,
+      "warehouse_physical_bytes": 4231270400
+    },
+    "verified": true,
+    "wall_ms": 135500.16216
+  },
+  "campaign_wall_seconds": 8102.0009402949945,
+  "ledger": {
+    "records": 8669,
+    "bound_failures": 8,
+    "bytes": 5514269,
+    "sha256": "e199537382c341d9b96960b0a01686df573424a1f2090f79e2b17533d6b95a77"
+  },
+  "validation": {
+    "normal": {
+      "registered": 981,
+      "passed": 968,
+      "skipped": 11,
+      "disabled": 2,
+      "failed": 0
+    },
+    "asan_ubsan_lsan": {
+      "passed": 29,
+      "failed": 0
+    },
+    "history_python_cases": 6,
+    "http_database_limit_cases": 7,
+    "format_files": 274,
+    "quality_negative_check": "PASS",
+    "targeted_benchmark_tidy": "PASS",
+    "full_tidy": {
+      "status": "FAIL: diagnostics outside the changed logic",
+      "translation_units": 177,
+      "diagnostic_count": 88,
+      "diagnostics": [
+        {
+          "path": "apps/server/metrics.cpp",
+          "line": 218,
+          "column": 54,
+          "message": "2 adjacent parameters of 'ClassifyOperation' of similar type ('size_t') are easily swapped by mistake [bugprone-easily-swappable-parameters,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "apps/server/metrics.cpp",
+          "line": 312,
+          "column": 29,
+          "message": "2 adjacent parameters of 'SetRequest' of similar type ('std::string_view') are easily swapped by mistake [bugprone-easily-swappable-parameters,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "apps/transport/utf8-inl.h",
+          "line": 13,
+          "column": 29,
+          "message": "2 adjacent parameters of 'operator()' of convertible types are easily swapped by mistake [bugprone-easily-swappable-parameters,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "apps/transport/rows_json.cpp",
+          "line": 271,
+          "column": 39,
+          "message": "2 adjacent parameters of 'operator()' of convertible types are easily swapped by mistake [bugprone-easily-swappable-parameters,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "apps/transport/utf8-inl.h",
+          "line": 13,
+          "column": 29,
+          "message": "2 adjacent parameters of 'operator()' of convertible types are easily swapped by mistake [bugprone-easily-swappable-parameters,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "apps/transport/codec.cpp",
+          "line": 681,
+          "column": 32,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "apps/transport/utf8-inl.h",
+          "line": 13,
+          "column": 29,
+          "message": "2 adjacent parameters of 'operator()' of convertible types are easily swapped by mistake [bugprone-easily-swappable-parameters,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "core/api/write_settings.cpp",
+          "line": 148,
+          "column": 17,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "core/scan/pruning.cpp",
+          "line": 165,
+          "column": 6,
+          "message": "an exception may be thrown in function 'ValidateColumnZoneStats' which should not throw exceptions [bugprone-exception-escape,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "core/scan/pruning.cpp",
+          "line": 357,
+          "column": 5,
+          "message": "2 adjacent parameters of 'EvalSortedInRange' of similar type ('const std::optional<TBoundValue> &') are easily swapped by mistake [bugprone-easily-swappable-parameters,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "core/scan/pruning.cpp",
+          "line": 361,
+          "column": 5,
+          "message": "2 adjacent parameters of 'EvalSortedInRange' of similar type ('bool &') are easily swapped by mistake [bugprone-easily-swappable-parameters,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "core/scan/pruning.cpp",
+          "line": 658,
+          "column": 93,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "core/scan/pruning.cpp",
+          "line": 670,
+          "column": 93,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "core/storage/data_file_writer.cpp",
+          "line": 349,
+          "column": 47,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": true,
+          "line_modified": false
+        },
+        {
+          "path": "core/storage/format_verifier.cpp",
+          "line": 159,
+          "column": 16,
+          "message": "constness of 'metadata' prevents automatic move [performance-no-automatic-move,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "core/storage/format_verifier.cpp",
+          "line": 384,
+          "column": 79,
+          "message": "2 adjacent parameters of 'ParseBoundedMetadata' of similar type are easily swapped by mistake [bugprone-easily-swappable-parameters,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "third_party/quill/include/quill/sinks/RotatingSink.h",
+          "line": 543,
+          "column": 14,
+          "message": "Call to virtual method 'RotatingSink::rename_file' during construction bypasses virtual dispatch [clang-analyzer-optin.cplusplus.VirtualCall,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "third_party/quill/include/quill/sinks/RotatingSink.h",
+          "line": 559,
+          "column": 14,
+          "message": "Call to virtual method 'RotatingSink::rename_file' during construction bypasses virtual dispatch [clang-analyzer-optin.cplusplus.VirtualCall,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "third_party/quill/include/quill/sinks/RotatingSink.h",
+          "line": 575,
+          "column": 9,
+          "message": "Call to virtual method 'RotatingSink::rename_file' during construction bypasses virtual dispatch [clang-analyzer-optin.cplusplus.VirtualCall,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/server/json_codec_bench.cpp",
+          "line": 99,
+          "column": 5,
+          "message": "an exception may be thrown in function 'main' which should not throw exceptions [bugprone-exception-escape,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/server/json_codec_test.cpp",
+          "line": 218,
+          "column": 40,
+          "message": "local copy 'allDoubles' of the variable 'doubles' is never modified; consider avoiding the copy [performance-unnecessary-copy-initialization,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/server/json_codec_test.cpp",
+          "line": 219,
+          "column": 41,
+          "message": "local copy 'allTimestamps' of the variable 'timestamps' is never modified; consider avoiding the copy [performance-unnecessary-copy-initialization,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/server/json_codec_test.cpp",
+          "line": 501,
+          "column": 74,
+          "message": "string concatenation results in allocation of unnecessary temporary strings; consider using 'operator+=' or 'string::append()' instead [performance-inefficient-string-concatenation,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/server/json_codec_test.cpp",
+          "line": 886,
+          "column": 13,
+          "message": "string concatenation results in allocation of unnecessary temporary strings; consider using 'operator+=' or 'string::append()' instead [performance-inefficient-string-concatenation,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/unit/arrow_input_scratch_test.cpp",
+          "line": 100,
+          "column": 5,
+          "message": "Use of memory after it is freed [clang-analyzer-cplusplus.NewDelete,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/unit/arrow_input_scratch_test.cpp",
+          "line": 157,
+          "column": 40,
+          "message": "performing an implicit widening conversion to type 'const int64_t' (aka 'const long') of a multiplication performed in type 'int' [bugprone-implicit-widening-of-multiplication-result,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/unit/arrow_input_scratch_test.cpp",
+          "line": 240,
+          "column": 62,
+          "message": "performing an implicit widening conversion to type 'int64_t' (aka 'long') of a multiplication performed in type 'int' [bugprone-implicit-widening-of-multiplication-result,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/unit/arrow_input_scratch_test.cpp",
+          "line": 241,
+          "column": 58,
+          "message": "performing an implicit widening conversion to type 'int64_t' (aka 'long') of a multiplication performed in type 'int' [bugprone-implicit-widening-of-multiplication-result,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/unit/metadata_cache_oom_test.cpp",
+          "line": 91,
+          "column": 5,
+          "message": "Attempt to free released memory [clang-analyzer-cplusplus.NewDelete,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/unit/metadata_cache_oom_test.cpp",
+          "line": 144,
+          "column": 9,
+          "message": "'push_back' is called inside a loop; consider pre-allocating the container capacity before the loop [performance-inefficient-vector-operation,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/unit/metadata_cache_oom_test.cpp",
+          "line": 154,
+          "column": 15,
+          "message": "empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether [bugprone-empty-catch,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/unit/metadata_cache_test.cpp",
+          "line": 223,
+          "column": 13,
+          "message": "'emplace_back' is called inside a loop; consider pre-allocating the container capacity before the loop [performance-inefficient-vector-operation,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/unit/scan_pruning_test.cpp",
+          "line": 676,
+          "column": 53,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/unit/scan_pruning_test.cpp",
+          "line": 727,
+          "column": 18,
+          "message": "the variable 'props' is copy-constructed from a const reference but is only used as const reference; consider making it a const reference [performance-unnecessary-copy-initialization,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/unit/scan_pruning_test.cpp",
+          "line": 736,
+          "column": 17,
+          "message": "switching on non-enum value without default case may not cover all cases [bugprone-switch-missing-default-case,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/unit/storage/data_file_writer_test.cpp",
+          "line": 148,
+          "column": 21,
+          "message": "the parameter 'path' is copied for each invocation but only used as a const reference; consider making it a const reference [performance-unnecessary-value-param,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/unit/storage/data_file_writer_test.cpp",
+          "line": 219,
+          "column": 13,
+          "message": "'push_back' is called inside a loop; consider pre-allocating the container capacity before the loop [performance-inefficient-vector-operation,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/unit/storage/data_file_writer_test.cpp",
+          "line": 491,
+          "column": 70,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/append_history_bench_test.cpp",
+          "line": 34,
+          "column": 49,
+          "message": "casting (double + 0.5) to integer leads to incorrect rounding; consider using lround (#include <cmath>) instead [bugprone-incorrect-roundings,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/append_input_ownership_test.cpp",
+          "line": 90,
+          "column": 16,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/append_input_ownership_test.cpp",
+          "line": 126,
+          "column": 15,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/append_input_ownership_test.cpp",
+          "line": 127,
+          "column": 15,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/append_input_ownership_test.cpp",
+          "line": 168,
+          "column": 15,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/append_input_ownership_test.cpp",
+          "line": 169,
+          "column": 15,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/append_stage_bench_test.cpp",
+          "line": 94,
+          "column": 73,
+          "message": "2 adjacent parameters of 'MakeBatch' of similar type are easily swapped by mistake [bugprone-easily-swappable-parameters,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/root_round_trip_test.cpp",
+          "line": 70,
+          "column": 9,
+          "message": "'push_back' is called inside a loop; consider pre-allocating the container capacity before the loop [performance-inefficient-vector-operation,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/row_group_layout_test.cpp",
+          "line": 178,
+          "column": 9,
+          "message": "'push_back' is called inside a loop; consider pre-allocating the container capacity before the loop [performance-inefficient-vector-operation,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/row_group_layout_test.cpp",
+          "line": 328,
+          "column": 30,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/row_group_layout_test.cpp",
+          "line": 329,
+          "column": 30,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/row_group_layout_test.cpp",
+          "line": 411,
+          "column": 53,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/row_group_layout_test.cpp",
+          "line": 412,
+          "column": 50,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/row_group_layout_test.cpp",
+          "line": 430,
+          "column": 5,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/row_group_layout_test.cpp",
+          "line": 438,
+          "column": 21,
+          "message": "2 adjacent parameters of 'Letters' of similar type are easily swapped by mistake [bugprone-easily-swappable-parameters,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/row_group_layout_test.cpp",
+          "line": 467,
+          "column": 69,
+          "message": "narrowing conversion from 'int64_t' (aka 'long') to 'double' [bugprone-narrowing-conversions,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/row_group_layout_test.cpp",
+          "line": 554,
+          "column": 76,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/row_group_layout_test.cpp",
+          "line": 560,
+          "column": 95,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/row_group_layout_test.cpp",
+          "line": 581,
+          "column": 43,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/row_group_layout_test.cpp",
+          "line": 586,
+          "column": 81,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/row_group_layout_test.cpp",
+          "line": 644,
+          "column": 34,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/row_group_layout_test.cpp",
+          "line": 662,
+          "column": 77,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/row_group_layout_test.cpp",
+          "line": 664,
+          "column": 59,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/scan_pruning_and_cache_test.cpp",
+          "line": 156,
+          "column": 104,
+          "message": "parameter 'options' is passed by value and only copied once; consider moving it to avoid unnecessary copies [performance-unnecessary-value-param,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/scan_pruning_and_cache_test.cpp",
+          "line": 170,
+          "column": 103,
+          "message": "parameter 'options' is passed by value and only copied once; consider moving it to avoid unnecessary copies [performance-unnecessary-value-param,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/scan_pruning_and_cache_test.cpp",
+          "line": 350,
+          "column": 9,
+          "message": "'push_back' is called inside a loop; consider pre-allocating the container capacity before the loop [performance-inefficient-vector-operation,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/scan_pruning_and_cache_test.cpp",
+          "line": 353,
+          "column": 30,
+          "message": "performing an implicit widening conversion to type 'int64_t' (aka 'long') of a multiplication performed in type 'int' [bugprone-implicit-widening-of-multiplication-result,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/scan_pruning_and_cache_test.cpp",
+          "line": 787,
+          "column": 34,
+          "message": "performing an implicit widening conversion to type 'size_type' (aka 'unsigned long') of a multiplication performed in type 'int' [bugprone-implicit-widening-of-multiplication-result,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/scan_pruning_and_cache_test.cpp",
+          "line": 1180,
+          "column": 30,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/scan_pruning_and_cache_test.cpp",
+          "line": 1435,
+          "column": 20,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/scan_pruning_and_cache_test.cpp",
+          "line": 1436,
+          "column": 20,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/scan_pruning_and_cache_test.cpp",
+          "line": 1452,
+          "column": 20,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/scan_pruning_and_cache_test.cpp",
+          "line": 1453,
+          "column": 20,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/write_settings_test.cpp",
+          "line": 28,
+          "column": 28,
+          "message": "std::move of the variable 'fallback' of the trivially-copyable type 'std::optional<ParquetCompression>' has no effect; remove std::move() [performance-move-const-arg,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/write_settings_test.cpp",
+          "line": 181,
+          "column": 15,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/write_settings_test.cpp",
+          "line": 182,
+          "column": 15,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/write_settings_test.cpp",
+          "line": 219,
+          "column": 15,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/write_settings_test.cpp",
+          "line": 220,
+          "column": 15,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/write_settings_test.cpp",
+          "line": 324,
+          "column": 15,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/write_settings_test.cpp",
+          "line": 328,
+          "column": 15,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/write_settings_test.cpp",
+          "line": 331,
+          "column": 15,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/write_settings_test.cpp",
+          "line": 342,
+          "column": 38,
+          "message": "The value '9' provided to the cast expression is not in the valid range of values for 'ParquetCodec' [clang-analyzer-optin.core.EnumCastOutOfRange,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/write_settings_test.cpp",
+          "line": 351,
+          "column": 19,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/write_settings_test.cpp",
+          "line": 352,
+          "column": 19,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/write_settings_test.cpp",
+          "line": 499,
+          "column": 15,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/write_settings_test.cpp",
+          "line": 535,
+          "column": 9,
+          "message": "'push_back' is called inside a loop; consider pre-allocating the container capacity before the loop [performance-inefficient-vector-operation,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/write_settings_test.cpp",
+          "line": 594,
+          "column": 26,
+          "message": "The value '7' provided to the cast expression is not in the valid range of values for 'DictionaryPolicy' [clang-analyzer-optin.core.EnumCastOutOfRange,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/write_settings_test.cpp",
+          "line": 605,
+          "column": 41,
+          "message": "The value '9' provided to the cast expression is not in the valid range of values for 'ParquetEncoding' [clang-analyzer-optin.core.EnumCastOutOfRange,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/write_settings_test.cpp",
+          "line": 614,
+          "column": 19,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        },
+        {
+          "path": "tests/vertical/write_settings_test.cpp",
+          "line": 614,
+          "column": 63,
+          "message": "unchecked access to optional value [bugprone-unchecked-optional-access,-warnings-as-errors]",
+          "file_modified": false,
+          "line_modified": false
+        }
+      ]
+    }
+  },
+  "prior_integration": {
+    "base_commit": "26546090f76ed1ef65535f09164674ed64a66744",
+    "source_patch_sha256": "c4a11efd8ef86c1ab30b9c8024c63317715ee9f56c14da44587a40aeda17cd9a",
+    "driver_sha256": "e904673d2cdb0f8e22ca4e3b599d93050ed5d439793d755916396e700215e4a4",
+    "normal": {
+      "registered": 1094,
+      "passed": 1079,
+      "skipped": 11,
+      "disabled": 4,
+      "failed": 0
+    },
+    "asan_ubsan_lsan_history": {
+      "passed": 29,
+      "failed": 0
+    },
+    "asan_ubsan_lsan_bulk_scalar_collections": {
+      "registered": 44,
+      "passed": 42,
+      "disabled": 2,
+      "failed": 0
+    },
+    "history_python_cases": 6,
+    "http_database_limit_cases": 9,
+    "mixed_distinct_and_duplicate_checkpoint_fixture": {
+      "release": "PASS",
+      "asan_ubsan_lsan": "PASS"
+    },
+    "format_files": 289,
+    "quality_negative_check": "PASS",
+    "targeted_tidy": {
+      "status": "PASS",
+      "translation_units": [
+        "benchmarks/history.cpp",
+        "core/engine/engine.cpp",
+        "core/catalog/durable_sqlite_catalog.cpp",
+        "apps/server/databases.cpp"
+      ]
+    },
+    "existing_full_store_compatibility": {
+      "all_rows_verified": false,
+      "append_ms": 0.0,
+      "append_p50_ms": 0.0,
+      "append_p95_ms": 0.0,
+      "append_p99_ms": 0.0,
+      "checkpoint_reopens": 0,
+      "committed": 8661,
+      "mode": "verify",
+      "open_ms": 205817.611497,
+      "opened": true,
+      "operations": 8669,
+      "rows": [
+        5,
+        25,
+        100000,
+        1500000,
+        2000000,
+        8000000,
+        15000000,
+        59986052
+      ],
+      "usage": {
+        "catalog_bytes": 7983104,
+        "manifest_bytes": 35097540,
+        "manifest_list_bytes": 746857516,
+        "peak_rss_bytes": 203341824,
+        "root_bytes": 7996175,
+        "warehouse_file_bytes": 4166453749,
+        "warehouse_physical_bytes": 4229820416
+      },
+      "verified": true,
+      "wall_ms": 234187.510725
+    },
+    "test_environment": "Python 3.12; local workload package installed with --ignore-requires-python for the database-drop CLI fixture, not a qualification of general workload support below Python 3.13"
+  },
+  "independent_review": {
+    "findings_fixed": [
+      "Legacy persisted HTTP limits omitted history",
+      "Metadata readers retained a hardcoded 16 MiB root ceiling",
+      "Full source oracle accepted an unconsumed suffix",
+      "Linux checkpoint ru_maxrss inherited the writer high-water mark"
+    ],
+    "final_review": "No remaining substantive findings in inspected implementation and checkpoint corrections",
+    "deferred": "A dedicated equality-filtered catalog query could avoid scans of unrelated collections; bounded keyset query is correct, collections default to eight and remain capped at 64",
+    "alternatives": [
+      "Incremental retained manifest structures to reduce quadratic list growth",
+      "Normalized snapshot index with a separately specified consistency invariant and migration"
+    ]
+  },
+  "qualification": [
+    "Fresh executable images, with OS page cache retained; shared host with builds/tests/analyzer contention",
+    "Linux peak RSS is current-image /proc/self/status VmHWM; separate parent and checkpoint child measurements",
+    "Physical warehouse counts max(logical size, st_blocks*512) per file plus allocated directory blocks; catalog and oracle scratch reported separately",
+    "All original outcomes compared; retry each failed binding once with original rows and a new unrestricted precondition, and the original successful append ten times per collection; initial and first-snapshot rows checked",
+    "No physical power-loss, universal allocator/RSS bound, or arbitrary larger configuration qualification",
+    "20,000 operations and 12,000 snapshots/manifests are declared headroom; measured end state is 8,669 operations and 8,661 commits"
+  ],
+  "final_integration": {
+    "base_commit": "6adb50c3a9be239b27deefa09c77b1a4db226ec3",
+    "source_patch_sha256": "889aca2fc8bd1189132f80110390f2c0371d213d988660f4a26e4d8318bf511a",
+    "driver_sha256": "616d82b5cdd280335de92d53a22a53cceb3882306dc446f326e424df031434ac",
+    "normal": {
+      "registered": 1123,
+      "passed": 1108,
+      "skipped": 11,
+      "disabled": 4,
+      "failed": 0,
+      "wall_seconds": 71.84,
+      "log_sha256": "063645af489313d6d3ce78b026f1d4c35bbc533e78eb0be204c18912f089c664"
+    },
+    "asan_ubsan_lsan": {
+      "registered": 78,
+      "passed": 76,
+      "skipped": 0,
+      "disabled": 2,
+      "failed": 0,
+      "wall_seconds": 73.03,
+      "log_sha256": "707635870a22cf4a3af851468c75cbeb68848bfea1637300aebf4e19a1dcfb3b"
+    },
+    "format_files": 293,
+    "quality_negative_check": "PASS",
+    "targeted_tidy": {
+      "status": "PASS",
+      "translation_units": [
+        "benchmarks/history.cpp",
+        "core/engine/engine.cpp",
+        "core/catalog/durable_sqlite_catalog.cpp",
+        "apps/server/databases.cpp",
+        "core/scan/scan_cursor.cpp",
+        "core/backend/local_storage_backend.cpp"
+      ]
+    },
+    "measured_full_store_compatibility": {
+      "all_rows_verified": false,
+      "append_ms": 0.0,
+      "append_p50_ms": 0.0,
+      "append_p95_ms": 0.0,
+      "append_p99_ms": 0.0,
+      "checkpoint_reopens": 0,
+      "committed": 8661,
+      "mode": "verify",
+      "open_ms": 111273.934869,
+      "opened": true,
+      "operations": 8669,
+      "rows": [
+        5,
+        25,
+        100000,
+        1500000,
+        2000000,
+        8000000,
+        15000000,
+        59986052
+      ],
+      "usage": {
+        "catalog_bytes": 7983104,
+        "manifest_bytes": 35097006,
+        "manifest_list_bytes": 748296987,
+        "peak_rss_bytes": 204120064,
+        "root_bytes": 7996128,
+        "warehouse_file_bytes": 4167892639,
+        "warehouse_physical_bytes": 4231270400
+      },
+      "verified": true,
+      "wall_ms": 125212.747725
+    },
+    "independent_integration_review": {
+      "status": "No actionable code findings",
+      "preserved": [
+        "incremental warehouse admission, deadline/cancellation and inventory invalidation",
+        "Explain planning reservation reuse, footer verification and cache OOM handling",
+        "SDK serialized request cap and atomic-shared-pointer fallback",
+        "all configurable history, receipt, recovery and uncertainty invariants"
+      ],
+      "limitations": [
+        "quadratic retained manifest lists",
+        "filtered keyset inventory scans",
+        "declared counts are not measured capacity guarantees",
+        "custom-backend vector fallback is intended for small integrations",
+        "arbitrary larger profiles, universal RSS bounds, power loss and external mutations outside the ownership contract are unqualified"
+      ]
+    }
+  }
+}

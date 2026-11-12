@@ -811,7 +811,7 @@ Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanReq
         auto controlMemory = Take(context.Resources->Reserve(ResourceClass::Control, ControlMemoryBytes));
         auto planningMemory = context.PlanningMemory
             ? std::move(context.PlanningMemory)
-            : Take(context.Resources->Reserve(ResourceClass::Metadata, MetadataWorkBytes));
+            : Take(context.Resources->Reserve(ResourceClass::Metadata, MetadataWorkForRoot(context.RootBytes)));
         RequireInput(request.batch_rows >= 1 && request.batch_rows <= MaxBatchRows,
             "batch_rows must be within 1..65536");
         RequireInput(!request.limit || *request.limit >= 0, "limit must not be negative");
@@ -836,9 +836,13 @@ Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanReq
                 BoundedDiagnostic("collection schema profile: " + profile.error().message),
                 RetryHint::OperatorAction});
         }
-        auto plan = Take(context.VerifiedState
-                ? PlanVerifiedScan(*context.VerifiedState, context.Base, request.selector)
-                : PlanManifests(context.FileIO, context.Base, request.selector, context.Cache.get()));
+        auto plan =
+            Take(context.VerifiedState ? PlanVerifiedScan(*context.VerifiedState, context.Base, request.selector)
+                                       : PlanManifests(context.FileIO,
+                                             context.Base,
+                                             request.selector,
+                                             context.Cache.get(),
+                                             context.RootBytes));
         // Uncached lists/schemas remain materialized in the plan. Verified
         // membership already retains the backend's shared generation lease.
         auto retainedPlan = context.VerifiedState ? nullptr : planningMemory;

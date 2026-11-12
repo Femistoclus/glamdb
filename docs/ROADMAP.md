@@ -142,6 +142,11 @@ private headers, including a zero-limit scan.
   original volume unavailable. The source stays locked through copy and
   verification; retained snapshots and all operation outcomes survive.
 
+The [configurable history campaign](development/SCALABLE_HISTORY_VALIDATION.md)
+records full eight-table SF=10 ordinary ingestion, permanent operation outcomes,
+exact row multiplicities, checkpoint recovery and lower-profile restoration.
+Its finite capacity evidence does not close the power-loss qualification gap.
+
 Calibrate a unified power-loss model covering data bytes, directory entries,
 and SQLite state. It must detect deliberately broken variants that omit data,
 directory, or catalog synchronization. A model that misses these failures cannot

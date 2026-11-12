@@ -529,18 +529,18 @@ void CheckReceipt(const iceberg::Snapshot& snapshot, const AppendResult& receipt
 // Bound and Failed operations therefore have no retained snapshot.
 void CheckHistory(const iceberg::TableMetadata& metadata,
     std::string_view collectionID,
-    std::span<const OperationRecord> operations)
+    const std::function<void(std::string_view, const DurableSqliteCatalogStore::OperationConsumer&)>& readOperations)
 {
-    std::map<std::string, const AppendResult*, std::less<>> committed;
-    for (const auto& operation : operations) {
+    std::map<std::string, AppendResult, std::less<>> committed;
+    readOperations(collectionID, [&](const auto& operation) {
         if (operation.binding.collection_id != collectionID || operation.state != OperationState::Committed) {
-            continue;
+            return;
         }
         if (!operation.outcome.has_value() || !operation.outcome->result.has_value()) {
             Fail("CORRUPTION", "history", "committed operation has no receipt");
         }
-        committed.emplace(operation.binding.operation_id, &*operation.outcome->result);
-    }
+        committed.emplace(operation.binding.operation_id, *operation.outcome->result);
+    });
     std::set<std::string, std::less<>> seen;
     for (const auto& snapshot : metadata.snapshots) {
         Require(snapshot != nullptr, "CORRUPTION", "retained snapshot is missing");
@@ -550,7 +550,7 @@ void CheckHistory(const iceberg::TableMetadata& metadata,
         Require(receipt != committed.end() && seen.insert(operation->second).second,
             "CORRUPTION",
             "retained snapshot has no unique committed receipt");
-        CheckReceipt(*snapshot, *receipt->second);
+        CheckReceipt(*snapshot, receipt->second);
     }
     Require(seen.size() == committed.size(), "CORRUPTION", "committed receipt has no retained snapshot");
 }
@@ -688,6 +688,23 @@ private:
 };
 
 } // namespace
+
+void TLocalStorageOptions::ApplyHistoryLimits(const HistoryLimits& limits)
+{
+    Storage.Store = {static_cast<uint64_t>(limits.max_root_bytes),
+        static_cast<uint64_t>(limits.max_snapshots),
+        static_cast<uint64_t>(limits.max_snapshots),
+        static_cast<uint64_t>(limits.max_data_files),
+        static_cast<uint64_t>(limits.max_manifests),
+        static_cast<uint64_t>(limits.max_manifest_bytes),
+        static_cast<uint64_t>(limits.max_manifest_list_bytes),
+        static_cast<uint64_t>(limits.max_footer_bytes)};
+    Storage.RootBytes = static_cast<uint64_t>(limits.max_root_file_bytes);
+    Storage.MetadataLogEntries = static_cast<uint64_t>(limits.max_snapshots);
+    Storage.CommitBytes = static_cast<uint64_t>(limits.max_commit_bytes);
+    Storage.RecoveryWorkspaceBytes = static_cast<uint64_t>(limits.max_recovery_workspace_bytes);
+    FileIO.MetadataBytes = Storage.RootBytes;
+}
 
 TLocalStorageBackend::TLocalStorageBackend(StoreInfo store,
     TLocalStorageOptions options,
@@ -1304,6 +1321,28 @@ Status TLocalStorageBackend::VerifyRetained(const StoreInfo& store,
     std::span<const CollectionView> collections,
     std::span<const OperationRecord> operations)
 {
+    return VerifyRetainedImpl(store, collections, [&](std::string_view id, const auto& consume) {
+        for (const auto& record : operations) {
+            if (id.empty() || record.binding.collection_id == id) {
+                consume(record);
+            }
+        }
+    });
+}
+
+Status TLocalStorageBackend::VerifyRetainedCatalog(const StoreInfo& store,
+    std::span<const CollectionView> collections,
+    DurableSqliteCatalogStore& catalog)
+{
+    return VerifyRetainedImpl(store, collections, [&](std::string_view id, const auto& consume) {
+        catalog.ForEachOperation(consume, id);
+    });
+}
+
+Status TLocalStorageBackend::VerifyRetainedImpl(const StoreInfo& store,
+    std::span<const CollectionView> collections,
+    const TOperationReader& readOperations)
+{
     // A failed rebuild must not leave the previous generation available.
     InvalidateCache();
     return Guarded<Status>([&]() -> Status {
@@ -1327,7 +1366,7 @@ Status TLocalStorageBackend::VerifyRetained(const StoreInfo& store,
             // receipt lookups reuse this verified generation.
             auto state = VerifyCollection(view.base);
             CheckSchema(*state->Metadata, view.info.schema);
-            CheckHistory(*state->Metadata, view.info.collection_id, operations);
+            CheckHistory(*state->Metadata, view.info.collection_id, readOperations);
             totalUsage = TakeUsage(NStorage::ReplaceUsage(totalUsage, {.Previous = {}, .Next = state->Usage}),
                 "CORRUPTION",
                 "aggregate storage usage");
@@ -1341,11 +1380,11 @@ Status TLocalStorageBackend::VerifyRetained(const StoreInfo& store,
                 entry.ConfirmedMemory = CacheMemory_.at(view.info.collection_id);
             }
         }
-        for (const auto& operation : operations) {
+        readOperations({}, [&](const auto& operation) {
             Require(operation.state != OperationState::Committed || verified.contains(operation.binding.collection_id),
                 "CORRUPTION",
                 "committed operation belongs to an unknown collection");
-        }
+        });
         std::lock_guard lock(Mutex_);
         Collections_ = std::move(verified);
         std::erase_if(CacheMemory_, [&](const auto& item) {

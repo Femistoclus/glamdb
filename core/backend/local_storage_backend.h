@@ -68,6 +68,8 @@ struct TLocalStorageOptions
     uint64_t ReadCacheBytes = ReadCacheMemoryBytes;
     bool EnablePruning = true;
 
+    void ApplyHistoryLimits(const HistoryLimits& limits);
+
     static bool DefaultVerifyStagedRoot()
     {
         if (const char* value = std::getenv("GLAMDB_VERIFY_ROUNDTRIP"); value && *value) {
@@ -118,6 +120,9 @@ public:
     Status VerifyRetained(const StoreInfo& store,
         std::span<const CollectionView> collections,
         std::span<const OperationRecord> operations) override;
+    Status VerifyRetainedCatalog(const StoreInfo& store,
+        std::span<const CollectionView> collections,
+        DurableSqliteCatalogStore& catalog) override;
     Result<std::shared_ptr<iceberg::FileIO>> ReadOnlyFileIO() override;
     Result<std::shared_ptr<const NGlamDB::NStorage::TBaseState>> VerifiedScanState(const BaseIdentity& base) override;
     std::shared_ptr<TSnapshotMetadataCache> ReadMetadataCache() override
@@ -131,6 +136,10 @@ public:
     void DiscardCandidate(std::string_view collectionID);
 
 private:
+    using TOperationReader = std::function<void(std::string_view, const DurableSqliteCatalogStore::OperationConsumer&)>;
+    Status VerifyRetainedImpl(const StoreInfo& store,
+        std::span<const CollectionView> collections,
+        const TOperationReader& readOperations);
     struct TCollectionState
     {
         std::shared_ptr<const NGlamDB::NStorage::TBaseState> Confirmed;

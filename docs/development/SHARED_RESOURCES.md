@@ -27,7 +27,7 @@ through slices and Arrow C Data exports, including after filtering.
 Closing a database cannot refund an allocation still owned by its caller.
 
 For upstream allocations without allocator hooks, the fixed append profile uses
-conservative working reservations: 256 MiB writer data, 768 MiB metadata work,
+conservative working reservations: 256 MiB writer data, at least 768 MiB metadata work,
 64 MiB catalog/coordinator state per engine, and 768 MiB protected recovery per
 engine for limits up to eight collections. Each slot above eight adds 1 MiB
 catalog/descriptor metadata, 1 MiB protected recovery and 4 KiB ordinary control,
@@ -54,7 +54,7 @@ Scan reservations have separate lifetimes:
 
 | Reservation | Release |
 | --- | --- |
-| 768 MiB metadata planning | End of indexed planning; uncached plans retain it until cursor destruction. Verified membership retains its existing generation charge. |
+| Metadata planning: 768 MiB default; larger root profiles scale to 48 times the root byte limit | End of indexed planning; uncached plans retain it until cursor destruction. Verified membership retains its existing generation charge. |
 | 16 MiB cursor metadata, 1 MiB selection data, 16 KiB ordinary control | Cursor destruction; returned schemas/buffers, including `ScanInfo::output_schema`, also retain the shared cursor metadata envelope. |
 | 256 MiB pending manifest metadata | After all descriptors from that manifest have been consumed (including when the last pending file is pruned), or on scan failure/EOS. |
 | 256 MiB footer/decoder metadata | After the active positional file reader (`TScanRandomAccessFile` + Parquet reader) is destroyed. Arrow column/filter allocations are charged directly to the cursor's `ResourcePool` under `ResourceClass::Data` (no whole-file byte copy is buffered). |
@@ -113,7 +113,7 @@ Device reservations serialize free-space observation and admission by `st_dev`.
 Different store/workspace paths on that device cannot spend the same pending
 bytes or inodes. Defaults cap pending reservations at 16 GiB and 65,536 inodes per
 device, leaving 1 GiB and 128 free inodes. Each open engine protects catalog and
-journal growth plus a 256 MiB recovery workspace; a write reserves another
+journal growth plus the configured recovery workspace (256 MiB default); a write reserves another
 256 MiB and 64 inodes. Native recovery creates its bounded SQLite workspace in
 the store root, on the reserved device. The service registry has a page cap and
 its own memory/disk reservation.
@@ -162,3 +162,8 @@ for a new operation, before binding. Its 128 MiB owned-input and 32 MiB descript
 envelopes complement existing writer/metadata budgets and tracked Arrow pools.
 See [the bulk contract](BULK_INGESTION.md). Ordinary attempts retain their smaller
 reservations; uncertain attempts retain the appropriate envelope until recovery.
+
+[Configurable retained history](SCALABLE_HISTORY.md) coordinates operation,
+root/manifest/list/footer and recovery budgets. Public larger root limits also
+reach metadata readers and their temporary memory envelopes; default admission
+units remain compatible.

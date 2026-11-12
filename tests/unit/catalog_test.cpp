@@ -255,6 +255,36 @@ TEST_F(CatalogTest, PermanentBindingConflictFailureCapacityAndFence)
     EXPECT_EQ(test::Present(catalog->FindOperation(collection_id, operation_id)).outcome, failure);
 }
 
+TEST_F(CatalogTest, LargeOperationInventoryReopensAndRejectsLowerLimitsWithoutDroppingBindings)
+{
+    CreateCollection();
+    const auto original = Bind();
+    catalog.reset();
+    Database raw;
+    raw.Open(temporary.path / "catalog.sqlite", SQLITE_OPEN_READWRITE, {});
+    raw.Execute("WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<8192) "
+                "INSERT INTO operations SELECT collection_id,printf('15600000-0000-4000-8000-%012x',n),"
+                "payload_hash,hash_version,state,base_identity,attempt_id,receipt_version,outcome_blob "
+                "FROM operations,numbers");
+    raw.Close();
+    Limits limits;
+    limits.max_operations = 10000;
+    ASSERT_NO_THROW(catalog = DurableSqliteCatalogStore::Open(temporary.path / "catalog.sqlite", info, limits));
+    EXPECT_EQ(catalog->Operations().size(), 8193);
+    EXPECT_EQ(test::Present(catalog->FindOperation(collection_id, operation_id)).binding, original);
+    catalog.reset();
+    limits.max_operations = 8192;
+    try {
+        catalog = DurableSqliteCatalogStore::Open(temporary.path / "catalog.sqlite", info, limits);
+        FAIL() << "insufficient operation budget accepted";
+    } catch (const Failure& error) {
+        EXPECT_EQ(error.detail.code, "CONFIG_TOO_SMALL");
+    }
+    limits.max_operations = 10000;
+    ASSERT_NO_THROW(catalog = DurableSqliteCatalogStore::Open(temporary.path / "catalog.sqlite", info, limits));
+    EXPECT_EQ(catalog->Operations().size(), 8193);
+}
+
 TEST_F(CatalogTest, IncompatibleVersionOrMissingSchemaNeverReinitializes)
 {
     catalog.reset();

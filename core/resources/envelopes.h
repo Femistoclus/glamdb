@@ -26,4 +26,15 @@ inline constexpr uint64_t ExtraCollectionSlots(int64_t limit)
 inline constexpr uint64_t CollectionMetadataBytes = 1ULL << 20;
 inline constexpr uint64_t CollectionRecoveryBytes = 1ULL << 20;
 inline constexpr uint64_t CollectionControlBytes = 4ULL << 10;
+
+// Root parsing/serialization is outside Arrow. Preserve the default envelope
+// and grow it with the admitted root size; reject invalid internal contexts
+// through reservation refusal rather than overflowing the multiplication.
+inline constexpr uint64_t MetadataWorkForRoot(int64_t bytes)
+{
+    if (bytes <= 0 || bytes > (64LL << 20)) {
+        return UINT64_MAX;
+    }
+    return bytes <= (16LL << 20) ? MetadataWorkBytes : static_cast<uint64_t>(bytes) * 48;
+}
 } // namespace glamdb::detail

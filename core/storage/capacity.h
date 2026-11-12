@@ -36,6 +36,7 @@ struct TStorageLimits
     std::uint64_t MinimumFreeBytes = 1ULL << 30;
     std::uint64_t AttemptReserveBytes = 256ULL << 20;
     std::uint64_t JournalReserveBytes = 256ULL << 20;
+    std::uint64_t RecoveryWorkspaceBytes = 256ULL << 20;
 };
 
 struct TUsageChange

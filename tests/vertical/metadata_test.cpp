@@ -8,6 +8,55 @@ namespace {
 
 using namespace glamdb::vertical;
 
+TEST(NativeHistoryLimits, LargerRootBudgetRemainsReadableAcrossAllMetadataApis)
+{
+    test::TempDir temporary;
+    const auto root = temporary.path / "store";
+    Limits limits;
+    limits.history.max_root_file_bytes = 32LL << 20;
+    limits.history.max_commit_bytes = 64LL << 20;
+    auto created = CreateStore({test::store_id, root.string(), "local-delete-extra-v1", limits});
+    ASSERT_TRUE(created) << created.error().message;
+    auto engine = std::move(*created);
+    ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", Schema}).disposition,
+        CommitDisposition::Committed);
+    ASSERT_EQ(engine
+                  ->AppendDurable({test::collection_id,
+                      FirstOperation,
+                      {},
+                      {Batch({{"duplicate", 1, 0.5, true, 123}, {"duplicate", 1, 0.5, true, 123}})}})
+                  .disposition,
+        CommitDisposition::Committed);
+    ASSERT_TRUE(engine->Shutdown(std::chrono::seconds(1)));
+    engine.reset();
+    const auto roots = FilesIn(root / "warehouse" / test::collection_id / "metadata", [](const auto& path) {
+        return path.filename().string().ends_with(".metadata.json");
+    });
+    ASSERT_EQ(roots.size(), 1);
+    // JSON whitespace preserves the exact logical root while crossing the old
+    // reader ceiling, without generating tens of thousands of snapshots.
+    std::ofstream padded(roots[0], std::ios::app | std::ios::binary);
+    padded << std::string(16ULL << 20, ' ');
+    padded.close();
+    ASSERT_FALSE(padded.fail());
+    auto opened = OpenExisting({root.string(), test::store_id, "local-delete-extra-v1", limits});
+    ASSERT_TRUE(opened) << opened.error().message;
+    engine = std::move(*opened);
+    const auto history = engine->ListSnapshots(test::collection_id);
+    ASSERT_TRUE(history) << history.error().message;
+    EXPECT_EQ(history->snapshots.size(), 1);
+    const auto statistics = engine->GetStatistics(test::collection_id);
+    ASSERT_TRUE(statistics) << statistics.error().message;
+    EXPECT_EQ(statistics->rows.value, 2);
+    const auto files = engine->ListFiles(test::collection_id);
+    ASSERT_TRUE(files) << files.error().message;
+    ASSERT_EQ(files->Files.size(), 1);
+    ASSERT_TRUE(engine->GetFileDetails(test::collection_id, files->Files[0].FileID));
+    ASSERT_TRUE(engine->ExplainScan({.collection_id = test::collection_id}));
+    EXPECT_TRUE(engine->GetHealth().write_ready);
+    ASSERT_TRUE(engine->Shutdown(std::chrono::seconds(1)));
+}
+
 class NativeMetadata : public ::testing::Test
 {
 protected:

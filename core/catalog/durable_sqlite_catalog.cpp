@@ -211,8 +211,8 @@ void DurableSqliteCatalogStore::Configure()
             profile.cache_size == -8192 && profile.mmap_size == 0,
         "IO_ERROR",
         "SQLite working connection settings did not take effect");
-    Require(limits_.max_catalog_bytes >= 65536 && limits_.max_catalog_bytes <= 256LL * 1024 * 1024 &&
-            limits_.max_operations > 0 && limits_.max_operations <= 4096 && limits_.max_collections > 0 &&
+    Require(limits_.max_catalog_bytes >= 65536 && limits_.max_catalog_bytes <= (1LL << 40) &&
+            limits_.max_operations > 0 && limits_.max_collections > 0 &&
             limits_.max_collections <= Limits::MaxSupportedCollections,
         "INVALID_ARGUMENT",
         "invalid catalog limits");
@@ -571,19 +571,36 @@ OperationRecord DurableSqliteCatalogStore::ReadOperation(const SqlRow& row)
 
 std::vector<OperationRecord> DurableSqliteCatalogStore::Operations()
 {
+    std::vector<OperationRecord> result;
+    ForEachOperation([&](const auto& record) {
+        result.push_back(record);
+    });
+    return result;
+}
+
+void DurableSqliteCatalogStore::ForEachOperation(const OperationConsumer& consume, std::string_view collection_id)
+{
     std::lock_guard lock(mutex_);
     Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
-    const auto rows = database_.Query(
-        "SELECT " + std::string(operation_columns) + " FROM operations ORDER BY collection_id,operation_id");
-    Require(rows.size() <= static_cast<size_t>(limits_.max_operations),
+    Require(database_.Integer("SELECT COUNT(*) FROM operations") <= limits_.max_operations,
         "CONFIG_TOO_SMALL",
         "operation count exceeds configured capacity");
-    std::vector<OperationRecord> result;
-    result.reserve(rows.size());
-    for (const auto& row : rows) {
-        result.push_back(ReadOperation(row));
+    std::string last_collection;
+    std::string last_operation;
+    while (true) {
+        const auto rows = database_.Query("SELECT " + std::string(operation_columns) +
+                " FROM operations WHERE (collection_id,operation_id)>(?,?) "
+                "AND (?='' OR collection_id=?) ORDER BY collection_id,operation_id LIMIT 256",
+            {last_collection, last_operation, std::string(collection_id), std::string(collection_id)});
+        if (rows.empty()) {
+            break;
+        }
+        for (const auto& row : rows) {
+            consume(ReadOperation(row));
+        }
+        last_collection = Required(rows.back(), 0);
+        last_operation = Required(rows.back(), 1);
     }
-    return result;
 }
 
 std::optional<OperationRecord> DurableSqliteCatalogStore::FindOperation(std::string_view collection_id,
@@ -828,13 +845,13 @@ void DurableSqliteCatalogStore::ValidateInventory()
     for (const auto& collection : collections) {
         (void)Base(collection.collection_id);
     }
-    for (const auto& record : Operations()) {
+    ForEachOperation([&](const auto& record) {
         const auto base = Base(record.binding.collection_id);
         Require(record.binding.base.table_uuid == base.table_uuid && record.binding.base.schema_id == base.schema_id &&
                 record.binding.base.spec_id == base.spec_id,
             "CORRUPTION",
             "operation bound to a different table");
-    }
+    });
 }
 
 void DurableSqliteCatalogStore::DurabilityFence()

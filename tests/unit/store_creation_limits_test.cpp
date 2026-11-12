@@ -52,9 +52,9 @@ TEST_P(StoreCreationLimits, InvalidCatalogLimitsLeaveTheRootReusable)
 
 INSTANTIATE_TEST_SUITE_P(OutOfRangeCatalogLimits,
     StoreCreationLimits,
-    testing::Values(InvalidLimitsCase{"TooManyOperations",
+    testing::Values(InvalidLimitsCase{"NoOperations",
                         [](Limits& limits) {
-                            limits.max_operations = 4097;
+                            limits.max_operations = 0;
                         }},
         InvalidLimitsCase{"TooManyCollections",
             [](Limits& limits) {
@@ -62,7 +62,7 @@ INSTANTIATE_TEST_SUITE_P(OutOfRangeCatalogLimits,
             }},
         InvalidLimitsCase{"CatalogTooLarge",
             [](Limits& limits) {
-                limits.max_catalog_bytes = 512LL * 1024 * 1024;
+                limits.max_catalog_bytes = (1LL << 40) + 1;
             }}),
     [](const testing::TestParamInfo<InvalidLimitsCase>& info) {
         return info.param.name;

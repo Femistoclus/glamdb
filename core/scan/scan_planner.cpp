@@ -164,13 +164,15 @@ std::shared_ptr<const std::vector<std::shared_ptr<const iceberg::DataFile>>> Rea
 
 } // namespace
 
-Result<std::shared_ptr<const iceberg::TableMetadata>>
-ReadScanRoot(const std::shared_ptr<iceberg::FileIO>& io, const BaseIdentity& base, TSnapshotMetadataCache* cache)
+Result<std::shared_ptr<const iceberg::TableMetadata>> ReadScanRoot(const std::shared_ptr<iceberg::FileIO>& io,
+    const BaseIdentity& base,
+    TSnapshotMetadataCache* cache,
+    int64_t root_bytes)
 {
     try {
         Require(io != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
         NGlamDB::NStorage::RegisterStorageFormats();
-        const auto limit = static_cast<int64_t>(NGlamDB::NStorage::TStorageLimits{}.RootBytes);
+        const auto limit = root_bytes;
         if (cache != nullptr) {
             if (!base.metadata_location.ends_with(".metadata.json")) {
                 throw Failure(StorageError(
@@ -214,10 +216,11 @@ ReadScanRoot(const std::shared_ptr<iceberg::FileIO>& io, const BaseIdentity& bas
 Result<TScanManifests> PlanManifests(const std::shared_ptr<iceberg::FileIO>& io,
     const BaseIdentity& base,
     const SnapshotSelector& selector,
-    TSnapshotMetadataCache* cache)
+    TSnapshotMetadataCache* cache,
+    int64_t root_bytes)
 {
     try {
-        const auto root = ReadScanRoot(io, base, cache);
+        const auto root = ReadScanRoot(io, base, cache, root_bytes);
         if (!root) {
             return std::unexpected(root.error());
         }
@@ -353,9 +356,10 @@ Result<std::shared_ptr<const std::vector<std::shared_ptr<const iceberg::DataFile
 Result<TScanPlan> PlanScan(const std::shared_ptr<iceberg::FileIO>& io,
     const BaseIdentity& base,
     const SnapshotSelector& selector,
-    TSnapshotMetadataCache* cache)
+    TSnapshotMetadataCache* cache,
+    int64_t root_bytes)
 {
-    auto manifests = PlanManifests(io, base, selector, cache);
+    auto manifests = PlanManifests(io, base, selector, cache, root_bytes);
     if (!manifests) {
         return std::unexpected(manifests.error());
     }

@@ -1,0 +1,16 @@
+{
+  "max_operations": 20000,
+  "max_catalog_bytes": 536870912,
+  "history": {
+    "max_snapshots": 12000,
+    "max_manifests": 12000,
+    "max_data_files": 16384,
+    "max_root_bytes": 134217728,
+    "max_root_file_bytes": 33554432,
+    "max_manifest_bytes": 536870912,
+    "max_manifest_list_bytes": 4294967296,
+    "max_footer_bytes": 536870912,
+    "max_commit_bytes": 67108864,
+    "max_recovery_workspace_bytes": 536870912
+  }
+}

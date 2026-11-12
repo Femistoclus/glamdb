@@ -130,7 +130,8 @@ resource admission), 4096 permanent operations, 256 MiB of
 catalog pages, 16 pending calls and 128 MiB aggregate owned input. Per append:
 10,000 rows, 16 MiB canonical input, 2 MiB per row, 1 MiB per string and 1024
 bytes per key. Writer wait is at most five seconds; append deadline at most
-60 seconds. Configuration may lower these bounds. See
+60 seconds. Configuration may lower these bounds; explicit operation/catalog and history
+budgets can exceed the development defaults. See
 [collection profiles](COLLECTION_PROFILES.md) for larger-profile reservations
 and validation. These are admission limits,
 not measured simultaneous RSS or full-storage capacity guarantees. All limits,
@@ -372,3 +373,9 @@ reconciliation available, but only reopening can replace that backend instance.
 The [HTTP contract](HTTP_SERVER.md) defines the state table, lifecycle overlays,
 and 200/503 readiness mapping. Every health snapshot remains durability-unqualified;
 backend availability and successful recovery are not qualification evidence.
+
+The [scalable history profile](SCALABLE_HISTORY.md) makes permanent-operation,
+catalog and aggregate retained-storage/recovery budgets configurable. Catalog
+inventory validation and interruption resolution use bounded keyset pages; native
+recovery streams receipts per collection. Healthy original-outcome lookup remains
+an indexed single-record query. Ordinary append and uncertainty contracts are unchanged.

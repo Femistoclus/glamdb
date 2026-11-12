@@ -1411,7 +1411,8 @@
                 "max_pending_calls",
                 "max_owned_input_bytes",
                 "writer_wait_ms",
-                "append_deadline_ms"
+                "append_deadline_ms",
+                "history"
               ]
             }
           ]
@@ -1510,7 +1511,7 @@
         "max_operations": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 4096
+          "maximum": 9223372036854775807
         },
         "max_collections": {
           "type": "integer",
@@ -1520,7 +1521,7 @@
         "max_catalog_bytes": {
           "type": "integer",
           "minimum": 65536,
-          "maximum": 268435456
+          "maximum": 1099511627776
         },
         "max_pending_calls": {
           "type": "integer",
@@ -1541,6 +1542,62 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 60000
+        },
+        "history": {
+          "type": "object",
+          "properties": {
+            "max_snapshots": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1099511627776
+            },
+            "max_manifests": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1099511627776
+            },
+            "max_data_files": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1099511627776
+            },
+            "max_root_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1099511627776
+            },
+            "max_root_file_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 67108864
+            },
+            "max_manifest_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1099511627776
+            },
+            "max_manifest_list_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1099511627776
+            },
+            "max_footer_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1099511627776
+            },
+            "max_commit_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 268435456
+            },
+            "max_recovery_workspace_bytes": {
+              "type": "integer",
+              "minimum": 8192,
+              "maximum": 1099511627776
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

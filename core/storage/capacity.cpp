@@ -28,6 +28,21 @@ std::error_code CheckStorageCapacity(const TStorageUsage& usage, const TStorageL
             return std::make_error_code(std::errc::no_space_on_device);
         }
     }
+    // WITHOUT ROWID visited keys are at most 2 KiB. Budget two 4 KiB
+    // pages per unique key, including B-tree split slack, plus the header.
+    // This conservative envelope is checked before publication as well as
+    // reopen; a state cannot outgrow its configured recovery workspace.
+    auto remaining = limits.RecoveryWorkspaceBytes / 8192;
+    if (remaining == 0) {
+        return std::make_error_code(std::errc::no_space_on_device);
+    }
+    --remaining;
+    for (const auto count : {usage.Snapshots, usage.Manifests, usage.DataFiles}) {
+        if (count > remaining) {
+            return std::make_error_code(std::errc::no_space_on_device);
+        }
+        remaining -= count;
+    }
     return {};
 }
 

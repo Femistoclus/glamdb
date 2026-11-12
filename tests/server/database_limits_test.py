@@ -19,7 +19,12 @@ CLI = sys.argv.pop(1) if len(sys.argv) > 1 and not sys.argv[1].startswith('-') e
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'sdk/python/src'))
 DEFAULTS = {'max_operations': 4096, 'max_collections': 8, 'max_catalog_bytes': 268435456,
             'max_pending_calls': 16, 'max_owned_input_bytes': 134217728,
-            'writer_wait_ms': 5000, 'append_deadline_ms': 60000}
+            'writer_wait_ms': 5000, 'append_deadline_ms': 60000,
+            'history': {'max_snapshots': 4096, 'max_manifests': 4096, 'max_data_files': 16384,
+                        'max_root_bytes': 64 << 20, 'max_root_file_bytes': 16 << 20,
+                        'max_manifest_bytes': 256 << 20, 'max_manifest_list_bytes': 512 << 20,
+                        'max_footer_bytes': 256 << 20, 'max_commit_bytes': 32 << 20,
+                        'max_recovery_workspace_bytes': 256 << 20}}
 
 
 class DatabaseLimits(unittest.TestCase):
@@ -99,13 +104,56 @@ class DatabaseLimits(unittest.TestCase):
         self.assertEqual(self.api(base)['limits'], limits)
         self.assertEqual(self.api(base)['state'], 'open')
 
+    def test_opt_in_operation_budget_survives_restart(self):
+        database = self.api('/databases', {'name': 'large-history', 'limits': {
+            'max_operations': 16384, 'history': {'max_snapshots': 12000,
+                'max_manifests': 12000, 'max_manifest_list_bytes': 4 << 30}}})
+        base = '/databases/' + database['database_id']
+        self.assertEqual(database['limits']['max_operations'], 16384)
+        first = self.collection(base, 'events')
+        operation = str(uuid.uuid4())
+        path = base + '/collections/' + first['collection_id'] + '/append'
+        payload = {'operation_id': operation, 'rows': [{'key': 'duplicate'}, {'key': 'duplicate'}]}
+        receipt = self.api(path, payload)
+        self.stop()
+        self.start()
+        self.assertEqual(self.api(base)['limits']['max_operations'], 16384)
+        self.assertEqual(self.api(base)['limits']['history']['max_snapshots'], 12000)
+        self.assertEqual(self.api(base)['limits']['history']['max_manifest_list_bytes'], 4 << 30)
+        self.assertEqual(self.api(path, payload), receipt)
+
+    def test_history_capacity_is_aggregate_and_does_not_bind_refused_append(self):
+        database = self.api('/databases', {'name': 'history-boundary', 'limits': {
+            'max_operations': 16384, 'history': {'max_snapshots': 1}}})
+        base = '/databases/' + database['database_id']
+        first = self.collection(base, 'first')
+        second = self.collection(base, 'second')
+        path = base + '/collections/' + first['collection_id'] + '/append'
+        payload = {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'one'}]}
+        original = self.api(path, payload)
+        other = base + '/collections/' + second['collection_id'] + '/append'
+        refused = {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'two'}]}
+        self.api(other, refused, 507)
+        self.api(base + '/close', {})
+        self.api(base + '/open', {'limits': {'history': {'max_snapshots': 2}}})
+        self.api(other, refused)
+        self.assertEqual(self.api(path, payload), original)
+        self.stop()
+        self.start()
+        self.assertEqual(self.api(base)['limits']['history']['max_snapshots'], 2)
+
     def test_invalid_limits_do_not_reserve_names_or_change_open_database(self):
         bad = [None, [], {'unknown': 1}, {'max_operations': True}, {'max_operations': 1.0},
-               {'max_operations': '1'}, {'max_operations': 0}, {'max_operations': 4097},
+               {'max_operations': '1'}, {'max_operations': 0},
                {'max_collections': 65}, {'max_catalog_bytes': 65535},
                {'max_pending_calls': 17}, {'max_owned_input_bytes': 0},
                {'writer_wait_ms': -1}, {'writer_wait_ms': 5001},
                {'append_deadline_ms': 0}, {'append_deadline_ms': 60001},
+               {'history': None}, {'history': []}, {'history': {'unknown': 1}},
+               {'history': {'max_snapshots': True}}, {'history': {'max_snapshots': 0}},
+               {'history': {'max_recovery_workspace_bytes': 8191}},
+               {'history': {'max_root_file_bytes': (64 << 20) + 1}},
+               {'history': {'max_manifest_list_bytes': 18446744073709551615}},
                {'max_operations': 18446744073709551615}]
         for limits in bad:
             with self.subTest(limits=limits):
@@ -286,6 +334,21 @@ class DatabaseLimits(unittest.TestCase):
         self.api(base + '/close', {})
         self.api(base + '/open', {})
         self.api(path, status=400)
+
+    def test_legacy_registry_without_history_budget_preserves_original_receipts(self):
+        database = self.api('/databases', {'name': 'legacy'})
+        base = '/databases/' + database['database_id']
+        collection = self.collection(base, 'events')
+        path = base + '/collections/' + collection['collection_id'] + '/append'
+        payload = {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'retained'}]}
+        receipt = self.api(path, payload)
+        self.stop()
+        legacy = {key: value for key, value in DEFAULTS.items() if key != 'history'}
+        with sqlite3.connect(Path(self.directory) / 'registry.sqlite') as registry:
+            registry.execute('UPDATE databases SET limits=?', (json.dumps(legacy),))
+        self.start()
+        self.assertEqual(self.api(base)['limits'], DEFAULTS)
+        self.assertEqual(self.api(path, payload), receipt)
 
 
 if __name__ == '__main__':

@@ -189,14 +189,17 @@ for the process parent, protected completion/recovery and atomic device admissio
 
 The synchronous append profile caps ordinary append input at 16 MiB of canonical
 decoded data and 10,000 rows, with one new Parquet file and one snapshot. Current
-store-wide checks include 4,096 retained snapshots and 4,096 operation
-bindings/outcomes, including failed operations. These development limits do not
-qualify combined memory usage or storage capacity. Canonical bytes, owned-input
+default store-wide checks include 4,096 retained snapshots and 4,096 operation
+bindings/outcomes, including failed operations. The opt-in [retained-history
+profile](development/SCALABLE_HISTORY.md) exposes coordinated count, byte and
+recovery budgets and bounded catalog iteration beyond those defaults. These
+development limits do not qualify combined memory usage or storage capacity. Canonical bytes, owned-input
 estimates, physical Arrow/writer allocations and HTTP payload bytes have separate
 checks; no one of them bounds process memory across stores.
 
 Small appends therefore do not imply large-scale ingestion: 1 TiB at 16 MiB per
 append needs at least 65,536 operations, exceeding the candidate history cap.
+A sufficient explicit history profile is required beyond the default horizon.
 The bounded bulk append extension amortizes publication over multiple files;
 its finite development profile and measured limits are documented separately.
 Larger bulk/compaction qualification remains future work. Initial history

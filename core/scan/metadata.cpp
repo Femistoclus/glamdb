@@ -37,7 +37,8 @@ void Add(int64_t& total, int64_t value)
 
 CollectionStatistics ReadStatistics(const TScanContext& context, const SnapshotSelector& selector)
 {
-    const auto plan = Take(PlanManifests(context.FileIO, context.Base, selector, context.Cache.get()));
+    const auto plan =
+        Take(PlanManifests(context.FileIO, context.Base, selector, context.Cache.get(), context.RootBytes));
     int64_t rows = 0;
     int64_t files = 0;
     int64_t bytes = 0;
@@ -58,7 +59,7 @@ CollectionStatistics ReadStatistics(const TScanContext& context, const SnapshotS
 
 SnapshotHistory ReadHistory(const TScanContext& context, std::span<const AppendResult> receipts)
 {
-    const auto root = Take(ReadScanRoot(context.FileIO, context.Base, context.Cache.get()));
+    const auto root = Take(ReadScanRoot(context.FileIO, context.Base, context.Cache.get(), context.RootBytes));
     std::map<int64_t, const AppendResult*> bySnapshot;
     for (const auto& receipt : receipts) {
         if (receipt.collection_id == context.Collection.collection_id) {

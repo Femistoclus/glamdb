@@ -181,7 +181,8 @@ This verification does not checksum every byte of historical data pages.
 
 Recovery checks snapshot transitions with a two-snapshot window and retains the
 loaded root for the final consistency check. Previously seen manifest-list and
-data paths use a private temporary SQLite database capped at 256 MiB, with an
+data paths use a private temporary SQLite database capped by the selected
+recovery workspace budget (256 MiB by default), with an
 eight-page cache. It does not modify the catalog or warehouse; workspace I/O or
 capacity failures fail recovery. SQLite must use disk-backed temporary databases
 and its temporary directory must have sufficient space on local disk. The
