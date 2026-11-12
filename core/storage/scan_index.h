@@ -215,6 +215,10 @@ public:
     }
     // Strong exception guarantee.
     void Insert(std::string path);
+    // Removes one occurrence of `path`; false when absent. Copies one
+    // root-to-leaf path and at most one sibling per level (an underfull node
+    // merges with a neighbour), so O(log n). Strong exception guarantee.
+    bool Erase(std::string_view path);
     bool Contains(std::string_view path) const;
     std::size_t size() const noexcept
     {

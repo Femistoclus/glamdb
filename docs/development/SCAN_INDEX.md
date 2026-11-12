@@ -68,7 +68,10 @@ only its new descriptors, one partial leaf of at most 32 handles and, once per
 32 files, one root-to-leaf path. Only the sorted boundary table, O(retained
 snapshots), is copied per publication. Retained manifest paths (a persistent
 B+-tree) and expired snapshot IDs (one immutable vector) are shared the same
-way. Nothing reachable from a published generation is modified, so cursors
+way. A snapshot archive cut drops the archived boundaries from a copy of the
+boundary table (bounded by the hot window) and erases each retired manifest
+path in O(log paths), copying one root-to-leaf path and at most one merged
+sibling per level; no descriptor or path string is copied. Nothing reachable from a published generation is modified, so cursors
 pinning previous generations keep exactly their own files while later ones
 share nodes with them. The backend's shared metadata reservation stays with the
 parsed root and its index, including generations pinned by cursors; each

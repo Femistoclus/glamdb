@@ -204,18 +204,25 @@ void ApplyArchiveCut(TBaseState& state, const TArchiveCut& cut)
         return;
     }
     if (state.ScanIndex) {
+        // Copying the membership shares every file descriptor; only the
+        // boundary table (one entry per root snapshot) is copied.
+        std::vector<std::int64_t> archived;
+        archived.reserve(cut.Snapshots.size());
+        for (const auto& snapshot : cut.Snapshots) {
+            archived.push_back(snapshot.Snapshot->snapshot_id);
+        }
+        std::ranges::sort(archived);
         auto index = std::make_shared<TScanMembership>(*state.ScanIndex);
         std::erase_if(index->Snapshots, [&](const TSnapshotBoundary& boundary) {
-            return std::ranges::any_of(cut.Snapshots, [&](const TArchivedSnapshot& archived) {
-                return archived.Snapshot->snapshot_id == boundary.SnapshotID;
-            });
+            return std::ranges::binary_search(archived, boundary.SnapshotID);
         });
         state.ScanIndex = std::move(index);
     }
-    std::vector<std::string> retained;
-    retained.reserve(state.RetainedManifestPaths.size());
-    std::ranges::set_difference(state.RetainedManifestPaths, cut.RetiredPaths, std::back_inserter(retained));
-    state.RetainedManifestPaths = std::move(retained);
+    // O(cut x log retained); like the former sorted-vector difference, one
+    // occurrence per retired path and absent paths are ignored.
+    for (const auto& path : cut.RetiredPaths) {
+        state.RetainedManifestPaths.Erase(path);
+    }
 }
 
 }

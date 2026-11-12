@@ -5,9 +5,11 @@
 
 #include "core/storage/base_state.h"
 #include "core/storage/scan_index.h"
+#include "core/storage/snapshot_archive.h"
 
 #include <gtest/gtest.h>
 #include <iceberg/manifest/manifest_entry.h>
+#include <iceberg/snapshot.h>
 
 #include <algorithm>
 #include <array>
@@ -214,6 +216,28 @@ TGeneration Expire(const TGeneration& base, std::span<const std::int64_t> prefix
     return next;
 }
 
+// The archive cut through the production ApplyArchiveCut: archived
+// boundaries leave the index and retired manifests leave the path set.
+TGeneration Archive(const TGeneration& base, std::span<const std::int64_t> prefix, std::vector<std::string> retired)
+{
+    TBaseState state;
+    state.ScanIndex = base.Index;
+    state.ExpiredSnapshotIDs = base.Expired;
+    state.RetainedManifestPaths = base.Manifests;
+    TArchiveCut cut;
+    for (const auto id : prefix) {
+        auto snapshot = std::make_shared<iceberg::Snapshot>();
+        snapshot->snapshot_id = id;
+        TArchivedSnapshot archived;
+        archived.Snapshot = std::move(snapshot);
+        cut.Snapshots.push_back(std::move(archived));
+    }
+    std::ranges::sort(retired);
+    cut.RetiredPaths = std::move(retired);
+    ApplyArchiveCut(state, cut);
+    return {state.ScanIndex, state.ExpiredSnapshotIDs, state.RetainedManifestPaths};
+}
+
 std::uint64_t Bytes(const TGeneration& generation)
 {
     return ScanIndexBytes(*generation.Index, generation.Expired, generation.Manifests);
@@ -281,6 +305,22 @@ LegacyExpire(const TLegacyGeneration& base, std::span<const std::int64_t> prefix
         });
     }
     std::ranges::sort(next.Expired);
+    next.Index = std::move(index);
+    return next;
+}
+
+// The former archive cut: copy the index, erase boundaries, and take the
+// sorted-vector difference of the retained paths.
+TLegacyGeneration
+LegacyArchive(const TLegacyGeneration& base, std::span<const std::int64_t> prefix, std::vector<std::string> retired)
+{
+    TLegacyGeneration next{nullptr, base.Expired, {}};
+    auto index = std::make_shared<TLegacyMembership>(*base.Index);
+    std::erase_if(index->Snapshots, [&](const TSnapshotBoundary& boundary) {
+        return std::ranges::find(prefix, boundary.SnapshotID) != prefix.end();
+    });
+    std::ranges::sort(retired);
+    std::ranges::set_difference(base.Manifests, retired, std::back_inserter(next.Manifests));
     next.Index = std::move(index);
     return next;
 }
@@ -467,6 +507,33 @@ TEST(ScanIndexSharingTest, MatchesTheCopyingReferenceForRandomizedGenerations)
                 file.RemovedSequence = sequence;
             });
             chain.Current.Index = std::move(shared);
+        } else if (action < 85 && chain.Chronological.size() > 1) {
+            // Archive cut: the oldest boundaries leave the index and a few
+            // distinct paths retire (one occurrence each; absent ones ignored).
+            const auto count = 1 + fixture.Random() % std::min<std::size_t>(chain.Chronological.size() - 1, 64);
+            std::vector<std::int64_t> prefix(chain.Chronological.begin(),
+                chain.Chronological.begin() + static_cast<std::ptrdiff_t>(count));
+            chain.Chronological.erase(chain.Chronological.begin(),
+                chain.Chronological.begin() + static_cast<std::ptrdiff_t>(count));
+            std::set<std::string> retired;
+            for (const auto& path : chain.Reference.Manifests) {
+                if (fixture.Random() % 4 == 0) {
+                    retired.insert(path);
+                }
+            }
+            retired.insert(ManifestPath(fixture.Serial++));
+            const auto basePaths = chain.Current.Manifests.Paths();
+            const auto baseBytes = Bytes(chain.Current);
+            const auto base = chain.Current;
+            chain.Reference =
+                LegacyArchive(chain.Reference, prefix, std::vector<std::string>(retired.begin(), retired.end()));
+            chain.Current = Archive(chain.Current, prefix, std::vector<std::string>(retired.begin(), retired.end()));
+            // The cut never changes the generation it started from.
+            ASSERT_EQ(base.Manifests.Paths(), basePaths);
+            ASSERT_EQ(Bytes(base), baseBytes);
+            if (!chain.Current.Index->Files.empty()) {
+                ASSERT_EQ(&chain.Current.Index->Files[0], &base.Index->Files[0]);
+            }
         } else if (chain.Chronological.size() > 1) {
             // Expiration drops the oldest boundaries and replaces the retained paths.
             const auto count = 1 + fixture.Random() % (chain.Chronological.size() - 1);
@@ -565,6 +632,101 @@ TAppendCost MeasureAppend(std::size_t history)
         cost.LegacyAllocations = count.Stop();
     }
     return cost;
+}
+
+TEST(ScanIndexSharingTest, ErasedPathsMatchASortedMultisetAndLeaveEveryCopyUnchanged)
+{
+    std::mt19937_64 random(0xE7A5E);
+    TManifestPathSet paths;
+    std::multiset<std::string> reference;
+    std::vector<std::pair<TManifestPathSet, std::vector<std::string>>> pinned;
+    const auto check = [](const TManifestPathSet& actual, const std::multiset<std::string>& expected) {
+        const auto values = actual.Paths();
+        ASSERT_EQ(values.size(), expected.size());
+        ASSERT_TRUE(std::ranges::equal(values, expected));
+        std::uint64_t bytes = 0;
+        actual.ForEach([&](const std::string& path) {
+            bytes += path.capacity() + 1;
+        });
+        ASSERT_EQ(actual.StringBytes(), bytes);
+    };
+    for (int step = 0; step < 20000; ++step) {
+        const auto action = random() % 100;
+        // Growth phases alternate with shrink phases so nodes underflow and merge.
+        const bool grow = (step / 2500) % 2 == 0;
+        if (action < (grow ? 70U : 30U)) {
+            auto path = ManifestPath(random() % 4000);
+            reference.insert(path);
+            paths.Insert(std::move(path));
+        } else if (action < 97) {
+            const auto path = ManifestPath(random() % 4000);
+            const auto found = reference.find(path);
+            ASSERT_EQ(paths.Erase(path), found != reference.end()) << step;
+            if (found != reference.end()) {
+                reference.erase(found);
+            }
+            ASSERT_FALSE(paths.Erase(path + "x"));
+        } else if (action < 98 && pinned.size() < 32) {
+            pinned.emplace_back(paths, std::vector<std::string>(reference.begin(), reference.end()));
+        } else if (action < 99 && reference.size() > 2000) {
+            // Bulk build (recovery and expiration) followed by more erasures.
+            paths = std::vector<std::string>(reference.begin(), reference.end());
+        }
+        if (step % 97 == 0) {
+            check(paths, reference);
+            if (HasFatalFailure()) {
+                FAIL() << "step " << step;
+            }
+            for (int probe = 0; probe < 8 && !reference.empty(); ++probe) {
+                auto it = reference.begin();
+                std::advance(it, static_cast<std::ptrdiff_t>(random() % reference.size()));
+                ASSERT_TRUE(paths.Contains(*it));
+            }
+        }
+    }
+    check(paths, reference);
+    // Erasing everything leaves an empty set.
+    for (const auto& path : std::vector<std::string>(reference.begin(), reference.end())) {
+        ASSERT_TRUE(paths.Erase(path));
+    }
+    EXPECT_TRUE(paths.empty());
+    EXPECT_EQ(paths.StringBytes(), 0U);
+    EXPECT_FALSE(paths.Erase("a"));
+    ASSERT_FALSE(pinned.empty());
+    for (const auto& [copy, expected] : pinned) {
+        ASSERT_TRUE(std::ranges::equal(copy.Paths(), expected));
+    }
+}
+
+TEST(ScanIndexSharingTest, EraseAllocatesTheSameAtTwoHistorySizes)
+{
+    // One erase copies a root-to-leaf path plus at most one merged sibling per
+    // level; the count depends on the depth, never on the number of paths.
+    const auto measure = [](std::size_t history) {
+        TManifestPathSet paths;
+        for (std::size_t path = 0; path < history; ++path) {
+            paths.Insert(ManifestPath(path * 2));
+        }
+        std::uint64_t worst = 0;
+        for (std::size_t probe = 0; probe < 64; ++probe) {
+            auto copy = paths;
+            const auto victim = ManifestPath((probe * 7919) % history * 2);
+            TAllocationCount count;
+            EXPECT_TRUE(copy.Erase(victim));
+            worst = std::max(worst, count.Stop());
+            EXPECT_EQ(copy.size(), history - 1);
+            EXPECT_EQ(paths.size(), history);
+            EXPECT_TRUE(paths.Contains(victim));
+        }
+        return worst;
+    };
+    const auto small = measure(1000);
+    const auto large = measure(30000);
+    std::cout << std::format("erase allocations (worst of 64): 1000 paths {}, 30000 paths {}\n", small, large);
+    // 1,000 paths: 3 levels; 30,000 paths: 4 levels. Per level two vectors and
+    // one node, and at most one merge (two vectors, two halves).
+    EXPECT_LE(small, 3U * 11);
+    EXPECT_LE(large, 4U * 11);
 }
 
 TEST(ScanIndexSharingTest, AppendCopiesNoDescriptorAndAllocatesTheSameAtTwoHistorySizes)

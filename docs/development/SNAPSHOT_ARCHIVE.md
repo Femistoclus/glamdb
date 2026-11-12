@@ -53,7 +53,9 @@ oldest snapshot that stays, hashes the moved lists, requires each list's file
 counts to equal the snapshot's verified membership boundary, and computes the
 manifests each moved snapshot references last. Manifests are referenced by a
 contiguous snapshot range in the verified append profile, so these lists are
-enough. The root keeps valid Iceberg v2: it lists the hot snapshots, and the
+enough. The verified candidate then drops the moved boundaries from its
+membership and erases the retired manifests from its retained path set without
+copying the shared file index (see [the scan index](SCAN_INDEX.md)). The root keeps valid Iceberg v2: it lists the hot snapshots, and the
 oldest one's parent is archived.
 
 ## Catalog format

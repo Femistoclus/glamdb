@@ -279,10 +279,10 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
                 candidate.RetainedManifestPaths = std::move(retirement.RetainedManifests);
             }
         }
-        for (const auto& expired : Context_.ExpiredArchive) {
-            candidate.ExpiredSnapshotIDs.push_back(expired.SnapshotID);
-        }
         std::vector<std::int64_t> expiredIDs(candidate.ExpiredSnapshotIDs.begin(), candidate.ExpiredSnapshotIDs.end());
+        for (const auto& expired : Context_.ExpiredArchive) {
+            expiredIDs.push_back(expired.SnapshotID);
+        }
         for (std::size_t i = 0; i < Context_.ExpirationPrefix; ++i) {
             const auto& expired = Context_.Base->Metadata->snapshots[i];
             expiredIDs.push_back(expired->snapshot_id);

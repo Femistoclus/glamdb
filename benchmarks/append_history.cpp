@@ -94,6 +94,11 @@ public:
         return status;
     }
 
+    std::vector<ArchivedSnapshotRecord> Archived() const override
+    {
+        return Inner_->Archived();
+    }
+
 private:
     const std::unique_ptr<StagedAppend> Inner_;
     const std::shared_ptr<TGuardTimes> Times_;
@@ -149,9 +154,15 @@ public:
     Result<std::unique_ptr<StagedExpiration>> PrepareExpiration(const StoreInfo& store,
         const CollectionInfo& collection,
         const BaseIdentity& base,
-        const std::optional<SnapshotRetentionPolicy>& policy) override
+        const std::optional<SnapshotRetentionPolicy>& policy,
+        std::span<const ArchivedSnapshotRecord> archived) override
     {
-        return Inner_->PrepareExpiration(store, collection, base, policy);
+        return Inner_->PrepareExpiration(store, collection, base, policy, archived);
+    }
+    Result<std::unique_ptr<StagedExpiration>>
+    PrepareArchive(const StoreInfo& store, const CollectionInfo& collection, const BaseIdentity& base) override
+    {
+        return Inner_->PrepareArchive(store, collection, base);
     }
     Status RemoveExpiredMetadata(std::string_view collection, std::string_view path) override
     {

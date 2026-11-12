@@ -6,6 +6,7 @@
 #include "storage/resources.h"
 #include "tests/support/checked.h"
 #include "tests/support/journal_fault_vfs.h"
+#include "tests/support/sql_trace.h"
 #include "tests/vertical/vertical_support.h"
 
 #include <array>
@@ -1124,13 +1125,22 @@ struct TWindowCost
     uint64_t FullscanSteps = 0;
     uint64_t VmSteps = 0;
     uint64_t RootParses = 0;
+    // From the statement trace (E1): store-wide operation counts, statements
+    // that walk all operations of the store, and pager page reads.
+    int64_t OperationCounts = 0;
+    int64_t StoreOperationPages = 0;
+    int64_t PageReads = 0;
     double MeanMs = 0;
 };
 
 // Appends until `history` committed operations, then measures `window`
 // appends: one complete archive cycle when window == hot + slack + 1.
-TWindowCost
-MeasureWindow(Engine& engine, const std::filesystem::path& root, int64_t& next, int64_t history, int64_t window)
+TWindowCost MeasureWindow(Engine& engine,
+    const std::filesystem::path& root,
+    int64_t& next,
+    int64_t history,
+    int64_t window,
+    test::SqlTrace* trace = nullptr)
 {
     const auto batch = Batch(RowsFor(0, 3));
     const auto append = [&] {
@@ -1139,6 +1149,9 @@ MeasureWindow(Engine& engine, const std::filesystem::path& root, int64_t& next, 
     };
     while (next < history) {
         append();
+    }
+    if (trace) {
+        (void)trace->Take();
     }
     const auto work = detail::ReadCatalogWork();
     const auto parses = NGlamDB::NStorage::TableMetadataParses();
@@ -1159,9 +1172,16 @@ MeasureWindow(Engine& engine, const std::filesystem::path& root, int64_t& next, 
         .VmSteps = after.vm_steps - work.vm_steps,
         .RootParses = NGlamDB::NStorage::TableMetadataParses() - parses,
         .MeanMs = elapsed / static_cast<double>(window)};
+    if (trace) {
+        const auto statements = trace->Take();
+        cost.OperationCounts = test::CountContaining(statements, "COUNT(*) FROM operations");
+        cost.StoreOperationPages = test::CountContaining(statements, "(collection_id,operation_id)>(?,?)");
+        cost.PageReads = test::Sum(statements).page_reads;
+    }
     std::cout << std::format("archive_cost history={} window={} root_bytes={} root_snapshots={} archived={} "
                              "rows_changed={} rows_returned={} statements={} fullscan_steps={} vm_steps={} "
-                             "root_parses={} mean_append_ms={:.2f}\n",
+                             "root_parses={} operation_counts={} store_operation_pages={} page_reads={} "
+                             "mean_append_ms={:.2f}\n",
         history,
         window,
         cost.RootBytes,
@@ -1173,6 +1193,9 @@ MeasureWindow(Engine& engine, const std::filesystem::path& root, int64_t& next, 
         cost.FullscanSteps,
         cost.VmSteps,
         cost.RootParses,
+        cost.OperationCounts,
+        cost.StoreOperationPages,
+        cost.PageReads,
         cost.MeanMs);
     return cost;
 }
@@ -1208,6 +1231,8 @@ TEST(SnapshotArchiveCost, RootAndCatalogWorkPerAppendDoNotDependOnArchivedHistor
     const int64_t window = static_cast<int64_t>(NGlamDB::NStorage::ArchiveSlack(hot)) + 1;
     test::TempDir directory;
     const auto root = directory.path / "store";
+    // Traces every statement of the store's catalog connection.
+    test::SqlTrace trace;
     auto created = CreateStore({test::store_id, root.string(), "local-delete-extra-v1", CostLimits()});
     ASSERT_TRUE(created) << created.error().message;
     auto engine = std::move(*created);
@@ -1218,9 +1243,15 @@ TEST(SnapshotArchiveCost, RootAndCatalogWorkPerAppendDoNotDependOnArchivedHistor
     std::vector<TWindowCost> costs;
     for (const auto history : CostHistories()) {
         ASSERT_EQ(history % window, 0) << "histories must align with the archive cycle";
-        costs.push_back(MeasureWindow(*engine, root, next, history, window));
+        costs.push_back(MeasureWindow(*engine, root, next, history, window, &trace));
     }
     for (const auto& cost : costs) {
+        // E1 on the archiving path: no store-wide operation count or walk,
+        // no full-table scan step, and page reads differ only by B-tree depth.
+        EXPECT_EQ(cost.OperationCounts, 0);
+        EXPECT_EQ(cost.StoreOperationPages, 0);
+        EXPECT_EQ(cost.FullscanSteps, 0U);
+        EXPECT_LE(cost.PageReads, costs.front().PageReads + 4 * window);
         EXPECT_EQ(cost.RootSnapshots, costs.front().RootSnapshots);
         EXPECT_LE(cost.RootSnapshots, hot + static_cast<int64_t>(NGlamDB::NStorage::ArchiveSlack(hot)));
         // Random snapshot IDs and sequence digits change the root by a few bytes.

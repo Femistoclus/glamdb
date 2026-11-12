@@ -374,6 +374,83 @@ TPathInsert InsertPath(const TManifestPathSet::TNode& node, const TPath& path)
     return SplitPathNode(std::move(paths), std::move(children));
 }
 
+// A non-root node with fewer entries merges with a neighbour (and splits
+// again when the union exceeds MaxPaths), so the depth stays logarithmic.
+constexpr std::size_t MinPaths = MaxPaths / 4;
+
+struct TPathErase
+{
+    bool Found = false;
+    // Null when the subtree became empty.
+    TPathNode Node;
+    std::uint64_t Bytes = 0;
+};
+
+TPathErase ErasePath(const TManifestPathSet::TNode& node, std::string_view path)
+{
+    if (node.Children.empty()) {
+        const auto position = std::lower_bound(node.Paths.begin(), node.Paths.end(), path, TPathLess{});
+        if (position == node.Paths.end() || **position != path) {
+            return {};
+        }
+        TPathErase result{.Found = true, .Node = nullptr, .Bytes = (*position)->capacity() + 1};
+        if (node.Paths.size() > 1) {
+            std::vector<TPath> paths;
+            paths.reserve(node.Paths.size() - 1);
+            paths.insert(paths.end(), node.Paths.begin(), position);
+            paths.insert(paths.end(), position + 1, node.Paths.end());
+            result.Node = MakePathNode(std::move(paths), {});
+        }
+        return result;
+    }
+    // Every entry of an earlier child is <= this child's first path < `path`
+    // unless they are equal, so the last child starting at or before `path`
+    // holds an occurrence if any exists.
+    const auto position = std::upper_bound(node.Paths.begin(), node.Paths.end(), path, TPathLess{});
+    if (position == node.Paths.begin()) {
+        return {};
+    }
+    const auto child = static_cast<std::size_t>(position - node.Paths.begin()) - 1;
+    auto erased = ErasePath(*node.Children[child], path);
+    if (!erased.Found) {
+        return {};
+    }
+    auto paths = CopyWithRoom(node.Paths, 0);
+    auto children = CopyWithRoom(node.Children, 0);
+    const auto at = static_cast<std::ptrdiff_t>(child);
+    if (!erased.Node) {
+        paths.erase(paths.begin() + at);
+        children.erase(children.begin() + at);
+    } else if (erased.Node->Paths.size() < MinPaths && children.size() > 1) {
+        // Merge with the right neighbour (the left one for the last child).
+        const auto left = child + 1 < children.size() ? child : child - 1;
+        const auto& first = left == child ? erased.Node : children[left];
+        const auto& second = left == child ? children[child + 1] : erased.Node;
+        auto mergedPaths = CopyWithRoom(first->Paths, second->Paths.size());
+        mergedPaths.insert(mergedPaths.end(), second->Paths.begin(), second->Paths.end());
+        auto mergedChildren = CopyWithRoom(first->Children, second->Children.size());
+        mergedChildren.insert(mergedChildren.end(), second->Children.begin(), second->Children.end());
+        auto merged = SplitPathNode(std::move(mergedPaths), std::move(mergedChildren));
+        const auto begin = static_cast<std::ptrdiff_t>(left);
+        paths[left] = merged.Left->Paths.front();
+        children[left] = std::move(merged.Left);
+        if (merged.Right) {
+            paths[left + 1] = merged.Right->Paths.front();
+            children[left + 1] = std::move(merged.Right);
+        } else {
+            paths.erase(paths.begin() + begin + 1);
+            children.erase(children.begin() + begin + 1);
+        }
+    } else {
+        paths[child] = erased.Node->Paths.front();
+        children[child] = std::move(erased.Node);
+    }
+    if (!children.empty()) {
+        erased.Node = MakePathNode(std::move(paths), std::move(children));
+    }
+    return erased;
+}
+
 void VisitPaths(const TManifestPathSet::TNode& node, const std::function<void(const std::string&)>& visit)
 {
     if (node.Children.empty()) {
@@ -444,6 +521,25 @@ void TManifestPathSet::Insert(std::string path)
     Root_ = std::move(root);
     ++Size_;
     StringBytes_ = bytes;
+}
+
+bool TManifestPathSet::Erase(std::string_view path)
+{
+    if (!Root_) {
+        return false;
+    }
+    auto erased = ErasePath(*Root_, path);
+    if (!erased.Found) {
+        return false;
+    }
+    auto root = std::move(erased.Node);
+    while (root && root->Children.size() == 1) {
+        root = root->Children.front();
+    }
+    Root_ = std::move(root);
+    --Size_;
+    StringBytes_ -= erased.Bytes;
+    return true;
 }
 
 bool TManifestPathSet::Contains(std::string_view path) const
