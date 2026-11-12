@@ -163,11 +163,13 @@ void AddWorkloadCommands(CLI::App& app, std::optional<int>& exitCode)
         Value(*command, *args, "--master-host", "Locust master hostname (default 127.0.0.1)");
         Value(*command, *args, "--master-port", "Locust control port (default 5557)");
         Value(*command, *args, "--expect-workers", "Workers required before starting (default 1)");
+        Value(*command, *args, "--processes", "Local worker processes behind one master and merged report");
         if (std::string_view(mode) == "write") {
             Value(*command, *args, "--dataset", "Generated dataset directory", true);
         } else {
             Value(*command, *args, "--query", "SDK scan parameters as JSON", true);
             Value(*command, *args, "--format", "json or arrow (default json)");
+            Value(*command, *args, "--consume", "rows (decoded Python rows) or batches (Arrow only; default rows)");
         }
     }
 }

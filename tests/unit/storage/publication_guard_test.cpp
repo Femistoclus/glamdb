@@ -547,6 +547,48 @@ TEST_F(TPublicationGuardTest, StagedRootRequiresTheDurableBytesAndRoundTrips)
     }
 }
 
+TEST_F(TPublicationGuardTest, StagedRootVerificationComparesSnapshotSummaryAndManifestList)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto empty = create.GetCandidate();
+    // The pinned Iceberg snapshot equality ignores the summary and the
+    // manifest list, so the durable bytes stay exact and only the staged
+    // metadata differs in one of those fields.
+    enum class EField : std::uint8_t { None, Summary, ManifestList };
+    const auto stage = [&](EField field, bool verify) {
+        return [&, field, verify](TPublicationContext* context, TPointerChange* change) {
+            auto bytes = IO_->ReadFile(change->NewLocation, std::nullopt);
+            ASSERT_TRUE(bytes) << bytes.error().message;
+            auto parsed = ParseTableMetadata(*bytes);
+            ASSERT_TRUE(parsed) << parsed.error().message;
+            ASSERT_FALSE((*parsed)->snapshots.empty());
+            if (field != EField::None) {
+                auto snapshot = std::make_shared<iceberg::Snapshot>(*(*parsed)->snapshots.back());
+                if (field == EField::Summary) {
+                    snapshot->summary["extra"] = "different";
+                } else {
+                    snapshot->manifest_list += ".different";
+                }
+                (*parsed)->snapshots.back() = std::move(snapshot);
+            }
+            context->StagedRoot = TStagedRoot{std::shared_ptr<const iceberg::TableMetadata>(std::move(*parsed)),
+                std::make_shared<const std::string>(std::move(*bytes))};
+            context->VerifyStagedRoot = verify;
+        };
+    };
+    const auto base = Append(1, empty, 3, stage(EField::None, true));
+    ASSERT_TRUE(base) << base.error().message;
+    int index = 2;
+    for (const auto field : {EField::Summary, EField::ManifestList}) {
+        const auto rejected = Append(index++, *base, 3, stage(field, true));
+        ASSERT_FALSE(rejected);
+        EXPECT_EQ(rejected.error().kind, iceberg::ErrorKind::kInvalid) << rejected.error().message;
+        EXPECT_TRUE(rejected.error().message.starts_with("CORRUPTION: ")) << rejected.error().message;
+    }
+}
+
 TEST_F(TPublicationGuardTest, RecoveryHonorsExactAndReducedLimitsWithoutChangingTheStore)
 {
     WriteRoot();

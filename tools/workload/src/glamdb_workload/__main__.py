@@ -64,6 +64,9 @@ def parser():
         group = command.add_mutually_exclusive_group()
         group.add_argument("--master", action="store_true")
         group.add_argument("--worker", action="store_true")
+        # N local worker interpreters behind one Locust master in one command,
+        # sharing this report directory and one merged report.
+        group.add_argument("--processes", type=positive)
         command.add_argument("--master-host", default="127.0.0.1")
         command.add_argument("--master-port", type=positive, default=5557)
         command.add_argument("--expect-workers", type=positive, default=1)
@@ -72,6 +75,9 @@ def parser():
         else:
             command.add_argument("--query", required=True)
             command.add_argument("--format", choices=["json", "arrow"], default="json")
+            command.add_argument(
+                "--consume", choices=["rows", "batches"], default="rows"
+            )
     return app
 
 
@@ -160,6 +166,15 @@ def _bench(args):
     if not 1 <= args.master_port <= 65535:
         raise ValueError("master-port must fit a TCP port")
     config = vars(args).copy()
+    if args.mode == "read":
+        from .runtime import read_mode
+
+        read_mode(config)
+    if args.processes:
+        # A local Locust master with spawned workers: journals and reports
+        # follow the existing distributed rules (one journal per worker).
+        config["master"] = True
+        config["expect_workers"] = args.processes
     config["database"] = uuid_string(args.database, "database")
     config["collection"] = uuid_string(args.collection, "collection")
     run = Path(args.report).resolve()
@@ -185,6 +200,7 @@ def _bench(args):
             "dataset_manifest",
             "query",
             "format",
+            "consume",
         ):
             if config.get(key) != original.get(key):
                 raise ValueError("worker parameters differ from the shared master run")
@@ -211,7 +227,8 @@ def _bench(args):
             "pyarrow": version("pyarrow"),
         }
         config["measurement"] = (
-            "SDK scenario; file reads, encoding and SQLite journal included in run throughput"
+            "SDK scenario; file reads, encoding and SQLite journal included in run "
+            "throughput; success-only latency excludes refusals and errors"
         )
         config["dataset_distribution"] = (
             "one complete dataset per worker; duplicate rows across workers are retained"

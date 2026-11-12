@@ -188,6 +188,55 @@ std::shared_ptr<arrow::ArrayData> AttachLease(const std::shared_ptr<arrow::Array
     return copy;
 }
 
+std::shared_ptr<arrow::Schema> RetainSchema(std::shared_ptr<arrow::Schema> schema,
+    std::shared_ptr<ResourceReservation> memory)
+{
+    struct TSchemaLease
+    {
+        std::shared_ptr<ResourceReservation> Memory;
+        std::shared_ptr<arrow::Schema> Schema;
+    };
+    auto* retainedSchema = schema.get();
+    auto lease = std::make_shared<TSchemaLease>(std::move(memory), std::move(schema));
+    return std::shared_ptr<arrow::Schema>(std::move(lease), retainedSchema);
+}
+
+struct TOutputUsage
+{
+    std::atomic<int64_t> Bytes{0};
+    std::atomic<int64_t> Peak{0};
+};
+
+struct TOutputLease
+{
+    // Output schemas retain this lease even for zero-column batch slices.
+    std::shared_ptr<const void> Cursor;
+    std::shared_ptr<ResourceReservation> Memory;
+    std::shared_ptr<TOutputUsage> Usage;
+    std::shared_ptr<arrow::Schema> Schema;
+
+    TOutputLease(std::shared_ptr<const void> cursor,
+        std::shared_ptr<ResourceReservation> memory,
+        std::shared_ptr<TOutputUsage> usage,
+        std::shared_ptr<arrow::Schema> schema)
+        : Cursor(std::move(cursor))
+        , Memory(std::move(memory))
+        , Usage(std::move(usage))
+        , Schema(std::move(schema))
+    {
+        const auto bytes =
+            Usage->Bytes.fetch_add(static_cast<int64_t>(Memory->GetBytes())) + static_cast<int64_t>(Memory->GetBytes());
+        auto peak = Usage->Peak.load();
+        while (peak < bytes && !Usage->Peak.compare_exchange_weak(peak, bytes)) {
+        }
+    }
+
+    ~TOutputLease()
+    {
+        Usage->Bytes.fetch_sub(static_cast<int64_t>(Memory->GetBytes()));
+    }
+};
+
 std::vector<size_t> ResolveProjection(const SchemaSpec& schema, const std::optional<std::vector<std::string>>& names)
 {
     std::vector<size_t> fields;
@@ -212,6 +261,8 @@ class TScanCursor final : public ScanCursor
 {
 public:
     TScanCursor(TScanContext context,
+        std::shared_ptr<ResourceReservation> planningMemory,
+        std::shared_ptr<ResourceReservation> controlMemory,
         std::shared_ptr<iceberg::Schema> fileSchema,
         std::shared_ptr<arrow::Schema> outputSchema,
         TScanManifests plan,
@@ -220,13 +271,15 @@ public:
         std::vector<size_t> readFields,
         int64_t batchRows,
         std::optional<int64_t> limit)
-        : Context_(std::move(context))
+        : PlanningMemory_(std::move(planningMemory))
+        , CursorMemory_(Take(context.Resources->Reserve(ResourceClass::Metadata, 16ULL << 20)))
+        , SelectionMemory_(Take(context.Resources->Reserve(ResourceClass::Data, 1ULL << 20)))
+        , ControlMemory_(std::move(controlMemory))
+        , Context_(std::move(context))
         , Pool_(MakeResourcePool(Context_.Resources, Context_.Pool))
-        , CursorMemory_(Take(Context_.Resources->Reserve(ResourceClass::Metadata, 16ULL << 20)))
-        , SelectionMemory_(Take(Context_.Resources->Reserve(ResourceClass::Data, 1ULL << 20)))
         , BufferLease_(std::make_shared<TBufferLease>(Context_.Lease, Context_.FileIO, Pool_, CursorMemory_))
         , FileSchema_(std::move(fileSchema))
-        , OutputSchema_(std::move(outputSchema))
+        , OutputSchema_(RetainSchema(std::move(outputSchema), CursorMemory_))
         , Info_{OutputSchema_,
               Context_.Base,
               plan.SnapshotID ? SnapshotSelector::Id(*plan.SnapshotID) : SnapshotSelector::InitialEmpty()}
@@ -293,7 +346,17 @@ public:
             .data_files_read = {DataFilesRead_, MetricKind::Measured},
             .data_bytes_read = {DataBytesRead_, MetricKind::Measured},
             .rows_decoded = {RowsDecoded_, MetricKind::Measured},
-            .rows_returned = {RowsReturned_, MetricKind::Measured}};
+            .rows_returned = {RowsReturned_, MetricKind::Measured},
+            .rows_filtered = {RowsFiltered_, MetricKind::Measured},
+            .rows_limited = {RowsLimited_, MetricKind::Measured},
+            .limit_stops = {LimitStopped_ ? 1 : 0, MetricKind::Measured},
+            .cancellation_stops = {CancellationStopped_ ? 1 : 0, MetricKind::Measured},
+            .data_files_pruned = {0, MetricKind::Measured},
+            .row_groups_pruned = {0, MetricKind::Measured},
+            .arrow_bytes = {Pool_->bytes_allocated(), MetricKind::Measured},
+            .peak_arrow_bytes = {Pool_->max_memory(), MetricKind::Measured},
+            .output_metadata_bytes = {OutputUsage_->Bytes.load(), MetricKind::Measured},
+            .peak_output_metadata_bytes = {OutputUsage_->Peak.load(), MetricKind::Measured}};
         if (profile.state == ScanState::Open && (Cancelled_.load() || (Context_.Closing && Context_.Closing->load()))) {
             profile.state = ScanState::Cancelled;
         }
@@ -308,9 +371,11 @@ private:
         std::shared_ptr<arrow::MemoryPool> Pool;
         std::shared_ptr<ResourceReservation> Metadata;
     };
+    // Reservations outlive the context, plan, predicate and decoder objects.
+    const std::shared_ptr<ResourceReservation> PlanningMemory_, CursorMemory_, SelectionMemory_, ControlMemory_;
     const TScanContext Context_;
     const std::shared_ptr<arrow::MemoryPool> Pool_;
-    const std::shared_ptr<ResourceReservation> CursorMemory_, SelectionMemory_;
+    const std::shared_ptr<TOutputUsage> OutputUsage_ = std::make_shared<TOutputUsage>();
     const std::shared_ptr<TBufferLease> BufferLease_;
     std::shared_ptr<ResourceReservation> FileMemory_;
     // The canonical Iceberg schema of every data file of this collection.
@@ -333,10 +398,15 @@ private:
     int64_t DataBytesRead_ = 0;
     int64_t RowsDecoded_ = 0;
     int64_t RowsReturned_ = 0;
+    int64_t RowsFiltered_ = 0;
+    int64_t RowsLimited_ = 0;
+    bool LimitStopped_ = false;
+    bool CancellationStopped_ = false;
     std::atomic<bool> Cancelled_{false};
     std::optional<ErrorDetail> Failed_;
     size_t NextManifest_ = 0;
     size_t NextIndexedFile_ = 0;
+    std::shared_ptr<ResourceReservation> PendingMemory_;
     std::deque<TScanFile> PendingFiles_;
     // A RecordBatchReader must not outlive its FileReader; members are
     // destroyed in reverse order.
@@ -344,21 +414,28 @@ private:
     std::unique_ptr<arrow::RecordBatchReader> BatchReader_;
     std::optional<int64_t> Remaining_;
 
-    void CheckActive() const
+    void CheckActive()
     {
-        if (Cancelled_.load()) {
-            throw Failure({"CANCELLED", "scan was cancelled", RetryHint::OperatorAction});
-        }
-        if (Context_.Closing && Context_.Closing->load()) {
-            throw Failure({"CANCELLED", "engine is closing", RetryHint::OperatorAction});
+        if (Cancelled_.load() || (Context_.Closing && Context_.Closing->load())) {
+            if (State_ == ScanState::Open) {
+                CancellationStopped_ = true;
+            }
+            throw Failure({"CANCELLED", "scan was cancelled or engine is closing", RetryHint::OperatorAction});
         }
     }
 
-    void Release()
+    void ReleaseFile()
     {
         BatchReader_.reset();
         FileReader_.reset();
         FileMemory_.reset();
+    }
+
+    void Release()
+    {
+        ReleaseFile();
+        PendingFiles_.clear();
+        PendingMemory_.reset();
     }
 
     Result<std::shared_ptr<arrow::RecordBatch>> ReadNext()
@@ -376,6 +453,7 @@ private:
                     auto files = Take(ManifestFiles(Context_.FileIO, Plan_, NextManifest_++));
                     ++ManifestsRead_;
                     CheckActive();
+                    PendingMemory_ = std::move(memory);
                     PendingFiles_.insert(PendingFiles_.end(),
                         std::make_move_iterator(files.begin()),
                         std::make_move_iterator(files.end()));
@@ -386,25 +464,33 @@ private:
                 const auto file = std::move(PendingFiles_.front());
                 PendingFiles_.pop_front();
                 OpenFile(file);
+                if (PendingFiles_.empty()) {
+                    PendingMemory_.reset();
+                }
             }
             std::shared_ptr<arrow::RecordBatch> batch;
             DecodeParquet("read Parquet batch", [&] {
                 CheckArrow(BatchReader_->ReadNext(&batch), "CORRUPTION", "read Parquet batch");
             });
             if (!batch) {
-                Release();
+                ReleaseFile();
                 continue;
             }
             RowsDecoded_ += batch->num_rows();
             CheckActive();
             if (auto produced = Produce(*batch)) {
                 CheckActive();
+                if (Remaining_) {
+                    *Remaining_ -= produced->num_rows();
+                    LimitStopped_ = *Remaining_ == 0;
+                }
                 RowsReturned_ += produced->num_rows();
                 return produced;
             }
         }
         Release();
         CheckActive();
+        LimitStopped_ = Remaining_ && *Remaining_ == 0;
         State_ = ScanState::Complete;
         return std::shared_ptr<arrow::RecordBatch>{};
     }
@@ -507,12 +593,22 @@ private:
             return std::nullopt;
         }();
         auto count = selected ? static_cast<int64_t>(selected->size()) : batch.num_rows();
+        RowsFiltered_ += batch.num_rows() - count;
         if (Remaining_) {
-            count = std::min(count, *Remaining_);
+            const auto limited = std::min(count, *Remaining_);
+            RowsLimited_ += count - limited;
+            count = limited;
         }
         if (count == 0) {
             return nullptr;
         }
+        // Flat output arrays need ArrayData, buffer wrappers and vector nodes.
+        // Reserve before constructing any retained descriptors. The shared
+        // cursor envelope separately covers schema fields and allocator state.
+        auto memory = Take(Context_.Resources->Reserve(ResourceClass::Metadata,
+            4096 + static_cast<uint64_t>(OutputFields_.size()) * 2048));
+        auto lease = std::make_shared<TOutputLease>(BufferLease_, std::move(memory), OutputUsage_, OutputSchema_);
+        auto schema = std::shared_ptr<arrow::Schema>(lease, OutputSchema_.get());
         std::vector<std::shared_ptr<arrow::Array>> columns;
         columns.reserve(OutputFields_.size());
         for (const auto field : OutputFields_) {
@@ -523,12 +619,9 @@ private:
             } else if (count != array->length()) {
                 array = array->Slice(0, count);
             }
-            columns.push_back(arrow::MakeArray(AttachLease(array->data(), BufferLease_)));
+            columns.push_back(arrow::MakeArray(AttachLease(array->data(), lease)));
         }
-        if (Remaining_) {
-            *Remaining_ -= count;
-        }
-        return arrow::RecordBatch::Make(OutputSchema_, count, std::move(columns));
+        return arrow::RecordBatch::Make(std::move(schema), count, std::move(columns));
     }
 };
 
@@ -538,6 +631,7 @@ Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanReq
 {
     try {
         context.Resources = context.Resources ? context.Resources : ResourceOwner::ProcessDefault();
+        auto controlMemory = Take(context.Resources->Reserve(ResourceClass::Control, ControlMemoryBytes));
         auto planningMemory = Take(context.Resources->Reserve(ResourceClass::Metadata, MetadataWorkBytes));
         RequireInput(request.batch_rows >= 1 && request.batch_rows <= MaxBatchRows,
             "batch_rows must be within 1..65536");
@@ -566,7 +660,12 @@ Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanReq
         auto plan =
             Take(context.VerifiedState ? PlanVerifiedScan(*context.VerifiedState, context.Base, request.selector)
                                        : PlanManifests(context.FileIO, context.Base, request.selector));
+        // Uncached lists/schemas remain materialized in the plan. Verified
+        // membership already retains the backend's shared generation lease.
+        auto retainedPlan = context.VerifiedState ? nullptr : planningMemory;
         return std::make_shared<TScanCursor>(std::move(context),
+            std::move(retainedPlan),
+            std::move(controlMemory),
             std::move(profile->Schema),
             arrow::schema(std::move(fields)),
             std::move(plan),

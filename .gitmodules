@@ -19,3 +19,6 @@
 [submodule "third_party/reproc"]
 	path = third_party/reproc
 	url = https://github.com/DaanDeMeyer/reproc.git
+[submodule "third_party/quill"]
+	path = third_party/quill
+	url = https://github.com/odygrd/quill.git

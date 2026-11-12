@@ -247,6 +247,33 @@ the confirmed snapshot; new scans block until reconciliation. This injected
 result loss does not simulate loss of the OS page cache. Restore, combined capacity/RSS and
 OS-cache-loss/power-cut qualification remain NOT RUN.
 
+### Combined storage faults
+
+`tests/vertical/storage_fault_test.cpp` uses `EngineFactory::CreateWith` to
+combine the real local backend's `TLocalStorageOptions::Fs` adapter with
+`JournalFaultVfs`. Neither hook is installed or exposed through product settings.
+The fault filesystem delegates to POSIX; Parquet, Avro manifests, Avro manifest
+lists and metadata JSON are real files.
+
+`TCombinedStorageFaultTest` injects file sync failures in each file class and a
+metadata directory sync failure, then loses the SQLite result while recording
+the failed append. Reconciliation preserves the original error and committed
+rows, keeps the write latch closed, and returns the same failed outcome on retry.
+`TCatalogStorageFaultTest` fails publication before and after journal unlink;
+a fresh process opens through the public factory, resolves the outcome, checks
+rows and retries without producing new files. The combined cases also verify
+persisted outcomes and rows in a fresh process after reconciliation.
+
+Run the native cases with:
+
+```sh
+cmake --build --preset local --target glamdb_vertical
+ctest --preset local -R 'TCombinedStorageFaultTest|TCatalogStorageFaultTest'
+```
+
+These are injected syscall/result failures, not a model of OS-cache loss or
+physical power cuts. Mock-backend tests remain separate evidence; G4 is NOT RUN.
+
 ## Public health observation
 
 `Engine::GetHealth()` returns a point-in-time `StoreHealth` without catalog I/O

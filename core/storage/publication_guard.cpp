@@ -7,6 +7,7 @@
 #include "core/storage/metadata_validation.h"
 
 #include <iceberg/file_io.h>
+#include <iceberg/snapshot.h>
 #include <iceberg/table_metadata.h>
 
 #include <limits>
@@ -57,6 +58,27 @@ iceberg::Status TStoragePublicationGuard::CheckContext(const TPointerChange& cha
     return {};
 }
 
+namespace {
+
+// The pinned Iceberg snapshot equality ignores the summary and the manifest
+// list location, so compare them explicitly for every snapshot.
+bool SameSnapshotDetails(const iceberg::TableMetadata& left, const iceberg::TableMetadata& right)
+{
+    if (left.snapshots.size() != right.snapshots.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < left.snapshots.size(); ++index) {
+        const auto& a = left.snapshots[index];
+        const auto& b = right.snapshots[index];
+        if (!a || !b || a->summary != b->summary || a->manifest_list != b->manifest_list) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
 iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& change)
 {
     const auto record = Context_.Attempt->Record(change.NewLocation);
@@ -91,7 +113,10 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
         if (Context_.VerifyStagedRoot) {
             ICEBERG_ASSIGN_OR_RAISE(auto parsed, ParseTableMetadata(*staged->Bytes));
             ICEBERG_ASSIGN_OR_RAISE(auto reserialized, SerializeTableMetadata(*parsed));
-            if (!(*parsed == *staged->Metadata) || reserialized != *staged->Bytes) {
+            ICEBERG_ASSIGN_OR_RAISE(auto stagedBytes, SerializeTableMetadata(*staged->Metadata));
+            if (!(*parsed == *staged->Metadata) || !SameSnapshotDetails(*parsed, *staged->Metadata) ||
+                reserialized != *staged->Bytes || stagedBytes != *staged->Bytes)
+            {
                 return iceberg::Invalid("CORRUPTION: Staged metadata does not round-trip through its root bytes.");
             }
         }
