@@ -255,6 +255,70 @@ def test_parquet_write_settings_are_applied_or_refused_explicitly(server):
         assert missing.value.status_code == 404
 
 
+def test_snapshot_archive_keeps_history_readable_or_is_refused_explicitly(server):
+    # Native archives old snapshots out of the Iceberg root and still answers
+    # them exactly; the mock does not implement the archive and must refuse it.
+    with Client(server.url, TOKEN) as client:
+        capabilities = client.capabilities()
+        cid = str(uuid4())
+        if server.mock:
+            assert not capabilities.get("features", {}).get("snapshot_archive")
+            with pytest.raises(HTTPError) as refused:
+                client.create_collection("archive", SCHEMA, collection_id=cid, hot_snapshots=2)
+            assert refused.value.status_code == 422 and refused.value.collection_id == cid
+            create(client, name="archive", collection_id=cid)
+            with pytest.raises(ProtocolError):
+                client.resolve_create("archive", SCHEMA, collection_id=cid, hot_snapshots=2)
+            for call in (lambda: client.snapshot_archive(cid), lambda: client.update_snapshot_archive(cid, 2),
+                         lambda: client.archive_snapshots(cid)):
+                with pytest.raises(HTTPError) as missing:
+                    call()
+                assert missing.value.status_code == 404
+            return
+        assert capabilities["features"]["snapshot_archive"] is True
+        created = client.create_collection("archive", SCHEMA, collection_id=cid, hot_snapshots=2)
+        assert created.outcome == "committed" and created.info["hot_snapshots"] == "2"
+        assert client.resolve_create("archive", SCHEMA, collection_id=cid, hot_snapshots=2)["hot_snapshots"] == "2"
+        with pytest.raises(ProtocolError):
+            client.resolve_create("archive", SCHEMA, collection_id=cid, hot_snapshots=3)
+        receipts, expected = [], []
+        for index in range(12):
+            rows = [{"key": f"k-{index}", "n": 9007199254740993 + index}]
+            receipts.append(client.append(cid, rows, operation_id=uuid4(), schema=SCHEMA).result)
+            expected.append(expected[-1] + rows if expected else rows)
+        status = client.snapshot_archive(cid)
+        assert status["hot_snapshots"] == "2" and int(status["archived_snapshots"]) > 0
+        assert int(status["root_snapshots"]) + int(status["archived_snapshots"]) == 12
+        history = [item["snapshot_id"] for item in client.snapshots(cid, page_size=5).items]
+        assert history[:5] == [receipt["snapshot_id"] for receipt in receipts[:5]]
+        pages, cursor = [], None
+        while True:
+            page = client.snapshots(cid, page_size=5, cursor=cursor)
+            pages.extend(item["snapshot_id"] for item in page.items)
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
+        assert pages == [receipt["snapshot_id"] for receipt in receipts]
+        for index in (0, 5, 11):
+            snapshot = receipts[index]["snapshot_id"]
+            # Row order follows manifest order; compare the selected multiset.
+            assert sorted(client.scan_json(cid, snapshot_id=snapshot).rows, key=lambda row: row["n"]) == [
+                dict(row, at=None, flag=None, ratio=None) for row in expected[index]]
+            assert client.stats(cid, snapshot_id=snapshot)["rows"] == str(index + 1)
+            assert len(client.files(cid, snapshot_id=snapshot).items) == index + 1
+        updated = client.update_snapshot_archive(cid, None)
+        assert updated["hot_snapshots"] is None and client.update_snapshot_archive(cid, None) == updated
+        assert client.snapshot_archive(cid)["archive_pending"] == "0"
+        assert client.update_snapshot_archive(cid, 1)["hot_snapshots"] == "1"
+        moved = client.archive_snapshots(cid)
+        assert moved["root_snapshots"] == "1" and moved["archive_pending"] == "0"
+        assert moved["archived_snapshots"] == "11" and int(moved["snapshots_archived"]) >= 1
+        assert client.archive_snapshots(cid)["snapshots_archived"] == "0"
+        assert sorted(row["key"] for row in client.scan_json(cid, snapshot_id=receipts[10]["snapshot_id"]).rows) == \
+            sorted(f"k-{index}" for index in range(11))
+    assert_storage(server, cid, 12)
+
+
 def test_real_arrow_empty_schema_eos_and_fixed_view_survive_later_append(server):
     import pyarrow as pa
     transport = ArrowHTTPTransport()

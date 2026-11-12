@@ -48,6 +48,7 @@ dependencies. `GLAMDB_E2E_PORT`, `GLAMDB_STATIC_PORT`, `GLAMDB_BROWSER_PATH` and
 | SDK Arrow integrity and ownership | Empty schema/EOS, a scan opened before another append, corrupt checksums/lengths, missing EOS, truncation, extra bytes, bad schema and wrong/missing snapshot headers. Early close, consumer/client errors and simultaneous later-page view/close errors release owners; returned batches remain readable. |
 | SDK operations | Retry A after B returns the original receipt; failed preconditions stay terminal; changed payload conflicts; a dropped real response retains the original request. |
 | SDK metadata | History/file pages retain their selected view across writes; file details and explain select the same snapshot. |
+| SDK snapshot archive | Native creates with `hot_snapshots`, archives during appends and maintenance, and answers history pages, scans, statistics and files of archived snapshots; the mock advertises no `features.snapshot_archive`, rejects the setting (422) and has no archive routes (404). |
 | SDK TLS and quickstart | Trusted CA succeeds, system/wrong CA fails without fabricating an outcome; the runnable example verifies its stream. |
 | Browser | Create, append duplicates and precise integers, render hostile text safely, select history, filter and download Arrow. |
 | Browser exports | Empty schema, append between preview and download, and damaged real checksum/EOS/snapshot responses that never start a download. A healthy retry succeeds. |

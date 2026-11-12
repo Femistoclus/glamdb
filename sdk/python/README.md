@@ -329,6 +329,38 @@ what each column chunk actually used: `compression`, `encodings` and
 `encoding_stats` (page counts per page type and encoding; a dictionary that fell
 back shows both `rle_dictionary` and `plain` data pages).
 
+## Snapshot archive
+
+Servers advertising `features.snapshot_archive` (native local storage) keep only
+the newest `hot_snapshots` snapshots of an append collection in the Iceberg root;
+older snapshots move to the catalog archive and stay readable by ID through
+`snapshots`, `stats`, `files`, `file`, `explain` and scans exactly as before.
+
+```python
+created = client.create_collection("events", schema, collection_id=collection_id,
+                                   hot_snapshots=100)   # 1..2**40, part of the definition
+status = client.snapshot_archive(collection_id)         # {"hot_snapshots": "100", "root_snapshots": ...}
+client.update_snapshot_archive(collection_id, 50)       # later appends apply it; None stops archiving
+while True:                                             # bounded maintenance, at most 1024 per call
+    status = client.archive_snapshots(collection_id)
+    if status["archive_pending"] == "0":
+        break
+```
+
+Counts are decimal strings. `hot_snapshots` is part of the collection definition:
+repeating a lost create with another value is refused (409
+`SNAPSHOT_ARCHIVE_MISMATCH`, a `definitely_not_committed` outcome). The reported
+value is the current one, so `resolve_create` repeats the original create when a
+value was requested or is reported, and the server compares it with the created
+value. `update_snapshot_archive` is idempotent and returns the collection; after
+a lost response or `OutcomeUnknownError` (503 `RECOVERY_REQUIRED`) reconcile if
+requested and repeat the same call, as for `archive_snapshots`. KV collections
+refuse a value and maintenance with 409 `COLLECTION_MODE_MISMATCH`; values
+outside 1..2^40 raise `ValidationError` before sending. The mock does not
+implement the archive: it rejects `hot_snapshots` (422) and has no archive routes
+(404), and the SDK raises `ProtocolError` if a collection created with
+`hot_snapshots` does not report it.
+
 ## Scalars, predicates and metadata
 
 `Field(name, type, nullable=False, field_id=None, precision=None, scale=None)`
