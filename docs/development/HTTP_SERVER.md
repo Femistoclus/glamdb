@@ -337,17 +337,20 @@ a cursor cannot be replayed: opening again creates a new scan. The SDK's scan en
 `POST .../scan/cancel {"cursor":"TOKEN"}` accepts either the next or most recently
 consumed cursor and returns `{"cancelled":true}`. Tokens are scoped to database,
 collection and representation; stale or missing tokens return 404, never restart
-queries. Each database has eight sessions within a server limit of 64. Idle sessions expire
-after 60 seconds (checked every second); replay does not refresh that deadline.
-Active production scans have no absolute lifetime limit. Admission reserves the
-16 MiB hard response bound for each session within a shared 1 GiB replay budget,
-before planning or consuming rows. This logical reservation covers retained
-serialized bodies, not pending Arrow buffers, outgoing copies or total memory.
-Shared process-memory refusal happens before page consumption and preserves an
-existing cursor and its last replay.
-Completed replay caches may be evicted to admit new scans. A failed page invalidates its session. Close, reconciliation
-and shutdown release sessions after admitted calls drain. Cancellation releases
-between page calls; it does not interrupt an active filesystem read.
+queries. Defaults allow eight live cursors per database and 64 globally, with
+separate completed replay retention, a 60-second idle/retention timeout and no
+absolute lifetime. Startup options configure these limits and global/per-database
+replay bytes. Admission reserves the 16 MiB hard response maximum in the replay
+quota and `32 MiB + 64 KiB` data memory from the shared process parent before
+planning. Page assembly and outgoing copies have separate shared reservations.
+Admission refusal preserves an existing cursor and its previous replay;
+reason-specific 429 responses include `Retry-After: 1`.
+Completed entries use observable oldest-first eviction; live cursors are never
+evicted for another database. Close, reconciliation and shutdown cancel retained
+sessions; reservations outlive active reads and outgoing copies as needed.
+Cancellation does not wait for an active filesystem read. See
+[scan session policy](SCAN_SESSIONS.md) for every option, effective-limit and
+occupancy observations, EOF/replay/TTL semantics and the sufficient 32-reader profile.
 
 Create/append results use the existing native serializer. Append preserves
 `committed`, `definitely_not_committed` and `commit_unknown`, phase, original ID,
@@ -610,8 +613,9 @@ five-second closed-loop phase. Every successful query checked row values and cou
 The 64-client phase exceeds the eight-cursor database quota; neither phase had
 `SERVER_BUSY` refusals. Concurrent builds/analyzers and the shared Python process
 limit timing interpretation. This is concurrency evidence, not a capacity or
-before/after performance claim. Configurable cursor quotas and aggregate process
-memory admission remain separate work.
+before/after performance claim. These measurements precede the
+[configurable, shared-resource-backed policy](SCAN_SESSIONS.md); the new native
+regression records its own occupancy, latency and memory observations separately.
 
 ## Metadata selectors and cursors
 
