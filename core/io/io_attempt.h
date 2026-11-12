@@ -48,6 +48,9 @@ struct TFileRecord
     std::optional<TDurableFileReceipt> Receipt = std::nullopt;
     bool FormatVerified = false;
     std::error_code FirstError{};
+    // Warehouse bytes of the durable file as MeasureTree counts them: the
+    // larger of its length and its allocated blocks after the file sync.
+    std::uint64_t PhysicalBytes = 0;
 };
 
 struct TAttemptBudget
@@ -96,7 +99,8 @@ public:
     std::error_code CheckWrite(std::string_view path);
     void FailFile(std::string_view path, std::error_code error);
     std::error_code Advance(std::string_view path, EFileState next);
-    TResult<TDurableFileReceipt> CompleteFile(std::string_view path, std::uint64_t length, const TSha256Digest& digest);
+    TResult<TDurableFileReceipt>
+    CompleteFile(std::string_view path, std::uint64_t length, const TSha256Digest& digest, std::uint64_t allocated = 0);
     std::error_code MarkFormatVerified(std::string_view path);
     TResult<TWriteReservation> ReserveWrite(std::string_view path, std::uint64_t requested);
     std::error_code ChargeRead(std::uint64_t requested);

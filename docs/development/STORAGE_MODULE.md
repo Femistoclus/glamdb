@@ -49,8 +49,26 @@ from `VerifyReachable` or a previously confirmed publication.
    durable and before changing the catalog pointer. The guard seals the attempt,
    verifies the exact prepared base, metadata delta, reachable new files,
    retained manifests, expected summary fields, and aggregate logical capacity limits.
-   It remeasures physical warehouse usage after production, including staged files
-   and orphans, before allowing publication.
+   For an append the backend serializes the staged root once (the exact bytes of
+   `TableMetadataUtil::Write`) and passes both forms; the guard requires the
+   durable root to equal those bytes and runs every validation on the in-memory
+   staged metadata instead of parsing the file. This relies on parsing our roots
+   reproducing the staged metadata, which `vertical/root_round_trip_test.cpp`
+   establishes for roots written by real appends (byte-identical reserialization
+   and structural equality). `VerifyStagedRoot` (on by default without `NDEBUG`,
+   `GLAMDB_VERIFY_ROUNDTRIP=1|0` overrides it; the vertical CTest suite sets it)
+   additionally parses the durable root and requires that equality before
+   publication. Collection creation still parses its root.
+   It rechecks the physical warehouse cap after production, before allowing
+   publication: for an append it adds the physical size of every durable file
+   of the sealed attempt (the larger of length and allocated blocks, recorded
+   after the file sync) and the growth of the collection's data/metadata
+   directories to the full pre-production measurement, which includes orphans
+   present at admission. That equals a new walk when nothing else wrote to the
+   warehouse in between; growth from outside the writer after admission is
+   first rejected by the next admission. A failed estimate falls back to a
+   walk. Collection creation, and `WalkWarehouseAtPublication=true`, still
+   walk the whole warehouse at publication.
 6. `GetCandidate()` returns a tentative verified state. Install it as the next
    confirmed base only after the caller confirms its outer catalog COMMIT.
    Atomic pointer/outcome publication, uncertain-commit recovery, fencing, and
@@ -146,7 +164,7 @@ target.
 | Real formats, bounded decoding, writer metrics and failures | `storage/format_verifier_test.cpp`, `storage/data_file_writer_test.cpp` |
 | Writer compatibility and entirely absent footer statistics | `storage/writer_compatibility_test.cpp` |
 | Staging, manifest round trips, no implicit publication | `storage/append_stager_test.cpp` |
-| Guard, closure/recovery, retained history, invalid candidates | `storage/publication_guard_test.cpp` |
+| Guard, closure/recovery, retained history, invalid candidates, staged-root byte/round-trip checks | `storage/publication_guard_test.cpp` |
 | Recovery visited index, exact duplicates, disk spill and workspace failures | `storage/recovery_visited_test.cpp` |
 | Capacity boundaries, orphans, preflight faults | `storage/capacity_test.cpp`, `io/local_fs_test.cpp` |
 
@@ -154,7 +172,10 @@ The native `vertical/aggregate_capacity_test.cpp` suite additionally covers
 cross-collection root/history limits, uncertain COMMIT success and rollback,
 physical orphan usage on publication/reconciliation/reopen, and fresh-process
 rejection under lower limits. `vertical/append_preflight_cost_test.cpp` bounds
-warehouse traversal to admission and publication.
+warehouse traversal to one walk per append (admission) and prints per-append
+root/manifest-list/manifest opens. `vertical/append_history_bench_test.cpp` is a
+manual benchmark (skipped unless `GLAMDB_APPEND_HISTORY_BENCH=<appends>`) that
+reports one-row append latency per bucket of retained history.
 
 The fault adapter also injects errors after a successful native file or directory
 sync. Nested traces distinguish the successful syscall from the reported error;

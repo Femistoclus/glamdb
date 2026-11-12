@@ -1,3 +1,5 @@
+#include "core/io/durable_file.h"
+#include "core/io/io_attempt.h"
 #include "core/io/store_dirs.h"
 #include "core/storage/capacity.h"
 #include "tests/support/fault_fs.h"
@@ -8,6 +10,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <limits>
+#include <string>
 
 namespace NGlamDB::NStorage {
 namespace {
@@ -169,6 +172,60 @@ TEST_F(TWriteCapacityTest, RejectsReplacedRootBeforeWalkingWarehouse)
     EXPECT_EQ(Fs_->Events().size(), start + 2);
     EXPECT_TRUE(Directories_->Latch()->IsSet());
     ExpectOnlyReadOperations(start);
+}
+
+// Publication adds a sealed attempt's durable files to the pre-production
+// measurement; the result equals a new walk of the same tree.
+TEST_F(TWriteCapacityTest, AttemptEstimateMatchesAWalkAfterProduction)
+{
+    constexpr auto store = "11111111-1111-4111-8111-111111111111";
+    constexpr auto collection = "22222222-2222-4222-8222-222222222222";
+    constexpr auto attemptId = "33333333-3333-7333-8333-333333333333";
+    constexpr auto operation = "44444444-4444-4444-8444-444444444444";
+    const auto dirs = Directories_->CreateCollection(collection);
+    ASSERT_TRUE(dirs);
+    // Orphans before the measurement count through the baseline.
+    auto orphan = Fs_->CreateExclusive(dirs.Value().Data, "orphan.parquet");
+    ASSERT_TRUE(orphan);
+    const std::string orphanBytes(10000, 'o');
+    ASSERT_TRUE(Fs_->Write(orphan.Value(), std::as_bytes(std::span(orphanBytes))));
+    ASSERT_FALSE(Fs_->Close(orphan.Value()));
+    TStorageLimits limits;
+    const auto before = MeasureWarehouse(*Directories_, limits);
+    ASSERT_TRUE(before);
+    const auto directories = MeasureCollectionDirs(*Directories_, collection);
+    ASSERT_TRUE(directories);
+    const TWarehouseBaseline baseline{.Bytes = before.Value(), .Directories = directories.Value()};
+
+    auto attempt = NIO::TIOAttempt::Make({store, collection, attemptId, NIO::EAttemptKind::Append, operation},
+        Directories_->Latch());
+    ASSERT_TRUE(attempt);
+    const auto prefix = std::string("store://") + store + "/warehouse/" + collection + "/metadata/";
+    const std::string manifest = prefix + operation + "-m0.avro";
+    const std::string root = prefix + "00001-" + operation + ".metadata.json";
+    for (const auto& [path, size] : {std::pair{manifest, std::size_t{5000}}, std::pair{root, std::size_t{17}}}) {
+        auto file = NIO::TDurableFile::Create(Fs_, dirs.Value().Metadata, path, Directories_->Latch(), attempt.Value());
+        ASSERT_TRUE(file);
+        const std::string content(size, 'x');
+        ASSERT_FALSE(file.Value()->Write(std::as_bytes(std::span(content))));
+        if (path == root) {
+            EXPECT_EQ(EstimateAttemptWarehouse(*Directories_, baseline, *attempt.Value(), limits).Error(),
+                std::errc::state_not_recoverable);
+        }
+        ASSERT_FALSE(file.Value()->Close());
+    }
+    ASSERT_FALSE(attempt.Value()->Seal());
+    const auto walked = MeasureWarehouse(*Directories_, limits);
+    ASSERT_TRUE(walked);
+    const auto estimated = EstimateAttemptWarehouse(*Directories_, baseline, *attempt.Value(), limits);
+    ASSERT_TRUE(estimated);
+    EXPECT_EQ(estimated.Value(), walked.Value());
+    EXPECT_GT(estimated.Value(), before.Value() + 5000);
+    limits.WarehouseBytes = walked.Value();
+    EXPECT_TRUE(EstimateAttemptWarehouse(*Directories_, baseline, *attempt.Value(), limits));
+    limits.WarehouseBytes = walked.Value() - 1;
+    EXPECT_EQ(EstimateAttemptWarehouse(*Directories_, baseline, *attempt.Value(), limits).Error(),
+        std::errc::no_space_on_device);
 }
 
 }

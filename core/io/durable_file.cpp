@@ -243,6 +243,7 @@ std::error_code TDurableFile::Close()
             CloseHandle();
             return Error_;
         }
+        std::uint64_t allocated = 0;
         if (auto error = Fs_->SyncFile(File_)) {
             Latch_->Observe(error);
             Fail(error);
@@ -252,6 +253,8 @@ std::error_code TDurableFile::Close()
                 Fail(info.Error());
             } else if (info.Value().Type != EFileType::Regular || info.Value().Size != StoredLength_) {
                 Fail(std::make_error_code(std::errc::state_not_recoverable));
+            } else {
+                allocated = info.Value().Allocated;
             }
         }
         CloseHandle();
@@ -268,7 +271,7 @@ std::error_code TDurableFile::Close()
         }
         const auto digest = Hash_.Finalize();
         if (Attempt_) {
-            auto receipt = Attempt_->CompleteFile(Path_, StoredLength_, digest);
+            auto receipt = Attempt_->CompleteFile(Path_, StoredLength_, digest, allocated);
             if (!receipt) {
                 Fail(receipt.Error());
             } else {

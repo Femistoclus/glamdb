@@ -279,7 +279,9 @@ TResult<TFileStat> TPosixLocalFS::Stat(const THandle& handle)
         if (::fstat(fd, &info) != 0) {
             return LastError();
         }
-        if (info.st_size < 0) {
+        if (info.st_size < 0 || info.st_blocks < 0 ||
+            static_cast<std::uint64_t>(info.st_blocks) > std::numeric_limits<std::uint64_t>::max() / 512)
+        {
             return std::errc::value_too_large;
         }
         const auto type = S_ISREG(info.st_mode) ? EFileType::Regular
@@ -288,7 +290,8 @@ TResult<TFileStat> TPosixLocalFS::Stat(const THandle& handle)
         return TFileStat{static_cast<std::uint64_t>(info.st_dev),
             static_cast<std::uint64_t>(info.st_ino),
             static_cast<std::uint64_t>(info.st_size),
-            type};
+            type,
+            static_cast<std::uint64_t>(info.st_blocks) * 512};
     });
 }
 

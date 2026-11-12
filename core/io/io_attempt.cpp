@@ -229,8 +229,10 @@ std::error_code TIOAttempt::Advance(std::string_view path, EFileState next)
     return {};
 }
 
-TResult<TDurableFileReceipt>
-TIOAttempt::CompleteFile(std::string_view path, std::uint64_t length, const TSha256Digest& digest)
+TResult<TDurableFileReceipt> TIOAttempt::CompleteFile(std::string_view path,
+    std::uint64_t length,
+    const TSha256Digest& digest,
+    std::uint64_t allocated)
 {
     std::lock_guard lock(Mutex_);
     if (auto error = AdmitLocked(path)) {
@@ -248,6 +250,7 @@ TIOAttempt::CompleteFile(std::string_view path, std::uint64_t length, const TSha
     }
     record.Receipt = TDurableFileReceipt{record.Path, record.Kind, length, digest, Spec_.AttemptId};
     record.Sha256 = digest;
+    record.PhysicalBytes = std::max(length, allocated);
     return *record.Receipt;
 }
 

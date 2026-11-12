@@ -182,7 +182,8 @@ Preserve these boundaries when adding or changing engine behavior:
   published state can be reopened within the same limits. Capacity exhaustion
   produces backpressure before publication, not partial success or hidden
   deletion of history. Publication rechecks physical warehouse usage after
-  production; recovery checks the same physical cap without reserving a future
+  production (admission walk plus the attempt's own durable files; outside
+  growth after admission is caught by the next admission); recovery checks the same physical cap without reserving a future
   attempt. Logical reachable
   usage is accumulated with overflow and limit checks across collections.
   Warehouse orphan files consume capacity; their automatic cleanup is
