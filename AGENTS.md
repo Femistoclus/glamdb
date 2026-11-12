@@ -35,6 +35,9 @@ for the file-layer contract. A shared `ResourceOwner` now admits engines,
 transport copies and tracked Arrow allocations under finite class and device
 reservations; see [the resource owner](docs/development/SHARED_RESOURCES.md)
 for conservative envelopes, retained-buffer lifetime and measured validation.
+Scan plans, queued manifest descriptors and individual output descriptors retain
+shared reservations; cursor control admission and live/peak memory profiles are
+described in [shared resources](docs/development/SHARED_RESOURCES.md).
 Full engine durability remains unqualified. `Engine::GetHealth()` exposes
 nonblocking read/write admission and recovery/shutdown state; HTTP
 `GET /databases/{id}/readyz` (or legacy `/readyz`) maps write readiness to

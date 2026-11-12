@@ -202,3 +202,36 @@ Existing injected I/O/fault suites pass, but no dedicated physical full-volume,
 inode-exhaustion or power-loss campaign was run. External writers can still
 cause ENOSPC after admission. No G4 qualification or network durability claim
 follows from these results; [G4 remains NOT RUN](../ROADMAP.md#current-status).
+
+## Scan budget follow-up (#47)
+
+Based on official `0c5df05`. Native `ScanBudget` cases exercise concurrent cursor
+admission, retained slice/C Data pressure, per-output metadata, zero-column
+slices, extracted info schemas, failure cleanup and measured profiles. Mock
+`ScanMockTest` cases use in-memory FileIO with real Arrow/Parquet/Avro to check
+uncached planning, pending-manifest admission and cancellation at every output
+allocation boundary. They are separate from real-file engine evidence.
+
+The new admission/retention regressions failed before the fix. Independent
+review found uncharged extracted info schemas and premature limit completion;
+both received failing regressions and fixes before re-review passed.
+
+Commands and final results:
+
+- `cmake --build build/local -j 2`: PASS.
+- `GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 ctest --test-dir build/local --output-on-failure --no-tests=error -j 2`:
+  PASS, 705 passed, three standalone child-helper skips, one existing disabled benchmark.
+- `cmake --build build/stress-asan --target glamdb_vertical glamdb_mock -j 2`, then
+  `ctest --test-dir build/stress-asan -R '(ScanBudget|SharedResources|ScanMockTest|NativeMetadata|TScanLifetimeTest)\.' --output-on-failure --no-tests=error`:
+  PASS, 53 cases (36 native, 17 mock), ASan/UBSan with leak detection. Project
+  code is instrumented; dependencies use the existing ordinary pinned prefix.
+- `cmake --build build/local --target format-check quality-negative-check`: PASS.
+- LLVM 18 `clang-tidy -p build/local --warnings-as-errors='*'` on the changed
+  cursor and two test translation units: PASS.
+- `cmake -P cmake/dependencies/VerifySubmodules.cmake`: PASS.
+
+HTTP tests require local sockets; sanitizer discovery requires running outside
+the tracing sandbox. Initial sandbox attempts failed on these restrictions and
+were rerun with the required access. TSan, full-repository tidy and qualification
+scale RSS/power-loss campaigns were not run locally. No format or dependency
+changes are introduced.
