@@ -67,6 +67,8 @@ std::vector<CLI::App*> AddDataCommands(CLI::App& app, TDataCommand& data)
         {"files", "List committed Parquet files in a selected snapshot"},
         {"file", "Inspect a committed Parquet file's footer, statistics and row groups"},
         {"write-settings", "Update Parquet settings for later writes using an expected version"},
+        {"snapshot-archive", "Show, set or unset how many newest snapshots stay in the Iceberg root"},
+        {"archive-snapshots", "Move root snapshots above hot_snapshots to the archive (bounded, repeatable)"},
     };
     for (const auto& [name, description] : commandHelp) {
         auto* command = app.add_subcommand(name, description);
@@ -89,6 +91,20 @@ std::vector<CLI::App*> AddDataCommands(CLI::App& app, TDataCommand& data)
             command->add_option("--write-settings",
                 data.WriteSettingsFile,
                 "Parquet write settings JSON file (part of the definition), or - for stdin");
+            command->add_option("--hot-snapshots",
+                data.HotSnapshots,
+                "Newest snapshots kept in the Iceberg root; older ones are archived and stay readable "
+                "(append collections, part of the definition)");
+        }
+        if (action == "snapshot-archive") {
+            auto* set = command->add_option("--hot-snapshots",
+                data.HotSnapshots,
+                "Set hot_snapshots for later appends and archive maintenance");
+            auto* unset = command->add_flag("--unset",
+                data.UnsetHotSnapshots,
+                "Stop archiving later snapshots; archived snapshots stay archived");
+            set->excludes(unset);
+            unset->excludes(set);
         }
         if (action == "write-settings") {
             command->add_option("--expected-version", data.ExpectedVersion, "Current write_settings_version")
@@ -173,7 +189,8 @@ TRequest BuildDataRequest(const TDataCommand& data)
         request.Body = "{\"collection_id\":" + TJson(data.CollectionID).dump() +
             ",\"name\":" + TJson(data.Name).dump() + ",\"schema\":" + ReadDataFile(data.SchemaFile) +
             (data.Mode == "append" ? "" : ",\"mode\":" + TJson(data.Mode).dump()) +
-            (data.WriteSettingsFile.empty() ? "" : ",\"write_settings\":" + ReadDataFile(data.WriteSettingsFile)) + "}";
+            (data.WriteSettingsFile.empty() ? "" : ",\"write_settings\":" + ReadDataFile(data.WriteSettingsFile)) +
+            (data.HotSnapshots.empty() ? "" : ",\"hot_snapshots\":" + TJson(data.HotSnapshots).dump()) + "}";
     } else if (data.Command == "collections") {
         request.Url += "?page_size=1000";
     } else if (data.Command == "resolve-collection") {
@@ -182,11 +199,20 @@ TRequest BuildDataRequest(const TDataCommand& data)
         request.Url += '/' + EncodeUrlComponent(data.CollectionID);
         if (data.Command == "operation") {
             request.Url += "/operations/" + EncodeUrlComponent(data.OperationID);
+        } else if (data.Command == "archive-snapshots") {
+            request.Url += "/snapshot-archive/maintenance";
         } else if (data.Command != "collection") {
             request.Url +=
                 '/' + (data.Command == "file" ? "files/" + EncodeUrlComponent(data.FileID) : std::string(data.Command));
         }
-        if (data.Command == "write-settings") {
+        if (data.Command == "snapshot-archive" && (!data.HotSnapshots.empty() || data.UnsetHotSnapshots)) {
+            request.Method = "POST";
+            request.Body =
+                TJson{{"hot_snapshots", data.UnsetHotSnapshots ? TJson(nullptr) : TJson(data.HotSnapshots)}}.dump();
+        } else if (data.Command == "archive-snapshots") {
+            request.Method = "POST";
+            request.Body = "{}";
+        } else if (data.Command == "write-settings") {
             request.Method = "POST";
             request.Body = "{\"expected_version\":" + TJson(data.ExpectedVersion).dump() +
                 ",\"write_settings\":" + ReadDataFile(data.WriteSettingsFile) + "}";

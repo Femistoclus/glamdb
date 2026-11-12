@@ -139,7 +139,7 @@ creates a missing store.
 
 | Command | Additional options | Result |
 | --- | --- | --- |
-| `create-collection` | `--collection-id UUID --name NAME --schema FILE [--write-settings FILE]` | Created collection or original matching collection |
+| `create-collection` | `--collection-id UUID --name NAME --schema FILE [--write-settings FILE] [--hot-snapshots N]` | Created collection or original matching collection |
 | `collections` | None | Collection inventory |
 | `resolve-collection` | `--name NAME` | Exact-name lookup, including after a lost create reply |
 | `collection` | `--collection-id UUID` | Collection identity and schema |
@@ -151,6 +151,8 @@ creates a missing store.
 | `files` | `--collection-id UUID [--snapshot SELECTOR]` | Committed file membership and opaque IDs |
 | `file` | `--collection-id UUID --file-id ID [--snapshot SELECTOR]` | Verified Parquet footer and row groups |
 | `write-settings` | `--collection-id UUID --expected-version N --settings FILE` | Collection after a compare-and-set of its Parquet write settings |
+| `snapshot-archive` | `--collection-id UUID [--hot-snapshots N \| --unset]` | Archive status; with an option, the collection after replacing `hot_snapshots` |
+| `archive-snapshots` | `--collection-id UUID` | One bounded archive maintenance call: status plus `snapshots_archived` |
 
 Remote commands accept `--database-id UUID` for a managed server, or a base URL
 already scoped to `/databases/UUID`. Omit both for legacy single-store servers.
@@ -166,6 +168,15 @@ on creation they are part of the definition. `write-settings` applies only when
 `--expected-version` is the collection's current `write_settings_version`; repeating
 an applied command succeeds unchanged, a stale version fails with
 `WRITE_SETTINGS_CONFLICT` (see the [HTTP contract](../../docs/development/HTTP_SERVER.md)).
+`--hot-snapshots N` (1..2^40, append collections) keeps only the newest N
+snapshots in the Iceberg root; older ones move to the catalog archive and remain
+readable through `snapshots`, `scan`, `files` and `file`. On creation it is part
+of the definition (`SNAPSHOT_ARCHIVE_MISMATCH` for another value). `snapshot-archive`
+without options shows `{hot_snapshots, root_snapshots, archived_snapshots,
+expired_snapshots, archive_pending}`; `--unset` stops archiving later snapshots.
+Repeat `archive-snapshots` while `archive_pending` is not `"0"`. An uncertain
+update or maintenance (`RECOVERY_REQUIRED`) exits 3: reconcile, then repeat the
+same command.
 Schema files contain `{"fields":[...]}`. Append files contain the original
 `operation_id`, `rows`, and optional `expected_snapshot` (`null` means no previous
 snapshot; an exact decimal string requires that snapshot). Files may be `-` for

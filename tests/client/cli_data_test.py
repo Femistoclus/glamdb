@@ -209,6 +209,59 @@ class NativeCommands(unittest.TestCase):
         server.terminate()
         self.assertEqual(server.wait(timeout=15), 0)
 
+    def test_snapshot_archive_local_and_remote(self):
+        schema = self.body_file("schema.json", SCHEMA)
+        common = ["--collection-id", COLLECTION]
+        create = ["create-collection", *common, "--name", "events", "--schema", schema]
+        created = self.run_command(ADMIN, *create[:1], *self.local, *create[1:], "--hot-snapshots", "2")
+        self.assertEqual(created["hot_snapshots"], "2")
+        snapshots = []
+        for index in range(7):
+            row = dict(ROWS[0], key=f"k-{index}")
+            body = self.body_file("append.json", {"operation_id": str(uuid.uuid4()), "rows": [row]})
+            receipt = self.run_command(ADMIN, "append", *self.local, *common, "--body", body)
+            snapshots.append(receipt["result"]["snapshot_id"])
+        status = self.run_command(ADMIN, "snapshot-archive", *self.local, *common)
+        self.assertEqual(status["hot_snapshots"], "2")
+        self.assertGreater(int(status["archived_snapshots"]), 0)
+        self.assertEqual(int(status["root_snapshots"]) + int(status["archived_snapshots"]), 7)
+        lowered = self.run_command(ADMIN, "snapshot-archive", *self.local, *common, "--hot-snapshots", "1")
+        self.assertEqual(lowered["hot_snapshots"], "1")
+        moved = self.run_command(ADMIN, "archive-snapshots", *self.local, *common)
+        self.assertEqual((moved["root_snapshots"], moved["archived_snapshots"], moved["archive_pending"]),
+                         ("1", "6", "0"))
+        self.assertEqual(moved["snapshots_archived"], str(int(status["root_snapshots"]) - 1))
+        offline = {command: self.run_command(ADMIN, command, *self.local, *common)
+                   for command in ("snapshot-archive", "snapshots", "collection")}
+        self.assertEqual([item["snapshot_id"] for item in offline["snapshots"]["items"]], snapshots)
+        # Usage errors never send a request.
+        self.run_command(ADMIN, "snapshot-archive", *self.local, *common, "--hot-snapshots", "2", "--unset", code=2)
+
+        server, url = self.start_server()
+        for command, value in offline.items():
+            with self.subTest(command=command):
+                self.assertEqual(self.run_command(CLI, command, "--url", url, *common), value)
+        oldest = self.body_file("oldest.json", {"snapshot_id": snapshots[0]})
+        self.assertEqual([row["key"] for row in self.run_command(CLI, "scan", "--url", url, *common,
+                                                                 "--body", oldest)["rows"]], ["k-0"])
+        # Repeated creation must use the created value, not the current one.
+        self.assertEqual(self.run_command(CLI, *create, "--url", url, "--hot-snapshots", "2"), offline["collection"])
+        mismatch = self.run_command(CLI, *create, "--url", url, "--hot-snapshots", "1", code=1)
+        self.assertEqual(json.loads(mismatch.stdout)["error"]["code"], "SNAPSHOT_ARCHIVE_MISMATCH")
+        invalid = self.run_command(CLI, "snapshot-archive", "--url", url, *common, "--hot-snapshots", "0", code=1)
+        self.assertEqual(json.loads(invalid.stdout)["error"]["code"], "INVALID_ARGUMENT")
+        unset = self.run_command(CLI, "snapshot-archive", "--url", url, *common, "--unset")
+        self.assertIsNone(unset["hot_snapshots"])
+        self.assertEqual(self.run_command(CLI, "snapshot-archive", "--url", url, *common, "--unset"), unset)
+        idle = self.run_command(CLI, "archive-snapshots", "--url", url, *common)
+        self.assertEqual((idle["snapshots_archived"], idle["archive_pending"], idle["hot_snapshots"]), ("0", "0", None))
+        self.run_command(CLI, "snapshot-archive", "--url", url, *common, "--hot-snapshots", "2", "--unset", code=2)
+        server.terminate()
+        self.assertEqual(server.wait(timeout=15), 0)
+        # The unset setting and the archive survive restart and offline reopen.
+        self.assertEqual(self.run_command(ADMIN, "snapshot-archive", *self.local, *common),
+                         dict(offline["snapshot-archive"], hot_snapshots=None, archive_pending="0"))
+
     def test_offline_stdout_failure_preserves_committed_operation(self):
         self.create_collection()
         body = self.body_file("append.json", {"operation_id": OPERATION, "rows": ROWS})
