@@ -9,6 +9,7 @@
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
 #include <arrow/util/byte_size.h>
+#include <arrow/util/compression.h>
 #include <iceberg/file_io.h>
 #include <iceberg/file_writer.h>
 #include <iceberg/manifest/manifest_entry.h>
@@ -18,10 +19,14 @@
 #include <iceberg/table_metadata.h>
 #include <iceberg/type.h>
 #include <iceberg/util/macros.h>
+#include <parquet/metadata.h>
 
 #include <algorithm>
 #include <cmath>
+#include <format>
 #include <span>
+#include <string_view>
+#include <unordered_map>
 #include <utility>
 
 namespace NGlamDB::NStorage {
@@ -221,6 +226,86 @@ iceberg::Status WriteBatches(iceberg::Writer& writer,
     return {};
 }
 
+iceberg::Result<std::string> IcebergCodecName(arrow::Compression::type codec)
+{
+    switch (codec) {
+        case arrow::Compression::UNCOMPRESSED:
+            return "uncompressed";
+        case arrow::Compression::SNAPPY:
+            return "snappy";
+        case arrow::Compression::GZIP:
+            return "gzip";
+        case arrow::Compression::LZ4:
+            return "lz4";
+        case arrow::Compression::ZSTD:
+            return "zstd";
+        default:
+            return iceberg::InvalidArgument("Unsupported Parquet compression codec.");
+    }
+}
+
+iceberg::Status AddCompression(std::unordered_map<std::string, std::string>& properties,
+    const TParquetCompressionSpec& compression,
+    std::string_view suffix)
+{
+    ICEBERG_ASSIGN_OR_RAISE(auto name, IcebergCodecName(compression.Codec));
+    properties.emplace(std::format("write.parquet.compression-codec{}", suffix), std::move(name));
+    if (compression.Level) {
+        properties.emplace(std::format("write.parquet.compression-level{}", suffix),
+            std::to_string(*compression.Level));
+    }
+    return {};
+}
+
+iceberg::Result<std::unordered_map<std::string, std::string>>
+WriterProperties(const TInputShape& shape, const iceberg::Schema& schema, const TParquetWriteSpec& spec)
+{
+    std::unordered_map<std::string, std::string> properties{
+        {"write.parquet.max-row-group-rows", std::to_string(shape.RowGroupRows)}};
+    if (spec.Compression) {
+        ICEBERG_RETURN_UNEXPECTED(AddCompression(properties, *spec.Compression, ""));
+    }
+    for (const auto& [name, compression] : spec.Columns) {
+        if (std::ranges::none_of(schema.fields(), [&](const auto& field) {
+                return field.name() == name;
+            }))
+        {
+            return iceberg::InvalidArgument("Parquet column settings name an unknown column.");
+        }
+        ICEBERG_RETURN_UNEXPECTED(AddCompression(properties, compression, ".column." + name));
+    }
+    return properties;
+}
+
+// The writer ignores settings for paths it does not know, so the footer is the
+// proof: every column chunk must use the effective codec of its column.
+iceberg::Status
+CheckColumnCodecs(const parquet::FileMetaData& footer, const iceberg::Schema& schema, const TParquetWriteSpec& spec)
+{
+    const auto fields = schema.fields();
+    std::vector<arrow::Compression::type> expected(fields.size(),
+        spec.Compression ? spec.Compression->Codec : arrow::Compression::ZSTD);
+    for (const auto& [name, compression] : spec.Columns) {
+        const auto field = std::ranges::find_if(fields, [&](const auto& item) {
+            return item.name() == name;
+        });
+        expected[static_cast<std::size_t>(field - fields.begin())] = compression.Codec;
+    }
+    if (footer.num_columns() != static_cast<int>(fields.size())) {
+        return iceberg::Invalid("Parquet footer does not match the table schema.");
+    }
+    for (int group = 0; group < footer.num_row_groups(); ++group) {
+        const auto rowGroup = footer.RowGroup(group);
+        for (int column = 0; column < footer.num_columns(); ++column) {
+            if (rowGroup->ColumnChunk(column)->compression() != expected[static_cast<std::size_t>(column)]) {
+                return iceberg::Invalid("Parquet writer did not apply the configured compression of column {}.",
+                    fields[static_cast<std::size_t>(column)].name());
+            }
+        }
+    }
+    return {};
+}
+
 iceberg::Result<std::shared_ptr<iceberg::DataFile>> MakeDataFile(iceberg::Writer& writer,
     const iceberg::TableMetadata& metadata,
     const std::string& path,
@@ -258,7 +343,8 @@ iceberg::Result<TDataWriteResult> WriteDataFile(std::shared_ptr<iceberg::FileIO>
     const iceberg::TableMetadata& metadata,
     std::string path,
     std::vector<std::shared_ptr<arrow::RecordBatch>> batches,
-    TDataWriterLimits limits)
+    TDataWriterLimits limits,
+    TParquetWriteSpec writeSpec)
 {
     auto result = CatchIcebergExceptions([&]() -> iceberg::Result<TDataWriteResult> {
         if (!fileIO || !attempt || metadata.format_version != 2) {
@@ -279,8 +365,8 @@ iceberg::Result<TDataWriteResult> WriteDataFile(std::shared_ptr<iceberg::FileIO>
         options.io = fileIO;
         options.schema = schema;
         ICEBERG_ASSIGN_OR_RAISE(options.metrics_config, iceberg::MetricsConfig::Make(metadata.properties.configs()));
-        options.properties = iceberg::WriterProperties::FromMap(
-            {{"write.parquet.max-row-group-rows", std::to_string(shape.RowGroupRows)}});
+        ICEBERG_ASSIGN_OR_RAISE(auto properties, WriterProperties(shape, *schema, writeSpec));
+        options.properties = iceberg::WriterProperties::FromMap(properties);
         ICEBERG_ASSIGN_OR_RAISE(auto writer,
             iceberg::WriterFactoryRegistry::Open(iceberg::FileFormatType::kParquet, options));
         auto written = CatchIcebergExceptions([&] {
@@ -307,15 +393,16 @@ iceberg::Result<TDataWriteResult> WriteDataFile(std::shared_ptr<iceberg::FileIO>
         const auto& receipt = *record.Value().Receipt;
         ICEBERG_ASSIGN_OR_RAISE(auto dataFile, MakeDataFile(*writer, metadata, path, shape, receipt));
         ICEBERG_ASSIGN_OR_RAISE(auto input, fileIO->NewInputFile(path));
-        ICEBERG_ASSIGN_OR_RAISE(auto verified,
-            CheckParquet(*input,
+        ICEBERG_ASSIGN_OR_RAISE(auto footer,
+            ReadParquetFooter(*input,
                 *schema,
                 {static_cast<std::int64_t>(receipt.Length), shape.Rows},
                 {limits.MaxFileBytes}));
+        ICEBERG_RETURN_UNEXPECTED(CheckColumnCodecs(*footer, *schema, writeSpec));
         if (auto error = attempt->MarkFormatVerified(path)) {
             return iceberg::IOError(error.message());
         }
-        return TDataWriteResult{std::move(dataFile), receipt, verified.FooterBytes};
+        return TDataWriteResult{std::move(dataFile), receipt, footer->size()};
     });
     if (!result && attempt) {
         attempt->FailFile(path, std::make_error_code(std::errc::io_error));

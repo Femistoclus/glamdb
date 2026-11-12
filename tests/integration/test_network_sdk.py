@@ -215,6 +215,30 @@ def test_runnable_quickstart_uses_actual_http_and_reports_verified_stream(server
     assert_storage(server, collection_id, 2)
 
 
+def test_mock_without_parquet_write_settings_refuses_them_explicitly(server):
+    # Native write settings are covered by native HTTP tests. The mock must not
+    # look as if it applied Parquet compression it does not implement.
+    settings = {"parquet": {"compression": {"codec": "zstd", "level": 3}}}
+    with Client(server.url, TOKEN) as client:
+        capabilities = client.capabilities()
+        assert capabilities.get("parquet") is None
+        assert not capabilities.get("features", {}).get("write_settings")
+        cid = str(uuid4())
+        with pytest.raises(HTTPError) as refused:
+            client.create_collection("parquet_settings", SCHEMA, collection_id=cid, write_settings=settings)
+        assert refused.value.status_code == 422 and refused.value.collection_id == cid
+        with pytest.raises(HTTPError) as absent:
+            client.get_collection(cid)
+        assert absent.value.status_code == 404
+        create(client, name="parquet_settings", collection_id=cid)
+        assert client.resolve_create("parquet_settings", SCHEMA, collection_id=cid)["collection_id"] == cid
+        with pytest.raises(ProtocolError):
+            client.resolve_create("parquet_settings", SCHEMA, collection_id=cid, write_settings=settings)
+        with pytest.raises(HTTPError) as missing:
+            client.update_write_settings(cid, "0", settings)
+        assert missing.value.status_code == 404
+
+
 def test_real_arrow_empty_schema_eos_and_fixed_view_survive_later_append(server):
     import pyarrow as pa
     transport = ArrowHTTPTransport()

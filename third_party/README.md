@@ -104,6 +104,13 @@ upstream as
 which is after v0.4.0 and not yet released. Delete the patch in the change
 that moves the pin to a revision containing that commit: the patch no longer
 applies there, so the dependency build fails until it is removed.
+`iceberg-cpp/0002-parquet-column-compression.patch` adds column-scoped
+`write.parquet.compression-codec.column.<name>` and
+`write.parquet.compression-level.column.<name>` to the Parquet writer and range
+checks levels before the file is created; collection write settings need them.
+Upstream has no equivalent yet. Every written footer is checked against the
+requested codecs, so a pin bump that silently drops the patch fails appends
+instead of writing other codecs.
 
 After pulling changes to dependency recipes or patches, rerun the `deps-local`
 configure and build commands above before rebuilding the application. Building

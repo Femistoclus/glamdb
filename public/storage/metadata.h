@@ -6,6 +6,17 @@ namespace glamdb {
 
 enum class BackendKind : uint8_t { Unavailable, Custom, LocalStorage };
 
+struct ParquetCodecCapability
+{
+    ParquetCodec codec = ParquetCodec::Zstd;
+    // Accepted level range and the level used when none is given; all absent
+    // for codecs without levels.
+    std::optional<int32_t> min_level{};
+    std::optional<int32_t> max_level{};
+    std::optional<int32_t> default_level{};
+    bool operator==(const ParquetCodecCapability&) const = default;
+};
+
 // Supported operations, independent of current admission (GetHealth).
 // Selecting local storage does not qualify power-loss durability.
 struct EngineCapabilities
@@ -17,6 +28,11 @@ struct EngineCapabilities
     bool file_pruning = false;
     bool row_group_pruning = false;
     bool durability_qualified = false;
+    // Collection write settings: the codecs available in this build, in
+    // ParquetCodec order, and the compression used when none is configured.
+    bool write_settings = false;
+    std::vector<ParquetCodecCapability> parquet_codecs{};
+    ParquetCompression default_parquet_compression{};
 };
 
 struct TMetadataPageRequest

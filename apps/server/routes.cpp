@@ -476,14 +476,15 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
         return JsonResponse({{"items", items}, {"next_cursor", nullptr}});
     }
     if (request.Method == "POST" && path == "/collections") {
-        CheckKeys(body, {"collection_id", "name", "schema", "mode"});
+        CheckKeys(body, {"collection_id", "name", "schema", "mode", "write_settings"});
         Require(body.value("mode", "append") == "append",
             "only append collections are supported",
             "UNSUPPORTED_OPERATION");
         return OutcomeResponse(
             json_adapter::ToJson(Engine_->CreateCollection({body.at("collection_id").get<std::string>(),
                 body.at("name").get<std::string>(),
-                ParseSchema(body.at("schema"))})));
+                ParseSchema(body.at("schema")),
+                body.contains("write_settings") ? ParseWriteSettings(body["write_settings"]) : WriteSettings{}})));
     }
     const auto parts = Split(path);
     Require(parts.size() >= 2 && parts[0] == "collections", "route not found", "ROUTE_NOT_FOUND");
@@ -502,6 +503,14 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
         // core failure has fenced catalog reads pending reconciliation.
         Require(query.empty(), "unknown query parameter");
         return Scans_->Cancel(DatabaseID_, id, body);
+    }
+    if (request.Method == "POST" && parts.size() == 3 && action == "write-settings") {
+        Require(query.empty(), "unknown query parameter");
+        CheckKeys(body, {"expected_version", "write_settings"});
+        Require(body.contains("expected_version") && body.contains("write_settings"),
+            "write settings require expected_version and write_settings");
+        return JsonResponse(Collection(Unwrap(Engine_->UpdateWriteSettings(
+            {id, ParseInt64(body["expected_version"]), ParseWriteSettings(body["write_settings"])}))));
     }
     if (request.Method == "POST" && parts.size() == 3 && action == "append") {
         Require(query.empty(), "unknown query parameter");

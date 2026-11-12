@@ -129,6 +129,39 @@ uncertain outcomes retain it until reconciliation. The owned-input estimate is
 one charge within that parent; HTTP decoding, writer work and scan buffers have
 separate reservations. Conservative upstream envelopes require RSS calibration.
 
+## Collection write settings
+
+`CreateCollectionRequest::write_settings` and `Engine::UpdateWriteSettings`
+choose the Parquet compression of data files written by later appends. The
+canonical settings (schema-ordered, at most one entry per field, each entry
+with an option) are part of the collection definition: a repeated creation
+compares the settings it was created with, and a mismatch is
+`WRITE_SETTINGS_MISMATCH`. Structure is validated before the writer is taken;
+codec availability and level ranges come from the backend's capabilities and
+are checked again before every binding, because a store may be opened by a
+build without a stored codec (`DEPENDENCY_UNAVAILABLE`, no operation ID is
+consumed). Empty settings never depend on the backend.
+
+Updates take the writer like appends and creations. An append reads the
+settings with its collection after acquiring the writer and keeps them through
+production, so an update waits for a bound append and only later appends see
+it. Settings are not part of the operation identity: a retried ID returns its
+original terminal outcome, and recovery never re-executes an append. An update
+is a compare-and-set on `write_settings_version` (0 = never set) in one catalog
+transaction without file I/O. Repeating an applied request (identical settings,
+current version = expected + 1) succeeds unchanged; anything else is
+`WRITE_SETTINGS_CONFLICT`. An uncertain COMMIT closes readiness like other
+catalog uncertainty; after `Reconcile` the same request either applies or is
+recognized as applied.
+
+Catalog version 1 has no settings. The first transaction that stores settings
+creates `collection_write_settings` (creation and current blobs plus version)
+and sets `user_version=2` atomically; stores that never use settings remain
+version 1 for older binaries. Older binaries reject version 2 instead of
+writing data files that ignore the stored settings. Open validates the table
+against the version, foreign keys and every blob against its schema (blobs
+identify fields by stable field ID; unknown options fail closed).
+
 ## Storage backend integration
 
 `core/engine/storage_backend.h` is the private integration seam, injected by

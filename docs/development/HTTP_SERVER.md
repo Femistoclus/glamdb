@@ -170,6 +170,7 @@ separate, broader development profile.
 | `GET /collections/{id}` | `GetCollection` | Identity and current schema |
 | `GET /collections/{id}/schema` | `GetCollection` / `Schema` | Stable field IDs |
 | `POST /collections/{id}/append` | `AppendDurable` | Synchronous native receipt |
+| `POST /collections/{id}/write-settings` | `UpdateWriteSettings` | Compare-and-set of Parquet settings for later appends |
 | `GET /collections/{id}/operations/{op}` | `FindAppendOutcome` | Original result or authoritative absence |
 | `POST /collections/{id}/scan/open` | `Scan` | Resolve a fixed view and return a cursor without consuming rows |
 | `POST /collections/{id}/scan` | `Scan` / `ScanCursor::Next` | First page or cursor continuation, JSON or Arrow IPC |
@@ -259,6 +260,30 @@ Types: `string`, `bool`, `int64`, `float64`, `timestamp_us_utc`. Core assigns ID
 1..N; supplied field IDs must match. A field named `key`, if supplied, must be a
 non-nullable string; its values are not unique.
 Schema evolution, SQL, upsert and delete are unsupported.
+
+Create also accepts optional `write_settings`, part of the collection definition
+(a repeated creation with different settings returns 409 `WRITE_SETTINGS_MISMATCH`):
+`{parquet:{compression?:{codec,level?}|null,columns?:[{field,compression?}]}}`.
+They choose the **Parquet value compression** of data files written by later
+appends; HTTP bodies stay uncompressed (`Content-Encoding` other than `identity`
+is still rejected). Codecs are `uncompressed`, `snappy`, `gzip`, `lz4_raw` and
+`zstd`; `parquet.codecs` in capabilities lists those of the running build with
+their level ranges (`null` for codecs without levels) and default levels, and
+`parquet.default_compression` is used when nothing is configured. A column entry
+overrides the collection default for that field; a level is never inherited
+from another codec. Unknown fields, codecs, duplicate columns, empty column
+entries, levels outside the range or for codecs without levels are rejected
+before anything is bound. Collections return the canonical (schema-ordered)
+`write_settings` and `write_settings_version` (decimal string; `"0"` = never set).
+
+`POST /collections/{id}/write-settings` takes
+`{expected_version:"N",write_settings:{...}}` and returns the collection. It
+applies only when `N` is the current version and yields `N+1`; repeating an
+applied request (same settings, current version `N+1`) succeeds unchanged, so a
+lost response can be retried. Otherwise 409 `WRITE_SETTINGS_CONFLICT`. It waits
+for the single writer: an append already bound keeps the settings it read, and
+existing files keep the codecs recorded in their footers (`compression` in file
+details). Settings are never part of an append's operation identity.
 
 Append: `{operation_id,rows:[{field:value,...}],expected_snapshot?}`. Omitted
 precondition means any snapshot; null means no snapshot; a decimal string means

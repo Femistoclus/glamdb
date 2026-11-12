@@ -136,6 +136,32 @@ TEST(OutcomeJson, CollectionSuccessMatchesExistingUiShapeAndStableFieldIds)
     EXPECT_EQ(JsonAt(encoded->body, "$.schema.fields[0].field_id").text, "1");
     EXPECT_EQ(JsonAt(encoded->body, "$.schema.fields[0].field_id").type, "integer");
     EXPECT_EQ(JsonAt(encoded->body, "$.mode").text, "append");
+    EXPECT_EQ(JsonAt(encoded->body, "$.write_settings.parquet.compression").type, "null");
+    EXPECT_EQ(JsonAt(encoded->body, "$.write_settings.parquet.columns").type, "array");
+    EXPECT_EQ(JsonAt(encoded->body, "$.write_settings_version").text, "0");
+    EXPECT_EQ(JsonAt(encoded->body, "$.write_settings_version").type, "text");
+}
+
+TEST(OutcomeJson, CollectionWriteSettingsAreCanonicalParquetObjects)
+{
+    CollectionInfo info{test::collection_id,
+        "events",
+        test::table_uuid,
+        SchemaSpec{{{"n", FieldType::Int64, true}, {"s", FieldType::String, true}}},
+        1,
+        std::nullopt};
+    info.write_settings = {ParquetCompression{ParquetCodec::Zstd, 9},
+        {{"s", ParquetCompression{ParquetCodec::Lz4Raw, std::nullopt}}}};
+    info.write_settings_version = 3;
+    const auto encoded = json_adapter::CollectionJson(info);
+    ASSERT_TRUE(encoded);
+    EXPECT_EQ(JsonAt(*encoded, "$.write_settings.parquet.compression.codec").text, "zstd");
+    EXPECT_EQ(JsonAt(*encoded, "$.write_settings.parquet.compression.level").text, "9");
+    EXPECT_EQ(JsonAt(*encoded, "$.write_settings.parquet.compression.level").type, "integer");
+    EXPECT_EQ(JsonAt(*encoded, "$.write_settings.parquet.columns[0].field").text, "s");
+    EXPECT_EQ(JsonAt(*encoded, "$.write_settings.parquet.columns[0].compression.codec").text, "lz4_raw");
+    EXPECT_EQ(JsonAt(*encoded, "$.write_settings.parquet.columns[0].compression.level").type, "null");
+    EXPECT_EQ(JsonAt(*encoded, "$.write_settings_version").text, "3");
 }
 
 TEST(OutcomeJson, ExhaustedCapacityIs507WhileAdmissionStays429)

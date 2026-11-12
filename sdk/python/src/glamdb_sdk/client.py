@@ -20,6 +20,7 @@ from .predicates import Predicate
 from .request import AppendRequest, json_bytes, schema_fingerprint, uuid_string
 from .recovery import validate_append_recovery, validate_create_recovery
 from .transport import JSON_ACCEPT_ENCODING, Deadline, read_json, translate_transport
+from .write_settings import canonical_write_settings, write_settings_version
 
 
 class _ScanPages:
@@ -379,14 +380,23 @@ class Client:
         return self._metadata(self._read(path, params=self._selector(snapshot_id), deadline=deadline, collection_id=cid), cid, snapshot_id)
 
     def create_collection(self, name: str, schema: Schema | Mapping[str, Any], *, collection_id: str | UUID,
+                          write_settings: Mapping[str, Any] | None = None,
                           deadline: float | None = None) -> CreateOutcome:
+        """Create or confirm one collection definition.
+
+        ``write_settings`` (Parquet value compression for later appends) is part
+        of the definition: send the same value when repeating a lost create.
+        """
         cid = uuid_string(collection_id, "collection_id")
         schema = self._schema(schema)
         if not isinstance(name, str) or not name:
             raise ValidationError("exact collection name is required")
+        requested = None if write_settings is None else canonical_write_settings(write_settings, schema)
+        body = {"collection_id": cid, "name": name, "schema": schema.to_dict()}
+        if requested is not None:
+            body["write_settings"] = requested
         budget = Deadline(deadline, collection_id=cid)
-        status, value = self._json("POST", "collections", budget,
-                                   body=json_bytes({"collection_id": cid, "name": name, "schema": schema.to_dict()}), write=True)
+        status, value = self._json("POST", "collections", budget, body=json_bytes(body), write=True)
         try:
             kind = value.get("outcome")
             if kind is None and status in (200, 201):
@@ -396,7 +406,7 @@ class Client:
             if kind == "committed":
                 if status not in (200, 201) or not isinstance(info, dict) or "error" in value:
                     raise ProtocolError("invalid committed create outcome", raw=value)
-                self._verify_created(info, cid, name, schema)
+                self._verify_created(info, cid, name, schema, requested, authoritative=True)
                 self._schemas[cid] = schema
             elif kind == "definitely_not_committed":
                 if (not isinstance(value.get("error"), dict) or info is not None or not 400 <= status <= 599
@@ -417,7 +427,16 @@ class Client:
             raise
 
     @staticmethod
-    def _verify_created(info: Mapping[str, Any], cid: str, name: str, schema: Schema) -> None:
+    def _verify_created(info: Mapping[str, Any], cid: str, name: str, schema: Schema,
+                        write_settings: dict[str, Any] | None = None, *, authoritative: bool = True) -> bool:
+        """Check a created or resolved collection against the original create.
+
+        ``authoritative`` responses come from the create POST itself: the
+        server compared the settings the collection was created with. A
+        resolved (GET) collection reports only its current settings, which
+        prove the creation settings only while none were ever stored (version
+        "0"). Returns False when only a repeated create can decide.
+        """
         try:
             actual_schema = Schema.from_dict(info["schema"])
             same = info.get("collection_id") == cid and info.get("name") == name and schema_fingerprint(actual_schema) == schema_fingerprint(schema)
@@ -425,13 +444,99 @@ class Client:
             raise ProtocolError("created collection has missing or invalid identity/schema", raw=info) from exc
         if not same:
             raise ProtocolError("resolved collection UUID, exact name, or schema does not match original create", raw=info)
+        if "write_settings" not in info and "write_settings_version" not in info:
+            # Servers without write settings (the mock, older native builds)
+            # cannot have applied any; a request that carried them must not pass.
+            if write_settings is not None:
+                raise ProtocolError("created collection does not report the requested write settings", raw=info)
+            return True
+        try:
+            version = write_settings_version(info["write_settings_version"])
+            actual = canonical_write_settings(info["write_settings"], schema, reported=True)
+        except (KeyError, ValidationError) as exc:
+            raise ProtocolError("created collection has missing, invalid or unsupported write settings",
+                                raw=info) from exc
+        # Creation stores non-default settings as version 1; defaults store
+        # nothing (version 0). Every update adds one, so a stored version can
+        # also be a default creation that was updated.
+        default = canonical_write_settings(None)
+        expected = write_settings or default
+        created_version = 0 if expected == default else 1
+        if version < created_version or (version == 0 and actual != expected):
+            raise ProtocolError("resolved collection write settings do not match original create", raw=info)
+        if not authoritative:
+            return version == 0
+        if version == created_version and actual != expected:
+            raise ProtocolError("created collection write settings do not match the request", raw=info)
+        return True
 
     def resolve_create(self, name: str, schema: Schema | Mapping[str, Any], *, collection_id: str | UUID,
+                       write_settings: Mapping[str, Any] | None = None,
                        deadline: float | None = None) -> dict[str, Any]:
+        """Resolve a lost create without guessing its write settings.
+
+        When the current collection cannot prove the creation settings (any
+        settings were ever stored), the original create is repeated: it changes
+        nothing for an existing collection, and the server compares it with the
+        settings the collection was created with.
+        """
         cid = uuid_string(collection_id, "collection_id")
+        schema = self._schema(schema)
+        requested = None if write_settings is None else canonical_write_settings(write_settings, schema)
         info = self.resolve_collection(name, deadline=deadline)
-        self._verify_created(info, cid, name, self._schema(schema))
-        return info
+        if self._verify_created(info, cid, name, schema, requested, authoritative=False):
+            return info
+        outcome = self.create_collection(name, schema, collection_id=cid, write_settings=requested, deadline=deadline)
+        if outcome.outcome == "committed":
+            return outcome.info
+        code = outcome.error.code if outcome.error else None
+        if code in ("WRITE_SETTINGS_MISMATCH", "SCHEMA_MISMATCH", "ALREADY_EXISTS"):
+            raise ProtocolError("resolved collection write settings do not match original create",
+                                raw=outcome.raw, collection_id=cid)
+        # Recovery or admission refused the confirmation; the create stays unresolved.
+        detail = outcome.error or ErrorDetail.from_dict({"code": "RECOVERY_REQUIRED",
+                                                         "message": "create confirmation is unresolved",
+                                                         "retry_hint": "SameIdAfterReconcile"})
+        raise OutcomeUnknownError(503, detail, raw=outcome.raw, collection_id=cid)
+
+    def update_write_settings(self, collection_id: str | UUID, expected_version: int | str,
+                              write_settings: Mapping[str, Any], *, deadline: float | None = None) -> dict[str, Any]:
+        """Compare-and-set the Parquet write settings used by later appends.
+
+        ``expected_version`` is the collection's current ``write_settings_version``;
+        the returned collection has version ``expected_version + 1``. Existing
+        data files keep their codecs. A stale version raises ``HTTPError`` 409
+        ``WRITE_SETTINGS_CONFLICT``. After a lost response or
+        ``OutcomeUnknownError`` (for example 503 ``RECOVERY_REQUIRED``), repeat
+        the same call, after reconciling if requested: an applied identical
+        request returns the collection unchanged.
+        """
+        cid, path = self._path(collection_id, "write-settings")
+        version = int64(expected_version)
+        if version < 0 or version == 2**63 - 1:
+            raise ValidationError("expected_version must be a current non-negative write settings version")
+        requested = canonical_write_settings(write_settings)
+        budget = Deadline(deadline, collection_id=cid)
+        status, value = self._json("POST", path, budget, write=True, body=json_bytes(
+            {"expected_version": str(version), "write_settings": requested}))
+        if status != 200:
+            self._http_error(status, value, budget)
+        try:
+            if value.get("collection_id") != cid:
+                raise ProtocolError("write settings response names a different collection")
+            schema = Schema.from_dict(value["schema"])
+            if write_settings_version(value["write_settings_version"]) != version + 1:
+                raise ProtocolError("write settings response has an unexpected version")
+            if (canonical_write_settings(value["write_settings"], schema, reported=True)
+                    != canonical_write_settings(requested, schema)):
+                raise ProtocolError("write settings response differs from the request")
+        except (KeyError, ValidationError) as exc:
+            raise ProtocolError("write settings response has missing or invalid collection fields",
+                                raw=value, collection_id=cid) from exc
+        except ProtocolError as exc:
+            exc.raw, exc.collection_id = value, cid
+            raise
+        return value
 
     def prepare_append(self, collection_id: str | UUID, rows: Iterable[Mapping[str, Any]], *, operation_id: str | UUID,
                        schema: Schema | Mapping[str, Any] | None = None, expected_snapshot: Any = ANY,

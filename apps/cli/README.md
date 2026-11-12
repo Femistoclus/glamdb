@@ -113,7 +113,7 @@ creates a missing store.
 
 | Command | Additional options | Result |
 | --- | --- | --- |
-| `create-collection` | `--collection-id UUID --name NAME --schema FILE` | Created collection or original matching collection |
+| `create-collection` | `--collection-id UUID --name NAME --schema FILE [--write-settings FILE]` | Created collection or original matching collection |
 | `collections` | None | Collection inventory |
 | `resolve-collection` | `--name NAME` | Exact-name lookup, including after a lost create reply |
 | `collection` | `--collection-id UUID` | Collection identity and schema |
@@ -124,6 +124,7 @@ creates a missing store.
 | `snapshots` | `--collection-id UUID [--snapshot SELECTOR]` | Receipt-backed snapshot history |
 | `files` | `--collection-id UUID [--snapshot SELECTOR]` | Committed file membership and opaque IDs |
 | `file` | `--collection-id UUID --file-id ID [--snapshot SELECTOR]` | Verified Parquet footer and row groups |
+| `write-settings` | `--collection-id UUID --expected-version N --settings FILE` | Collection after a compare-and-set of its Parquet write settings |
 
 Remote commands accept `--database-id UUID` for a managed server, or a base URL
 already scoped to `/databases/UUID`. Omit both for legacy single-store servers.
@@ -132,6 +133,13 @@ atomic `--output`, and `--headers` options. `glamdb-admin` remote mode accepts
 `--ca-file` and `--timeout` and writes JSON to stdout. Tokens remain exclusively
 in `GLAMDB_TOKEN`; TLS verification and loopback-only HTTP rules apply in both.
 
+Write settings files contain the HTTP `write_settings` object, for example
+`{"parquet":{"compression":{"codec":"zstd","level":9},"columns":[{"field":"payload","compression":{"codec":"uncompressed"}}]}}`.
+They choose the Parquet compression of data files written by later appends;
+on creation they are part of the definition. `write-settings` applies only when
+`--expected-version` is the collection's current `write_settings_version`; repeating
+an applied command succeeds unchanged, a stale version fails with
+`WRITE_SETTINGS_CONFLICT` (see the [HTTP contract](../../docs/development/HTTP_SERVER.md)).
 Schema files contain `{"fields":[...]}`. Append files contain the original
 `operation_id`, `rows`, and optional `expected_snapshot` (`null` means no previous
 snapshot; an exact decimal string requires that snapshot). Files may be `-` for

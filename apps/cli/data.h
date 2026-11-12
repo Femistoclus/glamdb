@@ -15,6 +15,8 @@ struct TDataCommand
 {
     std::string_view Command;
     std::string CollectionID, Name, SchemaFile, BodyFile, OperationID, FileID, DatabaseID;
+    // Parquet write settings JSON file (or - for stdin) and its expected version.
+    std::string WriteSettingsFile, ExpectedVersion;
     std::string Snapshot = "latest";
 };
 
