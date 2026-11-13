@@ -25,6 +25,7 @@ struct TBaseState;
 namespace glamdb::detail {
 
 class TSnapshotMetadataCache;
+struct ArchivedSnapshotRecord;
 
 Result<std::shared_ptr<const iceberg::TableMetadata>> ReadScanRoot(const std::shared_ptr<iceberg::FileIO>& io,
     const BaseIdentity& base,
@@ -59,15 +60,22 @@ struct TScanManifests
 // Resolves the selector once against the committed root of `base` and reads
 // that snapshot's manifest list. Warehouse directories are never listed, so
 // orphan and unpublished files are not visible.
+// An archived selected snapshot is read from its archive record: its list
+// must have the recorded size and SHA-256 before it is decoded.
 Result<TScanManifests> PlanManifests(const std::shared_ptr<iceberg::FileIO>& io,
     const BaseIdentity& base,
     const SnapshotSelector& selector,
     TSnapshotMetadataCache* cache = nullptr,
-    int64_t root_bytes = HistoryLimits{}.max_root_file_bytes);
+    int64_t root_bytes = HistoryLimits{}.max_root_file_bytes,
+    const ArchivedSnapshotRecord* archived = nullptr);
 
+// An archived snapshot selects the prefix of its recorded data-file count:
+// verified membership is chronological and append-only, so the prefix is
+// exactly the files its list held when it was archived.
 Result<TScanManifests> PlanVerifiedScan(const NGlamDB::NStorage::TBaseState& state,
     const BaseIdentity& base,
-    const SnapshotSelector& selector);
+    const SnapshotSelector& selector,
+    const ArchivedSnapshotRecord* archived = nullptr);
 
 // The live data files of one planned manifest.
 Result<std::vector<TScanFile>> ManifestFiles(const std::shared_ptr<iceberg::FileIO>& io,

@@ -1968,7 +1968,11 @@ TEST_F(ScanPruningVerticalTest, MultiRowGroupOverlappingChunksAndContradictoryAl
         ASSERT_TRUE(Engine_->Shutdown(1000ms));
         Engine_.reset();
         StorageBackend_.reset();
-        auto reopened = detail::EngineFactory::OpenWith({Root_.string(), test::store_id}, MakeFactory(options));
+        // Full verification reads every manifest's metrics; an open from
+        // checkpoints only reads the current ones.
+        OpenStoreRequest full{Root_.string(), test::store_id};
+        full.verify_full = true;
+        auto reopened = detail::EngineFactory::OpenWith(full, MakeFactory(options));
         ASSERT_FALSE(reopened);
         EXPECT_EQ(reopened.error().code, "CORRUPTION") << reopened.error().message;
 

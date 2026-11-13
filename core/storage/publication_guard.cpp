@@ -11,7 +11,9 @@
 #include <iceberg/snapshot.h>
 #include <iceberg/table_metadata.h>
 
+#include <algorithm>
 #include <limits>
+#include <span>
 
 namespace NGlamDB::NStorage {
 using iceberg::Error;
@@ -23,6 +25,11 @@ TStoragePublicationGuard::TStoragePublicationGuard(TPublicationContext context)
 std::shared_ptr<const TBaseState> TStoragePublicationGuard::GetCandidate() const
 {
     return Candidate_;
+}
+
+std::shared_ptr<const TArchiveCut> TStoragePublicationGuard::GetArchiveCut() const
+{
+    return ArchiveCut_;
 }
 
 iceberg::Status TStoragePublicationGuard::CheckContext(const TPointerChange& change) const
@@ -41,6 +48,13 @@ iceberg::Status TStoragePublicationGuard::CheckContext(const TPointerChange& cha
                 (Context_.Base->ScanIndex && Context_.Base->ScanIndex->KeyValue)));
     if (kv && (Context_.RetentionPolicy || Context_.Attempt->Kind() == NIO::EAttemptKind::Maintenance)) {
         return iceberg::ValidationFailed("Snapshot retention is unsupported for KV collections.");
+    }
+    // KV membership is copy-on-write over the complete root history.
+    if (kv &&
+        (Context_.ArchivePrefix != 0 || Context_.ArchiveMaintenance || !Context_.ExpiredArchive.empty() ||
+            Context_.RemainingArchive))
+    {
+        return iceberg::ValidationFailed("The snapshot archive is unsupported for KV collections.");
     }
     const auto isAppend = Context_.Attempt->Kind() != NIO::EAttemptKind::CreateCollection;
     if (isAppend != static_cast<bool>(Context_.Base) ||
@@ -135,14 +149,47 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
             ReadTableMetadata(*Context_.FileIO, change.NewLocation, std::nullopt, maxRootBytes));
         candidate.Metadata = std::shared_ptr<iceberg::TableMetadata>(std::move(metadata));
     }
+    const bool maintenance = Context_.RetentionPolicy || Context_.ArchiveMaintenance;
     if (Context_.Base) {
+        const auto& base = *Context_.Base->Metadata;
+        const auto archived = Context_.ArchivePrefix;
+        if ((archived >= base.snapshots.size() && archived != 0 && maintenance) || archived > base.snapshots.size() ||
+            (archived != 0 && Context_.RetentionPolicy) ||
+            (Context_.ArchiveMaintenance && (archived == 0 || Context_.RetentionPolicy)) ||
+            ((!Context_.ExpiredArchive.empty() || Context_.RemainingArchive) && !Context_.RetentionPolicy))
+        {
+            return iceberg::ValidationFailed("Invalid snapshot archive publication.");
+        }
+        // Moving the oldest root snapshots to the archive changes nothing else.
+        auto expected = base;
+        expected.snapshots.erase(expected.snapshots.begin(),
+            expected.snapshots.begin() + static_cast<std::ptrdiff_t>(archived));
+        expected.snapshot_log.erase(expected.snapshot_log.begin(),
+            expected.snapshot_log.begin() + static_cast<std::ptrdiff_t>(archived));
         if (Context_.RetentionPolicy) {
-            auto expected = *Context_.Base->Metadata;
             const auto count = Context_.ExpirationPrefix;
             if (count >= expected.snapshots.size() && count != 0) {
                 return iceberg::ValidationFailed("Expiration removes the current snapshot.");
             }
             ICEBERG_ASSIGN_OR_RAISE(auto expiredSequence, ExpiredSequence(expected));
+            for (const auto& expired : Context_.ExpiredArchive) {
+                if (expired.Sequence != expiredSequence + 1) {
+                    return iceberg::ValidationFailed("Expired archive is not the oldest retained history.");
+                }
+                expiredSequence = expired.Sequence;
+            }
+            if (Context_.RemainingArchive &&
+                (count != 0 || Context_.RemainingArchive->Sequence != expiredSequence + 1 ||
+                    expected.snapshots.empty() ||
+                    Context_.RemainingArchive->Sequence >= expected.snapshots.front()->sequence_number))
+            {
+                return iceberg::ValidationFailed("Expiration leaves an archive gap.");
+            }
+            if (!Context_.RemainingArchive && !expected.snapshots.empty() &&
+                expected.snapshots.front()->sequence_number != expiredSequence + 1)
+            {
+                return iceberg::ValidationFailed("Expiration leaves an archive gap.");
+            }
             if (count != 0) {
                 expiredSequence = expected.snapshots[count - 1]->sequence_number;
             }
@@ -151,16 +198,24 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
             expected.snapshot_log.erase(expected.snapshot_log.begin(),
                 expected.snapshot_log.begin() + static_cast<std::ptrdiff_t>(count));
             ICEBERG_RETURN_UNEXPECTED(WriteRetentionPolicy(expected, *Context_.RetentionPolicy, expiredSequence));
+        }
+        if (maintenance) {
             if (!(expected == *candidate.Metadata) || !SameSnapshotDetails(expected, *candidate.Metadata)) {
                 return iceberg::ValidationFailed("Expiration changes immutable metadata.");
             }
         } else {
             ICEBERG_RETURN_UNEXPECTED((IsKVMetadata(*Context_.Base->Metadata)
                     ? CheckKVMetadata(*Context_.Base->Metadata, *candidate.Metadata, Context_.ExpectedSummary)
-                    : CheckAppendMetadata(*Context_.Base->Metadata, *candidate.Metadata, Context_.ExpectedSummary)));
+                    : CheckAppendMetadata(expected, *candidate.Metadata, Context_.ExpectedSummary)));
             if (std::ranges::binary_search(Context_.Base->ExpiredSnapshotIDs, candidate.Metadata->current_snapshot_id))
             {
                 return iceberg::ValidationFailed("Append reuses an expired snapshot identity.");
+            }
+            if (std::ranges::any_of(std::span(base.snapshots).first(archived), [&](const auto& snapshot) {
+                    return snapshot->snapshot_id == candidate.Metadata->current_snapshot_id;
+                }))
+            {
+                return iceberg::ValidationFailed("Append reuses an archived snapshot identity.");
             }
         }
         candidate.Usage = Context_.Base->Usage;
@@ -168,6 +223,7 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
         candidate.ExpiredSnapshotIDs = Context_.Base->ExpiredSnapshotIDs;
         candidate.RetainedManifestPaths = Context_.Base->RetainedManifestPaths;
         candidate.CurrentCommitMetadataBytes = Context_.Base->CurrentCommitMetadataBytes;
+        candidate.CurrentManifestDecodedBytes = Context_.Base->CurrentManifestDecodedBytes;
     } else {
         const auto location = "store://" + std::string(Context_.Attempt->StoreId()) + "/warehouse/" +
             std::string(Context_.Attempt->CollectionId());
@@ -182,7 +238,7 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
     if (candidate.Metadata->metadata_log.size() > Context_.Limits.MetadataLogEntries) {
         return iceberg::ValidationFailed("CAPACITY: Metadata history exceeds storage capacity.");
     }
-    if (Context_.Base && !Context_.RetentionPolicy) {
+    if (Context_.Base && !maintenance) {
         ICEBERG_ASSIGN_OR_RAISE(candidate,
             (IsKVMetadata(*candidate.Metadata) ? CheckKVClosure(Context_.FileIO,
                                                      std::move(candidate),
@@ -195,7 +251,7 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
                                                      Context_.Attempt,
                                                      Context_.Limits)));
     }
-    if (Context_.RetentionPolicy) {
+    if (maintenance) {
         // Recovery charges the final root with the latest append's metadata.
         // A policy-only root can grow even when no snapshots are removed.
         if (candidate.CurrentCommitMetadataBytes > Context_.Limits.CommitBytes ||
@@ -204,29 +260,54 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
             return iceberg::ValidationFailed("CAPACITY: Maintenance exceeds commit verification bytes.");
         }
         candidate.CurrentManifests = Context_.Base->CurrentManifests;
+    }
+    if (Context_.RetentionPolicy) {
         auto index = std::make_shared<TScanMembership>(*Context_.Base->ScanIndex);
-        if (Context_.ExpirationPrefix != 0) {
+        if (Context_.ExpirationPrefix != 0 || !Context_.ExpiredArchive.empty()) {
             ICEBERG_ASSIGN_OR_RAISE(auto retirement,
                 FindExpiredMetadata(Context_.FileIO,
                     *Context_.Base->Metadata,
                     Context_.ExpirationPrefix,
-                    Context_.Limits));
+                    Context_.Limits,
+                    Context_.ExpiredArchive,
+                    Context_.RemainingArchive ? &*Context_.RemainingArchive : nullptr));
             const auto usage = ReplaceUsage(candidate.Usage, {.Previous = retirement.Removed});
             if (!usage) {
                 return iceberg::ValidationFailed("Invalid expired metadata usage.");
             }
             candidate.Usage = usage.Value();
-            candidate.RetainedManifestPaths = std::move(retirement.RetainedManifests);
+            if (Context_.ExpirationPrefix != 0) {
+                candidate.RetainedManifestPaths = std::move(retirement.RetainedManifests);
+            }
+        }
+        std::vector<std::int64_t> expiredIDs(candidate.ExpiredSnapshotIDs.begin(), candidate.ExpiredSnapshotIDs.end());
+        for (const auto& expired : Context_.ExpiredArchive) {
+            expiredIDs.push_back(expired.SnapshotID);
         }
         for (std::size_t i = 0; i < Context_.ExpirationPrefix; ++i) {
             const auto& expired = Context_.Base->Metadata->snapshots[i];
-            candidate.ExpiredSnapshotIDs.push_back(expired->snapshot_id);
+            expiredIDs.push_back(expired->snapshot_id);
             std::erase_if(index->Snapshots, [&](const auto& boundary) {
                 return boundary.SnapshotID == expired->snapshot_id;
             });
         }
-        std::ranges::sort(candidate.ExpiredSnapshotIDs);
+        candidate.ExpiredSnapshotIDs = TSortedSnapshotIDs(std::move(expiredIDs));
         candidate.ScanIndex = std::move(index);
+    }
+    if (Context_.ArchivePrefix != 0) {
+        const auto& snapshots = Context_.Base->Metadata->snapshots;
+        if (candidate.Metadata->snapshots.empty() || !Context_.Base->ScanIndex) {
+            return iceberg::ValidationFailed("Archive cut leaves no root snapshot.");
+        }
+        ICEBERG_ASSIGN_OR_RAISE(auto cut,
+            DescribeArchiveCut(Context_.FileIO,
+                std::span(snapshots).first(Context_.ArchivePrefix),
+                *candidate.Metadata->snapshots.front(),
+                *Context_.Base->ScanIndex,
+                candidate.Metadata->location,
+                Context_.Limits));
+        ApplyArchiveCut(candidate, cut);
+        ArchiveCut_ = std::make_shared<const TArchiveCut>(std::move(cut));
     }
     const auto total = ReplaceUsage(Context_.StoreUsage,
         {.Previous = Context_.Base ? Context_.Base->Usage : TStorageUsage{}, .Next = candidate.Usage});
@@ -274,6 +355,7 @@ iceberg::Status TStoragePublicationGuard::BeforePointerChange(const TPointerChan
     });
     if (!status) {
         Candidate_.reset();
+        ArchiveCut_.reset();
         if (Context_.Attempt) {
             Context_.Attempt->FailFile(change.NewLocation, std::make_error_code(std::errc::state_not_recoverable));
         }

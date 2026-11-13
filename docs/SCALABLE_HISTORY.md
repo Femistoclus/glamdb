@@ -1,9 +1,13 @@
 # Configurable retained history
 
 Ordinary appends retain their 10,000-row / 16 MiB input limits. Each successful
-append has its own operation, Parquet file and snapshot. The default permanent
-operation and snapshot limits remain 4,096. They are configurable budgets,
-rather than universal implementation maxima.
+append has its own operation, Parquet file and snapshot. Defaults for new
+databases are chosen so that counts do not bind: permanent operations are
+bounded by catalog bytes, root snapshots by the snapshot archive's hot window,
+retained manifests, data files and archived metadata by byte budgets derived
+from the 1 TiB warehouse budget (`DefaultWarehouseBytes`). Every budget stays
+finite and configurable; existing databases keep their persisted limits and
+embedded callers that pass explicit `Limits` keep them.
 
 ## Selecting a profile
 
@@ -14,26 +18,39 @@ values in `OpenStoreRequest::limits`. HTTP persists and returns the normalized
 values in every database descriptor, including closed/error states. Embedded
 callers retain their configuration; a store identity does not persist it.
 
-| Budget | Default | SF=10 profile |
-| --- | ---: | ---: |
-| Permanent operations, including bound failures | 4,096 | 20,000 |
-| Catalog bytes | 256 MiB | 512 MiB |
-| Retained snapshots and snapshot-log entries | 4,096 | 12,000 |
-| Retained manifests | 4,096 | 12,000 |
-| Data files | 16,384 | 16,384 |
-| Aggregate current root bytes | 64 MiB | 128 MiB |
-| Individual root bytes | 16 MiB | 32 MiB |
-| Aggregate manifest bytes | 256 MiB | 512 MiB |
-| Aggregate retained manifest-list bytes | 512 MiB | 4 GiB |
-| Aggregate footer bytes | 256 MiB | 512 MiB |
-| Metadata verification bytes per commit | 32 MiB | 64 MiB |
-| Recovery workspace bytes | 256 MiB | 512 MiB |
+| Budget | Default (new databases) | Former default (`LegacyHistoryLimits`) | SF=10 profile |
+| --- | ---: | ---: | ---: |
+| Permanent operations, including bound failures | 2^40 (catalog bytes bind) | 4,096 | 20,000 |
+| Catalog bytes | 64 GiB (warehouse / 16) | 256 MiB | 512 MiB |
+| Root snapshots and snapshot-log entries | 8,192 (64 × (hot 100 + 16)) | 4,096 | 12,000 |
+| Retained manifests (incl. archived) | 2^40 (bytes bind) | 4,096 | 12,000 |
+| Data files | 2^40 (footer/warehouse bytes bind) | 16,384 | 16,384 |
+| Aggregate current root bytes | 64 MiB | 64 MiB | 128 MiB |
+| Individual root bytes | 16 MiB | 16 MiB | 32 MiB |
+| Aggregate manifest bytes (incl. archived) | 256 GiB (warehouse / 4) | 256 MiB | 512 MiB |
+| Aggregate retained manifest-list bytes | 256 GiB (warehouse / 4) | 512 MiB | 4 GiB |
+| Aggregate footer bytes | 64 GiB (warehouse / 16) | 256 MiB | 512 MiB |
+| Metadata verification bytes per commit | 32 MiB | 32 MiB | 64 MiB |
+| Recovery workspace bytes | 64 GiB (warehouse / 16) | 256 MiB | 512 MiB |
+
+The catalog default follows the measurement of about 2.75 KB of catalog per
+one-row archived append (receipts, archive rows, checkpoints): 64 GiB holds
+roughly 25 million such appends, while the 1 TiB warehouse holds about 50
+million at the measured 21 KB per one-row append, so both budgets end in the
+same order of magnitude for the smallest appends and the warehouse binds for
+real ones. These maxima reserve nothing by themselves: the engine reserves
+recovery memory for the operations that exist (1 KiB each, in chunks of 256)
+and device space for twice the actual catalog plus 64 MiB steps and the actual
+recovery workspace envelope, growing both before a binding. The SF=10 profile is
+now narrower than the defaults for most counts and is kept to reproduce its
+recorded measurements.
 
 The last ten settings are nested under `limits.history`; their exact names are
 in the linked JSON. Omitted HTTP fields keep existing values during reconfiguration
 and use defaults during creation. The service accepts complete legacy persisted
-seven-field limits objects and supplies default history budgets without rewriting
-receipts or the core store format. A present persisted history object must be complete.
+seven-field limits objects and supplies the former history budgets
+(`LegacyHistoryLimits`) without rewriting receipts or the core store format. A
+present persisted history object must be complete.
 
 `max_operations` accepts positive signed 64-bit integers. Catalog and aggregate
 history byte/count budgets have a 1 TiB / 2^40 upper bound. Individual root bytes
@@ -52,11 +69,25 @@ raising a stored count alone does not reserve unlimited memory or disk.
 ## Inventory, memory and recovery
 
 Catalog inventories use primary-key keyset pages of at most 256 records, retaining
-the existing per-query byte ceiling. Inventory validation and interrupted-operation
-resolution stream those pages. Native storage recovery reconstructs committed
-receipts for one collection at a time and checks their bijection with retained
-snapshots. The legacy vector-returning internal seam remains for custom/test
-backends; production recovery uses the streaming seam.
+the existing per-query byte ceiling. A collection's inventory seeks its own key
+range and reads no other collection's records. Inventory validation and
+interrupted-operation resolution stream those pages. Native storage recovery
+reconstructs committed receipts for one collection at a time and checks their
+bijection with retained snapshots. The legacy vector-returning internal seam
+remains for custom/test backends; production recovery uses the streaming seam.
+
+Bindings check the operation budget against an exact count that the catalog
+derives once per connection: the owning process increments it for each
+committed binding, and an uncertain binding commit discards it until reopening
+counts the table again. Opening or reconciling validates the whole catalog
+inventory (SQLite integrity and foreign keys, registry and every operation
+record) when the connection opens and again after the durability fence and
+interruption resolution; storage verification in between reuses the first
+validation because no catalog transaction intervenes. Finding interrupted
+(`Bound`) operations still reads every record: no index covers the state column,
+and adding one would change the catalog format. `glamdb_catalog_history_bench`
+measures open and append cost against the number of permanent receipts with a
+fixed small retained history.
 
 Healthy outcome lookup remains one indexed `(collection_id, operation_id)` query.
 It does not enumerate history, read warehouse files or reconcile automatically.
@@ -102,3 +133,17 @@ Lowered operation/catalog limits reject open with `CONFIG_TOO_SMALL`. Lowered
 retained-storage limits preserve the existing storage error classification
 (`CORRUPTION` for structures outside that configured profile). Reopen does not
 prune or replace the store. Restore the sufficient profile and reopen it.
+
+## Manifest merging and the decoded-size bound
+
+Appends use Iceberg's merge append (bins of up to 100 small manifests, 8 MiB
+encoded target). Iceberg packs bins by encoded length while the verifier caps a
+manifest's decoded Avro bytes at 8 MiB, so a single merged manifest once failed
+at about 29,500 one-row files. The verifier now records every current manifest's
+decoded size; each append lowers the merge target for its own Iceberg transaction
+(set and removed inside it, never persisted) so that any merged bin stays within
+7/8 of the decoded cap by the largest measured decoded/encoded ratio. Merging then
+produces several bounded manifests (about 22,000 one-row files each for a
+two-column schema) and the manifest list grows instead; the number of live files
+is bounded by the configured budgets, not by one manifest. Every verifier limit
+is unchanged.

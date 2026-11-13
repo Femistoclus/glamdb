@@ -38,7 +38,7 @@ concurrent snapshot readers. Power-loss durability qualification is still pendin
   configurable through the SDK and [workbench](docs/WORKBENCH.md).
 - **Data inspection.** Browse schemas, snapshot history, statistics, files,
   Parquet row groups, scan plans, and execution profiles.
-- **Native compute contract.** Negotiate versions 1.0–1.4, operation support by append/KV
+- **Native compute contract.** Negotiate versions 1.0–1.5, operation support by append/KV
   mode and effective limits through the installed C++ API. See the
   [storage contract](docs/STORAGE_CONTRACT.md). Contract 1.1 adds bounded
   [native read views](docs/READ_VIEWS.md) for repeated scans across a
@@ -48,6 +48,8 @@ concurrent snapshot readers. Power-loss durability qualification is still pendin
   exact/necessary-condition/residual filters and safe global limits. Contract 1.4 adds
   [durable write sessions](docs/WRITE_SESSIONS.md) for one-pass append/KV
   output through a separate bounded staging journal and the existing Engine publisher.
+  Contract 1.5 adds the [snapshot archive](docs/SNAPSHOT_ARCHIVE.md) (hot window,
+  archived reads, maintenance), verified-checkpoint open and explicit full verification.
   Remote sessions and read views, stable C ABI and Flight remain unsupported.
 - **Connected tools.** Manage multiple databases through one authenticated
   server. Read and write through the UI, CLI, or Python SDK; retrieve scan results
@@ -299,9 +301,9 @@ provides one command for Prometheus, Grafana, Loki, Alloy, Alertmanager and host
 collectors. Real application endpoints and a dedicated Loki filesystem are inputs;
 repeated deployment preserves owned data and credentials.
 
-An opt-in [retained-history profile](docs/SCALABLE_HISTORY.md) lifts
-the default 4,096-operation/snapshot horizon with explicit aggregate storage and
-recovery budgets. The linked SF=10 recipe uses ordinary appends and preserves
+New databases default to byte-bound [retained-history budgets](docs/SCALABLE_HISTORY.md)
+(the former 4,096-operation/snapshot horizon is gone; persisted databases keep
+their limits). The linked SF=10 recipe uses ordinary appends and preserves
 permanent outcomes, duplicate rows, historical views and exact retries.
 
 ### Client and UI tests

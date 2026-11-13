@@ -171,10 +171,12 @@ local state/journals and does not consume a ninth collection.
 limits fields. It is read by the Python adapter before target creation.
 The initial eight-table layout fits the default collection count; larger
 collection profiles are documented in [collection profiles](COLLECTION_PROFILES.md).
-The [retained-history guide](SCALABLE_HISTORY.md) and
+The [retained-history guide](SCALABLE_HISTORY.md) describes the defaults, which
+no longer bind SF=10 by operation or history counts; the explicit
 [`benchmarks/profiles/tpch-sf10.json`](../benchmarks/profiles/tpch-sf10.json)
-describe an explicit larger operation/history profile. Configured limits are
-not universal capacity guarantees.
+profile (lower than the current defaults for most counts) is kept to reproduce
+the recorded SF=10 measurements. Configured limits are not universal capacity
+guarantees.
 
 The lifecycle depends on managed deletion (#153), native decimal/date support
 for the native profile (#154), and sufficient configurable operation/history

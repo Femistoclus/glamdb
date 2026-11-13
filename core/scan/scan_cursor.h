@@ -25,6 +25,7 @@ class ResourceReservation;
 namespace glamdb::detail {
 
 class TSnapshotMetadataCache;
+struct ArchivedSnapshotRecord;
 
 struct TScanContext
 {
@@ -53,6 +54,9 @@ struct TScanContext
     int64_t RootBytes = HistoryLimits{}.max_root_file_bytes;
     // Internal migration source order: oldest append files first, preserving rows.
     bool ChronologicalFiles = false;
+    // The engine's indexed catalog lookup of a selected snapshot that left
+    // the root for the archive; planning reads it instead of the root entry.
+    std::shared_ptr<const ArchivedSnapshotRecord> Archived{};
     // Half-open offsets in the immutable verified inventory, never caller paths.
     std::optional<std::pair<size_t, size_t>> FileRange{};
 };

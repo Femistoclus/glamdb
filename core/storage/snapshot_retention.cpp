@@ -150,10 +150,49 @@ ExpirationPrefix(const iceberg::TableMetadata& metadata, const TRetentionPolicy&
     return count;
 }
 
+iceberg::Result<TExpirationPlan> PlanExpiration(const iceberg::TableMetadata& metadata,
+    std::span<const std::int64_t> archived,
+    std::uint64_t archivedTotal,
+    const TRetentionPolicy& policy,
+    std::int64_t nowMs)
+{
+    if (IsKVMetadata(metadata)) {
+        return iceberg::ValidationFailed("Snapshot retention is unsupported for KV collections.");
+    }
+    ICEBERG_RETURN_UNEXPECTED(CheckRetentionPolicy(policy));
+    TExpirationPlan plan;
+    if ((!policy.KeepLast && policy.MinAgeMs == 0) || metadata.snapshots.empty() || archived.size() > archivedTotal ||
+        archivedTotal > std::numeric_limits<std::uint64_t>::max() - metadata.snapshots.size())
+    {
+        return plan;
+    }
+    const auto keep = std::max<std::uint64_t>(1, static_cast<std::uint64_t>(policy.KeepLast.value_or(1)));
+    const auto total = archivedTotal + metadata.snapshots.size();
+    const auto maximum = total > keep ? total - keep : 0;
+    // Supported timestamps and bounded ages keep this subtraction representable.
+    const auto old = [&](std::int64_t timestamp) {
+        return policy.MinAgeMs == 0 || (timestamp <= nowMs && nowMs - timestamp >= policy.MinAgeMs);
+    };
+    for (; plan.Archived < archived.size() && plan.Archived < maximum && old(archived[plan.Archived]); ++plan.Archived)
+    {
+    }
+    if (plan.Archived < archivedTotal) {
+        return plan;
+    }
+    for (; plan.Root < metadata.snapshots.size() && plan.Archived + plan.Root < maximum &&
+         old(metadata.snapshots[plan.Root]->timestamp_ms.time_since_epoch().count());
+         ++plan.Root)
+    {
+    }
+    return plan;
+}
+
 iceberg::Result<TMetadataRetirement> FindExpiredMetadata(const std::shared_ptr<iceberg::FileIO>& fileIO,
     const iceberg::TableMetadata& metadata,
     std::size_t prefix,
-    const TStorageLimits& limits)
+    const TStorageLimits& limits,
+    std::span<const TArchivedList> expiredArchive,
+    const TArchivedList* remainingArchive)
 {
     if (IsKVMetadata(metadata)) {
         return iceberg::ValidationFailed("Snapshot retention is unsupported for KV collections.");
@@ -163,16 +202,53 @@ iceberg::Result<TMetadataRetirement> FindExpiredMetadata(const std::shared_ptr<i
     {
         return iceberg::InvalidArgument("Invalid retirement verification limits.");
     }
-    if (prefix >= metadata.snapshots.size() && prefix != 0) {
+    if ((prefix >= metadata.snapshots.size() && prefix != 0) || (remainingArchive && prefix != 0)) {
         return iceberg::ValidationFailed("Metadata retirement removes the current snapshot.");
     }
     TMetadataRetirement result;
-    if (prefix == 0) {
+    if (prefix == 0 && expiredArchive.empty()) {
         return result;
     }
     RegisterStorageFormats();
     std::map<std::string, std::uint64_t> candidates;
     std::set<std::string> retained;
+    // Manifests of the remaining archive are protected but are not root state.
+    std::set<std::string> archiveRetained;
+    const auto addCandidate = [&](const iceberg::ManifestFile& manifest) -> iceberg::Status {
+        if (manifest.manifest_length <= 0 ||
+            static_cast<std::uint64_t>(manifest.manifest_length) > limits.ManifestBytes)
+        {
+            return iceberg::ValidationFailed("Invalid retirement manifest bytes.");
+        }
+        const auto [position, added] =
+            candidates.emplace(manifest.manifest_path, static_cast<std::uint64_t>(manifest.manifest_length));
+        if ((!added && position->second != static_cast<std::uint64_t>(manifest.manifest_length)) ||
+            candidates.size() > limits.Store.Manifests)
+        {
+            return iceberg::ValidationFailed("Inconsistent retirement manifest inventory.");
+        }
+        return {};
+    };
+    for (const auto& archived : expiredArchive) {
+        ICEBERG_ASSIGN_OR_RAISE(auto list,
+            ReadManifestListIdentity(fileIO, archived.Path, limits, archived.Bytes, archived.Sha256));
+        result.Files.push_back({archived.Path, NIO::EFileKind::ManifestList, list.Bytes});
+        result.Removed.ManifestListBytes += list.Bytes;
+        for (const auto& manifest : list.Manifests) {
+            ICEBERG_RETURN_UNEXPECTED(addCandidate(manifest));
+        }
+    }
+    if (remainingArchive) {
+        ICEBERG_ASSIGN_OR_RAISE(auto list,
+            ReadManifestListIdentity(fileIO,
+                remainingArchive->Path,
+                limits,
+                remainingArchive->Bytes,
+                remainingArchive->Sha256));
+        for (const auto& manifest : list.Manifests) {
+            archiveRetained.insert(manifest.manifest_path);
+        }
+    }
     for (std::size_t i = 0; i < metadata.snapshots.size(); ++i) {
         const auto& snapshot = metadata.snapshots[i];
         ICEBERG_ASSIGN_OR_RAISE(auto input, fileIO->NewInputFile(snapshot->manifest_list));
@@ -202,13 +278,7 @@ iceberg::Result<TMetadataRetirement> FindExpiredMetadata(const std::shared_ptr<i
                 return iceberg::ValidationFailed("Invalid retirement manifest bytes.");
             }
             if (i < prefix) {
-                const auto [position, added] =
-                    candidates.emplace(manifest.manifest_path, static_cast<std::uint64_t>(manifest.manifest_length));
-                if ((!added && position->second != static_cast<std::uint64_t>(manifest.manifest_length)) ||
-                    candidates.size() > limits.Store.Manifests)
-                {
-                    return iceberg::ValidationFailed("Inconsistent retirement manifest inventory.");
-                }
+                ICEBERG_RETURN_UNEXPECTED(addCandidate(manifest));
             } else {
                 retained.insert(manifest.manifest_path);
                 if (retained.size() > limits.Store.Manifests) {
@@ -218,7 +288,7 @@ iceberg::Result<TMetadataRetirement> FindExpiredMetadata(const std::shared_ptr<i
         }
     }
     for (const auto& [path, bytes] : candidates) {
-        if (!retained.contains(path)) {
+        if (!retained.contains(path) && !archiveRetained.contains(path)) {
             result.Files.push_back({path, NIO::EFileKind::Manifest, bytes});
             result.Removed.Manifests += 1;
             result.Removed.ManifestBytes += bytes;

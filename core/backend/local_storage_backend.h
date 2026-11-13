@@ -28,6 +28,7 @@ struct ITreeInventory;
 
 namespace NGlamDB::NStorage {
 struct TBaseState;
+struct TAncestor;
 } // namespace NGlamDB::NStorage
 
 namespace iceberg {
@@ -99,7 +100,7 @@ public:
 
     Health GetHealth() const override;
     EngineCapabilities GetCapabilities() const override;
-    Result<StorageFootprint> GetStorageFootprint() override;
+    Result<StorageFootprint> GetStorageFootprint(std::span<const ArchivedListReference> archived) override;
 
     Result<std::unique_ptr<StagedCreate>>
     PrepareCreate(const StoreInfo& store, const CreateCollectionRequest& request, std::string_view attempt_id) override;
@@ -117,7 +118,10 @@ public:
     Result<std::unique_ptr<StagedExpiration>> PrepareExpiration(const StoreInfo& store,
         const CollectionInfo& collection,
         const BaseIdentity& base,
-        const std::optional<SnapshotRetentionPolicy>& policy) override;
+        const std::optional<SnapshotRetentionPolicy>& policy,
+        std::span<const ArchivedSnapshotRecord> archived) override;
+    Result<std::unique_ptr<StagedExpiration>>
+    PrepareArchive(const StoreInfo& store, const CollectionInfo& collection, const BaseIdentity& base) override;
     Status RemoveExpiredMetadata(std::string_view collectionID, std::string_view path) override;
     void PublicationFinished(std::string_view collectionID,
         std::string_view metadataLocation,
@@ -130,6 +134,16 @@ public:
     Status VerifyRetainedCatalog(const StoreInfo& store,
         std::span<const CollectionView> collections,
         DurableSqliteCatalogStore& catalog) override;
+    Status OpenFromCheckpoints(const StoreInfo& store,
+        std::span<const CollectionView> collections,
+        std::span<const CollectionCheckpointView> checkpoints) override;
+    std::vector<CollectionCheckpoint> VerifiedCheckpoints() override;
+    uint64_t RecoveryWorkspaceBytes() override;
+    // Whether the current verified generation came from OpenFromCheckpoints
+    // (false after full verification). For tests and measurements.
+    bool OpenedFromCheckpoints();
+    // The confirmed state of every collection of the verified generation.
+    std::map<std::string, std::shared_ptr<const NGlamDB::NStorage::TBaseState>, std::less<>> ConfirmedStates();
     Result<std::shared_ptr<iceberg::FileIO>> ReadOnlyFileIO() override;
     Result<std::shared_ptr<const NGlamDB::NStorage::TBaseState>> VerifiedScanState(const BaseIdentity& base) override;
     std::shared_ptr<TSnapshotMetadataCache> ReadMetadataCache() override
@@ -144,9 +158,11 @@ public:
 
 private:
     using TOperationReader = std::function<void(std::string_view, const DurableSqliteCatalogStore::OperationConsumer&)>;
+    using TArchiveReader = std::function<void(std::string_view, const DurableSqliteCatalogStore::ArchiveConsumer&)>;
     Status VerifyRetainedImpl(const StoreInfo& store,
         std::span<const CollectionView> collections,
-        const TOperationReader& readOperations);
+        const TOperationReader& readOperations,
+        const TArchiveReader& readArchive);
     struct TCollectionState
     {
         std::shared_ptr<const NGlamDB::NStorage::TBaseState> Confirmed;
@@ -164,6 +180,7 @@ private:
     std::mutex Mutex_;
     std::map<std::string, TCollectionState, std::less<>> Collections_;
     bool VerifiedGeneration_ = false;
+    bool FromCheckpoints_ = false;
     // No-op receipts retain their exact historical metadata base permanently.
     // Reservations cover the bounded path set; files count in warehouse usage.
     std::map<std::string, std::shared_ptr<ResourceReservation>, std::less<>> NoOpRoots_;
@@ -205,8 +222,13 @@ private:
     std::shared_ptr<const NGlamDB::NStorage::TBaseState> ResolveBase(const BaseIdentity& base);
     std::shared_ptr<ResourceReservation>
     ReserveRootMemory(std::string_view collectionID, uint64_t bytes, bool reuse, uint64_t indexBytes = 0);
+    // `history` is the expired, then archived, ancestry before the root;
+    // `archive` the usage of the archived lists and their retired manifests.
     std::shared_ptr<const NGlamDB::NStorage::TBaseState> VerifyCollection(const BaseIdentity& base,
-        std::span<const std::shared_ptr<iceberg::Snapshot>> expired = {});
+        std::span<const NGlamDB::NStorage::TAncestor> history = {},
+        std::size_t expired = 0,
+        const std::shared_ptr<iceberg::Snapshot>& parent = nullptr,
+        const NGlamDB::NStorage::TStorageUsage& archive = {});
 };
 
 } // namespace glamdb::detail

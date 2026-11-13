@@ -1,8 +1,10 @@
 // Engine/storage integrity: concurrent corruption reports, fail-closed
 // classification and retry verification over the real storage backend.
 
+#include "core/catalog/sqlite.h"
 #include "tests/support/checked.h"
 #include "tests/support/fault_fs.h"
+#include "tests/vertical/storage_fault_support.h"
 #include "tests/vertical/vertical_support.h"
 
 #include <arrow/io/memory.h>
@@ -12,13 +14,38 @@
 #include <sys/stat.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <future>
+#include <thread>
 
 namespace glamdb {
 namespace {
 
 using namespace std::chrono_literals;
 using namespace glamdb::vertical;
+
+int64_t CheckpointRows(const std::filesystem::path& root)
+{
+    detail::Database catalog;
+    catalog.Open(root / "catalog.sqlite", SQLITE_OPEN_READONLY, {});
+    if (catalog.Integer("PRAGMA user_version") < 6) {
+        return 0;
+    }
+    return catalog.Integer("SELECT COUNT(*) FROM collection_checkpoints");
+}
+
+// Polls the nonblocking health until a corruption report closed readiness.
+bool WaitUntilNotReady(Engine& engine)
+{
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (engine.GetHealth().state == StoreState::Ready) {
+        if (std::chrono::steady_clock::now() > deadline) {
+            return false;
+        }
+        std::this_thread::sleep_for(1ms);
+    }
+    return true;
+}
 
 class EngineIntegrityTest : public ::testing::Test
 {
@@ -136,23 +163,33 @@ TEST_F(EngineIntegrityTest, CorruptionBeforeGuardDecisionAbortsPublication)
     const auto dataFile = OnlyDataFile(test::collection_id);
     const auto saved = ReadBytes(dataFile);
 
+    // The report closes readiness through the commit gate, then waits for
+    // this publication to release the catalog so that it returns only after
+    // the checkpoints are durably dropped.
+    std::future<Result<std::shared_ptr<arrow::RecordBatch>>> reader;
+    bool reported = false;
     Hooks_->BeforeVerifyClosure = [&](std::string_view collection) {
         if (collection != SecondCollection) {
             return;
         }
         std::filesystem::remove(dataFile);
-        auto reader = std::async(std::launch::async, [&] {
+        reader = std::async(std::launch::async, [&] {
             return cursor->Next();
         });
-        ASSERT_EQ(reader.wait_for(10s), std::future_status::ready);
-        const auto next = reader.get();
-        ASSERT_FALSE(next);
-        EXPECT_EQ(next.error().code, "CORRUPTION");
+        reported = WaitUntilNotReady(*Engine_);
     };
+    ASSERT_EQ(CheckpointRows(Root_), 2);
     const auto outcome = AppendSecond();
     EXPECT_EQ(outcome.disposition, CommitDisposition::DefinitelyNotCommitted);
     ASSERT_TRUE(outcome.error);
     EXPECT_EQ(test::Present(outcome.error).code, "RECOVERY_REQUIRED");
+    EXPECT_TRUE(reported);
+    ASSERT_TRUE(reader.valid());
+    ASSERT_EQ(reader.wait_for(10s), std::future_status::ready);
+    const auto next = reader.get();
+    ASSERT_FALSE(next);
+    EXPECT_EQ(next.error().code, "CORRUPTION");
+    EXPECT_EQ(CheckpointRows(Root_), 0);
 
     Hooks_->BeforeVerifyClosure = nullptr;
     WriteBytes(dataFile, saved);
@@ -732,6 +769,65 @@ TEST_F(EngineIntegrityTest, LatchedWriteFailureAllowsReconcileShutdownAndReopen)
     EXPECT_FALSE(Engine_->GetHealth().durability_qualified);
     EXPECT_EQ(Engine_->AppendDurable({test::collection_id, ThirdOperation, {}, {Batch(FirstRows)}}).disposition,
         CommitDisposition::Committed);
+}
+
+// A corruption report made while another thread publishes (the catalog is
+// busy) drops the checkpoints durably before the error reaches its caller: a
+// process that exits the moment the reader returns must not leave a store
+// that the next open would open from checkpoints without finding the damage.
+TEST(CheckpointInvalidationChild, ExitsRightAfterTheCorruptionIsReported)
+{
+    const auto* root = std::getenv("GLAMDB_STORAGE_FAULT_ROOT");
+    const auto* state = std::getenv("GLAMDB_STORAGE_FAULT_COMMITTED");
+    if (!root || !state || std::string_view(state) != "invalidate-checkpoints") {
+        GTEST_SKIP() << "Invoked by EngineIntegrityTest with a disposable store.";
+    }
+    std::shared_ptr<THookBackend> hooks;
+    auto opened = detail::EngineFactory::OpenWith({root, test::store_id}, THookBackend::Factory(hooks));
+    ASSERT_TRUE(opened) << opened.error().message;
+    const auto engine = *opened;
+    auto cursor = engine->Scan({.collection_id = std::string(test::collection_id)});
+    ASSERT_TRUE(cursor) << cursor.error().message;
+    const auto data = FilesIn(std::filesystem::path(root) / "warehouse" / std::string(test::collection_id) / "data");
+    ASSERT_EQ(data.size(), 1U);
+    std::thread reader;
+    hooks->BeforeVerifyClosure = [&](std::string_view collection) {
+        if (collection != SecondCollection) {
+            return;
+        }
+        std::filesystem::remove(data.front());
+        reader = std::thread([cursor = *cursor] {
+            const auto next = cursor->Next();
+            // The caller has the error: die before anything else happens.
+            std::_Exit(!next && next.error().code == "CORRUPTION" ? 42 : 43);
+        });
+        if (!WaitUntilNotReady(*engine)) {
+            std::_Exit(44);
+        }
+    };
+    [[maybe_unused]] const auto outcome =
+        engine->AppendDurable({SecondCollection, SecondOperation, {}, {Batch(SecondRows)}});
+    std::this_thread::sleep_for(10s);
+    std::_Exit(45);
+}
+
+TEST_F(EngineIntegrityTest, ProcessExitRightAfterABusyCorruptionReportLeavesNoCheckpoint)
+{
+    CreateTwoCollections();
+    CommitFirst();
+    ASSERT_TRUE(Engine_->Shutdown(1000ms));
+    Engine_.reset();
+    ASSERT_EQ(CheckpointRows(Root_), 2);
+    RunChild(Root_,
+        {.Test = "CheckpointInvalidationChild.ExitsRightAfterTheCorruptionIsReported",
+            .State = "invalidate-checkpoints",
+            .ExpectedExit = 42});
+    ASSERT_FALSE(HasFatalFailure());
+    EXPECT_EQ(CheckpointRows(Root_), 0);
+    // The default open verifies fully and finds the missing data file.
+    const auto reopened = OpenExisting({Root_.string(), test::store_id});
+    ASSERT_FALSE(reopened);
+    EXPECT_EQ(reopened.error().code, "CORRUPTION");
 }
 
 } // namespace

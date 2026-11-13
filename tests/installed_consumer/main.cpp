@@ -82,7 +82,10 @@ void CheckContract(glamdb::Engine& engine, bool storage)
             glamdb::EStorageFeature::PreserveAppendDuplicates};
     }
     const auto contract = Take(engine.NegotiateStorageContract(request), "negotiate native contract");
-    Check(contract.Version == glamdb::TStorageContractVersion{1, 4} &&
+    Check(contract.Version == glamdb::TStorageContractVersion{1, 5} &&
+            contract.HasOperation(glamdb::EStorageOperation::ArchiveSnapshots) == storage &&
+            contract.HasFeature(glamdb::EStorageFeature::CheckpointOpen) == storage &&
+            contract.EffectiveLimits.DefaultHotSnapshots == (storage ? glamdb::DefaultHotSnapshots : 0) &&
             contract.EffectiveLimits.Engine.max_collections == engine.GetLimits().max_collections &&
             contract.EffectiveLimits.SchemaFields == 128 && contract.EffectiveLimits.AppendRows == 10000 &&
             contract.HasOperation(glamdb::EStorageOperation::Scan) == storage &&

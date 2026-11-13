@@ -12,7 +12,7 @@ Physical power-loss durability has not been qualified.
 | [Python SDK](../sdk/python/README.md) | Typed requests, JSON/Arrow scans, exact retries and OAuth access. |
 | [Workbench](WORKBENCH.md) | Use the browser UI, inspect data and recover pending requests. |
 | [HTTP API](HTTP_SERVER.md) | Routes, authentication, limits, pagination and write outcomes. |
-| [Embedded C++ contract](STORAGE_CONTRACT.md) | Negotiate contracts 1.0–1.4 and use the installed Engine facade. |
+| [Embedded C++ contract](STORAGE_CONTRACT.md) | Negotiate contracts 1.0–1.5 and use the installed Engine facade. |
 | [Scalar types](SCALAR_TYPES.md) | Exact decimal/date values, timestamps and format compatibility. |
 | [Scans](SCANNING.md) | Fixed snapshots, predicates, projection, pruning and buffer ownership. |
 | [Read views](READ_VIEWS.md) | Capture coherent per-store snapshot vectors for repeated native scans. |
@@ -34,6 +34,7 @@ Physical power-loss durability has not been qualified.
 | [Collection limits](COLLECTION_PROFILES.md) | Configure 1–64 collections and fixed inventories. |
 | [Retained history](SCALABLE_HISTORY.md) | Configure operation, metadata and recovery budgets. |
 | [Snapshot retention](SNAPSHOT_RETENTION.md) | Explicit C++ maintenance for append collections. |
+| [Snapshot archive](SNAPSHOT_ARCHIVE.md) | Hot window, archived reads, maintenance and verified-checkpoint open. |
 | [Shared resources](SHARED_RESOURCES.md) | Process memory classes, device admission and ownership. |
 | [Scan sessions](SCAN_SESSIONS.md) | Configure cursor quotas, replay, expiry and HTTP reader admission. |
 | [Physical inventory](STORAGE_FOOTPRINT.md) | Inspect current store allocation and retained files. |

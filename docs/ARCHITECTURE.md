@@ -187,11 +187,13 @@ conservative envelopes; caller-owned inputs, copied metadata and process RSS
 require separate host budgeting.
 
 The synchronous append profile caps ordinary append input at 16 MiB of canonical
-decoded data and 10,000 rows, with one new Parquet file and one snapshot. Current
-default store-wide checks include 4,096 retained snapshots and 4,096 operation
-bindings/outcomes, including failed operations. The opt-in [retained-history
-profile](SCALABLE_HISTORY.md) exposes coordinated count, byte and
-recovery budgets and bounded catalog iteration beyond those defaults. These
+decoded data and 10,000 rows, with one new Parquet file and one snapshot. Defaults
+of new databases are byte-bound: operation bindings/outcomes (including failed
+operations) within 64 GiB of catalog, root snapshots within the
+[snapshot archive](SNAPSHOT_ARCHIVE.md)'s hot window, and retained metadata
+within fractions of the 1 TiB warehouse budget; the
+[retained-history profile](SCALABLE_HISTORY.md) documents every budget and the
+former 4,096-operation/snapshot defaults that persisted databases keep. These
 limits do not establish combined memory usage or storage capacity. Canonical bytes, owned-input
 estimates, physical Arrow/writer allocations and HTTP payload bytes have separate
 checks; no one of them bounds process memory across stores.

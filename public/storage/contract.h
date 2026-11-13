@@ -61,7 +61,11 @@ enum class EStorageOperation : uint16_t {
     GetWriteStatus,
     GetWriteOutcome,
     AbortWrite,
-    CleanupWrites
+    CleanupWrites,
+    // Contract 1.5: snapshot archive maintenance and explicit full verification.
+    UpdateSnapshotArchive,
+    ArchiveSnapshots,
+    VerifyStoreFull
 };
 
 enum class EStorageFeature : uint16_t {
@@ -87,7 +91,12 @@ enum class EStorageFeature : uint16_t {
     SchemaEvolution,
     CrossCollectionTransactions,
     // Native scan negotiation is advertised only from contract 1.3.
-    ScanNegotiation
+    ScanNegotiation,
+    // Contract 1.5: snapshots older than a collection's hot window stay
+    // readable by ID from the catalog archive; a fresh open of an archive-tier
+    // store rebuilds from verified checkpoints instead of re-verifying history.
+    ArchivedSnapshotReads,
+    CheckpointOpen
 };
 
 struct TStorageContractRequest
@@ -121,6 +130,10 @@ struct TStorageContractLimits
     std::optional<TScanSplitLimits> ScanSplits{};
     // Default configurable staging ceilings. A directory retains its chosen limits.
     std::optional<TWriteSessionLimits> WriteSessions{};
+    // Contract 1.5, when UpdateSnapshotArchive is advertised: hot_snapshots of
+    // a new append collection that does not choose one, and its largest value.
+    int64_t DefaultHotSnapshots = 0;
+    int64_t MaxHotSnapshots = 0;
 };
 
 struct TStorageContract

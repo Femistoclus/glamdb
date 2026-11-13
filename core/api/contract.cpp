@@ -7,7 +7,10 @@
 namespace glamdb {
 namespace {
 
-constexpr TStorageContractVersion CurrentVersion{1, 4};
+// 1.5 adds the snapshot archive and verified-checkpoint operations, features
+// and limits; every earlier minor describes exactly what it did before.
+constexpr TStorageContractVersion ArchiveVersion{1, 5};
+constexpr TStorageContractVersion CurrentVersion = ArchiveVersion;
 
 void AddOperations(TStorageContract& contract, std::initializer_list<EStorageOperation> operations)
 {
@@ -125,6 +128,25 @@ TStorageContract DescribeContract(TStorageContractVersion version,
         contract.HasOperation(EStorageOperation::Upsert))
     {
         contract.Features.push_back(EStorageFeature::TypedNulls);
+    }
+    if (version < ArchiveVersion) {
+        return contract;
+    }
+    // Full verification is the store-wide recovery path, like Reconcile.
+    contract.Operations.push_back(EStorageOperation::VerifyStoreFull);
+    // Archive maintenance is native append-only, like retention.
+    if (native && capabilities.snapshot_archive && mode == CollectionMode::Append &&
+        contract.HasOperation(EStorageOperation::Append))
+    {
+        AddOperations(contract, {EStorageOperation::UpdateSnapshotArchive, EStorageOperation::ArchiveSnapshots});
+        contract.EffectiveLimits.DefaultHotSnapshots = glamdb::DefaultHotSnapshots;
+        contract.EffectiveLimits.MaxHotSnapshots = glamdb::MaxHotSnapshots;
+        if (contract.HasOperation(EStorageOperation::SnapshotHistory) || contract.HasOperation(EStorageOperation::Scan))
+        {
+            contract.Features.push_back(EStorageFeature::ArchivedSnapshotReads);
+        }
+        // Stores with a KV collection always open by full verification.
+        contract.Features.push_back(EStorageFeature::CheckpointOpen);
     }
     return contract;
 }

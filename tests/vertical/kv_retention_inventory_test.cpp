@@ -110,7 +110,8 @@ TEST_F(TKvRetentionInventoryTest, KvExpirationRefusesBeforeStorageIoAndPreserves
     const auto direct = Backend_->PrepareExpiration(Engine_->GetStoreInfo(),
         *collection,
         history->identity,
-        SnapshotRetentionPolicy{1});
+        SnapshotRetentionPolicy{1},
+        {});
     ASSERT_FALSE(direct);
     EXPECT_EQ(direct.error().code, "COLLECTION_MODE_MISMATCH");
     EXPECT_EQ(Fs_->Events().size(), eventsBefore);

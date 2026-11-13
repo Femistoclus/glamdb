@@ -18,7 +18,8 @@ EngineCapabilities LocalCapabilities()
         .metadata = true,
         .write_settings = true,
         .key_value = true,
-        .storage_footprint = true};
+        .storage_footprint = true,
+        .snapshot_archive = true};
 }
 
 TEST(StorageContract, SplitProfileRequiresNativeVersion12)
@@ -69,9 +70,16 @@ TEST(StorageContract, SelectsSupportedVersionFromInclusiveRange)
     request.MaxVersion = {3, 7};
     const auto result = NegotiateStorageContract(request, LocalCapabilities(), {});
     ASSERT_TRUE(result);
-    EXPECT_EQ(result->Version, (TStorageContractVersion{1, 4}));
+    EXPECT_EQ(result->Version, (TStorageContractVersion{1, 5}));
     request.MaxVersion = {1, 0};
-    ASSERT_TRUE(NegotiateStorageContract(request, LocalCapabilities(), {}));
+    const auto first = NegotiateStorageContract(request, LocalCapabilities(), {});
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->Version, (TStorageContractVersion{1, 0}));
+    request.MinVersion = {1, 1};
+    request.MaxVersion = {1, 1};
+    const auto exact = NegotiateStorageContract(request, LocalCapabilities(), {});
+    ASSERT_TRUE(exact);
+    EXPECT_EQ(exact->Version, (TStorageContractVersion{1, 1}));
 }
 
 TEST(StorageContract, ReadViewsAreAdditiveAndNativeOnly)
@@ -115,7 +123,7 @@ TEST(StorageContract, ReadViewsAreAdditiveAndNativeOnly)
 TEST(StorageContract, RejectsDisjointVersionRangesAndMalformedRequests)
 {
     for (const auto version :
-        {TStorageContractVersion{0, 9}, TStorageContractVersion{1, 5}, TStorageContractVersion{2, 0}})
+        {TStorageContractVersion{0, 9}, TStorageContractVersion{1, 6}, TStorageContractVersion{2, 0}})
     {
         TStorageContractRequest request;
         request.MinVersion = version;
@@ -279,6 +287,89 @@ TEST(StorageContract, CustomBackendDoesNotImplyNativeBulkOrKeyValueMutations)
     EXPECT_FALSE(kv->HasOperation(EStorageOperation::Compact));
     EXPECT_FALSE(kv->HasFeature(EStorageFeature::DurableNoOp));
     EXPECT_FALSE(kv->HasFeature(EStorageFeature::SnapshotPreconditions));
+}
+
+// Contract 1.5 describes the snapshot archive like retention: native append
+// maintenance, plus archived reads, checkpoint open and full verification.
+TEST(StorageContract, SnapshotArchiveAndCheckpointsAreVersionFifteenAppendMaintenance)
+{
+    TStorageContractRequest request;
+    request.MaxVersion = {1, 5};
+    request.RequiredOperations = {EStorageOperation::UpdateSnapshotArchive,
+        EStorageOperation::ArchiveSnapshots,
+        EStorageOperation::VerifyStoreFull,
+        EStorageOperation::ExpireSnapshots};
+    request.RequiredFeatures = {EStorageFeature::ArchivedSnapshotReads, EStorageFeature::CheckpointOpen};
+    const auto append = NegotiateStorageContract(request, LocalCapabilities(), {});
+    ASSERT_TRUE(append) << append.error().message;
+    EXPECT_EQ(append->Version, (TStorageContractVersion{1, 5}));
+    EXPECT_EQ(append->EffectiveLimits.DefaultHotSnapshots, DefaultHotSnapshots);
+    EXPECT_EQ(append->EffectiveLimits.DefaultHotSnapshots, 100);
+    EXPECT_EQ(append->EffectiveLimits.MaxHotSnapshots, 1LL << 40);
+
+    // 1.4 (and every earlier minor) is unchanged: none of the additions, and
+    // requiring them fails closed.
+    request.MaxVersion = {1, 4};
+    const auto first = NegotiateStorageContract(request, LocalCapabilities(), {});
+    ASSERT_FALSE(first);
+    EXPECT_EQ(first.error().code, "UNSUPPORTED_OPERATION");
+    request.RequiredOperations.clear();
+    request.RequiredFeatures.clear();
+    const auto discovered = NegotiateStorageContract(request, LocalCapabilities(), {});
+    ASSERT_TRUE(discovered);
+    for (const auto operation : {EStorageOperation::UpdateSnapshotArchive,
+             EStorageOperation::ArchiveSnapshots,
+             EStorageOperation::VerifyStoreFull})
+    {
+        EXPECT_FALSE(discovered->HasOperation(operation));
+    }
+    EXPECT_FALSE(discovered->HasFeature(EStorageFeature::ArchivedSnapshotReads));
+    EXPECT_FALSE(discovered->HasFeature(EStorageFeature::CheckpointOpen));
+    EXPECT_EQ(discovered->EffectiveLimits.DefaultHotSnapshots, 0);
+    EXPECT_EQ(discovered->EffectiveLimits.MaxHotSnapshots, 0);
+    request.RequiredFeatures = {EStorageFeature::CheckpointOpen};
+    const auto feature = NegotiateStorageContract(request, LocalCapabilities(), {});
+    ASSERT_FALSE(feature);
+    EXPECT_EQ(feature.error().code, "UNSUPPORTED_FEATURE");
+
+    // KV collections have no archive and open by full verification; full
+    // verification itself is store-wide, like Reconcile.
+    request = {};
+    request.MaxVersion = {1, 5};
+    request.Mode = CollectionMode::KeyValue;
+    const auto kv = NegotiateStorageContract(request, LocalCapabilities(), {});
+    ASSERT_TRUE(kv);
+    EXPECT_TRUE(kv->HasOperation(EStorageOperation::VerifyStoreFull));
+    EXPECT_FALSE(kv->HasOperation(EStorageOperation::UpdateSnapshotArchive));
+    EXPECT_FALSE(kv->HasOperation(EStorageOperation::ArchiveSnapshots));
+    EXPECT_FALSE(kv->HasFeature(EStorageFeature::ArchivedSnapshotReads));
+    EXPECT_FALSE(kv->HasFeature(EStorageFeature::CheckpointOpen));
+    EXPECT_EQ(kv->EffectiveLimits.DefaultHotSnapshots, 0);
+
+    // Only the native backend that advertises the archive, like retention.
+    request.Mode = CollectionMode::Append;
+    auto capabilities = LocalCapabilities();
+    capabilities.snapshot_archive = false;
+    for (const auto backend : {BackendKind::LocalStorage, BackendKind::Custom, BackendKind::Unavailable}) {
+        capabilities.backend = backend;
+        const auto withoutArchive = NegotiateStorageContract(request, capabilities, {});
+        ASSERT_TRUE(withoutArchive);
+        EXPECT_TRUE(withoutArchive->HasOperation(EStorageOperation::VerifyStoreFull));
+        EXPECT_FALSE(withoutArchive->HasOperation(EStorageOperation::UpdateSnapshotArchive));
+        EXPECT_FALSE(withoutArchive->HasFeature(EStorageFeature::CheckpointOpen));
+        EXPECT_EQ(withoutArchive->EffectiveLimits.MaxHotSnapshots, 0);
+    }
+    capabilities = LocalCapabilities();
+    capabilities.backend = BackendKind::Custom;
+    const auto custom = NegotiateStorageContract(request, capabilities, {});
+    ASSERT_TRUE(custom);
+    EXPECT_FALSE(custom->HasOperation(EStorageOperation::ArchiveSnapshots));
+    EXPECT_FALSE(custom->HasFeature(EStorageFeature::ArchivedSnapshotReads));
+    capabilities = LocalCapabilities();
+    capabilities.append = false;
+    const auto readOnly = NegotiateStorageContract(request, capabilities, {});
+    ASSERT_TRUE(readOnly);
+    EXPECT_FALSE(readOnly->HasOperation(EStorageOperation::UpdateSnapshotArchive));
 }
 
 TEST(StorageContract, EngineConvenienceUsesEffectiveLimitsWithoutConsultingReadiness)

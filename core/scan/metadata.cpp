@@ -2,6 +2,8 @@
 
 #include "core/api/binary.h"
 #include "core/api/canonical.h"
+#include "core/backend/archive_records.h"
+#include "core/catalog/durable_sqlite_catalog.h"
 #include "core/scan/predicate.h"
 #include "core/scan/scan_planner.h"
 #include "core/storage/snapshot_retention.h"
@@ -38,8 +40,12 @@ void Add(int64_t& total, int64_t value)
 
 CollectionStatistics ReadStatistics(const TScanContext& context, const SnapshotSelector& selector)
 {
-    const auto plan =
-        Take(PlanManifests(context.FileIO, context.Base, selector, context.Cache.get(), context.RootBytes));
+    const auto plan = Take(PlanManifests(context.FileIO,
+        context.Base,
+        selector,
+        context.Cache.get(),
+        context.RootBytes,
+        context.Archived.get()));
     int64_t rows = 0;
     int64_t files = 0;
     int64_t bytes = 0;
@@ -58,7 +64,8 @@ CollectionStatistics ReadStatistics(const TScanContext& context, const SnapshotS
         .compressed_data_bytes = {bytes, MetricKind::Metadata}};
 }
 
-SnapshotHistory ReadHistory(const TScanContext& context, std::span<const AppendResult> receipts)
+SnapshotHistory
+ReadHistory(const TScanContext& context, std::span<const AppendResult> receipts, const ArchivedHistory* archived)
 {
     const auto root = Take(ReadScanRoot(context.FileIO, context.Base, context.Cache.get(), context.RootBytes));
     std::map<int64_t, const AppendResult*> bySnapshot;
@@ -82,14 +89,34 @@ SnapshotHistory ReadHistory(const TScanContext& context, std::span<const AppendR
     std::optional<int64_t> previous;
     const auto expired = NGlamDB::NStorage::ExpiredSequence(*root);
     Require(expired.has_value(), "CORRUPTION", "invalid expiration watermark");
-    int64_t sequence = *expired;
-    if (sequence != 0) {
-        Require(!snapshots.empty() && snapshots.front()->sequence_number == sequence + 1,
-            "CORRUPTION",
-            "retained history differs from expiration watermark");
-        previous = snapshots.front()->parent_snapshot_id;
+    const auto rootFirst = snapshots.empty() ? *expired + 1 : snapshots.front()->sequence_number;
+    std::vector<std::shared_ptr<iceberg::Snapshot>> chain;
+    if (archived != nullptr) {
+        chain.reserve(archived->snapshots.size() + snapshots.size());
+        for (const auto& row : archived->snapshots) {
+            Require(chain.empty() || row.sequence_number == chain.back()->sequence_number + 1,
+                "CORRUPTION",
+                "snapshot archive has a gap");
+            chain.push_back(DecodeArchivedSnapshot(row));
+        }
     }
-    for (const auto& snapshot : snapshots) {
+    Require(chain.empty() || chain.back()->sequence_number == rootFirst - 1,
+        "CORRUPTION",
+        "snapshot archive does not reach the retained root");
+    // The listing starts at the oldest snapshot neither expired nor missing.
+    // Missing archived entries are only the oldest ones a later expiration
+    // removed after this root was pinned.
+    const auto start = chain.empty() ? rootFirst : chain.front()->sequence_number;
+    Require(start - 1 >= *expired &&
+            (start - 1 == *expired || (archived != nullptr && archived->expired_through >= start - 1)),
+        "CORRUPTION",
+        "retained history differs from expiration watermark");
+    chain.insert(chain.end(), snapshots.begin(), snapshots.end());
+    int64_t sequence = start - 1;
+    if (sequence != 0 && !chain.empty()) {
+        previous = chain.front()->parent_snapshot_id;
+    }
+    for (const auto& snapshot : chain) {
         Require(snapshot->parent_snapshot_id == previous && snapshot->sequence_number > sequence,
             "CORRUPTION",
             "retained history is not one complete append chain");

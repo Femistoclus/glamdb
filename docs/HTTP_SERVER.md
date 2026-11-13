@@ -118,9 +118,9 @@ entry and open again with sufficient limits; data is never discarded.
 
 | Limit | Range | Default |
 | --- | --- | --- |
-| `max_operations` | 1–9223372036854775807 | 4096 |
+| `max_operations` | 1–9223372036854775807 | 1099511627776 |
 | `max_collections` | 1–64 | 8 |
-| `max_catalog_bytes` | 65536–1099511627776 | 268435456 |
+| `max_catalog_bytes` | 65536–1099511627776 | 68719476736 |
 | `max_pending_calls` | 1–16 | 16 |
 | `max_owned_input_bytes` | 1–134217728 | 134217728 |
 | `writer_wait_ms` | 0–5000 | 5000 |
@@ -128,9 +128,12 @@ entry and open again with sufficient limits; data is never discarded.
 
 `limits.history` configures aggregate snapshot, manifest, data-file, root,
 manifest-list and footer budgets, individual root/commit bytes and recovery
-workspace bytes. See the [field ranges and SF=10 profile](SCALABLE_HISTORY.md).
-Defaults remain conservative; normalized descriptors include every history field.
-Complete legacy persisted limits objects receive default history values.
+workspace bytes. See the [field ranges, defaults and SF=10 profile](SCALABLE_HISTORY.md).
+New databases get defaults under which byte budgets (catalog, retained metadata,
+warehouse) bind rather than counts; normalized descriptors include every history
+field. Persisted descriptors keep their values when the defaults change, and
+complete legacy persisted limits objects without `history` receive the former
+history defaults (`LegacyHistoryLimits`), not the current ones.
 
 Values are JSON integers; booleans, fractions, unknown fields and values outside
 these bounds are rejected before reserving a database. Every database response

@@ -11,6 +11,8 @@ struct TBaseState;
 
 namespace glamdb::detail {
 
+struct ArchivedSnapshotRecord;
+
 enum class EReadViewState { Active, Released, Cancelled, Expired, Closed };
 
 struct TReadViewState
@@ -38,6 +40,9 @@ public:
         std::shared_ptr<const TReadViewInfo> Info;
         // Preserve backend aliasing ownership, not just ScanIndex's shared pointer.
         std::vector<TVerifiedState> States;
+        // Per entry: the archive row of a selected snapshot outside the pinned
+        // root (bound to its receipt at acquisition), else empty.
+        std::vector<std::shared_ptr<const ArchivedSnapshotRecord>> Archived;
     };
 
     explicit TReadViews(TRootReaders& roots);

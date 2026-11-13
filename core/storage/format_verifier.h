@@ -53,6 +53,8 @@ struct TAvroContainerInfo
 {
     std::int64_t RecordCount = 0;
     std::int64_t BlockCount = 0;
+    // Decoded block bytes, the quantity MaxDecodedBytes bounds.
+    std::int64_t DecodedBytes = 0;
 };
 
 iceberg::Result<TParquetFileInfo> CheckParquet(iceberg::InputFile& file,
@@ -103,4 +105,8 @@ iceberg::Status VerifyTableMetadataBytes(iceberg::FileIO& io,
 // Number of root JSON parses (ReadTableMetadata and ParseTableMetadata) in
 // this process; cost tests compare it around an operation.
 std::uint64_t TableMetadataParses() noexcept;
+// Parquet footers read (ReadParquetFooter) and Avro containers checked
+// (CheckAvroContainer: manifest lists and manifests) in this process.
+std::uint64_t ParquetFooterReads() noexcept;
+std::uint64_t AvroContainerChecks() noexcept;
 }

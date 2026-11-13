@@ -83,7 +83,8 @@ TEST(RecoveryWorkspaceChild, CrashesDuringVerification)
     }
     ASSERT_EQ(sqlite3_initialize(), SQLITE_OK);
     TWorkspaceCrashVfs crash(root);
-    const auto opened = OpenExisting({.absolute_root = root, .expected_store_id = test::store_id});
+    // The recovery workspace belongs to full verification.
+    const auto opened = OpenExisting({.absolute_root = root, .expected_store_id = test::store_id, .verify_full = true});
     FAIL() << "recovery did not reach workspace I/O: " << (opened ? "opened" : opened.error().message);
 }
 

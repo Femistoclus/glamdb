@@ -48,6 +48,16 @@ public:
     // cursors continue reading. New reads/preconditions on expired IDs report
     // SNAPSHOT_EXPIRED. An uncertain publication requires Reconcile and retry.
     Result<SnapshotExpirationResult> ExpireSnapshots(const SnapshotExpirationRequest& request);
+    // Changes the collection's hot_snapshots setting, serialized with appends.
+    // Later appends and ArchiveSnapshots apply it; nothing moves immediately.
+    Result<CollectionInfo> UpdateSnapshotArchive(const UpdateSnapshotArchiveRequest& request);
+    // Explicit, bounded archive maintenance: moves at most 1024 of the oldest
+    // root snapshots above hot_snapshots to the catalog archive per call.
+    // Archived snapshots stay readable. An uncertain publication requires
+    // Reconcile and retry.
+    Result<SnapshotArchiveStatus> ArchiveSnapshots(std::string_view collection_id);
+    // No I/O: the confirmed view's root, archive and expiration counts.
+    Result<SnapshotArchiveStatus> GetSnapshotArchive(std::string_view collection_id) const;
     Result<CollectionStatistics> GetStatistics(std::string_view collection_id,
         SnapshotSelector selector = SnapshotSelector::Latest()) const;
     Result<TFileListing> ListFiles(std::string_view collectionID,
@@ -114,7 +124,12 @@ public:
     RenewReadView(const TReadView& view, std::string_view authorizationScope, std::chrono::milliseconds lifetime) const;
     Status ReleaseReadView(const TReadView& view, std::string_view authorizationScope) const;
     Status CancelReadView(const TReadView& view, std::string_view authorizationScope) const;
+    // Re-verifies the whole retained store, as recovery without checkpoints
+    // does, and re-establishes the catalog checkpoints (catalog version 6).
+    // Reconcile always takes this full path too; only a fresh open of a
+    // version 6 store may use the checkpoints instead.
     Status Reconcile();
+    Status VerifyStoreFull();
     Status Shutdown(std::chrono::milliseconds timeout);
 
 private:

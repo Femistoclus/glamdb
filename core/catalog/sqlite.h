@@ -40,4 +40,16 @@ private:
 int64_t ParseInteger(std::string_view text);
 std::string Required(const SqlRow& row, size_t column);
 
+// Process-wide work of finished catalog statements, for cost tests: rows
+// returned, rows changed, full-scan steps and SQLite virtual-machine steps.
+struct CatalogWork
+{
+    uint64_t rows_returned = 0;
+    uint64_t rows_changed = 0;
+    uint64_t fullscan_steps = 0;
+    uint64_t vm_steps = 0;
+    uint64_t statements = 0;
+};
+CatalogWork ReadCatalogWork() noexcept;
+
 } // namespace glamdb::detail

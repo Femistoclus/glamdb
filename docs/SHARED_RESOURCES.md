@@ -33,7 +33,16 @@ engine for limits up to eight collections. Each slot above eight adds 1 MiB
 catalog/descriptor metadata, 1 MiB protected recovery and 4 KiB ordinary control,
 reserved for the engine lifetime before filesystem creation/open. A 64-slot
 profile therefore protects 120 MiB catalog/descriptor metadata, 824 MiB recovery
-and 224 KiB control. Materialized cached roots reserve 32 times their serialized size plus
+and 224 KiB control. No reservation follows a configured history maximum: beyond
+the first 256 bound operations (covered by the fixed recovery envelope) the engine
+reserves 1 KiB of protected recovery per operation that exists, in chunks of 256,
+before recovery and before every binding (a refusal binds nothing). The store
+device keeps twice the actual catalog file in 64 MiB steps plus the actual
+recovery-workspace envelope `8 KiB × (1 + snapshots + manifests + data files)`
+(at least 256 MiB), also grown before a binding; full verification streams
+operations and archive rows and keeps compact per-snapshot state, so its memory
+follows the retained files rather than failed receipts or configured limits.
+Materialized cached roots reserve 32 times their serialized size plus
 4 MiB each, with a separate charge for the verified scan index and every retained
 file descriptor's metric maps and variable buffers. Index vectors use a stable
 two-times-element-count capacity allowance for the pinned standard library so

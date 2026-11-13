@@ -834,14 +834,15 @@ void OrderChronologicalFiles(TScanManifests& plan, const TScanContext& context)
         "CORRUPTION",
         "chronological source has no snapshot sequence");
     auto index = std::make_shared<NGlamDB::NStorage::TScanMembership>();
+    std::vector<NGlamDB::NStorage::TScanDataFile> files;
     uint64_t retainedBytes = 0;
     const auto maxRetainedBytes = MetadataWorkForRoot(context.RootBytes) / 2;
     for (size_t manifest = 0; manifest < plan.Manifests.size(); ++manifest) {
         Require(plan.Manifests[manifest].deleted_files_count == 0,
             "CORRUPTION",
             "chronological append source contains deleted files");
-        const auto files = Take(ReadManifestDataFiles(context.FileIO, plan, manifest, context.Cache.get()));
-        for (const auto& file : *files) {
+        const auto decoded = Take(ReadManifestDataFiles(context.FileIO, plan, manifest, context.Cache.get()));
+        for (const auto& file : *decoded) {
             const auto sequence = file->data_sequence_number;
             const auto path = NGlamDB::NIO::TStoreUri::Parse(file->file_path, context.Base.store_id);
             Require(sequence && *sequence > 0 && *sequence <= *plan.SequenceNumber && path &&
@@ -876,18 +877,17 @@ void OrderChronologicalFiles(TScanManifests& plan, const TScanContext& context)
                 "RESOURCE_EXHAUSTED",
                 "chronological source descriptors exceed the planning reservation");
             retainedBytes += bytes;
-            index->Files.push_back(
-                {file->file_path, file->file_size_in_bytes, file->record_count, file, *sequence, {}});
+            files.push_back({file->file_path, file->file_size_in_bytes, file->record_count, file, *sequence, {}});
         }
     }
-    std::ranges::sort(index->Files, [](const auto& left, const auto& right) {
+    std::ranges::sort(files, [](const auto& left, const auto& right) {
         return left.IntroducedSequence == right.IntroducedSequence ? left.Path < right.Path
                                                                    : left.IntroducedSequence < right.IntroducedSequence;
     });
     std::string_view operationPrefix;
     int64_t operationSequence = 0;
     size_t ordinal = 0;
-    for (const auto& file : index->Files) {
+    for (const auto& file : files) {
         if (file.IntroducedSequence != operationSequence) {
             operationSequence = file.IntroducedSequence;
             operationPrefix = std::string_view(file.Path).substr(0, file.Path.size() - 13);
@@ -899,6 +899,9 @@ void OrderChronologicalFiles(TScanManifests& plan, const TScanContext& context)
             "CORRUPTION",
             "chronological source has duplicate or missing producer file ordinals");
         ++ordinal;
+    }
+    for (auto& file : files) {
+        index->Files.push_back(std::move(file));
     }
     plan.FileCount = index->Files.size();
     plan.Index = std::move(index);
@@ -940,13 +943,14 @@ Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanReq
                 BoundedDiagnostic("collection schema profile: " + profile.error().message),
                 RetryHint::OperatorAction});
         }
-        auto plan =
-            Take(context.VerifiedState ? PlanVerifiedScan(*context.VerifiedState, context.Base, request.selector)
-                                       : PlanManifests(context.FileIO,
-                                             context.Base,
-                                             request.selector,
-                                             context.Cache.get(),
-                                             context.RootBytes));
+        auto plan = Take(context.VerifiedState
+                ? PlanVerifiedScan(*context.VerifiedState, context.Base, request.selector, context.Archived.get())
+                : PlanManifests(context.FileIO,
+                      context.Base,
+                      request.selector,
+                      context.Cache.get(),
+                      context.RootBytes,
+                      context.Archived.get()));
         if (context.FileRange) {
             RequireInput(context.VerifiedState && plan.Index && !context.ChronologicalFiles &&
                     context.FileRange->first <= context.FileRange->second &&

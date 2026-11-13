@@ -18,6 +18,10 @@ namespace glamdb::detail {
 
 class TSnapshotMetadataCache;
 
+// Archived snapshots one expiration call can remove. The engine passes one
+// more row so the backend knows the oldest archived snapshot that remains.
+inline constexpr uint64_t MaxExpiredArchivePerCall = 4096;
+
 struct CollectionView
 {
     CollectionInfo info;
@@ -28,6 +32,23 @@ struct CollectionView
     std::vector<ExpiredSnapshotRecord> expired_snapshots{};
 };
 
+// The manifest list of one archived snapshot as its catalog row records it.
+struct ArchivedListReference
+{
+    std::string collection_id;
+    std::string manifest_list;
+    int64_t bytes = 0;
+    std::string sha256;
+};
+
+// A collection's verified checkpoint with the archived snapshot that precedes
+// its oldest root snapshot (the newest archive row), for OpenFromCheckpoints.
+struct CollectionCheckpointView
+{
+    CollectionCheckpoint checkpoint;
+    std::optional<ArchivedSnapshotRecord> newest_archived{};
+};
+
 class StagedCreate
 {
 public:
@@ -35,6 +56,12 @@ public:
     virtual CollectionInfo Info() const = 0;
     virtual iceberg::Status Publish(iceberg::sql::CatalogStore& catalog) = 0;
     virtual Status VerifyClosure(std::string_view final_metadata_location) = 0;
+    // After VerifyClosure: the verified state for the catalog checkpoint, or
+    // nothing when this backend does not provide one.
+    virtual std::optional<CollectionCheckpoint> Checkpoint() const
+    {
+        return std::nullopt;
+    }
 };
 
 class StagedAppend
@@ -55,6 +82,17 @@ public:
     // sticky I/O errors and candidate reopen capacity. A closed flag is not
     // proof.
     virtual Status VerifyClosure(std::string_view final_metadata_location) = 0;
+    // After VerifyClosure: the oldest root snapshots this append moved to the
+    // snapshot archive, for the same outer transaction.
+    virtual std::vector<ArchivedSnapshotRecord> Archived() const
+    {
+        return {};
+    }
+    // After VerifyClosure: the verified state for the catalog checkpoint.
+    virtual std::optional<CollectionCheckpoint> Checkpoint() const
+    {
+        return std::nullopt;
+    }
 };
 
 class StagedExpiration
@@ -67,6 +105,21 @@ public:
     virtual bool Changed() const = 0;
     virtual iceberg::Status Publish(iceberg::sql::CatalogStore& catalog) = 0;
     virtual Status VerifyClosure(std::string_view location) = 0;
+    // Leading Expired() records that leave the snapshot archive.
+    virtual int64_t ArchivedExpired() const
+    {
+        return 0;
+    }
+    // Archive maintenance: after VerifyClosure, the snapshots it moved.
+    virtual std::vector<ArchivedSnapshotRecord> Archived() const
+    {
+        return {};
+    }
+    // After VerifyClosure: the verified state for the catalog checkpoint.
+    virtual std::optional<CollectionCheckpoint> Checkpoint() const
+    {
+        return std::nullopt;
+    }
 };
 
 class StorageBackend
@@ -79,7 +132,9 @@ public:
         bool write_failure_latched = false;
     };
     virtual ~StorageBackend() = default;
-    virtual Result<StorageFootprint> GetStorageFootprint()
+    // `archived`: every archive row's manifest list. Archived lists and the
+    // manifests they reference are retained metadata, not orphans.
+    virtual Result<StorageFootprint> GetStorageFootprint(std::span<const ArchivedListReference> /*archived*/)
     {
         return std::unexpected(ErrorDetail{"DEPENDENCY_UNAVAILABLE",
             "physical store inventory is not installed",
@@ -113,13 +168,24 @@ public:
         const CollectionInfo& collection,
         const NormalizedInput& input,
         std::chrono::steady_clock::time_point deadline) = 0;
+    // `archived` holds the oldest archived snapshots (at most 4097), from
+    // which expiration starts.
     virtual Result<std::unique_ptr<StagedExpiration>> PrepareExpiration(const StoreInfo&,
         const CollectionInfo&,
         const BaseIdentity&,
-        const std::optional<SnapshotRetentionPolicy>&)
+        const std::optional<SnapshotRetentionPolicy>&,
+        std::span<const ArchivedSnapshotRecord>)
     {
         return std::unexpected(
             ErrorDetail{"DEPENDENCY_UNAVAILABLE", "snapshot maintenance is not installed", RetryHint::OperatorAction});
+    }
+    // Moves the oldest root snapshots above the collection's hot_snapshots to
+    // the archive, bounded per call. Changed() is false when nothing moves.
+    virtual Result<std::unique_ptr<StagedExpiration>>
+    PrepareArchive(const StoreInfo&, const CollectionInfo&, const BaseIdentity&)
+    {
+        return std::unexpected(
+            ErrorDetail{"DEPENDENCY_UNAVAILABLE", "snapshot archive is not installed", RetryHint::OperatorAction});
     }
     virtual Status RemoveExpiredMetadata(std::string_view, std::string_view)
     {
@@ -157,6 +223,29 @@ public:
         DurableSqliteCatalogStore& catalog)
     {
         return VerifyRetained(store, collections, catalog.Operations());
+    }
+    // Fresh open without re-verifying history: rebuilds every collection's
+    // verified generation from its catalog checkpoint, current root and
+    // current manifests. Any error means the caller must run the full
+    // VerifyRetainedCatalog path instead; no generation is left installed.
+    virtual Status
+    OpenFromCheckpoints(const StoreInfo&, std::span<const CollectionView>, std::span<const CollectionCheckpointView>)
+    {
+        return std::unexpected(
+            ErrorDetail{"DEPENDENCY_UNAVAILABLE", "checkpoint open is not installed", RetryHint::OperatorAction});
+    }
+    // After a successful full verification: one checkpoint per append
+    // collection of the verified generation (none for KV collections).
+    virtual std::vector<CollectionCheckpoint> VerifiedCheckpoints()
+    {
+        return {};
+    }
+    // Recovery workspace bytes that verifying the confirmed generation needs
+    // (its conservative visited-key envelope); 0 when not applicable. Never
+    // throws.
+    virtual uint64_t RecoveryWorkspaceBytes()
+    {
+        return 0;
     }
     // Independent read-only view for scans; it never joins a writer attempt.
     virtual Result<std::shared_ptr<iceberg::FileIO>> ReadOnlyFileIO()

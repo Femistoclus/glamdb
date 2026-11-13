@@ -260,8 +260,24 @@ struct CollectionInfo
     WriteSettings write_settings{};
     int64_t write_settings_version = 0;
     CollectionMode mode = CollectionMode::Append;
+    // Newest snapshots kept in the Iceberg root; older ones move to the
+    // catalog snapshot archive and stay readable. Absent keeps every retained
+    // snapshot in the root. Append collections only.
+    std::optional<int64_t> hot_snapshots{};
+    // The value is DefaultHotSnapshots applied at creation (possibly lowered
+    // to a retention keep_last since) and was never set explicitly.
+    bool hot_snapshots_defaulted = false;
     bool operator==(const CollectionInfo&) const = default;
 };
+
+// hot_snapshots of a new append collection whose creation does not choose
+// one, when the storage backend supports the snapshot archive.
+inline constexpr int64_t DefaultHotSnapshots = 100;
+// Largest explicit hot_snapshots value.
+inline constexpr int64_t MaxHotSnapshots = 1LL << 40;
+// Explicit hot_snapshots value for "no archive": every retained snapshot
+// stays in the Iceberg root.
+inline constexpr int64_t KeepAllSnapshotsInRoot = 0;
 
 struct CreateCollectionRequest
 {
@@ -271,6 +287,39 @@ struct CreateCollectionRequest
     // Part of the definition: a repeated creation must request the same settings.
     WriteSettings write_settings{};
     CollectionMode mode = CollectionMode::Append;
+    // Also part of the definition, compared by effective value on a repeated
+    // creation. Absent: DefaultHotSnapshots for append collections (when the
+    // backend supports the archive), none for KV. KeepAllSnapshotsInRoot (0):
+    // no archive. 1..2^40: that many root snapshots (append only).
+    std::optional<int64_t> hot_snapshots{};
+};
+
+// Replaces the collection's hot_snapshots setting with an explicit value.
+// Absent or KeepAllSnapshotsInRoot stops archiving later snapshots. Archived
+// snapshots never move back into the root. A repeated request is applied once.
+struct UpdateSnapshotArchiveRequest
+{
+    std::string collection_id;
+    std::optional<int64_t> hot_snapshots{};
+};
+
+// Observed from the engine's confirmed view: snapshots in the Iceberg root,
+// in the catalog archive and expired by retention.
+struct SnapshotArchiveStatus
+{
+    std::optional<int64_t> hot_snapshots{};
+    int64_t root_snapshots = 0;
+    int64_t archived_snapshots = 0;
+    int64_t expired_snapshots = 0;
+    // Root snapshots above hot_snapshots that maintenance can still archive.
+    int64_t archive_pending = 0;
+    // Snapshots this maintenance call moved to the archive.
+    int64_t snapshots_archived = 0;
+    // As CollectionInfo::hot_snapshots_defaulted: hot_snapshots is the
+    // creation default (possibly lowered to a retention keep_last) and was
+    // never set explicitly.
+    bool hot_snapshots_defaulted = false;
+    bool operator==(const SnapshotArchiveStatus&) const = default;
 };
 
 // Compare-and-set: applies only when expected_version is the current version.
@@ -380,30 +429,59 @@ struct SnapshotExpirationResult
     int64_t cleanup_pending = 0;
 };
 
+// The physical warehouse budget of a store (1 TiB) from which the default
+// aggregate byte budgets below are derived.
+inline constexpr int64_t DefaultWarehouseBytes = 1LL << 40;
+
 // Finite retained-history budgets. Counts and serialized bytes are store-wide;
 // a root file and a commit also have individual byte limits. These budgets do
 // not expire snapshots or permanent operation outcomes.
+//
+// Defaults (for new databases) let byte budgets bind rather than counts: root
+// snapshots are bounded by the snapshot archive's hot window (100 + 16 per
+// collection, 64 collections fit), retained manifests and data files by the
+// manifest/footer byte budgets and the warehouse, and retained metadata bytes
+// by fractions of DefaultWarehouseBytes. Per-file and per-commit limits are
+// unchanged. Every value stays finite and configurable; stores keep whatever
+// limits their callers pass (the HTTP registry persists them).
 struct HistoryLimits
 {
-    int64_t max_snapshots = 4096;
-    int64_t max_manifests = 4096;
-    int64_t max_data_files = 16384;
+    int64_t max_snapshots = 8192;
+    int64_t max_manifests = 1LL << 40;
+    int64_t max_data_files = 1LL << 40;
     int64_t max_root_bytes = 64LL << 20;
     int64_t max_root_file_bytes = 16LL << 20;
-    int64_t max_manifest_bytes = 256LL << 20;
-    int64_t max_manifest_list_bytes = 512LL << 20;
-    int64_t max_footer_bytes = 256LL << 20;
+    int64_t max_manifest_bytes = DefaultWarehouseBytes / 4;
+    int64_t max_manifest_list_bytes = DefaultWarehouseBytes / 4;
+    int64_t max_footer_bytes = DefaultWarehouseBytes / 16;
     int64_t max_commit_bytes = 32LL << 20;
-    int64_t max_recovery_workspace_bytes = 256LL << 20;
+    int64_t max_recovery_workspace_bytes = DefaultWarehouseBytes / 16;
 };
+
+// The defaults before the snapshot archive, kept by stores persisted with
+// them (HTTP registry rows that predate history budgets).
+inline constexpr HistoryLimits LegacyHistoryLimits{.max_snapshots = 4096,
+    .max_manifests = 4096,
+    .max_data_files = 16384,
+    .max_root_bytes = 64LL << 20,
+    .max_root_file_bytes = 16LL << 20,
+    .max_manifest_bytes = 256LL << 20,
+    .max_manifest_list_bytes = 512LL << 20,
+    .max_footer_bytes = 256LL << 20,
+    .max_commit_bytes = 32LL << 20,
+    .max_recovery_workspace_bytes = 256LL << 20};
 
 struct Limits
 {
     // Finite supported profile; larger selections also require shared resources.
     static constexpr int64_t MaxSupportedCollections = 64;
-    int64_t max_operations = 4096;
+    // Permanent operations are bounded by catalog bytes by default.
+    int64_t max_operations = 1LL << 40;
     int64_t max_collections = 8;
-    int64_t max_catalog_bytes = 256LL * 1024 * 1024;
+    // DefaultWarehouseBytes / 16: about 2.75 KB per one-row archived append
+    // were measured, so roughly 25 million such appends; storage reservations
+    // follow the actual catalog size, not this maximum.
+    int64_t max_catalog_bytes = DefaultWarehouseBytes / 16;
     int64_t max_pending_calls = 16;
     int64_t max_owned_input_bytes = 128LL * 1024 * 1024;
     std::chrono::milliseconds writer_wait{5000};
@@ -434,6 +512,10 @@ struct OpenStoreRequest
     std::string profile_id = "local-delete-extra-v1";
     Limits limits{};
     std::shared_ptr<ResourceOwner> resources{};
+    // Re-verify the whole retained history (every receipt, archived row,
+    // transition and data-file footer) instead of opening from the verified
+    // checkpoints of a catalog version 6 store.
+    bool verify_full = false;
 };
 
 } // namespace glamdb

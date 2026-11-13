@@ -96,14 +96,18 @@ publication. Version 3 is introduced transactionally and includes the existing
 write-settings schema plus expiration and cleanup tables. Older binaries reject
 version 3. The immutable store and append receipt formats remain unchanged.
 
-The default permanent operation limit remains 4096. To exceed it, select adequate
-explicit `Limits::max_operations`, catalog bytes and `Limits::history` budgets,
-and pass the same profile when reopening; see [configurable history](SCALABLE_HISTORY.md).
-Retention never raises or lowers configured capacity. Successful history is bounded
-by the lesser of the operation and data-file budgets: above 4096 such slots,
-admission reserves an additional 16 KiB metadata and 64 KiB recovery memory per
-slot. This covers expired ancestry even when the retained root is small; streamed
-failed operations do not inflate this reservation. Catalog operation and
+With the [snapshot archive tier](SNAPSHOT_ARCHIVE.md) (catalog versions 5 and 6),
+retention counts and ages archived and root snapshots together. Archived
+snapshots are the oldest and expire first, at most 4096 per call; their rows
+move to the expiration ledger and their metadata joins the same cleanup queue.
+`hot_snapshots` may not exceed `keep_last`.
+
+New databases default to byte-bound operation and history budgets (see
+[configurable history](SCALABLE_HISTORY.md)); stores opened with explicit or
+persisted limits keep them, and the same profile must be passed when reopening.
+Retention never raises or lowers configured capacity. Recovery memory is reserved
+for the operations that exist (1 KiB each beyond the first 256, grown before a
+binding), which covers expired ancestry even when the retained root is small. Catalog operation and
 expiration inventories use bounded keyset pages, so a ledger beyond 8192 entries
 remains recoverable. Data files, roots, manifests, lists, catalog bytes, warehouse
 capacity and shared reservations remain finite. Retention cannot make an

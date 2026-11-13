@@ -135,7 +135,13 @@ protected:
 
     CreateOutcome Create(WriteSettings settings)
     {
-        return Engine_->CreateCollection({test::collection_id, "events", Schema, std::move(settings)});
+        // Catalog versions are this suite's subject: no archive tier.
+        return Engine_->CreateCollection({test::collection_id,
+            "events",
+            Schema,
+            std::move(settings),
+            CollectionMode::Append,
+            KeepAllSnapshotsInRoot});
     }
 
     AppendResult Append(const char* operation, const std::vector<TInputRow>& rows)
@@ -473,6 +479,24 @@ TEST_F(TWriteSettingsTest, NewerCatalogVersionsFailClosed)
         detail::Database database;
         database.Open(Root_ / "catalog.sqlite", SQLITE_OPEN_READWRITE, {});
         database.Execute("PRAGMA user_version=5");
+    }
+    // Version 5 also requires the KV and snapshot archive tables.
+    opened = detail::EngineFactory::OpenWith({Root_.string(), test::store_id}, THookBackend::Factory(Backend_));
+    ASSERT_FALSE(opened);
+    EXPECT_EQ(opened.error().code, "CORRUPTION");
+    {
+        detail::Database database;
+        database.Open(Root_ / "catalog.sqlite", SQLITE_OPEN_READWRITE, {});
+        database.Execute("PRAGMA user_version=6");
+    }
+    // Version 6 also requires the checkpoint table and the bound-operation index.
+    opened = detail::EngineFactory::OpenWith({Root_.string(), test::store_id}, THookBackend::Factory(Backend_));
+    ASSERT_FALSE(opened);
+    EXPECT_EQ(opened.error().code, "CORRUPTION");
+    {
+        detail::Database database;
+        database.Open(Root_ / "catalog.sqlite", SQLITE_OPEN_READWRITE, {});
+        database.Execute("PRAGMA user_version=7");
     }
     opened = detail::EngineFactory::OpenWith({Root_.string(), test::store_id}, THookBackend::Factory(Backend_));
     ASSERT_FALSE(opened);

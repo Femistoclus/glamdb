@@ -36,6 +36,7 @@
 #include <filesystem>
 #include <functional>
 #include <limits>
+#include <set>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <thread>
@@ -736,6 +737,101 @@ TEST_F(TPublicationGuardTest, AppendCannotReuseAnExpiredSnapshotIdentity)
         (*first)->Metadata->current_snapshot_id);
     ASSERT_FALSE(reused);
     EXPECT_EQ(reused.error().message, "Append reuses an expired snapshot identity.");
+}
+
+TEST_F(TPublicationGuardTest, AppendSharesEveryBaseDescriptorAndManifestPathAtTwoHistorySizes)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto first = Append(1, create.GetCandidate(), 3);
+    ASSERT_TRUE(first) << first.error().message;
+    int index = 2;
+    for (const std::size_t history : {std::size_t{100}, std::size_t{5000}}) {
+        // The guard never rereads base membership, so unrelated descriptors,
+        // boundaries and paths stand in for `history` earlier appends.
+        auto padded = std::make_shared<TBaseState>(**first);
+        auto membership = std::make_shared<TScanMembership>(*(*first)->ScanIndex);
+        const auto firstPaths = (*first)->RetainedManifestPaths.Paths();
+        std::vector<std::string> paths(firstPaths.begin(), firstPaths.end());
+        for (std::size_t file = 0; file < history; ++file) {
+            membership->Files.push_back(
+                {std::format("{}/data/padding-{:08}.parquet", Location_, file), 100, 1, nullptr});
+            membership->Snapshots.push_back({-static_cast<std::int64_t>(file) - 1, membership->Files.size()});
+            paths.push_back(std::format("{}/metadata/padding-{:08}-m0.avro", Location_, file));
+        }
+        std::ranges::sort(membership->Snapshots, {}, &TSnapshotBoundary::SnapshotID);
+        padded->ScanIndex = membership;
+        padded->RetainedManifestPaths = std::move(paths);
+        std::set<const char*> basePaths;
+        padded->RetainedManifestPaths.ForEach([&](const std::string& path) {
+            basePaths.insert(path.data());
+        });
+
+        const auto next = Append(index++, padded, 2);
+        ASSERT_TRUE(next) << next.error().message;
+        const auto& files = (*next)->ScanIndex->Files;
+        ASSERT_EQ(files.size(), membership->Files.size() + 1);
+        std::size_t shared = 0;
+        for (std::size_t file = 0; file < membership->Files.size(); ++file) {
+            shared += &files[file] == &membership->Files[file] ? 1 : 0;
+        }
+        EXPECT_EQ(shared, history + 1) << "every base descriptor is shared, none copied";
+        EXPECT_EQ(files[files.size() - 1].RecordCount, 2);
+        EXPECT_EQ((*next)->ScanIndex->Snapshots.size(), membership->Snapshots.size() + 1);
+        std::size_t sharedPaths = 0;
+        (*next)->RetainedManifestPaths.ForEach([&](const std::string& path) {
+            sharedPaths += basePaths.contains(path.data()) ? 1 : 0;
+        });
+        EXPECT_EQ(sharedPaths, basePaths.size());
+        EXPECT_EQ((*next)->RetainedManifestPaths.size(), basePaths.size() + 1);
+        EXPECT_EQ(padded->ScanIndex->Files.size(), history + 1) << "the base generation is unchanged";
+    }
+}
+
+TEST_F(TPublicationGuardTest, RejectedOrUnpublishedCandidatesLeaveTheBaseGenerationUnchanged)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto first = Append(1, create.GetCandidate(), 3);
+    ASSERT_TRUE(first) << first.error().message;
+    const auto second = Append(2, *first, 2);
+    ASSERT_TRUE(second) << second.error().message;
+    const auto& base = **second;
+    std::vector<const TScanDataFile*> addresses;
+    for (const auto& file : base.ScanIndex->Files) {
+        addresses.push_back(&file);
+    }
+    const auto snapshots = base.ScanIndex->Snapshots;
+    const auto paths = base.RetainedManifestPaths.Paths();
+    const auto bytes = ScanIndexBytes(*base.ScanIndex, base.ExpiredSnapshotIDs, base.RetainedManifestPaths);
+    const auto unchanged = [&] {
+        ASSERT_EQ(base.ScanIndex->Files.size(), addresses.size());
+        for (std::size_t file = 0; file < addresses.size(); ++file) {
+            EXPECT_EQ(&base.ScanIndex->Files[file], addresses[file]);
+        }
+        ASSERT_EQ(base.ScanIndex->Snapshots.size(), snapshots.size());
+        for (std::size_t boundary = 0; boundary < snapshots.size(); ++boundary) {
+            EXPECT_EQ(base.ScanIndex->Snapshots[boundary].SnapshotID, snapshots[boundary].SnapshotID);
+            EXPECT_EQ(base.ScanIndex->Snapshots[boundary].FileCount, snapshots[boundary].FileCount);
+        }
+        EXPECT_EQ(base.RetainedManifestPaths.Paths(), paths);
+        EXPECT_EQ(ScanIndexBytes(*base.ScanIndex, base.ExpiredSnapshotIDs, base.RetainedManifestPaths), bytes);
+    };
+    // The candidate has already pushed its file when the capacity check rejects it.
+    const auto rejected = Append(3, *second, 1, [](TPublicationContext* context, TPointerChange*) {
+        context->Limits.Store.DataFiles = 2;
+    });
+    ASSERT_FALSE(rejected);
+    unchanged();
+    {
+        const auto unpublished = Append(4, *second, 1);
+        ASSERT_TRUE(unpublished) << unpublished.error().message;
+        EXPECT_EQ((*unpublished)->ScanIndex->Files.size(), addresses.size() + 1);
+        EXPECT_EQ(&(*unpublished)->ScanIndex->Files[0], addresses[0]);
+    }
+    unchanged();
 }
 
 class TMergedClosureCorruptionTest
