@@ -512,8 +512,8 @@ class Client:
         (``KEEP_ALL_SNAPSHOTS_IN_ROOT``) creates it without an archive. The
         effective value is also part of the definition: a repeated create
         with another effective value is refused with 409
-        ``SNAPSHOT_ARCHIVE_MISMATCH`` (an omitted value matches the default
-        and an explicit 100).
+        ``SNAPSHOT_ARCHIVE_MISMATCH`` (an omitted value matches only a
+        still-defaulted setting; an explicit 100 also matches the default).
         """
         cid = uuid_string(collection_id, "collection_id")
         schema = self._schema(schema)

@@ -183,7 +183,8 @@ new append collection on a server advertising `features.snapshot_archive` gets
 the default (100, reported with `hot_snapshots_defaulted: true`);
 `--hot-snapshots 0` creates it without an archive. On creation the effective
 value is part of the definition (`SNAPSHOT_ARCHIVE_MISMATCH` for another value;
-an omitted option matches the default or an explicit 100). `snapshot-archive`
+an omitted option matches only a still-defaulted setting; an explicit value must
+equal the created one, so `--hot-snapshots 100` also matches the default). `snapshot-archive`
 without options shows `{hot_snapshots, root_snapshots, archived_snapshots,
 expired_snapshots, archive_pending}` (`"0"`: no archive); `--hot-snapshots 0`
 or `--unset` stops archiving later snapshots.

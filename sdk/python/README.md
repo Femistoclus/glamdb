@@ -359,8 +359,9 @@ Counts are decimal strings. Collections report the effective `hot_snapshots`
 server default and was never set; any update clears it). The effective value is
 part of the collection definition: repeating a lost create with another effective
 value is refused (409 `SNAPSHOT_ARCHIVE_MISMATCH`, a `definitely_not_committed`
-outcome). An omitted value matches a defaulted collection and one created with an
-explicit 100; an explicit 0 matches only a collection without an archive, so a
+outcome). An omitted value matches only a collection whose setting is still defaulted
+(not one created with an explicit 100 or later updated); an explicit 100 also
+matches a defaulted 100; an explicit 0 matches only a collection without an archive, so a
 create that omits the value no longer matches a collection created without an
 archive by an older server. The reported value is the current one, so
 `resolve_create` accepts a resolved collection only when that proves the creation

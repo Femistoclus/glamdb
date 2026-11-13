@@ -650,9 +650,10 @@ value as a decimal string (`"0"` without an archive, never `null`) plus
 `hot_snapshots_defaulted: true|false` (the value came from the default and was
 never set explicitly; any update clears it). The effective value is part of the
 definition like `write_settings`: a repeated creation compares effective values,
-so an omitted value matches a defaulted collection or an explicit `"100"`,
-`"0"` matches only a collection without an archive, and anything else returns
-409 `SNAPSHOT_ARCHIVE_MISMATCH`. A reported collection can therefore be repeated
+so an omitted value matches only a collection whose setting is still defaulted
+(whatever the numeric default was), an explicit value must equal the created
+value (an explicit `"100"` also matches a defaulted 100, `"0"` only a collection
+without an archive), and anything else returns 409 `SNAPSHOT_ARCHIVE_MISMATCH`. A reported collection can therefore be repeated
 as its own create request until it is updated. Consequence for collections
 created before the default existed (by older servers, without an archive): a
 create retry that omits the member no longer matches them; send `"0"`. Opening,

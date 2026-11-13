@@ -278,11 +278,14 @@ TEST_F(TSnapshotArchiveRoutesTest, OmittedSettingDefaultsAndRepeatedCreationComp
     EXPECT_EQ(status.at("hot_snapshots"), "100");
     EXPECT_EQ(status.at("archive_pending"), "0");
 
-    // Explicit 100 is not defaulted but matches an omitted value.
+    // Explicit 100 is not defaulted: an omitted value matches only a
+    // still-defaulted collection, whatever the numeric default is.
     const auto hundred = Json("POST", "/collections", events(Hundred, "hundred", {{"hot_snapshots", "100"}}));
     EXPECT_EQ(hundred.at("hot_snapshots"), "100");
     EXPECT_EQ(hundred.at("hot_snapshots_defaulted"), false);
-    EXPECT_EQ(Json("POST", "/collections", events(Hundred, "hundred", TJson::object())), hundred);
+    EXPECT_EQ(Json("POST", "/collections", events(Hundred, "hundred", {{"hot_snapshots", "100"}})), hundred);
+    EXPECT_EQ(Json("POST", "/collections", events(Hundred, "hundred", TJson::object()), 409).at("error").at("code"),
+        "SNAPSHOT_ARCHIVE_MISMATCH");
 
     // Explicit opt-out: "0" matches only "0".
     const auto none = Json("POST", "/collections", events(NoArchive, "none", {{"hot_snapshots", "0"}}));
@@ -302,15 +305,18 @@ TEST_F(TSnapshotArchiveRoutesTest, OmittedSettingDefaultsAndRepeatedCreationComp
             {"expired_snapshots", "0"},
             {"archive_pending", "0"}}));
 
-    // Any update, even to the same value, makes the setting explicit; the
-    // created effective value still decides repeated creation.
+    // Any update, even to the same value, makes the setting explicit: an
+    // omitted value no longer matches, an explicit value is compared with the
+    // value the collection was created with.
     const auto explicitHundred = Json("POST", Path("/snapshot-archive", Defaulted), TJson{{"hot_snapshots", "100"}});
     EXPECT_EQ(explicitHundred.at("hot_snapshots"), "100");
     EXPECT_EQ(explicitHundred.at("hot_snapshots_defaulted"), false);
-    EXPECT_EQ(Json("POST", "/collections", events(Defaulted, "defaulted", TJson::object())), explicitHundred);
+    EXPECT_EQ(Json("POST", "/collections", events(Defaulted, "defaulted", TJson::object()), 409).at("error").at("code"),
+        "SNAPSHOT_ARCHIVE_MISMATCH");
     const auto stopped = Json("POST", Path("/snapshot-archive", Defaulted), TJson{{"hot_snapshots", "0"}});
     EXPECT_EQ(stopped.at("hot_snapshots"), "0");
-    EXPECT_EQ(Json("POST", "/collections", events(Defaulted, "defaulted", TJson::object())), stopped);
+    EXPECT_EQ(Json("POST", "/collections", events(Defaulted, "defaulted", TJson::object()), 409).at("error").at("code"),
+        "SNAPSHOT_ARCHIVE_MISMATCH");
     EXPECT_EQ(Json("POST", "/collections", events(Defaulted, "defaulted", {{"hot_snapshots", "0"}}), 409)
                   .at("error")
                   .at("code"),
