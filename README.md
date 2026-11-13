@@ -10,7 +10,7 @@ for its catalog and write outcomes. Use it as an embedded C++ library or through
 the HTTP server, browser workbench, command-line client, and Python SDK.
 
 <sub>GlamDB is a software project developed for a hackathon at ITMO University
-and is not intended for production use.</sub>
+and is not intended for production use. [Presentation about the project](https://docs.google.com/presentation/d/1WN26TtEWeSEs4KMO7rEanRNz-sLYQZE_awN0cZxJg-c/edit?usp=sharing)</sub>
 
 **GlamDB is in early development.** The engine supports append and explicit key-value collections
 on local disk, with one owning process, one serialized writer per store, and
