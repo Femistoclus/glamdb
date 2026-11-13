@@ -100,11 +100,23 @@ NClient::TResponse RunDataCommand(Engine& engine, const NClient::TDataCommand& d
     const auto& collection = data.CollectionID;
     if (data.Command == "create-collection") {
         const auto body = ParseJson(request.Body);
-        CheckKeys(body, {"collection_id", "name", "schema", "write_settings"});
+        CheckKeys(body, {"collection_id", "name", "schema", "write_settings", "hot_snapshots"});
         return Outcome(json_adapter::ToJson(engine.CreateCollection({body.at("collection_id").get<std::string>(),
             body.at("name").get<std::string>(),
             ParseSchema(body.at("schema")),
-            body.contains("write_settings") ? ParseWriteSettings(body["write_settings"]) : WriteSettings{}})));
+            body.contains("write_settings") ? ParseWriteSettings(body["write_settings"]) : WriteSettings{},
+            CollectionMode::Append,
+            body.contains("hot_snapshots") ? ParseHotSnapshots(body["hot_snapshots"]) : std::nullopt})));
+    }
+    if (data.Command == "snapshot-archive") {
+        if (request.Method == "GET") {
+            return Reply(SnapshotArchiveJson(Unwrap(engine.GetSnapshotArchive(collection)), false));
+        }
+        return Reply(Collection(
+            Unwrap(engine.UpdateSnapshotArchive(ParseSnapshotArchiveUpdate(collection, ParseJson(request.Body))))));
+    }
+    if (data.Command == "archive-snapshots") {
+        return Reply(SnapshotArchiveJson(Unwrap(engine.ArchiveSnapshots(collection)), true));
     }
     if (data.Command == "write-settings") {
         const auto body = ParseJson(request.Body);

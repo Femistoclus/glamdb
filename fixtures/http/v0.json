@@ -172,9 +172,82 @@
       "response_fields": {
         "collection_id": "string",
         "schema": "object",
-        "current_snapshot_id": "null|string"
+        "current_snapshot_id": "null|string",
+        "hot_snapshots": "string",
+        "hot_snapshots_defaulted": "boolean"
       },
       "response_schema": "collection"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections",
+      "core": "Engine::CreateCollection (repeated; an explicit 100 matches the default)",
+      "status": 200,
+      "response_fields": {
+        "collection_id": "string",
+        "hot_snapshots": "string",
+        "hot_snapshots_defaulted": "boolean"
+      },
+      "request": {
+        "collection_id": "00000000-0000-0000-0000-000000000101",
+        "name": "contract_fixture",
+        "schema": {
+          "fields": [
+            {
+              "name": "key",
+              "type": "string",
+              "nullable": false
+            }
+          ]
+        },
+        "write_settings": {
+          "parquet": {
+            "compression": {
+              "codec": "zstd",
+              "level": 3
+            },
+            "columns": []
+          }
+        },
+        "hot_snapshots": "100"
+      },
+      "response_schema": "createOutcome",
+      "request_schema": "create"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections",
+      "core": "Engine::CreateCollection (repeated; \"0\" keeps every snapshot in the root and differs from the default)",
+      "status": 409,
+      "response_fields": {
+        "outcome": "string",
+        "error": "object"
+      },
+      "request": {
+        "collection_id": "00000000-0000-0000-0000-000000000101",
+        "name": "contract_fixture",
+        "schema": {
+          "fields": [
+            {
+              "name": "key",
+              "type": "string",
+              "nullable": false
+            }
+          ]
+        },
+        "write_settings": {
+          "parquet": {
+            "compression": {
+              "codec": "zstd",
+              "level": 3
+            },
+            "columns": []
+          }
+        },
+        "hot_snapshots": "0"
+      },
+      "response_schema": "createOutcome",
+      "request_schema": "create"
     },
     {
       "method": "GET",
@@ -274,6 +347,53 @@
       },
       "response_schema": "collection",
       "request_schema": "writeSettingsUpdate"
+    },
+    {
+      "method": "GET",
+      "path": "/databases/{database_id}/collections/{collection_id}/snapshot-archive",
+      "core": "Engine::GetSnapshotArchive",
+      "status": 200,
+      "response_fields": {
+        "hot_snapshots": "string",
+        "root_snapshots": "string",
+        "archived_snapshots": "string",
+        "expired_snapshots": "string",
+        "archive_pending": "string"
+      },
+      "response_schema": "snapshotArchive"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections/{collection_id}/snapshot-archive",
+      "core": "Engine::UpdateSnapshotArchive",
+      "status": 200,
+      "response_fields": {
+        "collection_id": "string",
+        "hot_snapshots": "string",
+        "hot_snapshots_defaulted": "boolean"
+      },
+      "request": {
+        "hot_snapshots": "1"
+      },
+      "response_schema": "collection",
+      "request_schema": "snapshotArchiveUpdate"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections/{collection_id}/snapshot-archive/maintenance",
+      "core": "Engine::ArchiveSnapshots",
+      "status": 200,
+      "response_fields": {
+        "hot_snapshots": "string",
+        "root_snapshots": "string",
+        "archived_snapshots": "string",
+        "expired_snapshots": "string",
+        "archive_pending": "string",
+        "snapshots_archived": "string"
+      },
+      "request": {},
+      "response_schema": "snapshotArchiveMaintenance",
+      "request_schema": "empty"
     },
     {
       "method": "GET",
@@ -577,6 +697,20 @@
         "target_file_bytes": "1024"
       },
       "request_schema": "compact"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections/{kv_collection_id}/snapshot-archive",
+      "core": "Engine::UpdateSnapshotArchive (append collections only)",
+      "status": 409,
+      "response_fields": {
+        "error": "object"
+      },
+      "request": {
+        "hot_snapshots": "1"
+      },
+      "response_schema": "error",
+      "request_schema": "snapshotArchiveUpdate"
     },
     {
       "method": "POST",

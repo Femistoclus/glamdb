@@ -8,11 +8,12 @@ from .errors import (AuthenticationError, DeadlineExceeded, ErrorDetail, HTTPErr
 from .models import ANY, AppendOutcome, CreateOutcome, LookupResult, OperationInProgress, Page, ScanResult
 from .predicates import Column, Predicate, and_, col, or_
 from .request import AppendRequest, MutationRequest
+from .snapshot_archive import KEEP_ALL_SNAPSHOTS_IN_ROOT
 from .stream import ScanStream
 from .write_settings import DICTIONARY_POLICIES, PARQUET_CODECS, PARQUET_ENCODINGS, canonical_write_settings
 
 __all__ = ["ANY", "AppendOutcome", "AppendRequest", "AuthenticationError", "BulkAppendRequest", "Client", "Column",
            "CreateOutcome", "DICTIONARY_POLICIES", "DeadlineExceeded", "ErrorDetail", "Field", "HTTPError",
-           "IntegrityError", "LookupResult", "MutationRequest", "OperationInProgress", "OutcomeUnknownError", "PARQUET_CODECS", "PARQUET_ENCODINGS",
+           "IntegrityError", "KEEP_ALL_SNAPSHOTS_IN_ROOT", "LookupResult", "MutationRequest", "OperationInProgress", "OutcomeUnknownError", "PARQUET_CODECS", "PARQUET_ENCODINGS",
            "Page", "Predicate", "ProtocolError", "SDKError", "ScanResult", "ScanStream", "Schema", "TransportError",
            "ValidationError", "and_", "canonical_write_settings", "col", "or_"]

@@ -166,6 +166,23 @@ TEST(OutcomeJson, CollectionSuccessMatchesExistingUiShapeAndStableFieldIds)
     EXPECT_EQ(JsonAt(encoded->body, "$.write_settings.parquet.columns").type, "array");
     EXPECT_EQ(JsonAt(encoded->body, "$.write_settings_version").text, "0");
     EXPECT_EQ(JsonAt(encoded->body, "$.write_settings_version").type, "text");
+    // No archive: the effective value "0" (KeepAllSnapshotsInRoot), never null.
+    EXPECT_EQ(JsonAt(encoded->body, "$.hot_snapshots").text, "0");
+    EXPECT_EQ(JsonAt(encoded->body, "$.hot_snapshots").type, "text");
+    EXPECT_EQ(JsonAt(encoded->body, "$.hot_snapshots_defaulted").type, "false");
+    auto archived = info;
+    archived.hot_snapshots = 1LL << 40;
+    const auto withSetting = json_adapter::CollectionJson(archived);
+    ASSERT_TRUE(withSetting);
+    EXPECT_EQ(JsonAt(*withSetting, "$.hot_snapshots").text, "1099511627776");
+    EXPECT_EQ(JsonAt(*withSetting, "$.hot_snapshots").type, "text");
+    EXPECT_EQ(JsonAt(*withSetting, "$.hot_snapshots_defaulted").type, "false");
+    archived.hot_snapshots = DefaultHotSnapshots;
+    archived.hot_snapshots_defaulted = true;
+    const auto defaulted = json_adapter::CollectionJson(archived);
+    ASSERT_TRUE(defaulted);
+    EXPECT_EQ(JsonAt(*defaulted, "$.hot_snapshots").text, "100");
+    EXPECT_EQ(JsonAt(*defaulted, "$.hot_snapshots_defaulted").type, "true");
 }
 
 TEST(OutcomeJson, CollectionWriteSettingsAreCanonicalParquetObjects)

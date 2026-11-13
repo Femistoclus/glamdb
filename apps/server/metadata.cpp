@@ -108,6 +108,7 @@ EngineCapabilities InstalledCapabilities()
     detail::AddEncodingCapabilities(capabilities);
     capabilities.key_value = true;
     capabilities.storage_footprint = true;
+    capabilities.snapshot_archive = true;
     return capabilities;
 #else
     return {};
@@ -201,6 +202,7 @@ TJson CapabilitiesJson(const EngineCapabilities& capabilities,
                 {"arrow_export", capabilities.scan},
                 {"stats", metadata},
                 {"storage_footprint", capabilities.storage_footprint},
+                {"snapshot_archive", capabilities.snapshot_archive},
                 {"snapshots", metadata},
                 {"files", metadata},
                 {"explain", metadata},

@@ -46,6 +46,19 @@ def test_write_settings_uses_database_write_policy_without_append_identity():
     assert route.kind is None
 
 
+def test_snapshot_archive_status_is_metadata_and_changes_use_write_policy():
+    collection = uuid4()
+    status = classify("GET", f"/collections/{collection}/snapshot-archive")
+    assert status.action == "metadata" and status.metric == "collection" and status.kind is None
+    for suffix in ("snapshot-archive", "snapshot-archive/maintenance"):
+        route = classify("POST", f"/collections/{collection}/{suffix}")
+        assert route.action == "write" and route.metric == "collection" and route.kind is None
+    for method, suffix in (("GET", "snapshot-archive/maintenance"), ("PUT", "snapshot-archive"),
+                           ("POST", "snapshot-archive/other")):
+        with pytest.raises(ValueError):
+            classify(method, f"/collections/{collection}/{suffix}")
+
+
 @pytest.mark.parametrize('action', ['upsert', 'delete', 'compact'])
 def test_kv_mutations_share_permanent_write_admission(action):
     route = classify('POST', f'/collections/{uuid4()}/{action}')

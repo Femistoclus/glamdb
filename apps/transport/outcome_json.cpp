@@ -242,6 +242,10 @@ std::string Collection(const CollectionInfo& collection)
     out.Add("schema", "{\"fields\":" + fields + "}");
     out.Add("write_settings", WriteSettingsJson(collection.write_settings));
     out.Integer("write_settings_version", collection.write_settings_version);
+    // The effective setting; "0" (KeepAllSnapshotsInRoot) when the collection
+    // has no archive, so a response can be repeated as a create request.
+    out.Integer("hot_snapshots", collection.hot_snapshots.value_or(KeepAllSnapshotsInRoot));
+    out.Add("hot_snapshots_defaulted", collection.hot_snapshots_defaulted ? "true" : "false");
     return out.Finish();
 }
 

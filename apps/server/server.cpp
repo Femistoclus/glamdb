@@ -69,7 +69,8 @@ ELogOperation ClassifyOperation(const TRequest& request) noexcept
             if (suffix.find("/scan") != std::string::npos || suffix.ends_with("/explain")) {
                 return ELogOperation::Scan;
             }
-            if (suffix.find("/snapshots") != std::string::npos) {
+            if (suffix.find("/snapshots") != std::string::npos || suffix.find("/snapshot-archive") != std::string::npos)
+            {
                 return ELogOperation::Snapshots;
             }
             return ELogOperation::Collections;

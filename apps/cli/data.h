@@ -17,6 +17,11 @@ struct TDataCommand
     std::string CollectionID, Name, SchemaFile, BodyFile, OperationID, FileID, DatabaseID;
     // Parquet write settings JSON file (or - for stdin) and its expected version.
     std::string WriteSettingsFile, ExpectedVersion;
+    // hot_snapshots decimal text for create-collection and snapshot-archive
+    // ("0": no archive; empty on create: the server default);
+    // UnsetHotSnapshots sends "0" (stop archiving later snapshots).
+    std::string HotSnapshots;
+    bool UnsetHotSnapshots = false;
     std::string Snapshot = "latest";
     std::string Mode = "append";
 };

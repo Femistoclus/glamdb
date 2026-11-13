@@ -472,6 +472,22 @@ def test_bearer_token_does_not_let_the_caller_forge_cursor_membership(client):
     assert response.json()["error"]["code"] == "INVALID_ARGUMENT"
 
 
+def test_mock_neither_advertises_nor_accepts_the_snapshot_archive(client):
+    # The archive is native-only: the mock keeps every snapshot and must refuse
+    # the setting instead of silently ignoring it.
+    capabilities = client.get("/capabilities").json()
+    assert not capabilities.get("features", {}).get("snapshot_archive")
+    response = client.post("/collections", json={"collection_id": CID, "name": "exact Name", "schema": SCHEMA,
+                                                 "hot_snapshots": "2"})
+    assert response.status_code == 422 and response.json()["error"]["code"] == "INVALID_ARGUMENT"
+    assert client.get(f"/collections/{CID}").status_code == 404
+    info = create(client)
+    assert "hot_snapshots" not in info
+    assert client.get(f"/collections/{CID}/snapshot-archive").status_code == 404
+    for suffix in ("snapshot-archive", "snapshot-archive/maintenance"):
+        assert client.post(f"/collections/{CID}/{suffix}", json={"hot_snapshots": "2"}).status_code == 404
+
+
 def test_mock_neither_advertises_nor_accepts_parquet_write_settings(client):
     # Clients enable Parquet compression controls only for an explicit native
     # capability; the mock must reject settings rather than silently ignore them.

@@ -42,7 +42,7 @@ inline TErrorPolicy ErrorPolicy(std::string_view code)
     }
     if (code == "DATABASE_REQUIRED" || code == "ALREADY_EXISTS" || code == "OPERATION_CONFLICT" ||
         code == "SCHEMA_MISMATCH" || code == "STALE_BASE" || code == "WRITE_SETTINGS_MISMATCH" ||
-        code == "WRITE_SETTINGS_CONFLICT" || code == "COLLECTION_MODE_MISMATCH")
+        code == "WRITE_SETTINGS_CONFLICT" || code == "COLLECTION_MODE_MISMATCH" || code == "SNAPSHOT_ARCHIVE_MISMATCH")
     {
         return {409, FixInput};
     }

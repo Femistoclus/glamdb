@@ -22,6 +22,8 @@ from .kv import validate_mutation_receipt
 from .predicates import Predicate
 from .request import AppendRequest, MutationRequest, _check_request_size, bounded_keys, json_bytes, schema_fingerprint, uuid_string
 from .recovery import validate_append_recovery, validate_create_recovery
+from .snapshot_archive import (KEEP_ALL_SNAPSHOTS_IN_ROOT, hot_snapshots_value, reported_collection_hot_snapshots,
+                               validate_archive_status)
 from .transport import JSON_ACCEPT_ENCODING, Deadline, read_json, translate_transport
 from .write_settings import canonical_write_settings, request_write_settings, write_settings_version
 
@@ -496,18 +498,29 @@ class Client:
 
     def create_collection(self, name: str, schema: Schema | Mapping[str, Any], *, collection_id: str | UUID,
                           write_settings: Mapping[str, Any] | None = None, mode: str = "append",
-                          deadline: float | None = None) -> CreateOutcome:
+                          hot_snapshots: int | str | None = None, deadline: float | None = None) -> CreateOutcome:
         """Create or confirm one collection definition.
 
         ``write_settings`` (Parquet compression, dictionary policy and value
         encodings of data files written by later appends) is part of the
         definition: send the same value when repeating a lost create.
+        ``hot_snapshots`` (1..2^40, append collections on servers advertising
+        ``features.snapshot_archive``) keeps only the newest snapshots in the
+        Iceberg root and archives older ones, which stay readable. None (the
+        default) omits it: such servers then give a new append collection
+        their default (100, reported with ``hot_snapshots_defaulted``); 0
+        (``KEEP_ALL_SNAPSHOTS_IN_ROOT``) creates it without an archive. The
+        effective value is also part of the definition: a repeated create
+        with another effective value is refused with 409
+        ``SNAPSHOT_ARCHIVE_MISMATCH`` (an omitted value matches the default
+        and an explicit 100).
         """
         cid = uuid_string(collection_id, "collection_id")
         schema = self._schema(schema)
         if not isinstance(name, str) or not name:
             raise ValidationError("exact collection name is required")
         requested = None if write_settings is None else canonical_write_settings(write_settings, schema)
+        hot = hot_snapshots_value(hot_snapshots)
         if mode not in ("append", "kv"):
             raise ValidationError("mode must be append or kv")
         body = {"collection_id": cid, "name": name, "schema": schema.to_dict()}
@@ -515,6 +528,8 @@ class Client:
             body["mode"] = mode
         if requested is not None:
             body["write_settings"] = request_write_settings(requested)
+        if hot is not None:
+            body["hot_snapshots"] = str(hot)
         budget = Deadline(deadline, collection_id=cid)
         status, value = self._json("POST", "collections", budget, body=json_bytes(body), write=True)
         try:
@@ -526,7 +541,8 @@ class Client:
             if kind == "committed":
                 if status not in (200, 201) or not isinstance(info, dict) or "error" in value:
                     raise ProtocolError("invalid committed create outcome", raw=value)
-                self._verify_created(info, cid, name, schema, requested, authoritative=True, mode=mode)
+                self._verify_created(info, cid, name, schema, requested, authoritative=True, mode=mode,
+                                     hot_snapshots=hot)
                 self._schemas[cid] = schema
             elif kind == "definitely_not_committed":
                 if (not isinstance(value.get("error"), dict) or info is not None or not 400 <= status <= 599
@@ -548,7 +564,8 @@ class Client:
 
     @staticmethod
     def _verify_created(info: Mapping[str, Any], cid: str, name: str, schema: Schema,
-                        write_settings: dict[str, Any] | None = None, *, authoritative: bool = True, mode: str = "append") -> bool:
+                        write_settings: dict[str, Any] | None = None, *, authoritative: bool = True, mode: str = "append",
+                        hot_snapshots: int | None = None) -> bool:
         """Check a created or resolved collection against the original create.
 
         ``authoritative`` responses come from the create POST itself: the
@@ -566,12 +583,32 @@ class Client:
             raise ProtocolError("resolved collection mode differs from the original create", raw=info)
         if not same:
             raise ProtocolError("resolved collection UUID, exact name, or schema does not match original create", raw=info)
+        try:
+            reported_hot = reported_collection_hot_snapshots(info)
+        except ValidationError as exc:
+            raise ProtocolError("collection reports an invalid hot_snapshots", raw=info) from exc
+        if reported_hot is None and hot_snapshots is not None:
+            # Servers without the snapshot archive (the mock, older native
+            # builds) cannot have applied it; such a create must not pass.
+            raise ProtocolError("created collection does not report the requested hot_snapshots", raw=info)
+        # The server compares a repeated create's effective value with the
+        # one the collection was created with; the reported value is the
+        # current one, which an update can change. A GET proves the creation
+        # value only when no archive exists at all (no member), for a KV
+        # collection (never archived) asked without a value, or while the
+        # value is still the server's default and the create omitted it.
+        if authoritative or reported_hot is None:
+            hot_proved = True
+        elif mode == "kv":
+            hot_proved = hot_snapshots in (None, KEEP_ALL_SNAPSHOTS_IN_ROOT)
+        else:
+            hot_proved = hot_snapshots is None and reported_hot[1]
         if "write_settings" not in info and "write_settings_version" not in info:
             # Servers without write settings (the mock, older native builds)
             # cannot have applied any; a request that carried them must not pass.
             if write_settings is not None:
                 raise ProtocolError("created collection does not report the requested write settings", raw=info)
-            return True
+            return hot_proved
         try:
             version = write_settings_version(info["write_settings_version"])
             actual = canonical_write_settings(info["write_settings"], schema, reported=True)
@@ -587,32 +624,36 @@ class Client:
         if version < created_version or (version == 0 and actual != expected):
             raise ProtocolError("resolved collection write settings do not match original create", raw=info)
         if not authoritative:
-            return version == 0
+            return version == 0 and hot_proved
         if version == created_version and actual != expected:
             raise ProtocolError("created collection write settings do not match the request", raw=info)
         return True
 
     def resolve_create(self, name: str, schema: Schema | Mapping[str, Any], *, collection_id: str | UUID,
                        write_settings: Mapping[str, Any] | None = None, mode: str = "append",
-                       deadline: float | None = None) -> dict[str, Any]:
+                       hot_snapshots: int | str | None = None, deadline: float | None = None) -> dict[str, Any]:
         """Resolve a lost create without guessing its write settings.
 
         When the current collection cannot prove the creation settings (any
-        settings were ever stored), the original create is repeated: it changes
-        nothing for an existing collection, and the server compares it with the
-        settings the collection was created with.
+        write settings were ever stored, or ``hot_snapshots`` is not the
+        server's default for a create that omitted it), the original create
+        is repeated: it changes nothing for an existing collection, and the
+        server compares it with the settings the collection was created with.
         """
         cid = uuid_string(collection_id, "collection_id")
         schema = self._schema(schema)
         requested = None if write_settings is None else canonical_write_settings(write_settings, schema)
+        hot = hot_snapshots_value(hot_snapshots)
         info = self.resolve_collection(name, deadline=deadline)
-        if self._verify_created(info, cid, name, schema, requested, authoritative=False, mode=mode):
+        if self._verify_created(info, cid, name, schema, requested, authoritative=False, mode=mode, hot_snapshots=hot):
             return info
-        outcome = self.create_collection(name, schema, collection_id=cid, write_settings=requested, mode=mode, deadline=deadline)
+        outcome = self.create_collection(name, schema, collection_id=cid, write_settings=requested, mode=mode,
+                                         hot_snapshots=hot, deadline=deadline)
         if outcome.outcome == "committed":
             return outcome.info
         code = outcome.error.code if outcome.error else None
-        if code in ("WRITE_SETTINGS_MISMATCH", "SCHEMA_MISMATCH", "ALREADY_EXISTS", "COLLECTION_MODE_MISMATCH"):
+        if code in ("WRITE_SETTINGS_MISMATCH", "SCHEMA_MISMATCH", "ALREADY_EXISTS", "COLLECTION_MODE_MISMATCH",
+                    "SNAPSHOT_ARCHIVE_MISMATCH"):
             raise ProtocolError("resolved collection write settings do not match original create",
                                 raw=outcome.raw, collection_id=cid)
         # Recovery or admission refused the confirmation; the create stays unresolved.
@@ -660,6 +701,72 @@ class Client:
             exc.raw, exc.collection_id = value, cid
             raise
         return value
+
+    def snapshot_archive(self, collection_id: str | UUID, *, deadline: float | None = None) -> dict[str, Any]:
+        """Report ``hot_snapshots`` and the root, archived and expired snapshot counts.
+
+        Counts are decimal strings observed from the server's confirmed view;
+        ``archive_pending`` is the number of root snapshots above
+        ``hot_snapshots`` that ``archive_snapshots`` can still move.
+        ``hot_snapshots`` is the effective value, ``"0"`` without an archive.
+        """
+        cid, path = self._path(collection_id, "snapshot-archive")
+        value = self._read(path, deadline=deadline, collection_id=cid)
+        try:
+            return validate_archive_status(value, maintenance=False)
+        except ValidationError as exc:
+            raise ProtocolError("invalid snapshot archive status", raw=value, collection_id=cid) from exc
+
+    def update_snapshot_archive(self, collection_id: str | UUID, hot_snapshots: int | str | None, *,
+                                deadline: float | None = None) -> dict[str, Any]:
+        """Replace ``hot_snapshots`` (1..2^40, or 0/None to stop archiving later snapshots).
+
+        Later appends and ``archive_snapshots`` apply it; nothing moves now and
+        archived snapshots never return to the root. Returns the collection.
+        Repeating the same call is idempotent, so after a lost response or
+        ``OutcomeUnknownError`` (503 ``RECOVERY_REQUIRED``: reconcile first)
+        repeat it. KV collections refuse a value with 409
+        ``COLLECTION_MODE_MISMATCH``; a value above the retention policy's
+        ``keep_last`` is refused with 400 ``INVALID_ARGUMENT``. Any update
+        makes the value explicit (``hot_snapshots_defaulted`` false).
+        """
+        cid, path = self._path(collection_id, "snapshot-archive")
+        hot = hot_snapshots_value(hot_snapshots)
+        hot = KEEP_ALL_SNAPSHOTS_IN_ROOT if hot is None else hot
+        budget = Deadline(deadline, collection_id=cid)
+        status, value = self._json("POST", path, budget, write=True, body=json_bytes({"hot_snapshots": str(hot)}))
+        if status != 200:
+            self._http_error(status, value, budget)
+        try:
+            if value.get("collection_id") != cid:
+                raise ProtocolError("snapshot archive response names a different collection")
+            if reported_collection_hot_snapshots(value) != (hot, False):
+                raise ProtocolError("snapshot archive response differs from the request")
+        except ValidationError as exc:
+            raise ProtocolError("snapshot archive response has an invalid hot_snapshots",
+                                raw=value, collection_id=cid) from exc
+        except ProtocolError as exc:
+            exc.raw, exc.collection_id = value, cid
+            raise
+        return value
+
+    def archive_snapshots(self, collection_id: str | UUID, *, deadline: float | None = None) -> dict[str, Any]:
+        """Run one bounded archive maintenance call (at most 1024 snapshots).
+
+        Returns the status after the call plus ``snapshots_archived``; repeat
+        while ``archive_pending`` is not ``"0"``. Archived snapshots stay
+        readable by ID through scans, statistics, files and history. After
+        ``OutcomeUnknownError`` (503 ``RECOVERY_REQUIRED``) reconcile and repeat.
+        """
+        cid, path = self._path(collection_id, "snapshot-archive/maintenance")
+        budget = Deadline(deadline, collection_id=cid)
+        status, value = self._json("POST", path, budget, write=True, body=b"{}")
+        if status != 200:
+            self._http_error(status, value, budget)
+        try:
+            return validate_archive_status(value, maintenance=True)
+        except ValidationError as exc:
+            raise ProtocolError("invalid snapshot archive maintenance response", raw=value, collection_id=cid) from exc
 
     def prepare_append(self, collection_id: str | UUID, rows: Iterable[Mapping[str, Any]], *, operation_id: str | UUID,
                        schema: Schema | Mapping[str, Any] | None = None, expected_snapshot: Any = ANY,
