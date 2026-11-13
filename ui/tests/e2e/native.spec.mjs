@@ -979,3 +979,107 @@ for (const action of ['delete', 'compact']) {
         });
     }
 }
+
+for (const mode of ['append', 'kv']) {
+    test(`native ${mode} creation persists compression and encoding through reopen`, async ({
+        page,
+    }) => {
+        await connect(page);
+        await page.getByLabel('Database name').fill(`native_${mode}_settings`);
+        await page.getByRole('button', { name: 'Create database', exact: true }).click();
+        await page.getByRole('button', { name: 'New collection', exact: true }).first().click();
+        const dialog = page.getByRole('dialog');
+        await dialog.getByLabel('Collection name').fill('configured_rows');
+        await dialog.getByLabel('Collection mode', { exact: true }).selectOption(mode);
+        await dialog.locator('select[name="parquet-codec"]').selectOption('gzip');
+        await dialog.getByLabel('Level', { exact: true }).fill('6');
+        await dialog.getByLabel('Parquet compression for column 3').selectOption('zstd');
+        await dialog.getByLabel('Parquet level for column 3').fill('3');
+        await dialog.getByLabel('Encoding for column 3').selectOption('delta_binary_packed');
+        const creating = page.waitForRequest(
+            (request) =>
+                request.method() === 'POST' &&
+                new URL(request.url()).pathname.endsWith('/collections'),
+        );
+        await dialog.getByRole('button', { name: 'Create collection', exact: true }).click();
+        const request = await creating;
+        const collection = request.postDataJSON().collection_id;
+        const databasePath = new URL(request.url()).pathname.replace(/\/collections$/, '');
+        const collectionPath = `${databasePath}/collections/${collection}`;
+        await expect(dialog).not.toBeVisible();
+        const headers = { Authorization: `Bearer ${token}` };
+        const get = async (path) => {
+            const response = await page.request.get(path, { headers });
+            expect(response.ok()).toBe(true);
+            return response.json();
+        };
+        const settings = {
+            parquet: {
+                compression: { codec: 'gzip', level: 6 },
+                dictionary: null,
+                dictionary_page_size_limit: null,
+                columns: [
+                    {
+                        field: 'amount',
+                        compression: { codec: 'zstd', level: 3 },
+                        dictionary: null,
+                        encoding: 'delta_binary_packed',
+                    },
+                ],
+            },
+        };
+        const created = await get(collectionPath);
+        expect(created.mode).toBe(mode);
+        expect(created.write_settings).toEqual(settings);
+        expect(created.write_settings_version).toBe('1');
+        const rows = [
+            { key: 'duplicate', label: 'first', amount: '1' },
+            { key: 'duplicate', label: 'last', amount: '9007199254740993' },
+        ];
+        await page.getByRole('button', { name: 'Batch editor', exact: true }).click();
+        const batch = page.getByRole('dialog');
+        await batch.getByLabel('Rows · JSON array', { exact: true }).fill(JSON.stringify(rows));
+        await batch
+            .getByRole('button', {
+                name: mode === 'kv' ? 'Upsert rows' : 'Append rows',
+                exact: true,
+            })
+            .click();
+        await expect(
+            batch.getByText(mode === 'kv' ? 'Upsert committed' : 'Append committed', {
+                exact: true,
+            }),
+        ).toBeVisible();
+        await batch.getByRole('button', { name: 'Close dialog' }).click();
+        await page.locator('#run-query').click();
+        await expect(
+            page.getByRole('table', { name: 'Query results' }).locator('tbody tr'),
+        ).toHaveCount(mode === 'kv' ? 1 : 2);
+        const files = await get(`${collectionPath}/files`);
+        expect(files.items).toHaveLength(1);
+        const details = await get(`${collectionPath}/files/${files.items[0].file_id}`);
+        const chunks = details.row_groups.flatMap((group) => group.field_metrics);
+        expect(chunks.find((column) => column.field_id === 1).compression).toBe('gzip');
+        expect(chunks.find((column) => column.field_id === 2).compression).toBe('gzip');
+        const amount = chunks.find((column) => column.field_id === 3);
+        expect(amount.compression).toBe('zstd');
+        expect(amount.encodings).toContain('delta_binary_packed');
+        for (const action of ['close', 'open']) {
+            const changed = await page.request.post(`${databasePath}/${action}`, {
+                headers,
+                data: {},
+            });
+            expect(changed.ok()).toBe(true);
+        }
+        const reopened = await get(collectionPath);
+        expect(reopened.mode).toBe(mode);
+        expect(reopened.write_settings).toEqual(settings);
+        expect(reopened.write_settings_version).toBe('1');
+        const scan = await page.request.post(`${collectionPath}/scan`, {
+            headers,
+            data: { limit: 10 },
+        });
+        expect(scan.ok()).toBe(true);
+        expect((await scan.json()).rows).toEqual(mode === 'kv' ? [rows[1]] : rows);
+    });
+}

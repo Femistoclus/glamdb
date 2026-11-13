@@ -44,7 +44,7 @@ server route, including collection creation, append, operation lookup, scan, cur
 continuation/cancellation, and database open/close/reconcile/discard. Discard only
 removes an uninitialized reservation without a ready store. Supply the complete
 route in `--url`, or append a `--path` to a base URL. Consult the
-[native HTTP contract](../../docs/development/HTTP_SERVER.md) for route bodies and
+[native HTTP contract](../../docs/HTTP_SERVER.md) for route bodies and
 supported features. A body file implies POST unless `--method` is explicit.
 Supported methods are GET and POST. A base URL combined with `--path` must not
 contain a query or fragment; put a query in the path or supply a complete URL.
@@ -122,7 +122,7 @@ After a timeout or lost response, retry with exactly the same URL and saved
 UUIDs. The completed deletion receipt makes a repeated request safe, even if
 another database reused the old name. Never resolve a name for cleanup. There
 is no automatic retry, force option, or local filesystem removal. See
-[managed database deletion](../../docs/development/DATABASE_DROP.md).
+[managed database deletion](../../docs/DATABASE_DROP.md).
 
 The optional `glamdb-admin` executable retains local `create-store --root ...
 --store-id ...` and `inspect-store` for offline administration. Build the full
@@ -175,7 +175,7 @@ They choose the Parquet compression of data files written by later appends;
 on creation they are part of the definition. `write-settings` applies only when
 `--expected-version` is the collection's current `write_settings_version`; repeating
 an applied command succeeds unchanged, a stale version fails with
-`WRITE_SETTINGS_CONFLICT` (see the [HTTP contract](../../docs/development/HTTP_SERVER.md)).
+`WRITE_SETTINGS_CONFLICT` (see the [HTTP contract](../../docs/HTTP_SERVER.md)).
 `--hot-snapshots N` (1..2^40, append collections) keeps only the newest N
 snapshots in the Iceberg root; older ones move to the catalog archive and remain
 readable through `snapshots`, `scan`, `files` and `file`. Without the option, a
@@ -265,8 +265,6 @@ precise scalars, duplicate rows, retained snapshots, exact retries after restart
 multi-page scans, bounded results and exclusive ownership. The wire suite's
 literal outcome fixtures separately test exit classification; they are protocol
 evidence, not native publication evidence.
-See the [validation record](../../docs/development/CLI_VALIDATION.md) for the
-independent review findings, regressions and evidence boundaries.
 Managed databases default to eight collections. Opt in through
 `glamdb-cli create-store --url URL --name comparison --max-collections 64`.
 The lifecycle API also accepts partial limits when opening a closed database
@@ -275,7 +273,7 @@ those limits; omission preserves them. Named `collections` completes bounded
 continuations before output, checking the creation high-water mark.
 Offline `glamdb-admin` commands and legacy `glamdb --root ... --store-id ...`
 servers accept `--max-collections 64`; supply the same value on every reopen.
-See [collection profiles](../../docs/development/COLLECTION_PROFILES.md).
+See [collection profiles](../../docs/COLLECTION_PROFILES.md).
 
 ## Workload commands
 
@@ -310,7 +308,7 @@ Preserve the exact file and operation UUID for explicit retries and do not mutat
 the file while uploading. Stdin is unsupported. The named append outcome exit
 codes and HTTPS verification apply. `glamdb-admin bulk-append --url ...` is also
 available; offline bulk upload is unsupported. The generic buffered `request`
-command keeps its 16 MiB limit. See the [bulk contract](../../docs/development/BULK_INGESTION.md#native-http-sdk-and-cli)
+command keeps its 16 MiB limit. See the [bulk contract](../../docs/BULK_INGESTION.md#native-http-sdk-and-cli)
 for per-record limits, deadlines and interrupted-upload behavior. UI import and
 the organization gateway upload adapter remain outside this native route.
 
@@ -326,7 +324,7 @@ Mutations may include `expected_snapshot`. Preserve the exact body and operation
 ID after an uncertain result; the CLI never retries automatically. Operation
 lookup reads all receipt versions, including durable KV no-ops. Bulk upsert and
 migration remain native C++ facade operations. See the
-[KV HTTP contract](../../docs/development/HTTP_SERVER.md#explicit-kv-routes-and-receipts).
+[KV HTTP contract](../../docs/HTTP_SERVER.md#explicit-kv-routes-and-receipts).
 
 ## TPC-H workloads
 
@@ -353,7 +351,7 @@ retains the original immutable plan and journal, while `resolve` only looks up
 outcomes unless `--retry` is explicit. Completed loads pin all eight table views.
 Q1–Q22 `scan` runs reproduce source access patterns; complete Q1/Q6 results use
 `--mode reduce` and explicitly measured client computation. These modes are
-described in [the TPC-H guide](../../docs/development/TPC_H.md), including fixed
+described in [the TPC-H guide](../../docs/TPC_H.md), including fixed
 views, recovery, resource dependencies and **NOT RUN** SF=1/SF=10 HTTP acceptance.
 
 TPC-H network commands take credentials exclusively from `GLAMDB_TOKEN`, accept

@@ -221,9 +221,15 @@ public:
     // its collection, and their operation counts to sum to the catalog's
     // exact operation count. Indexed counts only; CORRUPTION otherwise.
     void CheckCheckpoints(std::span<const CollectionCheckpoint> checkpoints);
-    // After detected corruption: the next open must verify fully. Never
-    // waits for the catalog lock; false when it could not run now (busy, in a
-    // transaction or after an uncertain one). True when nothing remains.
+    // Exact number of bound operations (bound, committed and failed).
+    int64_t BoundOperations();
+    // After detected corruption: the next open must verify fully. Waits for
+    // a publication of another thread to end (the caller must hold no engine
+    // lock that publication needs, such as the commit gate) and returns once
+    // the deletion is durable: true. False when it cannot be made durable now:
+    // after an uncertain transaction, or when called from inside this
+    // thread's own publication, whose outer transaction then deletes the
+    // checkpoints right after it ends (in that thread, before returning).
     bool DropCheckpoints();
     // The archived snapshot with the highest sequence, if any.
     std::optional<ArchivedSnapshotRecord> NewestArchivedSnapshot(std::string_view collection_id);
@@ -293,6 +299,8 @@ private:
         std::optional<CollectionCheckpoint> record,
         std::string_view kind,
         std::string_view receipt,
+        // Signed row-count changes of the archive and the expiration ledger.
+        // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
         int64_t archived_delta,
         int64_t expired_delta,
         bool reseed);
@@ -320,6 +328,10 @@ private:
     bool transaction_ = false;
     bool rollback_only_ = false;
     bool uncertain_ = false;
+    // DropCheckpoints was called inside this connection's outer transaction.
+    bool drop_checkpoints_after_transaction_ = false;
+    void DeleteCheckpoints();
+    void DropCheckpointsAfterTransaction() noexcept;
     // Exact row count of `operations`. The store has one owning process, so a
     // count derived on this connection stays exact while committed bindings
     // increment it; it is empty whenever that cannot be proven.

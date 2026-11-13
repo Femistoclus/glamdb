@@ -240,6 +240,13 @@ public:
     {
         return {};
     }
+    // Recovery workspace bytes that verifying the confirmed generation needs
+    // (its conservative visited-key envelope); 0 when not applicable. Never
+    // throws.
+    virtual uint64_t RecoveryWorkspaceBytes()
+    {
+        return 0;
+    }
     // Independent read-only view for scans; it never joins a writer attempt.
     virtual Result<std::shared_ptr<iceberg::FileIO>> ReadOnlyFileIO()
     {

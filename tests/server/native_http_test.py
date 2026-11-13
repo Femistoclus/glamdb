@@ -108,6 +108,7 @@ class NativeHTTP(unittest.TestCase):
         path = self.collection()
         body = {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'reader-profile', 'n': '7'}]}
         receipt = self.api(path + '/append', body)
+        operation_path = path + '/operations/' + body['operation_id']
         self.stop()
         self.start(('--http-readers', '1', '--http-readers-per-database', '1',
                     '--resource-metadata-bytes', str(1792 << 20),
@@ -120,6 +121,18 @@ class NativeHTTP(unittest.TestCase):
             def run(request):
                 barrier.wait(timeout=10)
                 route, payload = request
+                if route == operation_path:
+                    code, _, data = self.request(route, payload)
+                    result = json.loads(data)
+                    if code == 503:
+                        # Outcome lookup never blocks a control worker on the
+                        # catalog lock, including one held by a metadata read.
+                        self.assertEqual(result['error']['code'], 'OPERATION_IN_PROGRESS')
+                        self.assertEqual(result['error']['retry_hint'], 'SameIdAfterReconcile')
+                    else:
+                        self.assertEqual(code, 200, data)
+                        self.assertEqual(result, receipt)
+                    return result
                 return self.api(route, payload)
 
             with ThreadPoolExecutor(max_workers=len(requests)) as workers:
@@ -130,9 +143,9 @@ class NativeHTTP(unittest.TestCase):
             self.assertTrue(all(item['estimates']['synthetic'] is False for item in explanations))
             responses = concurrent([(path + '/explain', {}), (path + '/stats', None),
                                     ('/databases/' + self.store_id + '/readyz', None),
-                                    (path + '/operations/' + body['operation_id'], None)])
+                                    (operation_path, None)])
             self.assertTrue(responses[2]['write_ready'])
-            self.assertEqual(responses[3], receipt)
+            self.assertEqual(self.api(operation_path), receipt)
             caps = self.api('/capabilities')
             self.assertEqual(caps['shared_resources']['memory_bytes'][1], baseline)
             occupancy = caps['scan_sessions']['global']

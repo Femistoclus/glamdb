@@ -68,7 +68,7 @@ if(NOT GLAMDB_IO_ONLY)
 
         # Public API with the real storage backend: Parquet, Iceberg metadata and SQLite.
         file(GLOB_RECURSE vertical_test_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/vertical/*.cpp")
-        add_executable(glamdb_vertical ${vertical_test_sources} support/fault_fs.cpp support/journal_fault_vfs.cpp)
+        add_executable(glamdb_vertical ${vertical_test_sources} support/fault_fs.cpp support/journal_fault_vfs.cpp support/staging_fault_vfs.cpp)
         target_include_directories(glamdb_vertical PRIVATE "${PROJECT_SOURCE_DIR}")
         target_link_libraries(glamdb_vertical PRIVATE glamdb::core glamdb_storage glamdb_transport glamdb_build_options
             GTest::gtest_main SQLite::SQLite3)
@@ -194,7 +194,7 @@ if(NOT GLAMDB_IO_ONLY)
             "${CMAKE_CURRENT_SOURCE_DIR}/integration/scan_process_test.py" "$<TARGET_FILE:glamdb_scan_driver>")
         set_tests_properties(glamdb.scan_process PROPERTIES LABELS "integration;scan" TIMEOUT 120)
     endif()
-    add_executable(glamdb_public_consumer_compile installed_consumer/main.cpp)
+    add_executable(glamdb_public_consumer_compile installed_consumer/main.cpp installed_consumer/negotiation.cpp)
     target_link_libraries(glamdb_public_consumer_compile PRIVATE glamdb::core glamdb_build_options Arrow::arrow_static)
     if(NOT GLAMDB_ENABLE_ASAN AND NOT GLAMDB_ENABLE_UBSAN)
         add_test(NAME glamdb.installed_consumer COMMAND "${CMAKE_COMMAND}"

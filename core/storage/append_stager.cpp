@@ -2,6 +2,7 @@
 #include "core/storage/format_registry.h"
 
 #include "core/io/io_attempt.h"
+#include "core/storage/base_state.h"
 #include "core/storage/iceberg_error_boundary.h"
 #include "core/storage/metadata_validation.h"
 #include "core/storage/table_profile.h"
@@ -11,12 +12,15 @@
 #include <iceberg/snapshot.h>
 #include <iceberg/table.h>
 #include <iceberg/table_metadata.h>
+#include <iceberg/table_properties.h>
 #include <iceberg/transaction.h>
 #include <iceberg/update/merge_append.h>
 #include <iceberg/update/overwrite_files.h>
 #include <iceberg/update/rewrite_files.h>
+#include <iceberg/update/update_properties.h>
 #include <iceberg/util/macros.h>
 
+#include <algorithm>
 #include <set>
 #include <span>
 
@@ -89,7 +93,8 @@ iceberg::Result<TStagedAppend> StageFiles(std::shared_ptr<iceberg::Table> table,
     std::span<const std::shared_ptr<iceberg::DataFile>> dataFiles,
     const std::unordered_map<std::string, std::string>& summary,
     const std::shared_ptr<NIO::TIOAttempt>& attempt,
-    bool bulk)
+    bool bulk,
+    std::optional<std::int64_t> mergeTarget)
 {
     auto result = CatchIcebergExceptions([&]() -> iceberg::Result<TStagedAppend> {
         if (!table || !attempt || IsKVMetadata(*table->metadata()) || dataFiles.empty() ||
@@ -111,8 +116,22 @@ iceberg::Result<TStagedAppend> StageFiles(std::shared_ptr<iceberg::Table> table,
             ICEBERG_RETURN_UNEXPECTED(CheckData(*table, *dataFile, *attempt));
         }
         RegisterStorageFormats();
+        const auto& targetKey = iceberg::TableProperties::kManifestTargetSizeBytes.key();
+        if (mergeTarget && (*mergeTarget <= 0 || table->metadata()->properties.configs().contains(targetKey))) {
+            return iceberg::InvalidArgument("Invalid manifest merge target");
+        }
         ICEBERG_ASSIGN_OR_RAISE(auto transaction,
             iceberg::Transaction::Make(std::move(table), iceberg::TransactionKind::kUpdate));
+        // MergeAppend reads its merge target from the table properties when it
+        // is created. A smaller target is set only for this append and removed
+        // again in the same transaction, so the staged root keeps the fixed
+        // profile and is exactly what the default target would have written
+        // apart from manifest membership.
+        if (mergeTarget) {
+            ICEBERG_ASSIGN_OR_RAISE(auto target, transaction->NewUpdateProperties());
+            target->Set(targetKey, std::to_string(*mergeTarget));
+            ICEBERG_RETURN_UNEXPECTED(target->Commit());
+        }
         ICEBERG_ASSIGN_OR_RAISE(auto append, transaction->NewMergeAppend());
         for (const auto& dataFile : dataFiles) {
             append->AppendFile(dataFile);
@@ -125,6 +144,14 @@ iceberg::Result<TStagedAppend> StageFiles(std::shared_ptr<iceberg::Table> table,
             return iceberg::IOError("Append attempt failed: {}", error.message());
         }
         ICEBERG_RETURN_UNEXPECTED(committed);
+        if (mergeTarget) {
+            ICEBERG_ASSIGN_OR_RAISE(auto restore, transaction->NewUpdateProperties());
+            restore->Remove(targetKey);
+            ICEBERG_RETURN_UNEXPECTED(restore->Commit());
+            if (transaction->current().properties.configs().contains(targetKey)) {
+                return iceberg::ValidationFailed("Manifest merge target remained in the staged root");
+            }
+        }
         return CollectStage(std::move(transaction), *attempt);
     });
     if (!result && attempt) {
@@ -138,20 +165,68 @@ iceberg::Result<TStagedAppend> StageFiles(std::shared_ptr<iceberg::Table> table,
 
 }
 
+std::optional<std::int64_t>
+ManifestMergeTarget(const TBaseState& base, std::uint64_t newFiles, const TStorageLimits& limits)
+{
+    const auto defaultTarget = iceberg::TableProperties::kManifestTargetSizeBytes.value();
+    const auto& manifests = base.CurrentManifests;
+    if (manifests.empty() || base.CurrentManifestDecodedBytes.size() != manifests.size() || defaultTarget <= 0) {
+        return std::nullopt;
+    }
+    // A merged manifest holds the entries of its inputs; rewriting one as
+    // EXISTING may add its snapshot ID and two sequence numbers (three Avro
+    // longs with union branches, at most 33 bytes).
+    constexpr std::uint64_t RewriteGrowth = 40;
+    using TWide = unsigned __int128;
+    TWide ratioBytes = 0;
+    TWide ratioLength = 1;
+    std::uint64_t entryBytes = 0;
+    for (std::size_t index = 0; index < manifests.size(); ++index) {
+        const auto& manifest = manifests[index];
+        const auto entries = static_cast<std::uint64_t>(std::max<std::int64_t>(1,
+            std::int64_t{manifest.added_files_count.value_or(0)} + manifest.existing_files_count.value_or(0)));
+        const auto decoded = base.CurrentManifestDecodedBytes[index];
+        const auto length = static_cast<std::uint64_t>(std::max<std::int64_t>(1, manifest.manifest_length));
+        const auto rewritten = TWide{decoded} + TWide{RewriteGrowth} * entries;
+        // The largest decoded-per-encoded byte ratio among the inputs.
+        if (rewritten * ratioLength > ratioBytes * length) {
+            ratioBytes = rewritten;
+            ratioLength = length;
+        }
+        entryBytes = std::max(entryBytes, (decoded + entries - 1) / entries + RewriteGrowth);
+    }
+    // Every merged bin has at least two inputs whose encoded lengths sum to at
+    // most the target, so its decoded bytes are at most target * ratio plus the
+    // manifests this append writes (estimated at twice the widest average
+    // entry), within seven eighths of the verifier's decoded cap.
+    const TWide budget = limits.ManifestBytes - limits.ManifestBytes / 8;
+    const TWide reserve = TWide{2} * std::max<std::uint64_t>(newFiles, 1) * entryBytes;
+    if (reserve >= budget) {
+        return 1;
+    }
+    const auto target = (budget - reserve) * ratioLength / ratioBytes;
+    if (target >= static_cast<TWide>(defaultTarget)) {
+        return std::nullopt;
+    }
+    return std::max<std::int64_t>(1, static_cast<std::int64_t>(target));
+}
+
 iceberg::Result<TStagedAppend> StageAppend(std::shared_ptr<iceberg::Table> table,
     const std::shared_ptr<iceberg::DataFile>& dataFile,
     const std::unordered_map<std::string, std::string>& summary,
-    const std::shared_ptr<NIO::TIOAttempt>& attempt)
+    const std::shared_ptr<NIO::TIOAttempt>& attempt,
+    std::optional<std::int64_t> mergeTarget)
 {
-    return StageFiles(std::move(table), std::span(&dataFile, 1), summary, attempt, false);
+    return StageFiles(std::move(table), std::span(&dataFile, 1), summary, attempt, false, mergeTarget);
 }
 
 iceberg::Result<TStagedAppend> StageBulkAppend(std::shared_ptr<iceberg::Table> table,
     const std::vector<std::shared_ptr<iceberg::DataFile>>& dataFiles,
     const std::unordered_map<std::string, std::string>& summary,
-    const std::shared_ptr<NIO::TIOAttempt>& attempt)
+    const std::shared_ptr<NIO::TIOAttempt>& attempt,
+    std::optional<std::int64_t> mergeTarget)
 {
-    return StageFiles(std::move(table), dataFiles, summary, attempt, true);
+    return StageFiles(std::move(table), dataFiles, summary, attempt, true, mergeTarget);
 }
 
 iceberg::Result<TStagedAppend> StageKVOverwrite(std::shared_ptr<iceberg::Table> table,

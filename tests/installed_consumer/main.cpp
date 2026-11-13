@@ -1,4 +1,6 @@
+#include <storage/contract.h>
 #include <storage/engine.h>
+#include <storage/read_view.h>
 #include <storage/scan.h>
 
 #include <arrow/api.h>
@@ -15,6 +17,8 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+
+void CheckNegotiation(glamdb::Engine& engine, bool write);
 
 namespace {
 
@@ -59,6 +63,80 @@ T Take(glamdb::Result<T> result, std::string_view context)
         throw std::runtime_error(std::string(context) + ": " + result.error().code + ": " + result.error().message);
     }
     return std::move(*result);
+}
+
+void CheckContract(glamdb::Engine& engine, bool storage)
+{
+    const auto legacy = Take(engine.NegotiateStorageContract(), "negotiate default 1.0 contract");
+    Check(legacy.Version == glamdb::TStorageContractVersion{1, 0} &&
+            !legacy.HasFeature(glamdb::EStorageFeature::IndependentReadView) && !legacy.EffectiveLimits.ReadViews,
+        "default negotiation preserves 1.0 without read views");
+    glamdb::TStorageContractRequest request;
+    request.MaxVersion = {1, 9};
+    if (storage) {
+        request.RequiredOperations = {glamdb::EStorageOperation::Scan,
+            glamdb::EStorageOperation::Append,
+            glamdb::EStorageOperation::FindOutcome};
+        request.RequiredFeatures = {glamdb::EStorageFeature::FixedSnapshotScan,
+            glamdb::EStorageFeature::TypedNulls,
+            glamdb::EStorageFeature::PreserveAppendDuplicates};
+    }
+    const auto contract = Take(engine.NegotiateStorageContract(request), "negotiate native contract");
+    Check(contract.Version == glamdb::TStorageContractVersion{1, 5} &&
+            contract.HasOperation(glamdb::EStorageOperation::ArchiveSnapshots) == storage &&
+            contract.HasFeature(glamdb::EStorageFeature::CheckpointOpen) == storage &&
+            contract.EffectiveLimits.DefaultHotSnapshots == (storage ? glamdb::DefaultHotSnapshots : 0) &&
+            contract.EffectiveLimits.Engine.max_collections == engine.GetLimits().max_collections &&
+            contract.EffectiveLimits.SchemaFields == 128 && contract.EffectiveLimits.AppendRows == 10000 &&
+            contract.HasOperation(glamdb::EStorageOperation::Scan) == storage &&
+            !contract.HasOperation(glamdb::EStorageOperation::Upsert),
+        "negotiated append support and effective limits");
+    Check(contract.HasFeature(glamdb::EStorageFeature::IndependentReadView) == storage &&
+            contract.EffectiveLimits.ReadViews.has_value() == storage,
+        "native read-view feature and quotas are gated together");
+    Check(contract.HasFeature(glamdb::EStorageFeature::ScanSplits) == storage &&
+            contract.HasOperation(glamdb::EStorageOperation::ReadSplit) == storage &&
+            contract.EffectiveLimits.ScanSplits.has_value() == storage,
+        "native split discovery and limits are gated together");
+    Check(contract.HasFeature(glamdb::EStorageFeature::ScanNegotiation) == storage &&
+            contract.HasOperation(glamdb::EStorageOperation::NegotiateScan) == storage,
+        "native scan negotiation is gated by storage support");
+    Check(contract.HasFeature(glamdb::EStorageFeature::StagedWrites) == storage &&
+            contract.EffectiveLimits.WriteSessions.has_value() == storage &&
+            contract.HasOperation(glamdb::EStorageOperation::CommitWrite) == storage,
+        "native staging feature and limits are gated together");
+    auto version12 = request;
+    version12.MaxVersion = {1, 2};
+    const auto oldScan = Take(engine.NegotiateStorageContract(version12), "negotiate version 1.2");
+    Check(!oldScan.HasFeature(glamdb::EStorageFeature::ScanNegotiation) &&
+            !oldScan.HasOperation(glamdb::EStorageOperation::NegotiateScan),
+        "version 1.2 excludes negotiation");
+    auto version11 = request;
+    version11.MaxVersion = {1, 1};
+    const auto previous = Take(engine.NegotiateStorageContract(version11), "negotiate version 1.1");
+    Check(!previous.HasFeature(glamdb::EStorageFeature::ScanSplits) && !previous.EffectiveLimits.ScanSplits,
+        "version 1.1 does not expose splits");
+    request.Mode = glamdb::CollectionMode::KeyValue;
+    request.RequiredFeatures.clear();
+    request.RequiredOperations.clear();
+    if (storage) {
+        request.RequiredOperations = {glamdb::EStorageOperation::Upsert,
+            glamdb::EStorageOperation::Delete,
+            glamdb::EStorageOperation::Lookup,
+            glamdb::EStorageOperation::Compact};
+        request.RequiredFeatures = {glamdb::EStorageFeature::DurableNoOp};
+    }
+    const auto kv = Take(engine.NegotiateStorageContract(request), "negotiate KV contract");
+    Check(!kv.HasOperation(glamdb::EStorageOperation::Append) &&
+            !kv.HasOperation(glamdb::EStorageOperation::ExpireSnapshots),
+        "KV contract refuses raw append and retention");
+    request.RequiredOperations = {glamdb::EStorageOperation::Append};
+    const auto wrongMode = engine.NegotiateStorageContract(request);
+    Check(!wrongMode && wrongMode.error().code == "UNSUPPORTED_OPERATION", "unsupported operation requirement");
+    request.RequiredOperations.clear();
+    request.RequiredFeatures = {glamdb::EStorageFeature::ArrowFlight};
+    const auto future = engine.NegotiateStorageContract(request);
+    Check(!future && future.error().code == "UNSUPPORTED_FEATURE", "future features fail explicitly");
 }
 
 std::shared_ptr<arrow::Schema> InputSchema()
@@ -239,10 +317,27 @@ void Write(glamdb::Engine& engine, const std::string& receiptPath)
     Check(created.disposition == glamdb::CommitDisposition::Committed && created.info && !created.error &&
             !created.info->current_snapshot_id,
         "create collection with the default production backend");
+    const auto wrongMode = engine.UpsertDurable({CollectionId, UnknownOperation, {}, {MakeBatch(RowsA)}});
+    Check(wrongMode.disposition == glamdb::CommitDisposition::DefinitelyNotCommitted && wrongMode.error &&
+            wrongMode.error->code == "COLLECTION_MODE_MISMATCH",
+        "append collection refuses KV mutation");
+    const auto valid = MakeBatch({{"bad", 7}});
+    const auto wrongType = arrow::RecordBatch::Make(
+        arrow::schema({arrow::field("key", arrow::int64(), false), arrow::field("n", arrow::int64())}),
+        1,
+        {valid->column(1), valid->column(1)});
+    const auto badInput = engine.AppendDurable({CollectionId, UnknownOperation, {}, {wrongType}});
+    Check(badInput.disposition == glamdb::CommitDisposition::DefinitelyNotCommitted && badInput.error &&
+            badInput.error->code == "INVALID_ARGUMENT" &&
+            !Take(engine.FindAppendOutcome(CollectionId, UnknownOperation), "unbound invalid input"),
+        "wrong Arrow types fail before binding an outcome");
     CheckScan(engine, glamdb::SnapshotSelector::Latest(), {}, glamdb::SnapshotSelector::InitialEmpty());
     const auto a = engine.AppendDurable(
         {CollectionId, OperationA, {glamdb::SnapshotPreconditionKind::NoSnapshot, 0}, {MakeBatch(RowsA)}});
     const auto& receiptA = CheckReceipt(a, OperationA, 3);
+    auto pinned = Take(engine.AcquireReadView({{{CollectionId}}, "installed-consumer"}), "acquire read view");
+    auto splitPlan = Take(engine.PlanScan(pinned, 0, {}, "installed-consumer", {.SplitsPerPage = 1, .TargetBytes = 1}),
+        "plan pinned split");
     Check(!receiptA.parent_snapshot_id, "first snapshot has no parent");
     auto fixedLatest = Take(engine.Scan({.collection_id = CollectionId, .batch_rows = 1}), "fixed latest scan");
     const auto b = engine.AppendDurable({CollectionId,
@@ -250,6 +345,22 @@ void Write(glamdb::Engine& engine, const std::string& receiptPath)
         {glamdb::SnapshotPreconditionKind::Equals, receiptA.snapshot_id},
         {MakeBatch(RowsB)}});
     const auto& receiptB = CheckReceipt(b, OperationB, 2);
+    auto delayed = Take(engine.ScanReadView(*pinned, 0, {}, "installed-consumer"), "delayed pinned scan");
+    CheckRows(*delayed, RowsA, glamdb::SnapshotSelector::Id(receiptA.snapshot_id));
+    const auto page = Take(engine.NextScanSplits(*splitPlan, "installed-consumer"), "page pinned splits after append");
+    Check(page.Done && page.Splits.size() == 1 && page.Splits[0]->FileCount() == 1 &&
+            page.Splits[0]->EstimatedBytes() > 0,
+        "bounded physical split covers original file");
+    splitPlan.reset();
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        auto split = Take(engine.ReadSplit(*page.Splits[0], "installed-consumer"), "replay split");
+        CheckRows(*split, RowsA, glamdb::SnapshotSelector::Id(receiptA.snapshot_id));
+    }
+    Check(!engine.ReadSplit(*page.Splits[0], "wrong-scope"), "split rejects wrong authorization scope");
+    auto admittedSplit = Take(engine.ReadSplit(*page.Splits[0], "installed-consumer"), "admit split before release");
+    Check(engine.ReleaseReadView(*pinned, "installed-consumer").has_value(), "release read view");
+    Check(!engine.ReadSplit(*page.Splits[0], "installed-consumer"), "released view rejects split replay");
+    CheckRows(*admittedSplit, RowsA, glamdb::SnapshotSelector::Id(receiptA.snapshot_id));
     Check(receiptA.snapshot_id != receiptB.snapshot_id && receiptB.parent_snapshot_id == receiptA.snapshot_id,
         "second snapshot extends the first");
     CheckRows(*fixedLatest, RowsA, glamdb::SnapshotSelector::Id(receiptA.snapshot_id));
@@ -275,7 +386,7 @@ void Reopen(glamdb::Engine& engine, const std::string& receiptPath)
     Check(!stale && stale.error().code == "INVALID_CURSOR", "restart explicitly invalidates metadata cursors");
     const auto collection = Take(engine.GetCollection(CollectionId), "get reopened collection");
     Check(collection.schema == Schema && collection.name == "events", "persisted collection schema and name");
-    Check(Take(engine.ListCollections(), "list reopened collections").size() == 2, "persisted collection count");
+    Check(Take(engine.ListCollections(), "list reopened collections").size() == 4, "persisted collection count");
     const auto a = Take(engine.FindAppendOutcome(CollectionId, OperationA), "find receipt A");
     const auto b = Take(engine.FindAppendOutcome(CollectionId, OperationB), "find receipt B");
     if (!a || !b) {
@@ -309,6 +420,10 @@ void WriteKV(glamdb::Engine& engine)
     request.mode = glamdb::CollectionMode::KeyValue;
     Check(engine.GetCapabilities().key_value, "installed KV capability");
     Check(engine.CreateCollection(request).disposition == glamdb::CommitDisposition::Committed, "create installed KV");
+    const auto wrongMode = engine.AppendDurable({KVCollectionId, UnknownOperation, {}, {MakeBatch(RowsA)}});
+    Check(wrongMode.disposition == glamdb::CommitDisposition::DefinitelyNotCommitted && wrongMode.error &&
+            wrongMode.error->code == "COLLECTION_MODE_MISMATCH",
+        "KV collection refuses raw append");
     const auto upsert =
         engine.UpsertDurable({KVCollectionId, OperationA, {}, {MakeBatch({{"a", 1}, {"a", 9}, {"b", 2}})}});
     Check(upsert.disposition == glamdb::CommitDisposition::Committed && upsert.result &&
@@ -356,6 +471,8 @@ void CheckUnavailable(glamdb::Engine& engine)
             !capabilities.append && !capabilities.file_pruning && !capabilities.row_group_pruning &&
             !capabilities.durability_qualified,
         "storage-disabled capabilities");
+    const auto view = engine.AcquireReadView({{{CollectionId}}, "installed-consumer"});
+    Check(!view && view.error().code == "UNSUPPORTED_FEATURE", "storage-disabled read views are unavailable");
     const auto stats = engine.GetStatistics(CollectionId);
     const auto history = engine.ListSnapshots(CollectionId);
     const auto explain = engine.ExplainScan({.collection_id = CollectionId});
@@ -403,15 +520,52 @@ try {
     auto engine = mode == "write" ? Take(glamdb::CreateStore({StoreId, argv[2]}), "create store")
                                   : Take(glamdb::OpenExisting({argv[2], StoreId}), "reopen store");
     Check(engine->GetStoreInfo().store_id == StoreId, "store identity");
+    CheckContract(*engine, storage == "storage");
     if (storage == "nostorage") {
         CheckUnavailable(*engine);
     } else if (mode == "write") {
         Check(Take(engine->ListCollections(), "list initial collections").empty(), "new store is empty");
         Write(*engine, argv[3]);
         WriteKV(*engine);
+        CheckNegotiation(*engine, true);
     } else {
         Reopen(*engine, argv[3]);
         ReopenKV(*engine);
+        CheckNegotiation(*engine, false);
+    }
+    const auto stagePath = std::filesystem::path(argv[2]).parent_path() / "write-session-stage";
+    if (storage == "nostorage") {
+        auto sessions = glamdb::TWriteSessions::Open(engine, stagePath.string(), "installed-consumer");
+        Check(!sessions && sessions.error().code == "UNSUPPORTED_OPERATION",
+            "disabled staging refuses before directory creation");
+        Check(!std::filesystem::exists(stagePath), "disabled staging creates no artifacts");
+    } else {
+        // One extra collection keeps the existing scan/receipt oracle unchanged.
+        const std::string collection = "00000000-0000-4000-8000-000000000077";
+        const glamdb::TWriteIdentity id{collection, OperationA};
+        auto sessions = Take(glamdb::TWriteSessions::Open(engine, stagePath.string(), "installed-consumer"),
+            "open installed staging");
+        if (mode == "write") {
+            Check(engine->CreateCollection({collection, "staged", Schema}).disposition ==
+                    glamdb::CommitDisposition::Committed,
+                "create staged collection");
+            Take(sessions->BeginWrite({id}), "begin installed write");
+            Take(sessions->PutPart(id,
+                     {1, 0, 0},
+                     [done = false]() mutable -> glamdb::Result<std::shared_ptr<arrow::RecordBatch>> {
+                         if (std::exchange(done, true)) {
+                             return nullptr;
+                         }
+                         return MakeBatch(RowsA);
+                     }),
+                "stage installed part");
+            Take(sessions->SealWrite(id, {{1, 0, 0}}), "seal installed write");
+        }
+        const auto outcome = Take(sessions->CommitWrite(id), "commit installed staged write");
+        Check(outcome.disposition == glamdb::CommitDisposition::Committed && outcome.result &&
+                outcome.result->rows_appended == static_cast<int64_t>(RowsA.size()),
+            "installed staging receipt survives reopen");
+        Check(sessions->Cleanup().has_value(), "installed staging cleanup");
     }
     const auto shutdown = engine->Shutdown(std::chrono::milliseconds(1000));
     Check(shutdown.has_value(), "shutdown");

@@ -223,6 +223,7 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
         candidate.ExpiredSnapshotIDs = Context_.Base->ExpiredSnapshotIDs;
         candidate.RetainedManifestPaths = Context_.Base->RetainedManifestPaths;
         candidate.CurrentCommitMetadataBytes = Context_.Base->CurrentCommitMetadataBytes;
+        candidate.CurrentManifestDecodedBytes = Context_.Base->CurrentManifestDecodedBytes;
     } else {
         const auto location = "store://" + std::string(Context_.Attempt->StoreId()) + "/warehouse/" +
             std::string(Context_.Attempt->CollectionId());

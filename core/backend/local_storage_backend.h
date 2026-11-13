@@ -28,6 +28,7 @@ struct ITreeInventory;
 
 namespace NGlamDB::NStorage {
 struct TBaseState;
+struct TAncestor;
 } // namespace NGlamDB::NStorage
 
 namespace iceberg {
@@ -137,6 +138,7 @@ public:
         std::span<const CollectionView> collections,
         std::span<const CollectionCheckpointView> checkpoints) override;
     std::vector<CollectionCheckpoint> VerifiedCheckpoints() override;
+    uint64_t RecoveryWorkspaceBytes() override;
     // Whether the current verified generation came from OpenFromCheckpoints
     // (false after full verification). For tests and measurements.
     bool OpenedFromCheckpoints();
@@ -223,8 +225,9 @@ private:
     // `history` is the expired, then archived, ancestry before the root;
     // `archive` the usage of the archived lists and their retired manifests.
     std::shared_ptr<const NGlamDB::NStorage::TBaseState> VerifyCollection(const BaseIdentity& base,
-        std::span<const std::shared_ptr<iceberg::Snapshot>> history = {},
+        std::span<const NGlamDB::NStorage::TAncestor> history = {},
         std::size_t expired = 0,
+        const std::shared_ptr<iceberg::Snapshot>& parent = nullptr,
         const NGlamDB::NStorage::TStorageUsage& archive = {});
 };
 

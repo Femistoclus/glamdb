@@ -1,8 +1,11 @@
 #pragma once
 
+#include "storage/contract.h"
 #include "storage/kv.h"
 #include "storage/metadata.h"
+#include "storage/read_view.h"
 #include "storage/scan.h"
+#include "storage/scan_split.h"
 #include "storage/types.h"
 
 #include <string_view>
@@ -35,6 +38,8 @@ public:
     // No catalog/file I/O and no writer wait; remains callable during recovery/shutdown.
     StoreHealth GetHealth() const;
     EngineCapabilities GetCapabilities() const;
+    // Supported semantics and effective limits, independent of GetHealth().
+    Result<TStorageContract> NegotiateStorageContract(const TStorageContractRequest& request = {}) const;
     // Bounded physical inventory; refuses while a writer/recovery owns the store.
     Result<StorageFootprint> GetStorageFootprint() const;
     Result<SnapshotHistory> ListSnapshots(std::string_view collection_id) const;
@@ -98,6 +103,27 @@ public:
         std::string_view operation_id) const;
     // Reads one fixed view. The cursor retains the store until it is released.
     Result<std::shared_ptr<ScanCursor>> Scan(const ScanRequest& request) const;
+    // Coherent ordered snapshot vector within this engine. Native local backend only.
+    Result<std::shared_ptr<TReadView>> AcquireReadView(const TReadViewRequest& request) const;
+    Result<std::shared_ptr<const TReadViewInfo>> GetReadViewInfo(const TReadView& view,
+        std::string_view authorizationScope) const;
+    Result<std::shared_ptr<ScanCursor>> ScanReadView(const TReadView& view,
+        size_t entry,
+        const TReadViewScanRequest& request,
+        std::string_view authorizationScope) const;
+    Result<std::shared_ptr<TScanSplitPlan>> PlanScan(std::shared_ptr<const TReadView> view,
+        size_t entry,
+        const TReadViewScanRequest& request,
+        std::string_view authorizationScope,
+        const TScanPlanOptions& options = {}) const;
+    Result<TScanSplitPage> NextScanSplits(const TScanSplitPlan& plan, std::string_view authorizationScope) const;
+    Result<std::shared_ptr<ScanCursor>> ReadSplit(const TScanSplit& split, std::string_view authorizationScope) const;
+    Status CancelScanPlan(const TScanSplitPlan& plan, std::string_view authorizationScope) const;
+    // Renewal is capped at acquisition + MaxLifetime, never revives an expired pin.
+    Status
+    RenewReadView(const TReadView& view, std::string_view authorizationScope, std::chrono::milliseconds lifetime) const;
+    Status ReleaseReadView(const TReadView& view, std::string_view authorizationScope) const;
+    Status CancelReadView(const TReadView& view, std::string_view authorizationScope) const;
     // Re-verifies the whole retained store, as recovery without checkpoints
     // does, and re-establishes the catalog checkpoints (catalog version 6).
     // Reconcile always takes this full path too; only a fresh open of a
@@ -107,6 +133,8 @@ public:
     Status Shutdown(std::chrono::milliseconds timeout);
 
 private:
+    Result<std::optional<AppendOutcome>>
+    FindAppendOutcomeImpl(std::string_view collection, std::string_view operation, std::string_view expectedHash) const;
     void CloseOnCorruption(const ErrorDetail& error) const;
     CreateOutcome CreateCollectionImpl(const CreateCollectionRequest& request,
         std::string_view migrationIdentity,
@@ -116,7 +144,11 @@ private:
         const detail::TKvInput* kv = nullptr);
     Result<std::shared_ptr<ScanCursor>> ScanImpl(const ScanRequest& request,
         std::shared_ptr<detail::TReadBudget> budget,
-        bool chronologicalFiles = false) const;
+        bool chronologicalFiles = false,
+        const TReadView* view = nullptr,
+        size_t entry = 0,
+        std::string_view authorizationScope = {},
+        const TScanSplit* split = nullptr) const;
     explicit Engine(std::shared_ptr<Impl> implementation);
     std::shared_ptr<Impl> impl_;
     friend struct detail::EngineFactory;

@@ -42,6 +42,8 @@ protected:
     void CreateKV(const std::string& id,
         const std::string& name,
         const std::string& table,
+        // Migration identity digest and source population, both optional.
+        // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
         std::string_view identity = {},
         std::string_view population = {})
     {

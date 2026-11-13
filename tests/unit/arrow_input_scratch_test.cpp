@@ -2,7 +2,8 @@
 // C++ scratch of inspection, fingerprinting and the owned copy must not grow
 // with the batch count, and C++ plus owned Arrow bytes must fit the owned-input
 // reservation. C++ heap use is measured by replacing the global allocation
-// functions of this test binary with counting wrappers around malloc.
+// functions with counting wrappers around malloc, or sanitizer allocator hooks.
+// Sanitizers retain their own new/delete replacements and allocation semantics.
 
 #include "core/api/canonical.h"
 
@@ -16,7 +17,20 @@
 #include <cstdlib>
 #include <new>
 
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define GLAMDB_SCRATCH_SANITIZER_HOOKS 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer) ||          \
+    __has_feature(leak_sanitizer)
+#define GLAMDB_SCRATCH_SANITIZER_HOOKS 1
+#endif
+#endif
+
+#if defined(GLAMDB_SCRATCH_SANITIZER_HOOKS)
+#include <sanitizer/allocator_interface.h>
+#else
 #include <malloc.h>
+#endif
 
 namespace {
 
@@ -30,6 +44,12 @@ void Count(int64_t bytes) noexcept
     while (live > peak && !PeakBytes.compare_exchange_weak(peak, live)) {
     }
 }
+
+#if defined(GLAMDB_SCRATCH_SANITIZER_HOOKS)
+// Arrow buffers are measured separately by the proxy pool. Its allocator may
+// use intercepted malloc, so exclude these calls from the C++ scratch meter.
+thread_local bool InArrowPool = false;
+#else
 
 // Counts usable block sizes, so a block that some library releases with
 // free() only skews the counters instead of corrupting the heap.
@@ -61,7 +81,26 @@ void* AllocateOrThrow(std::size_t size, std::size_t alignment)
     throw std::bad_alloc();
 }
 
+#endif
+
 } // namespace
+
+#if defined(GLAMDB_SCRATCH_SANITIZER_HOOKS)
+extern "C" void __sanitizer_malloc_hook(const volatile void* pointer, std::size_t)
+{
+    if (pointer != nullptr && !InArrowPool) {
+        // Match the free hook even when the runtime rounds a zero-size request.
+        Count(static_cast<int64_t>(__sanitizer_get_allocated_size(pointer)));
+    }
+}
+
+extern "C" void __sanitizer_free_hook(const volatile void* pointer)
+{
+    if (pointer != nullptr && !InArrowPool) {
+        LiveBytes.fetch_sub(static_cast<int64_t>(__sanitizer_get_allocated_size(pointer)));
+    }
+}
+#else
 
 void* operator new(std::size_t size)
 {
@@ -147,6 +186,8 @@ void operator delete[](void* pointer, std::align_val_t, const std::nothrow_t&) n
     ReleaseCounted(pointer);
 }
 
+#endif
+
 namespace glamdb::detail {
 namespace {
 
@@ -167,6 +208,31 @@ int64_t MeasureHeapPeak(TWork&& work)
     PeakBytes.store(base);
     work();
     return PeakBytes.load() - base;
+}
+
+// A silent meter would let every scratch bound pass. Check both the peak and
+// release accounting with scalar, array, aligned and nothrow allocations.
+TEST(ArrowInputScratch, HeapMeterCountsAllocationsAndReleases)
+{
+    const auto base = LiveBytes.load();
+    int64_t live = 0;
+    const auto peak = MeasureHeapPeak([&] {
+        auto* zero = ::operator new(0);
+        auto* scalar = ::operator new(128 * 1024);
+        auto* array = ::operator new[](128 * 1024);
+        auto* aligned = ::operator new(128 * 1024, std::align_val_t{64});
+        auto* nothrow = ::operator new(128 * 1024, std::nothrow);
+        live = LiveBytes.load() - base;
+        ::operator delete(nothrow, std::nothrow);
+        ::operator delete(aligned, std::align_val_t{64});
+        ::operator delete[](array);
+        ::operator delete(scalar);
+        ::operator delete(zero);
+    });
+    const auto remaining = LiveBytes.load() - base;
+    EXPECT_GE(live, 512 * 1024);
+    EXPECT_GE(peak, 512 * 1024);
+    EXPECT_EQ(remaining, 0);
 }
 
 SchemaSpec Integers()
@@ -198,6 +264,72 @@ std::shared_ptr<arrow::RecordBatch> OneRow(int64_t value)
     return arrow::RecordBatch::Make(arrow::schema(fields), 1, std::move(columns));
 }
 
+#if defined(GLAMDB_SCRATCH_SANITIZER_HOOKS)
+class TScopedArrowPoolCall
+{
+public:
+    TScopedArrowPoolCall() noexcept
+        : Previous_(InArrowPool)
+    {
+        InArrowPool = true;
+    }
+    ~TScopedArrowPoolCall()
+    {
+        InArrowPool = Previous_;
+    }
+
+private:
+    bool Previous_;
+};
+
+class TScratchArrowPool : public arrow::ProxyMemoryPool
+{
+public:
+    using arrow::ProxyMemoryPool::Allocate;
+    using arrow::ProxyMemoryPool::Free;
+    using arrow::ProxyMemoryPool::ProxyMemoryPool;
+    using arrow::ProxyMemoryPool::Reallocate;
+
+    arrow::Status Allocate(int64_t size, int64_t alignment, uint8_t** out) override
+    {
+        const TScopedArrowPoolCall scope;
+        return arrow::ProxyMemoryPool::Allocate(size, alignment, out);
+    }
+
+    arrow::Status Reallocate(int64_t oldSize, int64_t newSize, int64_t alignment, uint8_t** out) override
+    {
+        const TScopedArrowPoolCall scope;
+        return arrow::ProxyMemoryPool::Reallocate(oldSize, newSize, alignment, out);
+    }
+
+    void Free(uint8_t* buffer, int64_t size, int64_t alignment) override
+    {
+        const TScopedArrowPoolCall scope;
+        arrow::ProxyMemoryPool::Free(buffer, size, alignment);
+    }
+};
+#else
+using TScratchArrowPool = arrow::ProxyMemoryPool;
+#endif
+
+// Force the intercepted system pool: Arrow buffers must be measured once even
+// when the sanitizer sees their underlying malloc/free calls.
+TEST(ArrowInputScratch, HeapMeterSeparatesArrowBuffers)
+{
+    TScratchArrowPool pool(arrow::system_memory_pool());
+    const auto base = LiveBytes.load();
+    const auto peak = MeasureHeapPeak([&] {
+        uint8_t* buffer = nullptr;
+        ASSERT_TRUE(pool.Allocate(256 * 1024, &buffer).ok());
+        ASSERT_TRUE(pool.Reallocate(256 * 1024, 512 * 1024, &buffer).ok());
+        pool.Free(buffer, 512 * 1024);
+    });
+    const auto remaining = LiveBytes.load() - base;
+    EXPECT_EQ(pool.max_memory(), 512 * 1024);
+    EXPECT_LT(peak, 16 * 1024);
+    EXPECT_EQ(remaining, 0);
+}
+
 struct TPreparationMemory
 {
     size_t Reservation = 0;
@@ -215,7 +347,7 @@ TPreparationMemory Measure(const std::vector<std::shared_ptr<arrow::RecordBatch>
         EXPECT_TRUE(fingerprinted) << fingerprinted.error().message;
         memory.Reservation = fingerprinted ? fingerprinted->Reservation : 0;
     });
-    arrow::ProxyMemoryPool pool(arrow::default_memory_pool());
+    TScratchArrowPool pool(arrow::default_memory_pool());
     memory.NormalizeHeap = MeasureHeapPeak([&] {
         const auto normalized = NormalizeBatches(schema, CollectionID, batches, memory.Reservation, &pool);
         EXPECT_TRUE(normalized) << normalized.error().message;

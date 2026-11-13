@@ -587,6 +587,9 @@ private:
         if (job->Complete) {
             Dispatch();
         } else {
+            // Reuse the spill buffer instead of allocating one for every chunk.
+            Input_ = std::move(job->Bytes);
+            Input_.clear();
             ReadBulk();
         }
     }

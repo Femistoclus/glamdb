@@ -106,3 +106,39 @@ TEST(ResourceOwner, DeviceOverflowAndMissingPathsRefuseWithoutChangingUsage)
 
 } // namespace
 } // namespace glamdb
+
+namespace glamdb {
+TEST(ResourceOwner, StagingHeadroomIsSharedAndNotDoubleReservedForCompletion)
+{
+    ResourceLimits limits;
+    limits.device_reserved_bytes = 256ULL << 20;
+    limits.device_free_bytes = 0;
+    auto owner = std::make_shared<ResourceOwner>(limits);
+    std::vector<std::shared_ptr<ResourceReservation>> stages;
+    std::barrier start(5);
+    std::vector<std::future<Result<std::shared_ptr<ResourceReservation>>>> attempts;
+    for (int i = 0; i < 5; ++i) {
+        attempts.push_back(std::async(std::launch::async, [&] {
+            start.arrive_and_wait();
+            return owner->ReserveStagingDevice("/tmp", 32ULL << 20, 1, 128ULL << 20, 1);
+        }));
+    }
+    for (auto& attempt : attempts) {
+        auto stage = attempt.get();
+        if (stage) {
+            stages.push_back(*stage);
+        } else {
+            EXPECT_EQ(stage.error().code, "RESOURCE_EXHAUSTED");
+        }
+    }
+    ASSERT_EQ(stages.size(), 4U);
+    EXPECT_FALSE(owner->ReserveStagingDevice("/tmp", 1, 1, 128ULL << 20, 1));
+    auto completion = owner->ReserveDevice("/tmp", 128ULL << 20, 1);
+    ASSERT_TRUE(completion);
+    EXPECT_EQ(owner->GetUsage().device_reserved_bytes, 256ULL << 20);
+    EXPECT_FALSE(owner->ReserveStagingDevice("/tmp", 0, 0, 128ULL << 20, 1));
+    completion->reset();
+    stages.clear();
+    EXPECT_EQ(owner->GetUsage().device_reserved_bytes, 0);
+}
+}

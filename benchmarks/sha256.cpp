@@ -14,7 +14,24 @@
 #include <string>
 #include <string_view>
 
+#if !defined(GLAMDB_HAS_INTERCEPTING_SANITIZER)
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define GLAMDB_HAS_INTERCEPTING_SANITIZER 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer) ||          \
+    __has_feature(leak_sanitizer)
+#define GLAMDB_HAS_INTERCEPTING_SANITIZER 1
+#endif
+#endif
+#endif
+
 namespace {
+
+#if defined(GLAMDB_HAS_INTERCEPTING_SANITIZER)
+constexpr bool AllocationCountingAvailable = false;
+#else
+constexpr bool AllocationCountingAvailable = true;
+#endif
 
 // Count ordinary C++ allocations on the measured thread only. This is not an
 // allocator/RSS profiler and does not include direct malloc or aligned new.
@@ -22,6 +39,8 @@ thread_local bool CountAllocations = false;
 thread_local std::size_t Allocations = 0;
 
 } // namespace
+
+#if !defined(GLAMDB_HAS_INTERCEPTING_SANITIZER)
 
 void* operator new(std::size_t size)
 {
@@ -59,6 +78,8 @@ void operator delete[](void* memory, std::size_t) noexcept
     std::free(memory);
 }
 
+#endif
+
 namespace {
 
 template <class THash>
@@ -81,7 +102,8 @@ void Measure(std::string_view name, std::string_view bytes, std::size_t chunk, T
         if (trial >= 0) {
             const auto wallMs = std::chrono::duration<double, std::milli>(end - start).count();
             const auto cpuMs = 1000.0 * static_cast<double>(cpuEnd - cpuStart) / CLOCKS_PER_SEC;
-            std::printf("%.*s,%zu,%d,%zu,%.6f,%.6f,%zu,%.3f,%s\n",
+            const auto allocations = AllocationCountingAvailable ? std::to_string(Allocations) : "unavailable";
+            std::printf("%.*s,%zu,%d,%zu,%.6f,%.6f,%s,%.3f,%s\n",
                 static_cast<int>(name.size()),
                 name.data(),
                 chunk,
@@ -89,7 +111,7 @@ void Measure(std::string_view name, std::string_view bytes, std::size_t chunk, T
                 bytes.size(),
                 wallMs,
                 cpuMs,
-                Allocations,
+                allocations.c_str(),
                 static_cast<double>(bytes.size()) / (1024 * 1024) / (wallMs / 1000),
                 digest.c_str());
         }
@@ -100,6 +122,9 @@ void Measure(std::string_view name, std::string_view bytes, std::size_t chunk, T
 
 int main()
 try {
+    if (!AllocationCountingAvailable) {
+        std::fputs("C++ allocation counting is unavailable under intercepting sanitizers.\n", stderr);
+    }
     // Allocate/generate once, outside all timed regions. The leading byte also
     // keeps every large direct-block Update deliberately unaligned.
     std::string input((16 << 20) + 1, '\0');

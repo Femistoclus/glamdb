@@ -16,7 +16,7 @@ set(flags "-gline-tables-only -fno-omit-frame-pointer")
 if(instrument AND NOT profile STREQUAL "normal")
     if(profile STREQUAL "asan")
         set(sanitizer address)
-        # Dependencies use an ordinary libc++ prefix (see BUILDING.md).
+        # Dependencies use an ordinary libc++ prefix (see docs/BUILDING.md).
         string(APPEND flags " -D_LIBCPP_HAS_NO_ASAN")
     elseif(profile STREQUAL "ubsan")
         set(sanitizer undefined)

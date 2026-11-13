@@ -17,14 +17,22 @@ SERVER = sys.argv[1]
 del sys.argv[1]
 CLI = sys.argv.pop(1) if len(sys.argv) > 1 and not sys.argv[1].startswith('-') else None
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'sdk/python/src'))
-DEFAULTS = {'max_operations': 4096, 'max_collections': 8, 'max_catalog_bytes': 268435456,
+# Defaults of new databases: byte budgets bind, not counts (SCALABLE_HISTORY.md).
+WAREHOUSE = 1 << 40
+DEFAULTS = {'max_operations': 1 << 40, 'max_collections': 8, 'max_catalog_bytes': WAREHOUSE // 16,
             'max_pending_calls': 16, 'max_owned_input_bytes': 134217728,
             'writer_wait_ms': 5000, 'append_deadline_ms': 60000,
-            'history': {'max_snapshots': 4096, 'max_manifests': 4096, 'max_data_files': 16384,
+            'history': {'max_snapshots': 8192, 'max_manifests': 1 << 40, 'max_data_files': 1 << 40,
                         'max_root_bytes': 64 << 20, 'max_root_file_bytes': 16 << 20,
-                        'max_manifest_bytes': 256 << 20, 'max_manifest_list_bytes': 512 << 20,
-                        'max_footer_bytes': 256 << 20, 'max_commit_bytes': 32 << 20,
-                        'max_recovery_workspace_bytes': 256 << 20}}
+                        'max_manifest_bytes': WAREHOUSE // 4, 'max_manifest_list_bytes': WAREHOUSE // 4,
+                        'max_footer_bytes': WAREHOUSE // 16, 'max_commit_bytes': 32 << 20,
+                        'max_recovery_workspace_bytes': WAREHOUSE // 16}}
+# History budgets of rows persisted before history existed (LegacyHistoryLimits).
+LEGACY_HISTORY = {'max_snapshots': 4096, 'max_manifests': 4096, 'max_data_files': 16384,
+                  'max_root_bytes': 64 << 20, 'max_root_file_bytes': 16 << 20,
+                  'max_manifest_bytes': 256 << 20, 'max_manifest_list_bytes': 512 << 20,
+                  'max_footer_bytes': 256 << 20, 'max_commit_bytes': 32 << 20,
+                  'max_recovery_workspace_bytes': 256 << 20}
 
 
 class DatabaseLimits(unittest.TestCase):
@@ -347,7 +355,9 @@ class DatabaseLimits(unittest.TestCase):
         with sqlite3.connect(Path(self.directory) / 'registry.sqlite') as registry:
             registry.execute('UPDATE databases SET limits=?', (json.dumps(legacy),))
         self.start()
-        self.assertEqual(self.api(base)['limits'], DEFAULTS)
+        # The row keeps the history budgets it was created under, not the
+        # defaults of a later binary.
+        self.assertEqual(self.api(base)['limits'], dict(legacy, history=LEGACY_HISTORY))
         self.assertEqual(self.api(path, payload), receipt)
 
 

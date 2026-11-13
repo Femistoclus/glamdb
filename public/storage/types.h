@@ -273,6 +273,8 @@ struct CollectionInfo
 // hot_snapshots of a new append collection whose creation does not choose
 // one, when the storage backend supports the snapshot archive.
 inline constexpr int64_t DefaultHotSnapshots = 100;
+// Largest explicit hot_snapshots value.
+inline constexpr int64_t MaxHotSnapshots = 1LL << 40;
 // Explicit hot_snapshots value for "no archive": every retained snapshot
 // stays in the Iceberg root.
 inline constexpr int64_t KeepAllSnapshotsInRoot = 0;
@@ -313,6 +315,10 @@ struct SnapshotArchiveStatus
     int64_t archive_pending = 0;
     // Snapshots this maintenance call moved to the archive.
     int64_t snapshots_archived = 0;
+    // As CollectionInfo::hot_snapshots_defaulted: hot_snapshots is the
+    // creation default (possibly lowered to a retention keep_last) and was
+    // never set explicitly.
+    bool hot_snapshots_defaulted = false;
     bool operator==(const SnapshotArchiveStatus&) const = default;
 };
 
@@ -423,30 +429,59 @@ struct SnapshotExpirationResult
     int64_t cleanup_pending = 0;
 };
 
+// The physical warehouse budget of a store (1 TiB) from which the default
+// aggregate byte budgets below are derived.
+inline constexpr int64_t DefaultWarehouseBytes = 1LL << 40;
+
 // Finite retained-history budgets. Counts and serialized bytes are store-wide;
 // a root file and a commit also have individual byte limits. These budgets do
 // not expire snapshots or permanent operation outcomes.
+//
+// Defaults (for new databases) let byte budgets bind rather than counts: root
+// snapshots are bounded by the snapshot archive's hot window (100 + 16 per
+// collection, 64 collections fit), retained manifests and data files by the
+// manifest/footer byte budgets and the warehouse, and retained metadata bytes
+// by fractions of DefaultWarehouseBytes. Per-file and per-commit limits are
+// unchanged. Every value stays finite and configurable; stores keep whatever
+// limits their callers pass (the HTTP registry persists them).
 struct HistoryLimits
 {
-    int64_t max_snapshots = 4096;
-    int64_t max_manifests = 4096;
-    int64_t max_data_files = 16384;
+    int64_t max_snapshots = 8192;
+    int64_t max_manifests = 1LL << 40;
+    int64_t max_data_files = 1LL << 40;
     int64_t max_root_bytes = 64LL << 20;
     int64_t max_root_file_bytes = 16LL << 20;
-    int64_t max_manifest_bytes = 256LL << 20;
-    int64_t max_manifest_list_bytes = 512LL << 20;
-    int64_t max_footer_bytes = 256LL << 20;
+    int64_t max_manifest_bytes = DefaultWarehouseBytes / 4;
+    int64_t max_manifest_list_bytes = DefaultWarehouseBytes / 4;
+    int64_t max_footer_bytes = DefaultWarehouseBytes / 16;
     int64_t max_commit_bytes = 32LL << 20;
-    int64_t max_recovery_workspace_bytes = 256LL << 20;
+    int64_t max_recovery_workspace_bytes = DefaultWarehouseBytes / 16;
 };
+
+// The defaults before the snapshot archive, kept by stores persisted with
+// them (HTTP registry rows that predate history budgets).
+inline constexpr HistoryLimits LegacyHistoryLimits{.max_snapshots = 4096,
+    .max_manifests = 4096,
+    .max_data_files = 16384,
+    .max_root_bytes = 64LL << 20,
+    .max_root_file_bytes = 16LL << 20,
+    .max_manifest_bytes = 256LL << 20,
+    .max_manifest_list_bytes = 512LL << 20,
+    .max_footer_bytes = 256LL << 20,
+    .max_commit_bytes = 32LL << 20,
+    .max_recovery_workspace_bytes = 256LL << 20};
 
 struct Limits
 {
     // Finite supported profile; larger selections also require shared resources.
     static constexpr int64_t MaxSupportedCollections = 64;
-    int64_t max_operations = 4096;
+    // Permanent operations are bounded by catalog bytes by default.
+    int64_t max_operations = 1LL << 40;
     int64_t max_collections = 8;
-    int64_t max_catalog_bytes = 256LL * 1024 * 1024;
+    // DefaultWarehouseBytes / 16: about 2.75 KB per one-row archived append
+    // were measured, so roughly 25 million such appends; storage reservations
+    // follow the actual catalog size, not this maximum.
+    int64_t max_catalog_bytes = DefaultWarehouseBytes / 16;
     int64_t max_pending_calls = 16;
     int64_t max_owned_input_bytes = 128LL * 1024 * 1024;
     std::chrono::milliseconds writer_wait{5000};

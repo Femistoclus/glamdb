@@ -102,19 +102,24 @@ async function nav(page, name) {
 // Intercepts capabilities and collection responses to emulate a native server
 // with write settings on top of the disposable mock.
 async function advertise(page, parquet) {
-    const stored = { version: '0', settings: null };
+    const stored = { version: '0', settings: null, mode: 'append' };
     const posts = [];
     const withSettings = (collection) => ({
         ...collection,
         write_settings: stored.settings,
         write_settings_version: stored.version,
+        mode: stored.mode,
     });
     await page.route('**/capabilities', async (route) => {
         const response = await route.fetch();
         const capabilities = await response.json();
         await route.fulfill({
             status: response.status(),
-            json: { ...capabilities, features: { write_settings: true }, parquet },
+            json: {
+                ...capabilities,
+                features: { ...capabilities.features, write_settings: true, key_value: true },
+                parquet,
+            },
         });
     });
     await page.route('**/collections', async (route) => {
@@ -124,7 +129,8 @@ async function advertise(page, parquet) {
         // Like the native catalog: non-default creation settings are version 1.
         stored.settings = body.write_settings;
         stored.version = '1';
-        const { write_settings: omitted, ...forwarded } = body;
+        stored.mode = body.mode ?? 'append';
+        const { write_settings: omitted, mode, ...forwarded } = body;
         expect(omitted).toBeDefined();
         const response = await route.fetch({ postData: JSON.stringify(forwarded) });
         await route.fulfill({
@@ -189,6 +195,47 @@ test('mock capabilities hide Parquet controls and create sends no write settings
     await expect(page.getByRole('table', { name: 'Collection schema' })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Parquet write settings' })).toHaveCount(0);
 });
+
+for (const mode of ['append', 'kv']) {
+    test(`${mode} creation retains compression and column encoding together`, async ({ page }) => {
+        const { posts } = await advertise(page, PARQUET_ENCODINGS);
+        await connect(page);
+        await page.getByRole('button', { name: 'New collection', exact: true }).first().click();
+        const dialog = page.getByRole('dialog');
+        await dialog.getByLabel('Collection name').fill(`${mode}_settings_${Date.now()}`);
+        await dialog.getByLabel('Collection mode', { exact: true }).selectOption(mode);
+        await dialog.locator('select[name="parquet-codec"]').selectOption('gzip');
+        await dialog.getByLabel('Level', { exact: true }).fill('6');
+        await dialog.getByLabel('Parquet compression for column 3').selectOption('zstd');
+        await dialog.getByLabel('Parquet level for column 3').fill('3');
+        await dialog.getByLabel('Encoding for column 3').selectOption('delta_binary_packed');
+        await dialog.getByRole('button', { name: 'Add column', exact: false }).click();
+        await dialog.getByLabel('Column name 4', { exact: true }).fill('extra');
+        // Rebuilding the column editor must preserve all existing choices.
+        await expect(dialog.getByLabel('Collection mode', { exact: true })).toHaveValue(mode);
+        await expect(dialog.getByLabel('Parquet compression for column 3')).toHaveValue('zstd');
+        await expect(dialog.getByLabel('Encoding for column 3')).toHaveValue('delta_binary_packed');
+        await dialog.getByRole('button', { name: 'Create collection', exact: true }).click();
+        await expect(dialog).not.toBeVisible();
+        expect(posts).toHaveLength(1);
+        expect(posts[0].mode ?? 'append').toBe(mode);
+        expect(posts[0].write_settings).toEqual({
+            parquet: {
+                compression: { codec: 'gzip', level: 6 },
+                columns: [
+                    {
+                        field: 'amount',
+                        compression: { codec: 'zstd', level: 3 },
+                        encoding: 'delta_binary_packed',
+                    },
+                ],
+            },
+        });
+        await expect(page.locator('.page-footer')).toContainText(
+            mode === 'kv' ? 'KV mode' : 'Append mode',
+        );
+    });
+}
 
 test('advertised settings create canonically, save by compare-and-set and reload on conflict', async ({
     page,

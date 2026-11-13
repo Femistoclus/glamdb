@@ -863,21 +863,30 @@ function renderReadResults() {
     if (state.result) $('#view').dataset.resultSnapshot = state.result.snapshot_id ?? 'initial';
     else delete $('#view').dataset.resultSnapshot;
 }
-function renderWritePanel({ removedIndex = null, reset = false } = {}) {
-    const expanded = reset
-        ? []
-        : [...document.querySelectorAll('[data-write-row]')].flatMap((row, index) =>
-              row.open && index !== removedIndex
-                  ? [removedIndex !== null && index > removedIndex ? index - 1 : index]
-                  : [],
-          );
+function renderWritePanel({ removedIndex = null, addedIndex = null, reset = false } = {}) {
+    const expanded =
+        addedIndex !== null
+            ? [addedIndex]
+            : reset
+              ? []
+              : [...document.querySelectorAll('[data-write-row]')].flatMap((row, index) =>
+                    row.open && index !== removedIndex
+                        ? [removedIndex !== null && index > removedIndex ? index - 1 : index]
+                        : [],
+                );
     const target = $('[data-write-panel]');
     if (target) {
+        const scrollTop = target.querySelector('.write-rows')?.scrollTop ?? 0;
         target.outerHTML = writePanel();
         for (const index of expanded) {
             const row = document.querySelectorAll('[data-write-row]')[index];
             if (row) row.open = true;
         }
+        const rows = $('.write-rows');
+        if (rows && addedIndex !== null) {
+            const row = rows.children[addedIndex];
+            rows.scrollTop += row.getBoundingClientRect().top - rows.getBoundingClientRect().top;
+        } else if (rows) rows.scrollTop = scrollTop;
     }
 }
 function updateDataSelection() {
@@ -2255,11 +2264,13 @@ document.addEventListener('click', async (event) => {
             }
             const removedIndex =
                 action === 'remove-write-row' ? Number(target.dataset.index) : null;
-            if (action === 'add-write-row' && state.writeDraft.length < 100)
+            let addedIndex = null;
+            if (action === 'add-write-row' && state.writeDraft.length < 100) {
+                addedIndex = state.writeDraft.length;
                 state.writeDraft.push({});
-            else if (removedIndex !== null && state.writeDraft.length > 1)
+            } else if (removedIndex !== null && state.writeDraft.length > 1)
                 state.writeDraft.splice(removedIndex, 1);
-            renderWritePanel({ removedIndex });
+            renderWritePanel({ removedIndex, addedIndex });
         } else if (action === 'new-write') {
             state.writeOperationId = null;
             state.writeDraft = null;

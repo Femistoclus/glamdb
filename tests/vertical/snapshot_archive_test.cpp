@@ -4,6 +4,7 @@
 #include "core/storage/format_verifier.h"
 #include "core/storage/snapshot_archive.h"
 #include "storage/resources.h"
+#include "storage/write_session.h"
 #include "tests/support/checked.h"
 #include "tests/support/journal_fault_vfs.h"
 #include "tests/support/sql_trace.h"
@@ -32,6 +33,7 @@ std::string Op(int64_t index)
     return std::format("00000000-0000-4000-8000-{:012x}", index + 1);
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters): an operation index and its row count.
 std::vector<TInputRow> RowsFor(int64_t index, int64_t count = 2)
 {
     std::vector<TInputRow> rows;
@@ -436,6 +438,180 @@ TEST_F(TSnapshotArchiveTest, NewAppendCollectionsDefaultToTheArchiveTier)
     Reopen();
     EXPECT_FALSE(Engine_->GetCollection(test::collection_id)->hot_snapshots);
     EXPECT_FALSE(Engine_->GetCollection(kvID)->hot_snapshots);
+}
+
+// A repeated creation that omits hot_snapshots matches a collection whose
+// setting is still defaulted, even when it was created under another default
+// value (simulated by rewriting the stored values to 50); explicit values
+// compare with the created value. Status reports the defaulted flag too.
+TEST_F(TSnapshotArchiveTest, OmittedRetryMatchesADefaultedCollectionWhateverTheDefaultWas)
+{
+    Create(std::nullopt);
+    ASSERT_TRUE(Engine_->Shutdown(std::chrono::seconds(5)));
+    Engine_.reset();
+    {
+        detail::Database catalog;
+        catalog.Open(Root_ / "catalog.sqlite", SQLITE_OPEN_READWRITE, {});
+        catalog.Execute("UPDATE collection_snapshot_archive SET created_hot_snapshots=50, hot_snapshots=50 "
+                        "WHERE collection_id=?",
+            {std::string(test::collection_id)});
+        ASSERT_EQ(catalog.Changes(), 1);
+    }
+    Reopen();
+    auto info = Engine_->GetCollection(test::collection_id);
+    ASSERT_TRUE(info);
+    EXPECT_EQ(info->hot_snapshots, 50);
+    EXPECT_TRUE(info->hot_snapshots_defaulted);
+    auto status = Engine_->GetSnapshotArchive(test::collection_id);
+    ASSERT_TRUE(status) << status.error().message;
+    EXPECT_EQ(status->hot_snapshots, 50);
+    EXPECT_TRUE(status->hot_snapshots_defaulted);
+    CreateCollectionRequest retry{test::collection_id, "events", Schema};
+    EXPECT_EQ(Engine_->CreateCollection(retry).disposition, CommitDisposition::Committed);
+    retry.hot_snapshots = DefaultHotSnapshots;
+    EXPECT_EQ(test::Present(Engine_->CreateCollection(retry).error).code, "SNAPSHOT_ARCHIVE_MISMATCH");
+    retry.hot_snapshots = 50;
+    EXPECT_EQ(Engine_->CreateCollection(retry).disposition, CommitDisposition::Committed);
+    retry.hot_snapshots = KeepAllSnapshotsInRoot;
+    EXPECT_EQ(test::Present(Engine_->CreateCollection(retry).error).code, "SNAPSHOT_ARCHIVE_MISMATCH");
+    // Maintenance reports the same flag.
+    const auto maintained = Engine_->ArchiveSnapshots(test::collection_id);
+    ASSERT_TRUE(maintained) << maintained.error().message;
+    EXPECT_TRUE(maintained->hot_snapshots_defaulted);
+    // Once set explicitly the setting is no longer a default: only the
+    // explicit created value matches.
+    ASSERT_TRUE(Engine_->UpdateSnapshotArchive({test::collection_id, 50}));
+    status = Engine_->GetSnapshotArchive(test::collection_id);
+    ASSERT_TRUE(status);
+    EXPECT_FALSE(status->hot_snapshots_defaulted);
+    retry.hot_snapshots.reset();
+    EXPECT_EQ(test::Present(Engine_->CreateCollection(retry).error).code, "SNAPSHOT_ARCHIVE_MISMATCH");
+    retry.hot_snapshots = 50;
+    EXPECT_EQ(Engine_->CreateCollection(retry).disposition, CommitDisposition::Committed);
+}
+
+std::vector<std::string> Drain(const Result<std::shared_ptr<ScanCursor>>& cursor)
+{
+    std::vector<std::string> rows;
+    EXPECT_TRUE(cursor) << (cursor ? std::string() : cursor.error().code + ": " + cursor.error().message);
+    if (!cursor) {
+        return rows;
+    }
+    while (true) {
+        auto next = (*cursor)->Next();
+        EXPECT_TRUE(next.has_value());
+        if (!next || !*next) {
+            break;
+        }
+        auto piece = Render(**next);
+        rows.insert(rows.end(), piece.begin(), piece.end());
+    }
+    return Sorted(std::move(rows));
+}
+
+int64_t CatalogCount(const std::filesystem::path& root, const std::string& sql)
+{
+    detail::Database catalog;
+    catalog.Open(root / "catalog.sqlite", SQLITE_OPEN_READONLY, {});
+    return catalog.Integer(sql);
+}
+
+// Pinned read views and their splits select archived snapshots and keep
+// answering exactly while later appends move the root on; a multipart write
+// session is an ordinary publication: it writes the checkpoint, takes part in
+// the archive cut and the exact operation count, and checkpoint open equals
+// full verification afterwards.
+TEST_F(TSnapshotArchiveTest, ReadViewsSplitsAndWriteSessionsWorkWithTheArchive)
+{
+    Create(3);
+    for (int64_t index = 0; index < 8; ++index) {
+        ASSERT_EQ(Append(index).disposition, CommitDisposition::Committed);
+    }
+    // A multipart session commits through the bulk publisher.
+    {
+        auto opened = TWriteSessions::Open(Engine_, (Directory_.path / "stage").string(), "scope");
+        ASSERT_TRUE(opened) << opened.error().message;
+        const auto sessions = *opened;
+        const TWriteIdentity id{test::collection_id, Op(100)};
+        ASSERT_TRUE(sessions->BeginWrite({id}));
+        ASSERT_TRUE(sessions->PutPart(id,
+            {0, 0, 0},
+            [batch = Batch(RowsFor(100, 5)), first = true]() mutable -> Result<std::shared_ptr<arrow::RecordBatch>> {
+                if (std::exchange(first, false)) {
+                    return batch;
+                }
+                return std::shared_ptr<arrow::RecordBatch>{};
+            }));
+        ASSERT_TRUE(sessions->SealWrite(id, {{0, 0, 0}}));
+        const auto committed = sessions->CommitWrite(id);
+        ASSERT_TRUE(committed) << committed.error().message;
+        ASSERT_EQ(committed->disposition, CommitDisposition::Committed) << test::Present(committed->error).message;
+    }
+    const auto status = Engine_->GetSnapshotArchive(test::collection_id);
+    ASSERT_TRUE(status);
+    ASSERT_GE(status->archived_snapshots, 3);
+    const auto archived = Receipts_.at(1).snapshot_id;
+    const auto expected = Capture(*Engine_, test::collection_id, archived).Rows;
+    ASSERT_FALSE(expected.empty());
+
+    auto acquired = Engine_->AcquireReadView(
+        {{{test::collection_id, SnapshotSelector::Id(archived)}, {test::collection_id, SnapshotSelector::Latest()}},
+            "scope"});
+    ASSERT_TRUE(acquired) << acquired.error().code << ": " << acquired.error().message;
+    const std::shared_ptr<const TReadView> view = *acquired;
+    const auto info = Engine_->GetReadViewInfo(*view, "scope");
+    ASSERT_TRUE(info);
+    EXPECT_EQ((*info)->Entries[0].SelectorResolved, SnapshotSelector::Id(archived));
+    const auto latestRows = Drain(Engine_->ScanReadView(*view, 1, {}, "scope"));
+    // The root moves on and archives more; the pinned view does not.
+    for (int64_t index = 8; index < 16; ++index) {
+        ASSERT_EQ(Append(index).disposition, CommitDisposition::Committed);
+    }
+    EXPECT_EQ(Drain(Engine_->ScanReadView(*view, 0, {}, "scope")), expected);
+    EXPECT_EQ(Drain(Engine_->ScanReadView(*view, 1, {}, "scope")), latestRows);
+    for (const size_t entry : {size_t{0}, size_t{1}}) {
+        auto plan = Engine_->PlanScan(view, entry, {}, "scope", {.SplitsPerPage = 2, .TargetBytes = 1});
+        ASSERT_TRUE(plan) << plan.error().message;
+        std::vector<std::string> rows;
+        size_t splits = 0;
+        while (true) {
+            auto page = Engine_->NextScanSplits(**plan, "scope");
+            ASSERT_TRUE(page) << page.error().message;
+            for (const auto& split : page->Splits) {
+                ++splits;
+                const auto piece = Drain(Engine_->ReadSplit(*split, "scope"));
+                rows.insert(rows.end(), piece.begin(), piece.end());
+            }
+            if (page->Done) {
+                break;
+            }
+        }
+        EXPECT_GT(splits, 1U);
+        EXPECT_EQ(Sorted(std::move(rows)), entry == 0 ? expected : latestRows);
+    }
+    ASSERT_TRUE(Engine_->ReleaseReadView(*view, "scope"));
+
+    // Exact operation count in the checkpoint; checkpoint open equals full.
+    EXPECT_EQ(CatalogCount(Root_, "SELECT COUNT(*) FROM operations"), 17);
+    EXPECT_EQ(CatalogCount(Root_, "SELECT operations FROM collection_checkpoints"), 17);
+    const auto history = Engine_->ListSnapshots(test::collection_id);
+    ASSERT_TRUE(history);
+    std::vector<int64_t> ids;
+    for (const auto& snapshot : history->snapshots) {
+        ids.push_back(snapshot.snapshot_id);
+    }
+    const auto sessionRows = Capture(*Engine_, test::collection_id, ids[8]).Rows;
+    for (const bool full : {false, true}) {
+        Reopen();
+        if (full) {
+            ASSERT_TRUE(Engine_->VerifyStoreFull());
+        }
+        const auto reopened = Engine_->ListSnapshots(test::collection_id);
+        ASSERT_TRUE(reopened);
+        ASSERT_EQ(reopened->snapshots.size(), ids.size());
+        EXPECT_EQ(Capture(*Engine_, test::collection_id, archived).Rows, expected);
+        EXPECT_EQ(Capture(*Engine_, test::collection_id, ids[8]).Rows, sessionRows);
+    }
 }
 
 // A retention keep_last below a defaulted hot_snapshots lowers it in the
@@ -889,6 +1065,7 @@ void RunArchiveChild(const std::filesystem::path& root,
     environment.push_back("GLAMDB_ARCHIVE_MODE=" + std::string(mode));
     environment.push_back("GLAMDB_ARCHIVE_OPERATION=" + std::to_string(operation));
     std::vector<char*> variables;
+    variables.reserve(environment.size() + 1);
     for (auto& value : environment) {
         variables.push_back(value.data());
     }
@@ -1251,9 +1428,11 @@ TEST_F(TArchiveDifferentialTest, RandomizedHistoryAnswersIdenticallyWithAndWitho
         const auto a = Archived_.Engine->FindAppendOutcome(operation.first, Op(index));
         const auto b = Reference_.Engine->FindAppendOutcome(operation.first, Op(index));
         ASSERT_TRUE(a && b);
-        ASSERT_EQ(a->has_value(), b->has_value());
-        if (a->has_value()) {
-            EXPECT_EQ(Normalize(Archived_, **a), Normalize(Reference_, **b)) << index;
+        const auto& archived = *a;
+        const auto& reference = *b;
+        ASSERT_EQ(archived.has_value(), reference.has_value());
+        if (archived && reference) {
+            EXPECT_EQ(Normalize(Archived_, *archived), Normalize(Reference_, *reference)) << index;
         }
     }
 }

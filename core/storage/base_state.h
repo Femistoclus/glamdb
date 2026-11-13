@@ -37,6 +37,10 @@ struct TBaseState
     // The latest data publication's list and manifest inputs/outputs, excluding
     // the root. Maintenance preserves this conservative recovery byte charge.
     std::uint64_t CurrentCommitMetadataBytes = 0;
+    // Decoded Avro bytes of each current manifest (CurrentManifests order) as
+    // the verifier measured them; they size the next manifest merge. Empty
+    // when a current manifest was not measured.
+    std::vector<std::uint64_t> CurrentManifestDecodedBytes{};
 };
 
 iceberg::Result<TBaseState> CheckAppendClosure(const std::shared_ptr<iceberg::FileIO>& fileIO,
@@ -102,5 +106,36 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
     const std::string& workspaceDirectory = {},
     std::span<const std::shared_ptr<iceberg::Snapshot>> expired = {},
     std::optional<std::size_t> expiredCount = std::nullopt);
+
+// One snapshot before the oldest root snapshot (expired or archived), reduced
+// to what verification uses: identity, ancestry and the append counters its
+// summary records. A few dozen bytes instead of a full snapshot.
+struct TAncestor
+{
+    std::int64_t SnapshotID = 0;
+    std::optional<std::int64_t> ParentID;
+    std::int64_t Sequence = 0;
+    std::uint64_t Rows = 0;
+    std::uint64_t Files = 0;
+    std::uint64_t Bytes = 0;
+    bool Bulk = false;
+    // False when the snapshot's summary lacks valid counters.
+    bool Valid = true;
+};
+
+// Requires the canonical added-records/files/size summary counters and a
+// valid bulk marker.
+iceberg::Result<TAncestor> AncestorOf(const iceberg::Snapshot& snapshot);
+
+// As above with the compact ancestry; `parent` is its newest entry in full.
+iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileIO>& fileIO,
+    const std::string& rootLocation,
+    const std::string& storeID,
+    const std::string& collectionID,
+    const TStorageLimits& limits,
+    const std::string& workspaceDirectory,
+    std::span<const TAncestor> ancestry,
+    std::size_t expiredCount,
+    const std::shared_ptr<iceberg::Snapshot>& parent);
 
 }

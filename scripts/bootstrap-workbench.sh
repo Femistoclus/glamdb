@@ -16,4 +16,4 @@ fi
 .venv/bin/python -m pip install --no-deps --no-build-isolation \
   -e tools/verification -e sdk/python -e apps/mock_server -e tools/workload
 npm --prefix ui ci
-printf '%s\n' 'Ready. See docs/development/WORKBENCH.md for launch and browser-test commands.'
+printf '%s\n' 'Ready. See docs/WORKBENCH.md for launch and usage; docs/BUILDING.md describes browser checks.'

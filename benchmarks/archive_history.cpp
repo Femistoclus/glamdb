@@ -8,8 +8,14 @@
 // glamdb_archive_history_bench open ROOT [full]
 //   Opens the existing store in this (fresh) process and prints the open time.
 //   `full` requests the full verification path instead of the checkpoint.
+// GLAMDB_BENCH_DEFAULT=1 uses the default Limits, the process-default
+// resource owner and the default hot_snapshots (HOT is ignored);
+// GLAMDB_BENCH_COLLECTIONS=N appends round-robin to N collections (TARGET is
+// the total).
 
+#include "core/backend/local_storage_backend.h"
 #include "core/engine/engine_factory.h"
+#include "core/storage/base_state.h"
 #include "storage/engine.h"
 #include "storage/resources.h"
 
@@ -20,6 +26,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -79,14 +86,46 @@ std::shared_ptr<arrow::RecordBatch> Batch(int64_t value)
 std::string OperationID(int64_t index)
 {
     char operation[37];
-    std::snprintf(operation, sizeof(operation), "65000000-0000-4000-8001-%012llx", static_cast<long long>(index + 1));
+    std::snprintf(operation, sizeof(operation), "65000000-0000-4000-8001-%012llx", static_cast<long long>(index) + 1);
     return operation;
+}
+
+bool DefaultProfile()
+{
+    const char* value = std::getenv("GLAMDB_BENCH_DEFAULT");
+    return value && std::string_view(value) == "1";
+}
+
+int64_t Collections()
+{
+    const char* value = std::getenv("GLAMDB_BENCH_COLLECTIONS");
+    int64_t count = 1;
+    if (value) {
+        const std::string_view text(value);
+        const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), count);
+        Require(error == std::errc{} && end == text.data() + text.size() && count >= 1 && count <= 8,
+            "invalid GLAMDB_BENCH_COLLECTIONS");
+    }
+    return count;
+}
+
+std::string CollectionAt(int64_t index)
+{
+    if (index == 0) {
+        return CollectionID;
+    }
+    char id[37];
+    std::snprintf(id, sizeof(id), "65000000-0000-4000-8000-%012llx", static_cast<long long>(index) + 2);
+    return id;
 }
 
 // Every archived snapshot keeps its list and the manifests it referenced last
 // on disk and in the budgets; one data file per append.
 Limits BenchLimits()
 {
+    if (DefaultProfile()) {
+        return {};
+    }
     Limits limits;
     limits.max_operations = MaxAppends + 16;
     limits.max_catalog_bytes = 512LL << 20;
@@ -98,7 +137,9 @@ Limits BenchLimits()
     limits.history.max_manifest_list_bytes = 64LL << 30;
     limits.history.max_footer_bytes = 4LL << 30;
     limits.history.max_commit_bytes = 128LL << 20;
-    limits.history.max_recovery_workspace_bytes = 512LL << 20;
+    // Recovery admits Snapshots + Manifests + DataFiles <= workspace / 8 KiB;
+    // with about one retained manifest per append 512 MiB ends near 32,500.
+    limits.history.max_recovery_workspace_bytes = 1LL << 30;
     return limits;
 }
 
@@ -106,6 +147,9 @@ Limits BenchLimits()
 // reservation classes above the process default for 60,000 appends.
 std::shared_ptr<ResourceOwner> BenchResources()
 {
+    if (DefaultProfile()) {
+        return nullptr;
+    }
     ResourceLimits limits;
     limits.memory_bytes = {2ULL << 30, 16ULL << 30, 16ULL << 20, 64ULL << 20, 16ULL << 30};
     return std::make_shared<ResourceOwner>(limits);
@@ -144,14 +188,42 @@ std::filesystem::path CurrentRoot(const std::filesystem::path& root)
     return newest;
 }
 
+// The production backend, as OpenExisting creates it, kept for inspection.
+std::shared_ptr<detail::TLocalStorageBackend> Backend;
+
 std::shared_ptr<Engine> OpenStore(const std::filesystem::path& root, bool full, double& ms)
 {
     OpenStoreRequest request{root.string(), StoreID, "local-delete-extra-v1", BenchLimits(), BenchResources()};
     request.verify_full = full;
     const auto started = TClock::now();
-    auto engine = Take(OpenExisting(request));
+    auto engine = Take(detail::EngineFactory::OpenWith(request,
+        [&](const std::filesystem::path& path,
+            const StoreInfo& info) -> Result<std::shared_ptr<detail::StorageBackend>> {
+            detail::TLocalStorageOptions options;
+            options.Resources = request.resources ? request.resources : ResourceOwner::ProcessDefault();
+            options.ApplyHistoryLimits(request.limits.history);
+            auto backend = detail::TLocalStorageBackend::Open(path, info, std::move(options));
+            if (!backend) {
+                return std::unexpected(backend.error());
+            }
+            Backend = *backend;
+            return std::shared_ptr<detail::StorageBackend>(Backend);
+        }));
     ms = ElapsedMs(started);
     return engine;
+}
+
+// Current manifest count and the largest decoded manifest, from the verified
+// generation the open installed.
+std::pair<size_t, uint64_t> CurrentManifests(Engine& engine)
+{
+    const auto cursor = Take(engine.Scan({.collection_id = CollectionID, .limit = 0}));
+    const auto state = Take(Backend->VerifiedScanState(cursor->Info().identity));
+    uint64_t largest = 0;
+    for (const auto bytes : state->CurrentManifestDecodedBytes) {
+        largest = std::max(largest, bytes);
+    }
+    return {state->CurrentManifests.size(), largest};
 }
 
 int Append(const std::filesystem::path& root, int64_t hot, int64_t target)
@@ -162,21 +234,29 @@ int Append(const std::filesystem::path& root, int64_t hot, int64_t target)
         engine = OpenStore(root, false, openMs);
     } else {
         engine = Take(CreateStore({StoreID, root.string(), "local-delete-extra-v1", BenchLimits(), BenchResources()}));
-        CreateCollectionRequest request{CollectionID,
-            "events",
-            {{{"key", FieldType::String, false}, {"value", FieldType::Int64, true}}}};
-        request.hot_snapshots = hot;
-        Require(engine->CreateCollection(request).disposition == CommitDisposition::Committed,
-            "create collection failed");
+        for (int64_t index = 0; index < Collections(); ++index) {
+            CreateCollectionRequest request{CollectionAt(index),
+                "events-" + std::to_string(index),
+                {{{"key", FieldType::String, false}, {"value", FieldType::Int64, true}}}};
+            if (!DefaultProfile()) {
+                request.hot_snapshots = hot;
+            }
+            Require(engine->CreateCollection(request).disposition == CommitDisposition::Committed,
+                "create collection failed");
+        }
     }
-    auto status = Take(engine->GetSnapshotArchive(CollectionID));
-    int64_t next = status.root_snapshots + status.archived_snapshots + status.expired_snapshots;
+    int64_t next = 0;
+    for (int64_t index = 0; index < Collections(); ++index) {
+        const auto collection = Take(engine->GetSnapshotArchive(CollectionAt(index)));
+        next += collection.root_snapshots + collection.archived_snapshots + collection.expired_snapshots;
+    }
     std::vector<double> appendMs;
     const auto started = TClock::now();
     for (; next < target; ++next) {
         const auto batch = Batch(next);
         const auto appendStarted = TClock::now();
-        const auto outcome = engine->AppendDurable({CollectionID, OperationID(next), {}, {batch}});
+        const auto outcome =
+            engine->AppendDurable({CollectionAt(next % Collections()), OperationID(next), {}, {batch}});
         appendMs.push_back(ElapsedMs(appendStarted));
         Require(outcome.disposition == CommitDisposition::Committed,
             "append " + std::to_string(next) + " failed: " + (outcome.error ? outcome.error->message : ""));
@@ -184,7 +264,7 @@ int Append(const std::filesystem::path& root, int64_t hot, int64_t target)
     const auto window =
         std::vector<double>(appendMs.end() - static_cast<std::ptrdiff_t>(std::min(Window, appendMs.size())),
             appendMs.end());
-    status = Take(engine->GetSnapshotArchive(CollectionID));
+    const auto status = Take(engine->GetSnapshotArchive(CollectionID));
     Require(engine->Shutdown(std::chrono::seconds(60)).has_value(), "shutdown failed");
     engine.reset();
     const auto rootFile = CurrentRoot(root);
@@ -213,10 +293,15 @@ int Open(const std::filesystem::path& root, bool full)
     double ms = 0;
     auto engine = OpenStore(root, full, ms);
     const auto status = Take(engine->GetSnapshotArchive(CollectionID));
+    const auto [manifests, largestDecoded] = CurrentManifests(*engine);
     Require(engine->Shutdown(std::chrono::seconds(60)).has_value(), "shutdown failed");
+    engine.reset();
+    Backend.reset();
     std::cout << TJson{{"command", "open"},
                      {"full", full},
                      {"open_ms", ms},
+                     {"current_manifests", manifests},
+                     {"largest_manifest_decoded_bytes", largestDecoded},
                      {"root_snapshots", status.root_snapshots},
                      {"archived_snapshots", status.archived_snapshots},
                      {"rss_peak_bytes", PeakRSS()}}

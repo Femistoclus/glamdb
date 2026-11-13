@@ -298,6 +298,20 @@ public:
     {
         return Inner_->VerifiedScanState(base);
     }
+    Status OpenFromCheckpoints(const StoreInfo& store,
+        std::span<const detail::CollectionView> collections,
+        std::span<const detail::CollectionCheckpointView> checkpoints) override
+    {
+        return Inner_->OpenFromCheckpoints(store, collections, checkpoints);
+    }
+    std::vector<detail::CollectionCheckpoint> VerifiedCheckpoints() override
+    {
+        return Inner_->VerifiedCheckpoints();
+    }
+    uint64_t RecoveryWorkspaceBytes() override
+    {
+        return Inner_->RecoveryWorkspaceBytes();
+    }
 
 private:
     class TStaged final : public detail::StagedAppend
@@ -334,6 +348,16 @@ private:
                 Owner_->BeforeVerifyClosure(CollectionID_);
             }
             return Inner_->VerifyClosure(location);
+        }
+
+        std::vector<detail::ArchivedSnapshotRecord> Archived() const override
+        {
+            return Inner_->Archived();
+        }
+
+        std::optional<detail::CollectionCheckpoint> Checkpoint() const override
+        {
+            return Inner_->Checkpoint();
         }
 
     private:

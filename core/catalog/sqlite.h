@@ -21,7 +21,7 @@ public:
     ~Database();
     Database(const Database&) = delete;
     Database& operator=(const Database&) = delete;
-    void Open(const std::filesystem::path& path, int flags, const std::string& vfs);
+    void Open(const std::filesystem::path& path, int flags, const std::string& vfs, int lengthLimit = 1024 * 1024);
     void Close();
     void Execute(std::string_view sql, std::initializer_list<SqlValue> values = {});
     std::vector<SqlRow> Query(std::string_view sql, std::initializer_list<SqlValue> values = {});

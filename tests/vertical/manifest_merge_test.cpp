@@ -10,7 +10,11 @@ namespace {
 using namespace vertical;
 using namespace std::chrono_literals;
 
-const auto MergeBatch = Batch({{"duplicate", 7, {}, {}, {}}, {"duplicate", 7, {}, {}, {}}});
+std::shared_ptr<arrow::RecordBatch> MakeMergeBatch()
+{
+    // Arrow buffers must be released before its global memory pools shut down.
+    return Batch({{"duplicate", 7, {}, {}, {}}, {"duplicate", 7, {}, {}, {}}});
+}
 
 std::string MergeOperation(int index)
 {
@@ -19,6 +23,7 @@ std::string MergeOperation(int index)
 
 void CheckMergeViews(const std::shared_ptr<Engine>& engine, int appends)
 {
+    const auto mergeBatch = MakeMergeBatch();
     const auto history = engine->ListSnapshots(test::collection_id);
     ASSERT_TRUE(history) << history.error().message;
     ASSERT_EQ(history->snapshots.size(), static_cast<size_t>(appends));
@@ -49,7 +54,7 @@ void CheckMergeViews(const std::shared_ptr<Engine>& engine, int appends)
         const auto& outcome = test::Present(*found);
         ASSERT_EQ(outcome.disposition, CommitDisposition::Committed);
         ASSERT_TRUE(outcome.result);
-        EXPECT_EQ(engine->AppendDurable({test::collection_id, MergeOperation(index), {}, {MergeBatch}}), outcome);
+        EXPECT_EQ(engine->AppendDurable({test::collection_id, MergeOperation(index), {}, {mergeBatch}}), outcome);
         const auto cursor = engine->Scan({.collection_id = test::collection_id,
             .selector = SnapshotSelector::Id(test::Present(outcome.result).snapshot_id)});
         ASSERT_TRUE(cursor);
@@ -69,7 +74,7 @@ void CheckMergeViews(const std::shared_ptr<Engine>& engine, int appends)
         ASSERT_TRUE(failed);
         ASSERT_TRUE(*failed);
         ASSERT_EQ(test::Present(*failed).disposition, CommitDisposition::DefinitelyNotCommitted);
-        EXPECT_EQ(engine->AppendDurable({test::collection_id, MergeOperation(100), {}, {MergeBatch}}),
+        EXPECT_EQ(engine->AppendDurable({test::collection_id, MergeOperation(100), {}, {mergeBatch}}),
             test::Present(*failed));
     }
 }
@@ -129,8 +134,9 @@ protected:
 
     void Populate(int count)
     {
+        const auto mergeBatch = MakeMergeBatch();
         for (int index = 1; index <= count; ++index) {
-            const auto result = Engine_->AppendDurable({test::collection_id, MergeOperation(index), {}, {MergeBatch}});
+            const auto result = Engine_->AppendDurable({test::collection_id, MergeOperation(index), {}, {mergeBatch}});
             ASSERT_EQ(result.disposition, CommitDisposition::Committed)
                 << index << ": " << (result.error ? result.error->message : "");
         }
@@ -158,18 +164,19 @@ protected:
 
 TEST_F(ManifestMergeTest, BoundsLatestManifestsAcrossRepeatedMergesAndReopens)
 {
+    const auto mergeBatch = MakeMergeBatch();
     Populate(99);
     ASSERT_FALSE(HasFatalFailure());
     EXPECT_EQ(LatestManifests(), 99U);
     const auto first = Engine_->FindAppendOutcome(test::collection_id, MergeOperation(1));
     ASSERT_TRUE(first && *first);
     for (int index = 100; index <= 205; ++index) {
-        const auto result = Engine_->AppendDurable({test::collection_id, MergeOperation(index), {}, {MergeBatch}});
+        const auto result = Engine_->AppendDurable({test::collection_id, MergeOperation(index), {}, {mergeBatch}});
         ASSERT_EQ(result.disposition, CommitDisposition::Committed)
             << index << ": " << (result.error ? result.error->message : "");
         ASSERT_LT(LatestManifests(), 100U);
     }
-    EXPECT_EQ(Engine_->AppendDurable({test::collection_id, MergeOperation(1), {}, {MergeBatch}}),
+    EXPECT_EQ(Engine_->AppendDurable({test::collection_id, MergeOperation(1), {}, {mergeBatch}}),
         test::Present(*first));
     CheckMergeViews(Engine_, 205);
     FreshProcess(205);
@@ -198,7 +205,7 @@ TEST_P(ManifestMergeFaultTest, FailureAtMergeBoundaryNeverPublishesPartialMember
     } else {
         Vfs_.Arm(2, mode == 4);
     }
-    const auto result = Engine_->AppendDurable({test::collection_id, MergeOperation(100), {}, {MergeBatch}});
+    const auto result = Engine_->AppendDurable({test::collection_id, MergeOperation(100), {}, {MakeMergeBatch()}});
     EXPECT_EQ(result.disposition,
         mode < 3 ? CommitDisposition::DefinitelyNotCommitted : CommitDisposition::CommitUnknown);
     Vfs_.Disarm();
@@ -206,6 +213,113 @@ TEST_P(ManifestMergeFaultTest, FailureAtMergeBoundaryNeverPublishesPartialMember
 }
 
 INSTANTIATE_TEST_SUITE_P(Boundaries, ManifestMergeFaultTest, ::testing::Range(0, 5));
+
+// The verifier caps every manifest's decoded Avro bytes at ManifestBytes.
+// Merging targets encoded bytes, so one merged manifest used to outgrow the
+// cap (at ~29,500 one-row appends with the 8 MiB default): the collection's
+// live data files were bounded by a single manifest. A 128 KiB cap reaches
+// the same boundary after a few hundred appends.
+class ManifestDecodedBoundTest : public ::testing::Test
+{
+protected:
+    static constexpr uint64_t DecodedCap = 128ULL << 10;
+    static constexpr int Appends = 900;
+
+    test::TempDir Temporary_;
+    const std::filesystem::path Root_ = Temporary_.path / "store";
+    std::shared_ptr<detail::TLocalStorageBackend> Backend_;
+
+    Result<std::shared_ptr<detail::StorageBackend>> OpenBackend(const std::filesystem::path& root,
+        const StoreInfo& store)
+    {
+        detail::TLocalStorageOptions options;
+        options.Storage.ManifestBytes = DecodedCap;
+        auto opened = detail::TLocalStorageBackend::Open(root, store, options);
+        if (!opened) {
+            return std::unexpected(opened.error());
+        }
+        Backend_ = *opened;
+        return Backend_;
+    }
+
+    std::shared_ptr<const NGlamDB::NStorage::TBaseState> Current(Engine& engine)
+    {
+        const auto cursor = engine.Scan({.collection_id = test::collection_id, .limit = 0});
+        EXPECT_TRUE(cursor);
+        if (!cursor) {
+            return nullptr;
+        }
+        const auto state = Backend_->VerifiedScanState((*cursor)->Info().identity);
+        EXPECT_TRUE(state);
+        return state ? *state : nullptr;
+    }
+
+    void CheckManifests(Engine& engine)
+    {
+        const auto state = Current(engine);
+        ASSERT_TRUE(state);
+        // Several merged manifests, each within the decoded cap: the list grew.
+        size_t merged = 0;
+        int64_t files = 0;
+        for (const auto& manifest : state->CurrentManifests) {
+            merged += manifest.existing_files_count.value_or(0) > 0 ? 1 : 0;
+            files += manifest.added_files_count.value_or(0) + manifest.existing_files_count.value_or(0);
+        }
+        EXPECT_GE(merged, 2U);
+        EXPECT_EQ(files, Appends);
+        EXPECT_LT(state->CurrentManifests.size(), 120U);
+        ASSERT_EQ(state->CurrentManifestDecodedBytes.size(), state->CurrentManifests.size());
+        for (const auto bytes : state->CurrentManifestDecodedBytes) {
+            EXPECT_GT(bytes, 0U);
+            EXPECT_LE(bytes, DecodedCap);
+        }
+        const auto statistics = engine.GetStatistics(test::collection_id, SnapshotSelector::Latest());
+        ASSERT_TRUE(statistics) << statistics.error().message;
+        EXPECT_EQ(statistics->rows.value, 2 * Appends);
+    }
+};
+
+TEST_F(ManifestDecodedBoundTest, MergedManifestsStayWithinTheDecodedCapAndTheListGrows)
+{
+    std::shared_ptr<Engine> engine;
+    {
+        auto created = detail::EngineFactory::CreateWith({test::store_id, Root_.string()},
+            [this](const auto& root, const auto& store) {
+                return OpenBackend(root, store);
+            });
+        ASSERT_TRUE(created) << created.error().message;
+        engine = std::move(*created);
+    }
+    ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", Schema}).disposition,
+        CommitDisposition::Committed);
+    const auto batch = MakeMergeBatch();
+    for (int index = 1; index <= Appends; ++index) {
+        const auto result = engine->AppendDurable({test::collection_id, MergeOperation(index), {}, {batch}});
+        ASSERT_EQ(result.disposition, CommitDisposition::Committed)
+            << index << ": " << (result.error ? result.error->message : "");
+    }
+    CheckManifests(*engine);
+    ASSERT_FALSE(HasFatalFailure());
+    const auto before = Current(*engine);
+    ASSERT_TRUE(before);
+    ASSERT_TRUE(engine->Shutdown(1000ms));
+    engine.reset();
+    // Both open paths measure the same decoded sizes.
+    for (const bool full : {false, true}) {
+        auto opened = detail::EngineFactory::OpenWith(
+            {.absolute_root = Root_.string(), .expected_store_id = test::store_id, .verify_full = full},
+            [this](const auto& root, const auto& store) {
+                return OpenBackend(root, store);
+            });
+        ASSERT_TRUE(opened) << opened.error().message;
+        CheckManifests(**opened);
+        const auto after = Current(**opened);
+        ASSERT_TRUE(after);
+        EXPECT_EQ(after->CurrentManifests, before->CurrentManifests);
+        EXPECT_EQ(after->CurrentManifestDecodedBytes, before->CurrentManifestDecodedBytes);
+        ASSERT_TRUE((*opened)->Shutdown(1000ms));
+    }
+}
 
 } // namespace
 } // namespace glamdb

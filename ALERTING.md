@@ -4,7 +4,7 @@ Prometheus evaluates **OK, WARN, ALARM and NODATA**. Alertmanager sends one
 combined current-state summary daily at **10:00 Europe/Moscow** through its
 native Telegram receiver. State changes between summaries do not notify. There is no
 GlamDB webhook, delivery daemon or SQLite outbox. These rules depend on the
-metric and recording-rule contracts in [monitoring](MONITORING.md).
+metric and recording-rule contracts in [monitoring](docs/MONITORING.md).
 
 This configuration is an operational starting point, not an SLO or proof of
 engine durability. Missing or unsupported sources remain visible as NODATA.

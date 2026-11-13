@@ -611,51 +611,84 @@ void CheckReceipt(const iceberg::Snapshot& snapshot, const AppendResult& receipt
         "retained snapshot differs from its committed receipt");
 }
 
+// Committed receipts of one append collection, sorted by operation ID, in one
+// streamed pass over its operations. Only what history verification compares
+// is kept (no collection ID or durability profile): a few hundred bytes per
+// receipt, each of which added at least one never-deleted data file.
+struct TAppendReceipts
+{
+    std::vector<AppendResult> Receipts;
+    std::vector<bool> Matched;
+
+    // The unmatched receipt of `operationID` bound to `snapshotID`, or nullptr.
+    const AppendResult* Match(std::string_view operationID, int64_t snapshotID)
+    {
+        const auto found = std::ranges::lower_bound(Receipts, operationID, {}, &AppendResult::operation_id);
+        if (found == Receipts.end() || found->operation_id != operationID || found->snapshot_id != snapshotID) {
+            return nullptr;
+        }
+        const auto index = static_cast<size_t>(found - Receipts.begin());
+        if (Matched[index]) {
+            return nullptr;
+        }
+        Matched[index] = true;
+        return &*found;
+    }
+};
+
+TAppendReceipts ReadAppendReceipts(const CollectionView& view,
+    const std::function<void(std::string_view, const DurableSqliteCatalogStore::OperationConsumer&)>& readOperations)
+{
+    TAppendReceipts result;
+    readOperations(view.info.collection_id, [&](const auto& operation) {
+        if (operation.binding.collection_id != view.info.collection_id || operation.state != OperationState::Committed)
+        {
+            return;
+        }
+        if (!operation.outcome.has_value() || !operation.outcome->result.has_value()) {
+            Fail("CORRUPTION", "history", "committed operation has no receipt");
+        }
+        auto receipt = *operation.outcome->result;
+        Require(receipt.receipt_version != 3,
+            "CORRUPTION",
+            "committed receipt version differs from the collection mode");
+        receipt.operation_id = operation.binding.operation_id;
+        receipt.collection_id = {};
+        receipt.durability_profile = {};
+        result.Receipts.push_back(std::move(receipt));
+    });
+    std::ranges::sort(result.Receipts, {}, &AppendResult::operation_id);
+    Require(std::ranges::adjacent_find(result.Receipts, {}, &AppendResult::operation_id) == result.Receipts.end(),
+        "CORRUPTION",
+        "committed operation identity is duplicated");
+    result.Matched.assign(result.Receipts.size(), false);
+    return result;
+}
+
 // The ancestry before the oldest root snapshot: the expiration ledger
-// reconstructed from permanent receipts, then the archive rows. Each archived
-// row is bound to exactly one committed receipt, continues the ledger without
-// a gap and records the cumulative data files and the metadata bytes that
-// stay on disk for it. No archived metadata file is read here.
+// reconstructed from permanent receipts, then the archive rows, streamed in
+// sequence order and kept only as compact ancestors (the newest one in full).
+// Each entry is bound to exactly one committed receipt, continues the ancestry
+// without a gap, and each archive row records the cumulative data files and
+// the metadata bytes that stay on disk for it. No archived metadata file is
+// read here.
 struct TRetainedPrefix
 {
-    std::vector<std::shared_ptr<iceberg::Snapshot>> History;
+    std::vector<NStorage::TAncestor> History;
     std::size_t Expired = 0;
     NStorage::TStorageUsage Archive;
-    std::vector<std::pair<int64_t, std::string>> Archived;
+    std::shared_ptr<iceberg::Snapshot> Parent;
+    // Every ancestor's snapshot ID, sorted.
+    std::vector<int64_t> IDs;
 };
 
 TRetainedPrefix RetainedPrefix(const CollectionView& view,
-    const std::function<void(std::string_view, const DurableSqliteCatalogStore::OperationConsumer&)>& readOperations,
+    TAppendReceipts& receipts,
     const std::function<void(std::string_view, const DurableSqliteCatalogStore::ArchiveConsumer&)>& readArchive,
     const NStorage::TStorageLimits& limits)
 {
     TRetainedPrefix result;
-    std::vector<ArchivedSnapshotRecord> rows;
-    std::vector<std::shared_ptr<iceberg::Snapshot>> archived;
-    readArchive(view.info.collection_id, [&](const ArchivedSnapshotRecord& row) {
-        auto snapshot = DecodeArchivedSnapshot(row);
-        auto core = row;
-        core.snapshot_blob.clear();
-        rows.push_back(std::move(core));
-        archived.push_back(std::move(snapshot));
-    });
-    if (view.expired_snapshots.empty() && rows.empty()) {
-        return result;
-    }
-    Require(view.info.mode == CollectionMode::Append,
-        "CORRUPTION",
-        "KV collection has an unsupported expiration ledger or snapshot archive");
-    Require(view.info.mode == CollectionMode::Append,
-        "CORRUPTION",
-        "KV collection has an unsupported expiration ledger");
-    std::map<std::string, AppendResult, std::less<>> byOperation;
-    readOperations(view.info.collection_id, [&](const auto& operation) {
-        if (operation.state == OperationState::Committed && operation.outcome && operation.outcome->result) {
-            byOperation.emplace(operation.binding.operation_id, *operation.outcome->result);
-        }
-    });
-    result.History.reserve(view.expired_snapshots.size() + rows.size());
-    std::set<int64_t> ids;
+    result.History.reserve(view.expired_snapshots.size());
     uint64_t files = 0;
     const auto addFiles = [&](const AppendResult& receipt) {
         Require(receipt.data_files_added > 0 &&
@@ -664,47 +697,65 @@ TRetainedPrefix RetainedPrefix(const CollectionView& view,
             "retained history file count overflows");
         files += static_cast<uint64_t>(receipt.data_files_added);
     };
+    const auto previous = [&]() -> std::optional<int64_t> {
+        return result.History.empty() ? std::nullopt : std::optional(result.History.back().SnapshotID);
+    };
+    const AppendResult* lastExpired = nullptr;
     for (const auto& record : view.expired_snapshots) {
-        const auto found = byOperation.find(record.operation_id);
-        Require(found != byOperation.end(), "CORRUPTION", "expired snapshot lacks its committed operation");
-        const auto& receipt = found->second;
-        Require(receipt.snapshot_id == record.snapshot_id && ids.insert(record.snapshot_id).second &&
-                record.sequence_number == static_cast<int64_t>(result.History.size() + 1),
+        const auto* receipt = receipts.Match(record.operation_id, record.snapshot_id);
+        Require(receipt != nullptr, "CORRUPTION", "expired snapshot lacks its committed operation");
+        Require(record.sequence_number == static_cast<int64_t>(result.History.size() + 1),
             "CORRUPTION",
             "invalid expiration ledger identity");
-        addFiles(receipt);
+        addFiles(*receipt);
+        result.History.push_back({.SnapshotID = record.snapshot_id,
+            .ParentID = receipt->parent_snapshot_id,
+            .Sequence = record.sequence_number,
+            .Rows = static_cast<uint64_t>(std::max<int64_t>(receipt->rows_appended, 0)),
+            .Files = static_cast<uint64_t>(receipt->data_files_added),
+            .Bytes = static_cast<uint64_t>(std::max<int64_t>(receipt->compressed_data_bytes_added, 0)),
+            .Bulk = receipt->receipt_version == 2});
+        Require(receipt->rows_appended >= 0 && receipt->compressed_data_bytes_added >= 0,
+            "CORRUPTION",
+            "invalid expired receipt counters");
+        result.IDs.push_back(record.snapshot_id);
+        lastExpired = receipt;
+    }
+    result.Expired = result.History.size();
+    if (lastExpired) {
+        // The parent of the oldest root snapshot when nothing is archived.
+        const auto& record = view.expired_snapshots.back();
         auto snapshot = std::make_shared<iceberg::Snapshot>();
         snapshot->snapshot_id = record.snapshot_id;
         snapshot->sequence_number = record.sequence_number;
-        snapshot->parent_snapshot_id = receipt.parent_snapshot_id;
-        snapshot->timestamp_ms = iceberg::TimePointMs(std::chrono::milliseconds(receipt.snapshot_created_at_us / 1000));
+        snapshot->parent_snapshot_id = lastExpired->parent_snapshot_id;
+        snapshot->timestamp_ms =
+            iceberg::TimePointMs(std::chrono::milliseconds(lastExpired->snapshot_created_at_us / 1000));
         snapshot->schema_id = view.base.schema_id;
         using Fields = iceberg::SnapshotSummaryFields;
         snapshot->summary = {{"operation", "append"},
             {std::string(OperationKey), record.operation_id},
-            {std::string(ContentHashKey), receipt.payload_hash},
-            {Fields::kAddedRecords, std::to_string(receipt.rows_appended)},
-            {Fields::kAddedDataFiles, std::to_string(receipt.data_files_added)},
-            {Fields::kAddedFileSize, std::to_string(receipt.compressed_data_bytes_added)}};
-        if (receipt.receipt_version == 2) {
+            {std::string(ContentHashKey), lastExpired->payload_hash},
+            {Fields::kAddedRecords, std::to_string(lastExpired->rows_appended)},
+            {Fields::kAddedDataFiles, std::to_string(lastExpired->data_files_added)},
+            {Fields::kAddedFileSize, std::to_string(lastExpired->compressed_data_bytes_added)}};
+        if (lastExpired->receipt_version == 2) {
             snapshot->summary[std::string(BulkVersionKey)] = "1";
         }
-        result.History.push_back(std::move(snapshot));
+        result.Parent = std::move(snapshot);
     }
-    result.Expired = result.History.size();
-    for (size_t index = 0; index < rows.size(); ++index) {
-        const auto& row = rows[index];
-        const auto& snapshot = archived[index];
-        const auto found = byOperation.find(row.operation_id);
-        Require(found != byOperation.end() && found->second.snapshot_id == row.snapshot_id &&
-                ids.insert(row.snapshot_id).second &&
-                row.sequence_number == static_cast<int64_t>(result.History.size() + 1),
+    readArchive(view.info.collection_id, [&](const ArchivedSnapshotRecord& row) {
+        Require(view.info.mode == CollectionMode::Append,
+            "CORRUPTION",
+            "KV collection has an unsupported snapshot archive");
+        auto snapshot = DecodeArchivedSnapshot(row);
+        const auto* receipt = receipts.Match(row.operation_id, row.snapshot_id);
+        Require(receipt != nullptr && row.sequence_number == static_cast<int64_t>(result.History.size() + 1),
             "CORRUPTION",
             "archived snapshot has no unique committed receipt or leaves a gap");
-        const auto previous = result.History.empty() ? std::nullopt : std::optional(result.History.back()->snapshot_id);
-        Require(row.parent_snapshot_id == previous, "CORRUPTION", "archived snapshot breaks the ancestry chain");
-        CheckReceipt(*snapshot, found->second);
-        addFiles(found->second);
+        Require(row.parent_snapshot_id == previous(), "CORRUPTION", "archived snapshot breaks the ancestry chain");
+        CheckReceipt(*snapshot, *receipt);
+        addFiles(*receipt);
         Require(static_cast<uint64_t>(row.data_files) == files,
             "CORRUPTION",
             "archived snapshot membership differs from its receipts");
@@ -724,10 +775,46 @@ TRetainedPrefix RetainedPrefix(const CollectionView& view,
                                                .ManifestListBytes = static_cast<uint64_t>(row.manifest_list_bytes)}}),
             "CORRUPTION",
             "archived metadata usage");
-        result.Archived.emplace_back(row.snapshot_id, row.operation_id);
-        result.History.push_back(snapshot);
+        auto ancestor = NStorage::AncestorOf(*snapshot);
+        Require(ancestor.has_value(), "CORRUPTION", "archived snapshot differs from its committed receipt");
+        result.History.push_back(*ancestor);
+        result.IDs.push_back(row.snapshot_id);
+        result.Parent = std::move(snapshot);
+    });
+    if (!result.History.empty()) {
+        Require(view.info.mode == CollectionMode::Append,
+            "CORRUPTION",
+            "KV collection has an unsupported expiration ledger or snapshot archive");
     }
+    std::ranges::sort(result.IDs);
+    Require(std::ranges::adjacent_find(result.IDs) == result.IDs.end(),
+        "CORRUPTION",
+        "retained ancestry repeats a snapshot identity");
     return result;
+}
+
+// Every root snapshot is bound to its own committed receipt, and every
+// committed receipt to exactly one expired, archived or root snapshot.
+void CheckRootReceipts(const iceberg::TableMetadata& metadata,
+    TAppendReceipts& receipts,
+    const std::vector<int64_t>& ancestorIDs)
+{
+    for (const auto& snapshot : metadata.snapshots) {
+        Require(snapshot != nullptr, "CORRUPTION", "retained snapshot is missing");
+        const auto operation = snapshot->summary.find(std::string(OperationKey));
+        Require(operation != snapshot->summary.end(), "CORRUPTION", "retained snapshot has no operation identity");
+        const auto* receipt = receipts.Match(operation->second, snapshot->snapshot_id);
+        Require(receipt != nullptr && !std::ranges::binary_search(ancestorIDs, snapshot->snapshot_id),
+            "CORRUPTION",
+            "retained snapshot has no unique committed receipt");
+        CheckReceipt(*snapshot, *receipt);
+    }
+    Require(std::ranges::all_of(receipts.Matched,
+                [](bool matched) {
+                    return matched;
+                }),
+        "CORRUPTION",
+        "committed receipt has no retained snapshot");
 }
 
 void CheckNoOpRootPrefix(const iceberg::TableMetadata& historical, const iceberg::TableMetadata& current)
@@ -1638,11 +1725,12 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
         if (input.bulk) {
             summary.emplace(BulkVersionKey, "1");
         }
-        auto staged =
-            TakeIceberg(input.bulk ? NStorage::StageBulkAppend(std::move(table), dataFiles, summary, attempt)
-                                   : NStorage::StageAppend(std::move(table), dataFiles.front(), summary, attempt),
-                "IO_ERROR",
-                "stage append");
+        const auto mergeTarget = NStorage::ManifestMergeTarget(*base, dataFiles.size(), Options_.Storage);
+        auto staged = TakeIceberg(input.bulk
+                ? NStorage::StageBulkAppend(std::move(table), dataFiles, summary, attempt, mergeTarget)
+                : NStorage::StageAppend(std::move(table), dataFiles.front(), summary, attempt, mergeTarget),
+            "IO_ERROR",
+            "stage append");
         auto root = MetadataLocation(location, MetadataVersion(base->MetadataLocation) + 1, binding.attempt_id);
         // Serialize the staged root once, exactly as TableMetadataUtil::Write
         // does, and hand both forms to the guard, which compares the durable
@@ -2338,18 +2426,34 @@ Status TLocalStorageBackend::VerifyRetainedImpl(const StoreInfo& store,
                 "CORRUPTION",
                 "collection view identity is inconsistent");
             // The full reachable closure on open and Reconcile; terminal
-            // receipt lookups reuse this verified generation.
-            const auto prefix = RetainedPrefix(view, readOperations, readArchive, Options_.Storage);
-            auto state = VerifyCollection(view.base, prefix.History, prefix.Expired, prefix.Archive);
-            CheckSchema(*state->Metadata, view.info.schema, view.info.mode);
-            CheckHistory(*state->Metadata,
-                view.info,
-                state->MetadataLocation,
-                readOperations,
-                historyIO,
-                Options_.Storage.RootBytes,
-                view.expired_snapshots,
-                prefix.Archived);
+            // receipt lookups reuse this verified generation. Append history
+            // streams its operations and archive rows once and keeps only
+            // compact receipts and ancestors; KV histories stay in the root.
+            std::shared_ptr<const NStorage::TBaseState> state;
+            if (view.info.mode == CollectionMode::Append) {
+                auto receipts = ReadAppendReceipts(view, readOperations);
+                const auto prefix = RetainedPrefix(view, receipts, readArchive, Options_.Storage);
+                state = VerifyCollection(view.base, prefix.History, prefix.Expired, prefix.Parent, prefix.Archive);
+                CheckSchema(*state->Metadata, view.info.schema, view.info.mode);
+                CheckRootReceipts(*state->Metadata, receipts, prefix.IDs);
+            } else {
+                Require(view.expired_snapshots.empty(),
+                    "CORRUPTION",
+                    "KV collection has an unsupported expiration ledger");
+                readArchive(view.info.collection_id, [](const ArchivedSnapshotRecord&) {
+                    Fail("CORRUPTION", "history", "KV collection has an unsupported snapshot archive");
+                });
+                state = VerifyCollection(view.base);
+                CheckSchema(*state->Metadata, view.info.schema, view.info.mode);
+                CheckHistory(*state->Metadata,
+                    view.info,
+                    state->MetadataLocation,
+                    readOperations,
+                    historyIO,
+                    Options_.Storage.RootBytes,
+                    {},
+                    {});
+            }
             totalUsage = TakeUsage(NStorage::ReplaceUsage(totalUsage, {.Previous = {}, .Next = state->Usage}),
                 "CORRUPTION",
                 "aggregate storage usage");
@@ -2464,6 +2568,27 @@ void TLocalStorageBackend::CheckStore(const StoreInfo& store) const
         "storage backend belongs to a different store");
 }
 
+uint64_t TLocalStorageBackend::RecoveryWorkspaceBytes()
+{
+    std::lock_guard lock(Mutex_);
+    if (!VerifiedGeneration_) {
+        return 0;
+    }
+    // The envelope CheckStorageCapacity enforces: 8 KiB per visited unit.
+    uint64_t units = 1;
+    for (const auto& [id, state] : Collections_) {
+        if (state.Confirmed) {
+            const auto& usage = state.Confirmed->Usage;
+            for (const auto count : {usage.Snapshots, usage.Manifests, usage.DataFiles}) {
+                units = count > std::numeric_limits<uint64_t>::max() / 8192 - units
+                    ? std::numeric_limits<uint64_t>::max() / 8192
+                    : units + count;
+            }
+        }
+    }
+    return units * 8192;
+}
+
 NStorage::TStorageUsage TLocalStorageBackend::ComputeStoreUsage()
 {
     std::lock_guard lock(Mutex_);
@@ -2521,8 +2646,9 @@ TLocalStorageBackend::ReserveRootMemory(std::string_view collectionID, uint64_t 
 }
 
 std::shared_ptr<const NStorage::TBaseState> TLocalStorageBackend::VerifyCollection(const BaseIdentity& base,
-    std::span<const std::shared_ptr<iceberg::Snapshot>> history,
+    std::span<const NStorage::TAncestor> history,
     std::size_t expired,
+    const std::shared_ptr<iceberg::Snapshot>& parent,
     const NStorage::TStorageUsage& archive)
 {
     const std::shared_ptr<iceberg::FileIO> view =
@@ -2537,7 +2663,8 @@ std::shared_ptr<const NStorage::TBaseState> TLocalStorageBackend::VerifyCollecti
                                   Options_.Storage,
                                   Dirs_->Path().string(),
                                   history,
-                                  expired),
+                                  expired,
+                                  parent),
         "verify retained collection");
     CheckIdentity(state, base);
     // Archived lists and the manifests only they reference stay on disk and
@@ -2568,6 +2695,11 @@ Status TLocalStorageBackend::OpenFromCheckpoints(const StoreInfo& store,
         CheckStore(store);
         CheckIO(Dirs_->CheckIdentity(), EStoragePath::Read, "verify store directories");
         Require(collections.size() == checkpoints.size(), "CORRUPTION", "checkpoints differ from the registry");
+        // As full verification: physical retained files, orphans included,
+        // fit the warehouse cap (a size walk, no file is read).
+        (void)TakeIO(NStorage::MeasureWarehouse(*Dirs_, Options_.Storage),
+            EStoragePath::Read,
+            "retained warehouse capacity");
         const std::shared_ptr<iceberg::FileIO> view =
             TakeIceberg(FileIO_->ReadOnlyView(), "IO_ERROR", "open read-only FileIO");
         std::map<std::string, TCollectionState, std::less<>> verified;

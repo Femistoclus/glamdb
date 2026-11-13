@@ -1,6 +1,7 @@
 #pragma once
 
 #include "storage/metadata.h"
+#include "storage/resources.h"
 
 #include <functional>
 #include <list>
@@ -15,6 +16,7 @@ public:
     using TClock = std::chrono::steady_clock;
     using TListing = std::variant<TCollectionPage, SnapshotHistory, TFileListing>;
     using TLoad = std::function<Result<TListing>()>;
+    using TLoadWithMemory = std::function<Result<TListing>(const std::shared_ptr<ResourceReservation>&)>;
 
     struct TOptions
     {
@@ -28,6 +30,13 @@ public:
     Result<TListing> Read(const TMetadataPageRequest& request,
         std::string_view parameters,
         const TLoad& load,
+        TClock::time_point now = TClock::now(),
+        std::optional<uint64_t> admissionGeneration = {},
+        const std::shared_ptr<ResourceOwner>& resources = {});
+    Result<TListing> ReadWithMemory(const TMetadataPageRequest& request,
+        std::string_view parameters,
+        const TLoadWithMemory& load,
+        uint64_t workingBytes,
         TClock::time_point now = TClock::now(),
         std::optional<uint64_t> admissionGeneration = {},
         const std::shared_ptr<ResourceOwner>& resources = {});

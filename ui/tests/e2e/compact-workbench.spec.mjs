@@ -49,7 +49,8 @@ test('snapshot changes preserve read/write drafts and results belong to Read row
     ).toHaveCount(0);
     await page.getByRole('button', { name: '+ Add row', exact: true }).click();
     await expect(page.locator('[data-write-row]')).toHaveCount(2);
-    await expect(page.locator('[data-write-row]').nth(1)).toHaveJSProperty('open', false);
+    await expect(page.locator('[data-write-row]').nth(0)).toHaveJSProperty('open', false);
+    await expect(page.locator('[data-write-row]').nth(1)).toHaveJSProperty('open', true);
     await page.getByLabel('Snapshot', { exact: true }).selectOption('latest');
     await page.locator('#run-query').click();
     await expect(page.locator('.read-panel tbody tr')).not.toHaveCount(0);

@@ -35,6 +35,7 @@ std::string Op(int64_t index)
     return std::format("00000000-0000-4000-8000-{:012x}", index + 1);
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters): an operation index and its row count.
 std::vector<TInputRow> RowsFor(int64_t index, int64_t count = 2)
 {
     std::vector<TInputRow> rows;
@@ -285,7 +286,7 @@ protected:
         const auto index = Next_++;
         auto outcome = Engine_->AppendDurable({collection, Op(index), precondition, {Batch(RowsFor(index))}});
         Operations_.emplace_back(collection, index);
-        if (outcome.disposition == CommitDisposition::Committed) {
+        if (outcome.disposition == CommitDisposition::Committed && outcome.result) {
             Committed_[collection].push_back(outcome.result->snapshot_id);
         }
         return outcome;
@@ -305,7 +306,7 @@ protected:
             .rows = rows,
             .source = std::make_shared<TBatchesSource>(std::move(source))});
         Operations_.emplace_back(collection, index);
-        if (outcome.disposition == CommitDisposition::Committed) {
+        if (outcome.disposition == CommitDisposition::Committed && outcome.result) {
             Committed_[collection].push_back(outcome.result->snapshot_id);
         }
         return outcome;
