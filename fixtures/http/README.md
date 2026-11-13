@@ -9,7 +9,7 @@ separate live/completed sessions, reservation usage, bounded rejection counters
 and listener queues. Embedded explain capabilities may omit observations. Scan
 admission errors extend `errorDetail` with a bounded `reason` and
 `retry_after_ms`; the native policy test validates configured observations and
-quota refusals against this schema. See [scan session policy](../../docs/development/SCAN_SESSIONS.md).
+quota refusals against this schema. See [scan session policy](../../docs/SCAN_SESSIONS.md).
 
 `outcomes-v0.json` supplies literal expectations shared by native C++, the
 Python SDK, the disposable mock and the browser API tests. It covers committed
@@ -112,39 +112,3 @@ ctest --preset local -R 'OutcomeConformance|glamdb\.native_http$'
 Fixture/transport-double results and disposable mock results are separate from
 native storage/network evidence. These tests do not qualify physical power-loss
 durability or replace native fault-injection and qualification campaigns.
-
-## Validation recorded on 2026-11-11
-
-Base revision: `4e53c89`. Linux x86-64, Clang/libc++ 18, pinned native dependencies
-(Arrow 25), Python 3.12, Node 24.13 and Playwright 1.56.1. Local browser execution
-used the existing Chromium support-library directory through `LD_LIBRARY_PATH`.
-
-| Scope | Command | Executed result |
-| --- | --- | --- |
-| Native build | `cmake --build --preset local --parallel 2` | PASS |
-| Native C++/storage/HTTP/SDK | `GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 ctest --preset local --parallel 2 --output-on-failure` | Zero failures out of 532 enabled cases; existing recovery child helper skipped; one additional existing cost benchmark disabled |
-| Client, verifier and disposable mock | `PYTHONPATH=sdk/python/src:apps/mock_server/src:tools/verification/src python -m pytest -q --tb=short` | 550 passed; existing Starlette/httpx deprecation warning |
-| Browser API units/Fetch | `npm --prefix ui test` | 106 passed |
-| Native Chromium | `GLAMDB_NATIVE_SERVER="$PWD/build/local/apps/server/glamdb" npm --prefix ui run test:e2e` | 3 passed |
-| Mock/static-demo Chromium | `npm --prefix ui run test:e2e` | 31 passed; 3 native-only cases excluded by their existing guard |
-| C++ formatting/negative controls | `cmake --build --preset local --target format-check quality-negative-check` | PASS; 178 project files formatted correctly |
-| Changed C++ analysis | `clang-tidy-18 apps/transport/outcome_json.cpp tests/server/outcome_conformance_test.cpp -p build/local --config-file=.clang-tidy --warnings-as-errors='*'` | PASS; vendor warnings suppressed by the project header filter |
-| Workbench formatting | `npm --prefix ui run format:check` | PASS |
-
-Python commands used the existing environment with native/workbench dependencies;
-browser runs selected it with `GLAMDB_E2E_PYTHON`. SDK/schema dependencies were
-required in the reported native run. A separate system-Python negative control
-confirmed the ordinary optional-SDK guard; it is not native SDK evidence.
-Full-tree clang-tidy, sanitizer profiles and physical power-loss tests were not run
-for this change.
-
-Bulk HTTP cases in `v0.json` use `request_records`, LF-terminated NDJSON encoded
-with the route's `content_type`, and corresponding `record_schemas` in
-`v0.schema.json`. They share the ordinary `appendOutcome` response contract.
-
-`kv-v3.json` is a separate immutable-mode fixture for new mutation receipts. It
-retains literal canonical hash preimages and committed upsert/delete/compaction
-results, including initial and existing-base no-ops. Native outcome serialization,
-the Python SDK and workbench consume the same counters and invalid scalar/field
-cases. Version-1/2 vectors in `outcomes-v0.json` stay unchanged. These fixtures
-prove protocol agreement, not storage durability.

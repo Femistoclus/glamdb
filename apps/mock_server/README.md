@@ -1,6 +1,6 @@
 # Disposable mock adapter
 
-This package supplies the missing server seam for workbench and SDK development.
+This package provides an explicit disposable server for workbench and SDK development.
 It serves real HTTP, JSON and Arrow IPC, but keeps all collections, snapshots and
 operation outcomes in process memory. It never opens a warehouse, writes Parquet,
 creates an Iceberg catalog or calls itself a production storage engine. Restart
@@ -108,4 +108,4 @@ and CLI address validation. The shared verifier has its own independent golden
 expectations; adapter tests use literal expected rows.
 
 C++ append behavior, process recovery, restart durability, real Parquet/Iceberg
-interoperability and G4 power-loss qualification remain **NOT RUN** here.
+interoperability and physical power-loss durability are not established by this mock.

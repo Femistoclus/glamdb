@@ -28,7 +28,7 @@ cmake --build --preset release --target glamdb_server glamdb_cli --parallel 2
 ```
 
 The native build needs the pinned dependency prefix described in
-[BUILDING.md](../../docs/development/BUILDING.md). Build it first if unavailable.
+[BUILDING.md](../../docs/BUILDING.md). Build it first if unavailable.
 Capacity runs require `CMAKE_BUILD_TYPE=Release` in the binary's build tree.
 `--allow-non-release` permits diagnostic runs, whose recorded build settings
 must remain separate from Release results. Smoke runs accept other builds.

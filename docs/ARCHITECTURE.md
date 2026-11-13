@@ -1,14 +1,8 @@
 # Architecture
 
-This document describes the intended engine and its correctness boundaries.
-The current checkout implements the catalog, coordinator, production file
-backend and fixed-view scanner. A native HTTP adapter exposes their public API, including fixed-view metadata,
-verified file details and explain. See the
-[coordinator guide](development/COORDINATOR.md) for tested behavior and the
-[roadmap](ROADMAP.md) for acceptance gates. The SDK and workbench can use the [native HTTP server](development/HTTP_SERVER.md)
-or the separate [disposable mock](development/HTTP_MOCK_CONTRACT.md). Neither
-client integration nor mock tests qualify physical storage durability. See the [build guide](development/BUILDING.md) and
-[workbench guide](development/WORKBENCH.md) for runnable commands.
+GlamDB implements a local C++23 storage engine with an authenticated HTTP
+service, Python SDK, CLI and browser workbench. These interfaces share one
+publication authority. Physical power-loss durability has not been qualified.
 
 ## Model and scope
 
@@ -27,18 +21,17 @@ same authority rather than maintaining their own storage writers.
 | Operation | A collection-scoped identity bound to a canonical input hash and a durable terminal outcome. |
 | Orphan | A file not referenced by a published snapshot; it consumes space but is not visible to scans. |
 
-The initial mode is append: every input row is preserved, including duplicate
+The default collection mode is append: every input row is preserved, including duplicate
 keys. A nonempty successful append publishes one snapshot; independent requests
 are not coalesced, and empty input is rejected before writing. One process owns
 the store, writes are serialized, and independent cursors can read concurrently.
 
-Upsert, delete and compaction belong to the later explicit KV mode.
-The [bounded bulk append extension](development/BULK_INGESTION.md) adds replayable
-streaming ingestion to append collections before KV, with one atomic publication. Initial append has no payload journal, asynchronous queue, automatic file
-deletion or rollback to an older snapshot. The explicit
-[snapshot retention extension](development/SNAPSHOT_RETENTION.md) can expire
+[Explicit KV mode](KV_MODE.md) supports full-row upsert, keyed delete, lookup
+and compaction. [Bulk append](BULK_INGESTION.md) provides replayable streaming
+ingestion to append collections with one atomic publication. There is no payload
+journal, asynchronous write queue, general garbage collection or rollback API. The explicit
+[snapshot retention extension](SNAPSHOT_RETENTION.md) can expire
 an opted-in collection's oldest snapshot metadata in a separate publication.
-Other later features and their prerequisites are listed in the roadmap.
 
 ## Store identity and file ownership
 
@@ -68,8 +61,8 @@ orphan removal, is outside the initial engine. While the store is open, warehous
 mutations belong exclusively to the engine. Linux incremental physical-capacity
 admission detects ordinary notified local mutations but does not promise
 detection of arbitrary external mmap, alias or mount changes;
-[the inventory contract](development/WAREHOUSE_INVENTORY.md) defines strict
-full-traversal mode and safe fallback. Store ownership spans creation, recovery,
+bounded notification overflow or unsupported filesystems trigger an exact full
+traversal. Strict inventory mode uses full traversal at every admission. Store ownership spans creation, recovery,
 writes, cursors, retained buffers, and maintenance, including concurrent opens
 in the same process.
 
@@ -165,7 +158,7 @@ are outside initial scan execution.
 The schema is flat and supports UTF-8 strings, booleans, int64, finite float64,
 UTC timestamps in microseconds, decimal128(p,s) and calendar dates. Decimal
 precision is 1..38 and scale is 0..precision; dates span years 0001..9999.
-See [scalar forms and version compatibility](development/SCALAR_TYPES.md).
+See [scalar forms and version compatibility](SCALAR_TYPES.md).
 Field IDs persist in Iceberg and
 Parquet. A `key` field, when present, is a required string but is not unique in
 append mode. Omitted nullable fields become NULL; missing required fields,
@@ -174,7 +167,7 @@ rejected, and negative floating-point zero canonicalizes to positive zero.
 
 Timestamps span years 0001 through 9999. Text input needs a timezone, is
 normalized to UTC, and rejects leap seconds and more than six fractional digits.
-Integer and timestamp precision survives the future wire/SDK boundary without
+Integer and timestamp precision survives the HTTP/SDK boundary without
 passing through JavaScript Number or Date.
 
 The `key` column uses full Iceberg bounds; other applicable metrics use explicit
@@ -188,28 +181,29 @@ Data, metadata, and control memory have separate shared budgets. Arrow's pool
 does not account for every STL, Avro, JSON, SQLite, codec, or upstream writer
 allocation. Lazy file planning does not bound materialized table metadata or
 retained snapshot history. Account for buffers held by callers as well as work
-still executing inside the engine. The [shared resource budget contract](development/RESOURCE_BUDGETS.md)
-defines units, owners, reservation/release lifetimes, completion/recovery reserves
-and limit errors. Its matrices distinguish shared reservation envelopes from remaining RSS and
-caller-owned metadata qualification. See the [resource owner](development/SHARED_RESOURCES.md)
-for the process parent, protected completion/recovery and atomic device admission.
+still executing inside the engine. The [shared resource guide](SHARED_RESOURCES.md) defines reservation lifetimes,
+protected completion/recovery classes and device admission. Reservations are
+conservative envelopes; caller-owned inputs, copied metadata and process RSS
+require separate host budgeting.
 
 The synchronous append profile caps ordinary append input at 16 MiB of canonical
-decoded data and 10,000 rows, with one new Parquet file and one snapshot. Current
-default store-wide checks include 4,096 retained snapshots and 4,096 operation
-bindings/outcomes, including failed operations. The opt-in [retained-history
-profile](development/SCALABLE_HISTORY.md) exposes coordinated count, byte and
-recovery budgets and bounded catalog iteration beyond those defaults. These
-development limits do not qualify combined memory usage or storage capacity. Canonical bytes, owned-input
+decoded data and 10,000 rows, with one new Parquet file and one snapshot. Defaults
+of new databases are byte-bound: operation bindings/outcomes (including failed
+operations) within 64 GiB of catalog, root snapshots within the
+[snapshot archive](SNAPSHOT_ARCHIVE.md)'s hot window, and retained metadata
+within fractions of the 1 TiB warehouse budget; the
+[retained-history profile](SCALABLE_HISTORY.md) documents every budget and the
+former 4,096-operation/snapshot defaults that persisted databases keep. These
+limits do not establish combined memory usage or storage capacity. Canonical bytes, owned-input
 estimates, physical Arrow/writer allocations and HTTP payload bytes have separate
 checks; no one of them bounds process memory across stores.
 
 Small appends therefore do not imply large-scale ingestion: 1 TiB at 16 MiB per
-append needs at least 65,536 operations, exceeding the candidate history cap.
+append needs at least 65,536 operations, exceeding the default operation budget.
 A sufficient explicit history profile is required beyond the default horizon.
 The bounded bulk append extension amortizes publication over multiple files;
-its finite development profile and measured limits are documented separately.
-Larger bulk/compaction qualification remains future work. History never expires
+its finite operation limits are documented separately.
+Large-scale ingestion and compaction performance have not been qualified. History never expires
 by default; explicit retention maintenance changes that contract for opted-in
 collections. Receipts never expire, and orphan files count toward physical
 capacity.
@@ -248,20 +242,19 @@ while the retained engine owns its independent directory lease until the copying
 process releases stdin. Copying includes all regular store files (including
 orphans), rejects links/special files, verifies SHA-256, synchronizes files and
 directories and publishes `store.ready` last. A competing process is refused
-during copying. The [system recipe](development/NATIVE_ACCEPTANCE.md) verifies
+during copying. The [system recipe](../tools/acceptance/README.md) verifies
 successful and failed outcomes and current/historical/initial reads at another
 root while the original root is unavailable. This is a local quiesced procedure,
 not online backup or physical power-loss qualification.
 A live copy of only `catalog.sqlite` is not a backup of the store.
 
-Durability claims apply only to the
-[qualified environment](ROADMAP.md#g4-local-release-qualification). Disk loss,
+No physical power-loss-qualified environment is currently advertised. Disk loss,
 devices that falsely acknowledge flushes, and later media corruption are not
 made recoverable by `fsync`; backup and replication are separate capabilities.
 
 ## Explicit KV mutation path
 
-[KV mode](development/KV_MODE.md) is an immutable collection profile, selected in
+[KV mode](KV_MODE.md) is an immutable collection profile, selected in
 SQLite and verified against Iceberg metadata. It adds sorted disjoint ranges,
 COW overwrite/rewrite staging and interval-based historical membership through
 the existing coordinator, durable FileIO and exact-base publication guard.

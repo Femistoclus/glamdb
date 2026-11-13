@@ -19,7 +19,7 @@ enum class EStoragePath : std::uint8_t {
     Preflight,
 };
 
-// Maps a filesystem error to an engine error code. See SCANNER.md.
+// Maps a filesystem error to an engine error code. See docs/SCANNING.md.
 std::string_view ClassifyFsError(std::error_code error, EStoragePath path);
 
 ErrorDetail StorageError(std::error_code error, EStoragePath path, std::string_view context);

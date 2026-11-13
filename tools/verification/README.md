@@ -34,7 +34,7 @@ The frozen public API exports `normalize_schema`, `normalize_rows`, `wire_rows`,
 to zero and fields `{field_id, name, type, nullable}`, plus required integer
 `precision` (1–38) and `scale` (0–precision) for decimal fields. These parameters
 are forbidden on every other type. Initial fixed-schema IDs
-must be consecutive in declaration order starting at one. It validates 1–64
+must be consecutive in declaration order starting at one. It validates 1–128
 fields, unique UTF-8 names of at most 128 bytes, supported types, and the required
 string `key` rule. Omitted `nullable` defaults to false. This validates a complete
 collection schema; projected/reordered output schemas may retain sparse stable
@@ -102,8 +102,8 @@ inputs: keys with a common ASCII prefix longer than 16 bytes, a 1024-byte UTF-8
 key, binary ordering without Unicode normalization, truncated footer bounds,
 and missing footer statistics. Expected full key bounds/counts and matching
 rows are explicit and checked independently. No physical manifest is generated
-or validated here; feed these inputs to the future native writer's T-METRICS
-harness and compare actual manifests, stable field IDs and pruning on/off.
+or validated by this package; native storage and pruning tests compare actual
+manifests, stable field IDs and exact scan results separately.
 
 ## Predicate oracle
 
@@ -133,7 +133,7 @@ with parameters equal to the field. Date literals require
 raw NULL remains valid. Mismatched or missing parameters are rejected even for
 empty input and a zero scan limit.
 
-This is an independent expected-result oracle for a future engine. The current
+This is an independent expected-result oracle for the native engine. The current
 development mock deliberately reuses it as its evaluator. Mock tests therefore
 do not constitute an independent comparison against a C++ scanner or pruning.
 
@@ -143,7 +143,7 @@ do not constitute an independent comparison against a C++ scanner or pruning.
 hash/receipt version, digest, exact counters, ordinary one-file or bounded bulk mode, and retained
 snapshot creation time in whole milliseconds. `canonical_receipt` is the
 controller's deterministic JSON serialization; it makes no claim to define the
-future engine's persisted receipt bytes.
+engine's persisted receipt bytes.
 
 `AckLedger(path, test_volume=..., evidence_kind=...)` creates a JSONL ledger on an
 existing controller directory outside the selected test-volume subtree. Each
@@ -204,18 +204,3 @@ path-and-SHA256 index. Even then it returns `REVIEW REQUIRED`, never a durabilit
 PASS: declarations cannot prove hardware behavior, external-controller durability,
 artifact authenticity, or real execution. Every result retains an OPEN acceptance
 gate. No actual real-power or C++ process-crash evidence is shipped here.
-
-## Open handoff questions
-
-- The RFC fixes canonical schema/append bytes but does not fix an engine receipt
-  serialization. The ledger's JSON v1 must be adapted to the real coordinator's
-  authoritative canonical bytes, then tested with old retries/recovery.
-- Which real engine/IO seams will map the emitted cut-point names to executed
-  faults? Until that adapter exists, schedules and the simplified ordering model
-  remain helper-level evidence; process/real-power integration is NOT RUN.
-- Which qualified dedicated device and independent durable controller will supply
-  real-power receipts and raw images? No such environment was selected or tested.
-- Creation-schema normalization defaults omitted nullable to false, rejects empty
-  names, and validates consecutive initial IDs. Projected result schemas retain
-  their original IDs and use full-schema conversion before projection. Confirm
-  these adapter choices at the real public API handoff.

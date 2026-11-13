@@ -12,7 +12,7 @@ target. `bench tpch` adds reference eight-table generation, explicit target
 creation, resumable loading, verification, Q1–Q22 scan access patterns, complete
 Q1/Q6 client reductions, status, outcome resolution and exact database cleanup.
 No command silently reconciles a database or switches to a mock backend.
-See [the TPC-H guide](../../docs/development/TPC_H.md) for provenance, capacity,
+See [the TPC-H guide](../../docs/TPC_H.md) for provenance, capacity,
 recovery and the separate validation status of this workload.
 
 ## Install
@@ -50,7 +50,7 @@ executable is `GLAMDB_PYTHON`, defaulting to `python3`.
 
 ## Prepare the target
 
-Start a [native server](../../docs/development/HTTP_SERVER.md), set its bearer
+Start a [native server](../../docs/HTTP_SERVER.md), set its bearer
 token in `GLAMDB_TOKEN`, and create an open database and fixed-schema collection
 using the SDK or existing `request` command. The server starts with no databases.
 For example, the following SDK snippet creates a dedicated benchmark target:
@@ -220,12 +220,10 @@ glamdb-cli bench tpch scan --state tpch-run.json --queries 1,6 --mode reduce \
   --format arrow --consume batches --report tpch-reduce/
 ```
 
-Fractional scales are development profiles. SF=1/SF=10 full command-family HTTP
-acceptance is **NOT RUN**; the earlier
-[retained-history campaign](../../docs/development/SCALABLE_HISTORY_VALIDATION.md)
-is separate evidence. See [executed small native acceptance and independent review](../../docs/development/TPC_H_VALIDATION.md).
-This workload does not claim official TPC-H compliance
-or publish QphH results.
+Fractional scales provide small reproducible workloads. Full SF=1/SF=10 HTTP
+campaigns have not been run. See [the TPC-H guide](../../docs/TPC_H.md) for
+operation/history profiles and benchmark scope. This workload does not claim
+official TPC-H compliance or publish QphH results.
 
 | Command | Controls beyond required `--state` |
 | --- | --- |

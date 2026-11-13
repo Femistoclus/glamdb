@@ -57,6 +57,8 @@ struct TScanContext
     // The engine's indexed catalog lookup of a selected snapshot that left
     // the root for the archive; planning reads it instead of the root entry.
     std::shared_ptr<const ArchivedSnapshotRecord> Archived{};
+    // Half-open offsets in the immutable verified inventory, never caller paths.
+    std::optional<std::pair<size_t, size_t>> FileRange{};
 };
 
 Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanRequest& request);

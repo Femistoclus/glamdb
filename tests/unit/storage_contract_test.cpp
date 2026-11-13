@@ -22,6 +22,47 @@ EngineCapabilities LocalCapabilities()
         .snapshot_archive = true};
 }
 
+TEST(StorageContract, SplitProfileRequiresNativeVersion12)
+{
+    TStorageContractRequest request;
+    request.MaxVersion = {1, 2};
+    request.RequiredFeatures = {EStorageFeature::ScanSplits};
+    auto result = NegotiateStorageContract(request, LocalCapabilities(), {});
+    ASSERT_TRUE(result) << result.error().code;
+    EXPECT_EQ(result->Version, (TStorageContractVersion{1, 2}));
+    EXPECT_TRUE(result->HasOperation(EStorageOperation::PlanScan));
+    EXPECT_TRUE(result->HasOperation(EStorageOperation::NextScanSplits));
+    EXPECT_TRUE(result->HasOperation(EStorageOperation::ReadSplit));
+    EXPECT_TRUE(result->HasOperation(EStorageOperation::CancelScanPlan));
+    ASSERT_TRUE(result->EffectiveLimits.ScanSplits);
+    request.Mode = CollectionMode::KeyValue;
+    EXPECT_TRUE(NegotiateStorageContract(request, LocalCapabilities(), {}));
+    request.Mode = CollectionMode::Append;
+
+    request.MaxVersion = {1, 1};
+    EXPECT_FALSE(NegotiateStorageContract(request, LocalCapabilities(), {}));
+    request.MaxVersion = {1, 2};
+    auto custom = LocalCapabilities();
+    custom.backend = BackendKind::Custom;
+    EXPECT_FALSE(NegotiateStorageContract(request, custom, {}));
+}
+
+TEST(StorageContract, ScanNegotiationIsAdditiveAndNativeOnly)
+{
+    TStorageContractRequest request;
+    request.MaxVersion = {1, 3};
+    request.RequiredFeatures = {EStorageFeature::ScanNegotiation};
+    request.RequiredOperations = {EStorageOperation::NegotiateScan};
+    EXPECT_TRUE(NegotiateStorageContract(request, LocalCapabilities(), {}));
+    request.MaxVersion = {1, 2};
+    EXPECT_FALSE(NegotiateStorageContract(request, LocalCapabilities(), {}));
+    request.MaxVersion = {1, 3};
+    auto capabilities = LocalCapabilities();
+    capabilities.backend = BackendKind::Custom;
+    EXPECT_FALSE(NegotiateStorageContract(request, capabilities, {}));
+    EXPECT_FALSE(NegotiateStorageContract(request, {}, {}));
+}
+
 TEST(StorageContract, SelectsSupportedVersionFromInclusiveRange)
 {
     TStorageContractRequest request;
@@ -29,7 +70,7 @@ TEST(StorageContract, SelectsSupportedVersionFromInclusiveRange)
     request.MaxVersion = {3, 7};
     const auto result = NegotiateStorageContract(request, LocalCapabilities(), {});
     ASSERT_TRUE(result);
-    EXPECT_EQ(result->Version, (TStorageContractVersion{1, 1}));
+    EXPECT_EQ(result->Version, (TStorageContractVersion{1, 5}));
     request.MaxVersion = {1, 0};
     const auto first = NegotiateStorageContract(request, LocalCapabilities(), {});
     ASSERT_TRUE(first);
@@ -41,10 +82,48 @@ TEST(StorageContract, SelectsSupportedVersionFromInclusiveRange)
     EXPECT_EQ(exact->Version, (TStorageContractVersion{1, 1}));
 }
 
+TEST(StorageContract, ReadViewsAreAdditiveAndNativeOnly)
+{
+    TStorageContractRequest request;
+    auto old = NegotiateStorageContract(request, LocalCapabilities(), {});
+    ASSERT_TRUE(old);
+    EXPECT_EQ(old->Version, (TStorageContractVersion{1, 0}));
+    EXPECT_FALSE(old->HasFeature(EStorageFeature::IndependentReadView));
+    EXPECT_FALSE(old->HasOperation(EStorageOperation::AcquireReadView));
+    EXPECT_FALSE(old->EffectiveLimits.ReadViews);
+    request.RequiredFeatures = {EStorageFeature::IndependentReadView};
+    ASSERT_FALSE(NegotiateStorageContract(request, LocalCapabilities(), {}));
+    request.MaxVersion = {1, 1};
+    auto latest = NegotiateStorageContract(request, LocalCapabilities(), {});
+    ASSERT_TRUE(latest) << latest.error().code;
+    EXPECT_EQ(latest->Version, (TStorageContractVersion{1, 1}));
+    EXPECT_TRUE(latest->HasOperation(EStorageOperation::AcquireReadView));
+    EXPECT_TRUE(latest->HasOperation(EStorageOperation::ReadViewInfo));
+    EXPECT_TRUE(latest->HasOperation(EStorageOperation::ScanReadView));
+    EXPECT_TRUE(latest->HasOperation(EStorageOperation::RenewReadView));
+    EXPECT_TRUE(latest->HasOperation(EStorageOperation::ReleaseReadView));
+    EXPECT_TRUE(latest->HasOperation(EStorageOperation::CancelReadView));
+    ASSERT_TRUE(latest->EffectiveLimits.ReadViews);
+    EXPECT_EQ(latest->EffectiveLimits.ReadViews->MaxViews, 32U);
+    EXPECT_EQ(latest->EffectiveLimits.ReadViews->MaxEntries, 256U);
+    request.Mode = CollectionMode::KeyValue;
+    EXPECT_TRUE(NegotiateStorageContract(request, LocalCapabilities(), {}));
+    request.Mode = CollectionMode::Append;
+    auto custom = LocalCapabilities();
+    custom.backend = BackendKind::Custom;
+    auto unavailable = NegotiateStorageContract(request, custom, {});
+    ASSERT_FALSE(unavailable);
+    EXPECT_EQ(unavailable.error().code, "UNSUPPORTED_FEATURE");
+    request.RequiredFeatures.push_back(EStorageFeature::ScanSplits);
+    unavailable = NegotiateStorageContract(request, LocalCapabilities(), {});
+    ASSERT_FALSE(unavailable);
+    EXPECT_EQ(unavailable.error().code, "UNSUPPORTED_FEATURE");
+}
+
 TEST(StorageContract, RejectsDisjointVersionRangesAndMalformedRequests)
 {
     for (const auto version :
-        {TStorageContractVersion{0, 9}, TStorageContractVersion{1, 2}, TStorageContractVersion{2, 0}})
+        {TStorageContractVersion{0, 9}, TStorageContractVersion{1, 6}, TStorageContractVersion{2, 0}})
     {
         TStorageContractRequest request;
         request.MinVersion = version;
@@ -210,12 +289,12 @@ TEST(StorageContract, CustomBackendDoesNotImplyNativeBulkOrKeyValueMutations)
     EXPECT_FALSE(kv->HasFeature(EStorageFeature::SnapshotPreconditions));
 }
 
-// Contract 1.1 describes the snapshot archive like retention: native append
+// Contract 1.5 describes the snapshot archive like retention: native append
 // maintenance, plus archived reads, checkpoint open and full verification.
-TEST(StorageContract, SnapshotArchiveAndCheckpointsAreVersionElevenAppendMaintenance)
+TEST(StorageContract, SnapshotArchiveAndCheckpointsAreVersionFifteenAppendMaintenance)
 {
     TStorageContractRequest request;
-    request.MaxVersion = {1, 1};
+    request.MaxVersion = {1, 5};
     request.RequiredOperations = {EStorageOperation::UpdateSnapshotArchive,
         EStorageOperation::ArchiveSnapshots,
         EStorageOperation::VerifyStoreFull,
@@ -223,13 +302,14 @@ TEST(StorageContract, SnapshotArchiveAndCheckpointsAreVersionElevenAppendMainten
     request.RequiredFeatures = {EStorageFeature::ArchivedSnapshotReads, EStorageFeature::CheckpointOpen};
     const auto append = NegotiateStorageContract(request, LocalCapabilities(), {});
     ASSERT_TRUE(append) << append.error().message;
-    EXPECT_EQ(append->Version, (TStorageContractVersion{1, 1}));
+    EXPECT_EQ(append->Version, (TStorageContractVersion{1, 5}));
     EXPECT_EQ(append->EffectiveLimits.DefaultHotSnapshots, DefaultHotSnapshots);
     EXPECT_EQ(append->EffectiveLimits.DefaultHotSnapshots, 100);
     EXPECT_EQ(append->EffectiveLimits.MaxHotSnapshots, 1LL << 40);
 
-    // 1.0 is unchanged: none of the additions, and requiring them fails closed.
-    request.MaxVersion = {1, 0};
+    // 1.4 (and every earlier minor) is unchanged: none of the additions, and
+    // requiring them fails closed.
+    request.MaxVersion = {1, 4};
     const auto first = NegotiateStorageContract(request, LocalCapabilities(), {});
     ASSERT_FALSE(first);
     EXPECT_EQ(first.error().code, "UNSUPPORTED_OPERATION");
@@ -255,7 +335,7 @@ TEST(StorageContract, SnapshotArchiveAndCheckpointsAreVersionElevenAppendMainten
     // KV collections have no archive and open by full verification; full
     // verification itself is store-wide, like Reconcile.
     request = {};
-    request.MaxVersion = {1, 1};
+    request.MaxVersion = {1, 5};
     request.Mode = CollectionMode::KeyValue;
     const auto kv = NegotiateStorageContract(request, LocalCapabilities(), {});
     ASSERT_TRUE(kv);
@@ -317,3 +397,17 @@ TEST(StorageContract, EngineConvenienceUsesEffectiveLimitsWithoutConsultingReadi
 
 } // namespace
 } // namespace glamdb
+
+namespace glamdb {
+TEST(StorageContract, NativeStagedWritesAreAdditiveFrom14)
+{
+    TStorageContractRequest request;
+    request.MaxVersion = {1, 4};
+    request.RequiredFeatures = {EStorageFeature::StagedWrites};
+    auto contract = NegotiateStorageContract(request, LocalCapabilities(), {});
+    ASSERT_TRUE(contract);
+    EXPECT_EQ(contract->Version, (TStorageContractVersion{1, 4}));
+    request.MaxVersion = {1, 3};
+    EXPECT_FALSE(NegotiateStorageContract(request, LocalCapabilities(), {}));
+}
+}

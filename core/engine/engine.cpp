@@ -9,6 +9,8 @@
 #include "core/api/write_settings.h"
 #include "core/engine/engine_factory.h"
 #include "core/engine/metadata_pages.h"
+#include "core/engine/read_views.h"
+#include "core/engine/scan_splits.h"
 #include "core/engine/storage_mapping.h"
 #include "core/engine/store_lease.h"
 #include "core/scan/read_budget.h"
@@ -19,7 +21,9 @@
 #include "core/backend/local_storage_backend.h"
 #include "core/scan/file_metadata.h"
 #include "core/scan/metadata.h"
+#include "core/scan/predicate.h"
 #include "core/scan/scan_cursor.h"
+#include "core/scan/scan_planner.h"
 #include "core/storage/base_state.h"
 #include "core/storage/snapshot_retention.h"
 
@@ -251,6 +255,7 @@ struct Engine::Impl
     // Roots that scans resolved from confirmed_views and are still reading,
     // and superseded roots waiting for those readers (all under state_mutex).
     std::map<std::string, std::size_t, std::less<>> root_readers;
+    TReadViews read_views{root_readers};
     std::vector<BaseIdentity> retired_roots;
     std::optional<BoundOperation> active;
     std::optional<RecoveryContext> recovery;
@@ -679,6 +684,7 @@ struct Engine::Impl
         std::vector<BaseIdentity> released;
         {
             std::lock_guard lock(state_mutex);
+            read_views.Expire();
             const auto unleased = std::ranges::partition(retired_roots, [&](const auto& item) {
                 return root_readers.contains(item.metadata_location);
             });
@@ -710,6 +716,7 @@ struct Engine::Impl
             const auto prefix = "store://" + info.store_id + "/warehouse/" + collection.collection_id + "/";
             {
                 std::lock_guard lock(state_mutex);
+                read_views.Expire();
                 if (std::ranges::any_of(root_readers, [&](const auto& reader) {
                         return reader.first.starts_with(prefix);
                     }))
@@ -1226,6 +1233,28 @@ struct Engine::Impl
 
 namespace detail {
 
+Result<std::optional<AppendOutcome>> EngineFactory::FindWriteOutcome(const Engine& engine,
+    std::string_view collection,
+    std::string_view operation,
+    std::string_view expectedHash)
+{
+    return engine.FindAppendOutcomeImpl(collection, operation, expectedHash);
+}
+
+Status EngineFactory::ValidateStagingDirectory(const Engine& engine, const std::filesystem::path& directory)
+{
+    const auto root = std::filesystem::weakly_canonical(engine.impl_->lease->Root());
+    const auto stage = std::filesystem::weakly_canonical(directory);
+    auto contains = [](const auto& parent, const auto& child) {
+        const auto relative = child.lexically_relative(parent);
+        return relative.empty() || *relative.begin() != "..";
+    };
+    if (contains(root, stage) || contains(stage, root)) {
+        return std::unexpected(ErrorDetail{"INVALID_ARGUMENT", "staging and store directories must be disjoint"});
+    }
+    return {};
+}
+
 Result<std::shared_ptr<Engine>> EngineFactory::Create(const CreateStoreRequest& request,
     std::shared_ptr<StorageBackend> backend,
     std::string sqlite_vfs)
@@ -1322,7 +1351,13 @@ void Engine::CloseOnCorruption(const ErrorDetail& error) const
     impl_->CloseOnCorruption(error);
 }
 
-Engine::~Engine() = default;
+Engine::~Engine()
+{
+    // Cursors can keep Impl alive after the facade is gone. Release query pins
+    // here without setting closing: existing cursors retain their original lifetime.
+    std::lock_guard lock(impl_->state_mutex);
+    impl_->read_views.Clear();
+}
 
 Result<std::shared_ptr<Engine>> CreateStore(const CreateStoreRequest& request)
 {
@@ -2870,6 +2905,13 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
 Result<std::optional<AppendOutcome>> Engine::FindAppendOutcome(std::string_view collection_id,
     std::string_view operation_id) const
 {
+    return FindAppendOutcomeImpl(collection_id, operation_id, {});
+}
+
+Result<std::optional<AppendOutcome>> Engine::FindAppendOutcomeImpl(std::string_view collection_id,
+    std::string_view operation_id,
+    std::string_view expectedHash) const
+{
     const auto impl = impl_;
     try {
         Require(ValidUuid(collection_id) && ValidUuid(operation_id),
@@ -2881,6 +2923,9 @@ Result<std::optional<AppendOutcome>> Engine::FindAppendOutcome(std::string_view 
             if (!impl->ready && recovery && recovery->collection_id == collection_id &&
                 recovery->operation_id == operation_id)
             {
+                Require(expectedHash.empty() || recovery->payload_hash == expectedHash,
+                    "IDEMPOTENCY_CONFLICT",
+                    "sealed identity differs from the bound operation");
                 auto error = recovery->first_error;
                 error.retry_hint = RetryHint::SameIdAfterReconcile;
                 return std::optional(AppendOutcome{std::string(operation_id),
@@ -2908,6 +2953,9 @@ Result<std::optional<AppendOutcome>> Engine::FindAppendOutcome(std::string_view 
         if (!record) {
             return std::optional<AppendOutcome>{};
         }
+        Require(expectedHash.empty() || record->binding.payload_hash == expectedHash,
+            "IDEMPOTENCY_CONFLICT",
+            "sealed identity differs from the bound operation");
         if (!record->outcome) {
             throw Failure(
                 {"OPERATION_IN_PROGRESS", "registered append is still executing", RetryHint::SameIdAfterReconcile});
@@ -3050,41 +3098,75 @@ Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) con
     return ScanImpl(request, nullptr);
 }
 
-Result<std::shared_ptr<ScanCursor>>
-Engine::ScanImpl(const ScanRequest& request, std::shared_ptr<TReadBudget> budget, bool chronologicalFiles) const
+Result<std::shared_ptr<ScanCursor>> Engine::ScanImpl(const ScanRequest& request,
+    std::shared_ptr<TReadBudget> budget,
+    bool chronologicalFiles,
+    const TReadView* pinnedView,
+    size_t entry,
+    std::string_view authorizationScope,
+    const TScanSplit* split) const
 {
     NGlamDB::NTelemetry::TReadOperationScope metrics(NGlamDB::NTelemetry::EReadOperation::ScanOpen);
     const auto impl = impl_;
     // The root this scan resolved; held until planning has read it, so a
     // concurrent append does not remove it underneath the scan.
-    std::optional<std::string> leased_root;
+    std::string leased_root;
+    bool root_acquired = false;
     const auto release_root = [&] {
-        if (leased_root) {
-            impl->ReleaseRoot(*std::exchange(leased_root, std::nullopt));
+        if (std::exchange(root_acquired, false)) {
+            impl->ReleaseRoot(leased_root);
         }
     };
     try {
-        Require(ValidUuid(request.collection_id), "INVALID_ARGUMENT", "scan requires a canonical collection UUID");
+        if (!pinnedView) {
+            Require(ValidUuid(request.collection_id), "INVALID_ARGUMENT", "scan requires a canonical collection UUID");
+        }
 #if GLAMDB_HAS_STORAGE
+        auto selectedRequest = request;
         TScanContext context;
         context.RootBytes = impl->limits.history.max_root_file_bytes;
         {
             // Latest is resolved here exactly once, from the confirmed view;
             // no SQLite read transaction is held while files are read.
             std::lock_guard lock(impl->state_mutex);
+            if (pinnedView) {
+                const auto& captured = impl->read_views.Resolve(*pinnedView, impl->info.store_id, authorizationScope);
+                Require(entry < captured.Info->Entries.size(),
+                    "INVALID_ARGUMENT",
+                    "read-view entry index out of range");
+                if (split) {
+                    Require(!split->State_->Cancelled, "SCAN_PLAN_CANCELLED", "scan plan was cancelled");
+                    context.FileRange = std::pair{split->Begin_, split->End_};
+                }
+                const auto& selected = captured.Info->Entries[entry];
+                context.Collection = selected.Collection;
+                context.Base = selected.Identity;
+                context.VerifiedState = captured.States[entry];
+                context.Archived = captured.Archived[entry];
+                selectedRequest.collection_id = selected.Collection.collection_id;
+                selectedRequest.selector = selected.SelectorResolved;
+            } else {
+                impl->CheckReady();
+                context.Collection = impl->CachedCollection(request.collection_id);
+                const auto view = std::ranges::find_if(impl->confirmed_views, [&](const auto& item) {
+                    return item.info.collection_id == request.collection_id;
+                });
+                Require(view != impl->confirmed_views.end(), "CORRUPTION", "confirmed collection view is missing");
+                context.Base = view->base;
+                context.VerifiedState = view->scan_state;
+            }
             impl->CheckReady();
-            context.Collection = impl->CachedCollection(request.collection_id);
-            const auto view = std::ranges::find_if(impl->confirmed_views, [&](const auto& item) {
-                return item.info.collection_id == request.collection_id;
-            });
-            Require(view != impl->confirmed_views.end(), "CORRUPTION", "confirmed collection view is missing");
-            context.Base = view->base;
-            context.VerifiedState = view->scan_state;
-            ++impl->root_readers[context.Base.metadata_location];
             leased_root = context.Base.metadata_location;
+            ++impl->root_readers[leased_root];
+            root_acquired = true;
         }
         Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
-        impl->ResolveArchived(context, request.selector);
+        if (pinnedView) {
+            // The view pinned its state and any archive row at acquisition.
+            CheckExpiredSnapshot(context, selectedRequest.selector);
+        } else {
+            impl->ResolveArchived(context, selectedRequest.selector);
+        }
         const auto capabilities = impl->backend->GetCapabilities();
         context.Resources = impl->resources;
         context.ChronologicalFiles = chronologicalFiles;
@@ -3100,7 +3182,7 @@ Engine::ScanImpl(const ScanRequest& request, std::shared_ptr<TReadBudget> budget
         context.OnError = [impl](const ErrorDetail& error) {
             impl->CloseOnCorruption(error);
         };
-        auto cursor = OpenScan(std::move(context), request);
+        auto cursor = OpenScan(std::move(context), selectedRequest);
         // Planning pinned membership or read the uncached root. The cursor now
         // needs only files that are never removed.
         release_root();
@@ -3111,6 +3193,9 @@ Engine::ScanImpl(const ScanRequest& request, std::shared_ptr<TReadBudget> budget
 #else
         (void)budget;
         (void)chronologicalFiles;
+        (void)split;
+        (void)entry;
+        (void)authorizationScope;
         throw Failure({"DEPENDENCY_UNAVAILABLE", "storage scanner is not built", RetryHint::OperatorAction});
 #endif
     } catch (const Failure& error) {
@@ -3123,6 +3208,369 @@ Engine::ScanImpl(const ScanRequest& request, std::shared_ptr<TReadBudget> budget
         const auto detail = ExceptionError(error);
         metrics.Error(detail.code);
         return std::unexpected(detail);
+    }
+}
+
+Result<std::shared_ptr<TReadView>> Engine::AcquireReadView(const TReadViewRequest& request) const
+{
+    const auto impl = impl_;
+    // Declare the handle outside the locked scope: its destruction callback must
+    // never run while state_mutex is already held, including allocation failure.
+    std::shared_ptr<TReadView> handle;
+    try {
+        TReadViews::Validate(request);
+        const auto capabilities = GetCapabilities();
+        Require(capabilities.backend == BackendKind::LocalStorage && capabilities.scan,
+            "UNSUPPORTED_FEATURE",
+            "pinned read views require the native local scanner");
+#if GLAMDB_HAS_STORAGE
+        {
+            // Reclaim expired pins before their shared reservations can refuse
+            // this acquisition. Admission below can race other acquisitions or
+            // shutdown, so capture repeats expiry/readiness/quota checks.
+            std::lock_guard lock(impl->state_mutex);
+            impl->read_views.Expire();
+            impl->CheckReady();
+            impl->read_views.CheckCapacity(request);
+        }
+        auto controlMemory = Take(impl->resources->Reserve(ResourceClass::Control, TReadViews::ControlMemoryBytes));
+        auto memory = Take(impl->resources->Reserve(ResourceClass::Metadata,
+            TReadViews::ControlMemoryBytes + request.Entries.size() * TReadViews::EntryMemoryBytes));
+        handle = std::shared_ptr<TReadView>(new TReadView());
+        handle->State_->ControlMemory = std::move(controlMemory);
+        handle->Release_ = [owner = std::weak_ptr<Impl>(impl), state = std::weak_ptr<TReadViewState>(handle->State_)] {
+            const auto locked = owner.lock();
+            const auto handleState = state.lock();
+            if (locked && handleState) {
+                std::lock_guard lock(locked->state_mutex);
+                locked->read_views.Drop(handleState);
+            }
+        };
+        auto info = std::make_shared<TReadViewInfo>();
+        info->ResourceLease = std::move(memory);
+        info->Entries.reserve(request.Entries.size());
+        TReadViews::TCapture capture;
+        capture.Info = info;
+        capture.States.reserve(request.Entries.size());
+        capture.Archived.reserve(request.Entries.size());
+        // A selected snapshot may have left the root for the archive: resolve
+        // its row (an indexed catalog lookup bound to the receipt) without
+        // state_mutex, which the catalog must never be taken under.
+        std::vector<std::shared_ptr<const ArchivedSnapshotRecord>> archived(request.Entries.size());
+        {
+            std::vector<std::pair<CollectionInfo, TReadViews::TVerifiedState>> current;
+            {
+                std::lock_guard lock(impl->state_mutex);
+                impl->CheckReady();
+                for (const auto& entry : request.Entries) {
+                    const auto view = std::ranges::find_if(impl->confirmed_views, [&](const auto& item) {
+                        return item.info.collection_id == entry.CollectionID;
+                    });
+                    current.emplace_back(impl->CachedCollection(entry.CollectionID),
+                        view == impl->confirmed_views.end() ? nullptr : view->scan_state);
+                }
+            }
+            for (size_t index = 0; index < request.Entries.size(); ++index) {
+                TScanContext context;
+                context.Collection = current[index].first;
+                context.VerifiedState = current[index].second;
+                impl->ResolveArchived(context, request.Entries[index].Selector);
+                archived[index] = std::move(context.Archived);
+            }
+        }
+        {
+            std::lock_guard lock(impl->state_mutex);
+            impl->read_views.Expire();
+            impl->CheckReady();
+            impl->read_views.CheckCapacity(request);
+            for (const auto& entry : request.Entries) {
+                auto collection = impl->CachedCollection(entry.CollectionID);
+                const auto view = std::ranges::find_if(impl->confirmed_views, [&](const auto& item) {
+                    return item.info.collection_id == entry.CollectionID;
+                });
+                Require(view != impl->confirmed_views.end() && view->scan_state,
+                    "CORRUPTION",
+                    "native confirmed collection has no verified state");
+                TScanContext context;
+                context.Base = view->base;
+                context.VerifiedState = view->scan_state;
+                CheckExpiredSnapshot(context, entry.Selector);
+                const auto& record = archived[capture.States.size()];
+                const auto plan = Take(PlanVerifiedScan(*view->scan_state, view->base, entry.Selector, record.get()));
+                // The archived prefix is pinned together with this state.
+                const bool hot = plan.SnapshotID &&
+                    std::ranges::binary_search(view->scan_state->ScanIndex->Snapshots,
+                        *plan.SnapshotID,
+                        {},
+                        &NGlamDB::NStorage::TSnapshotBoundary::SnapshotID);
+                info->Entries.push_back({std::move(collection),
+                    view->base,
+                    plan.SnapshotID ? SnapshotSelector::Id(*plan.SnapshotID) : SnapshotSelector::InitialEmpty()});
+                capture.States.push_back(view->scan_state);
+                capture.Archived.push_back(hot ? nullptr : record);
+            }
+            impl->read_views.Add(*handle, impl->info.store_id, request, std::move(capture));
+        }
+        return handle;
+#else
+        throw Failure({"UNSUPPORTED_FEATURE", "pinned read views require the native local scanner"});
+#endif
+    } catch (const Failure& error) {
+        impl->CloseOnCorruption(error.detail);
+        return std::unexpected(error.detail);
+    } catch (const std::exception& error) {
+        return std::unexpected(ExceptionError(error));
+    }
+}
+
+Result<std::shared_ptr<const TReadViewInfo>> Engine::GetReadViewInfo(const TReadView& view,
+    std::string_view authorizationScope) const
+{
+    try {
+        std::lock_guard lock(impl_->state_mutex);
+        return impl_->read_views.Resolve(view, impl_->info.store_id, authorizationScope).Info;
+    } catch (const Failure& error) {
+        return std::unexpected(error.detail);
+    } catch (const std::exception& error) {
+        return std::unexpected(ExceptionError(error));
+    }
+}
+
+Result<std::shared_ptr<ScanCursor>> Engine::ScanReadView(const TReadView& view,
+    size_t entry,
+    const TReadViewScanRequest& request,
+    std::string_view authorizationScope) const
+{
+    try {
+        ScanRequest scan;
+        scan.projection = request.Projection;
+        scan.predicate = request.Filter;
+        scan.limit = request.Limit;
+        scan.batch_rows = request.BatchRows;
+        return ScanImpl(scan, nullptr, false, &view, entry, authorizationScope);
+    } catch (const std::exception& error) {
+        return std::unexpected(ExceptionError(error));
+    }
+}
+
+const ScanInfo& TScanSplitPlan::Info() const
+{
+    return State_->Info;
+}
+
+uint64_t TScanSplit::EstimatedBytes() const
+{
+    return Bytes_;
+}
+
+size_t TScanSplit::FileCount() const
+{
+    return FileCount_;
+}
+
+Result<std::shared_ptr<TScanSplitPlan>> Engine::PlanScan(std::shared_ptr<const TReadView> view,
+    size_t entry,
+    const TReadViewScanRequest& request,
+    std::string_view authorizationScope,
+    const TScanPlanOptions& options) const
+{
+    try {
+        Require(view != nullptr, "INVALID_ARGUMENT", "scan planning requires a read view");
+        Require(!request.Limit, "UNSUPPORTED_FEATURE", "independent splits cannot apply a global limit");
+        const TScanSplitLimits limits;
+        Require(options.SplitsPerPage > 0 && options.SplitsPerPage <= limits.MaxSplitsPerPage &&
+                options.TargetBytes > 0 && options.TargetBytes <= limits.MaxTargetBytes,
+            "INVALID_ARGUMENT",
+            "scan split page or target size is outside the supported range");
+#if GLAMDB_HAS_STORAGE
+        {
+            // Reclaim expired pins before any new shared reservation.
+            std::lock_guard lock(impl_->state_mutex);
+            const auto& capture = impl_->read_views.Resolve(*view, impl_->info.store_id, authorizationScope);
+            impl_->CheckReady();
+            Require(entry < capture.Info->Entries.size(), "INVALID_ARGUMENT", "read-view entry index out of range");
+        }
+        const auto predicateBytes = Take(TPredicateResources::Measure(request.Filter));
+        Require(predicateBytes <= limits.MaxPredicateBytes, "RESOURCE_EXHAUSTED", "scan split predicate too large");
+        if (request.Projection) {
+            Require(request.Projection->size() <= MaxSchemaFields, "INVALID_ARGUMENT", "too many projected fields");
+            for (const auto& field : *request.Projection) {
+                Require(field.size() <= 128, "INVALID_ARGUMENT", "projected field name too long");
+            }
+        }
+        auto control = Take(impl_->resources->Reserve(ResourceClass::Control, TScanPlanState::ControlBytes));
+        auto memory = Take(impl_->resources->Reserve(ResourceClass::Metadata, (256ULL << 10) + 2 * predicateBytes));
+        // Reuse scanner binding/validation and its independently charged schema.
+        // Opening is metadata-only; no data files/footers are read or copied.
+        auto validation = Take(ScanReadView(*view, entry, request, authorizationScope));
+        auto state = std::make_shared<TScanPlanState>();
+        state->ControlMemory = std::move(control);
+        state->RequestMemory = std::move(memory);
+        state->View = std::move(view);
+        state->Entry = entry;
+        state->Request = request;
+        state->Options = options;
+        state->Info = validation->Info();
+        auto plan = std::shared_ptr<TScanSplitPlan>(new TScanSplitPlan());
+        plan->State_ = std::move(state);
+        {
+            // Binding may race expiry, explicit release or shutdown.
+            std::lock_guard lock(impl_->state_mutex);
+            (void)impl_->read_views.Resolve(*plan->State_->View, impl_->info.store_id, authorizationScope);
+            impl_->CheckReady();
+        }
+        return plan;
+#else
+        (void)entry;
+        (void)authorizationScope;
+        throw Failure({"UNSUPPORTED_FEATURE", "scan splits require the native local scanner"});
+#endif
+    } catch (const Failure& error) {
+        return std::unexpected(error.detail);
+    } catch (const std::exception& error) {
+        return std::unexpected(ExceptionError(error));
+    }
+}
+
+Result<TScanSplitPage> Engine::NextScanSplits(const TScanSplitPlan& plan, std::string_view authorizationScope) const
+{
+    try {
+        std::lock_guard lock(impl_->state_mutex);
+        auto& state = *plan.State_;
+        const auto& capture = impl_->read_views.Resolve(*state.View, impl_->info.store_id, authorizationScope);
+        impl_->CheckReady();
+        Require(!state.Cancelled, "SCAN_PLAN_CANCELLED", "scan plan was cancelled");
+#if GLAMDB_HAS_STORAGE
+        const auto& entry = capture.Info->Entries[state.Entry];
+        const auto membership = Take(PlanVerifiedScan(*capture.States[state.Entry],
+            entry.Identity,
+            entry.SelectorResolved,
+            capture.Archived[state.Entry].get()));
+        TScanSplitPage page;
+        auto position = state.Next;
+        size_t examined = 0;
+        while (position < membership.FileCount && page.Splits.size() < state.Options.SplitsPerPage &&
+            examined < TScanSplitLimits{}.MaxFilesExaminedPerPage)
+        {
+            const auto begin = position;
+            uint64_t bytes = 0;
+            size_t files = 0;
+            while (position < membership.FileCount && bytes < state.Options.TargetBytes &&
+                examined < TScanSplitLimits{}.MaxFilesExaminedPerPage)
+            {
+                const auto& file = membership.Index->Files[position++];
+                ++examined;
+                if (membership.Index->KeyValue &&
+                    (!membership.SequenceNumber || file.IntroducedSequence > *membership.SequenceNumber ||
+                        (file.RemovedSequence && *membership.SequenceNumber >= *file.RemovedSequence)))
+                {
+                    continue;
+                }
+                Require(file.SizeBytes > 0 &&
+                        static_cast<uint64_t>(file.SizeBytes) <= std::numeric_limits<uint64_t>::max() - bytes,
+                    "CORRUPTION",
+                    "invalid split file size");
+                bytes += static_cast<uint64_t>(file.SizeBytes);
+                ++files;
+            }
+            if (files != 0) {
+                // Each descriptor's charge includes its shared_ptr and page-vector slot.
+                // Failed pages destroy partial descriptors before committing position.
+                auto memory = Take(impl_->resources->Reserve(ResourceClass::Control, TScanPlanState::ControlBytes));
+                auto split = std::shared_ptr<TScanSplit>(new TScanSplit());
+                split->Memory_ = std::move(memory);
+                split->State_ = plan.State_;
+                split->Begin_ = begin;
+                split->End_ = position;
+                split->FileCount_ = files;
+                split->Bytes_ = bytes;
+                page.Splits.push_back(std::move(split));
+            }
+        }
+        // Expiry can cross while producing a page. Never commit a failed page.
+        (void)impl_->read_views.Resolve(*state.View, impl_->info.store_id, authorizationScope);
+        page.Done = position == membership.FileCount;
+        state.Next = position;
+        return page;
+#else
+        (void)capture;
+        throw Failure({"UNSUPPORTED_FEATURE", "scan splits require the native local scanner"});
+#endif
+    } catch (const Failure& error) {
+        impl_->CloseOnCorruption(error.detail);
+        return std::unexpected(error.detail);
+    } catch (const std::exception& error) {
+        return std::unexpected(ExceptionError(error));
+    }
+}
+
+Result<std::shared_ptr<ScanCursor>> Engine::ReadSplit(const TScanSplit& split,
+    std::string_view authorizationScope) const
+{
+    try {
+        const auto& state = *split.State_;
+        ScanRequest scan;
+        scan.projection = state.Request.Projection;
+        scan.predicate = state.Request.Filter;
+        scan.batch_rows = state.Request.BatchRows;
+        return ScanImpl(scan, nullptr, false, state.View.get(), state.Entry, authorizationScope, &split);
+    } catch (const std::exception& error) {
+        return std::unexpected(ExceptionError(error));
+    }
+}
+
+Status Engine::CancelScanPlan(const TScanSplitPlan& plan, std::string_view authorizationScope) const
+{
+    try {
+        std::lock_guard lock(impl_->state_mutex);
+        (void)impl_->read_views.Resolve(*plan.State_->View, impl_->info.store_id, authorizationScope);
+        plan.State_->Cancelled = true;
+        return {};
+    } catch (const Failure& error) {
+        return std::unexpected(error.detail);
+    } catch (const std::exception& error) {
+        return std::unexpected(ExceptionError(error));
+    }
+}
+
+Status Engine::RenewReadView(const TReadView& view,
+    std::string_view authorizationScope,
+    std::chrono::milliseconds lifetime) const
+{
+    try {
+        std::lock_guard lock(impl_->state_mutex);
+        impl_->read_views.Renew(view, impl_->info.store_id, authorizationScope, lifetime);
+        return {};
+    } catch (const Failure& error) {
+        return std::unexpected(error.detail);
+    } catch (const std::exception& error) {
+        return std::unexpected(ExceptionError(error));
+    }
+}
+
+Status Engine::ReleaseReadView(const TReadView& view, std::string_view authorizationScope) const
+{
+    try {
+        std::lock_guard lock(impl_->state_mutex);
+        impl_->read_views.End(view, impl_->info.store_id, authorizationScope, EReadViewState::Released);
+        return {};
+    } catch (const Failure& error) {
+        return std::unexpected(error.detail);
+    } catch (const std::exception& error) {
+        return std::unexpected(ExceptionError(error));
+    }
+}
+
+Status Engine::CancelReadView(const TReadView& view, std::string_view authorizationScope) const
+{
+    try {
+        std::lock_guard lock(impl_->state_mutex);
+        impl_->read_views.End(view, impl_->info.store_id, authorizationScope, EReadViewState::Cancelled);
+        return {};
+    } catch (const Failure& error) {
+        return std::unexpected(error.detail);
+    } catch (const std::exception& error) {
+        return std::unexpected(ExceptionError(error));
     }
 }
 
@@ -3163,6 +3611,10 @@ Status Engine::Shutdown(std::chrono::milliseconds timeout)
     NGlamDB::NTelemetry::TReadOperationScope metrics(NGlamDB::NTelemetry::EReadOperation::CloseStore);
     const auto impl = impl_;
     impl->closing = true;
+    {
+        std::lock_guard state_lock(impl->state_mutex);
+        impl->read_views.Clear();
+    }
     impl->metadata_pages.Clear();
     std::unique_lock lock(impl->writer, std::defer_lock);
     if (!lock.try_lock_for(std::max(timeout, std::chrono::milliseconds(0)))) {

@@ -7,10 +7,10 @@
 namespace glamdb {
 namespace {
 
-constexpr TStorageContractVersion FirstVersion{1, 0};
-// 1.1 adds the snapshot archive and verified-checkpoint operations, features
-// and limits; 1.0 describes exactly what it did before.
-constexpr TStorageContractVersion CurrentVersion{1, 1};
+// 1.5 adds the snapshot archive and verified-checkpoint operations, features
+// and limits; every earlier minor describes exactly what it did before.
+constexpr TStorageContractVersion ArchiveVersion{1, 5};
+constexpr TStorageContractVersion CurrentVersion = ArchiveVersion;
 
 void AddOperations(TStorageContract& contract, std::initializer_list<EStorageOperation> operations)
 {
@@ -54,12 +54,50 @@ TStorageContract DescribeContract(TStorageContractVersion version,
     if (supportedMode && capabilities.scan) {
         AddOperations(contract, {EStorageOperation::Scan, EStorageOperation::ExplainScan});
         contract.Features.push_back(EStorageFeature::FixedSnapshotScan);
+        if (native && version >= TStorageContractVersion{1, 1}) {
+            AddOperations(contract,
+                {EStorageOperation::AcquireReadView,
+                    EStorageOperation::ReadViewInfo,
+                    EStorageOperation::ScanReadView,
+                    EStorageOperation::RenewReadView,
+                    EStorageOperation::ReleaseReadView,
+                    EStorageOperation::CancelReadView});
+            contract.Features.push_back(EStorageFeature::IndependentReadView);
+            contract.EffectiveLimits.ReadViews = TReadViewLimits{};
+        }
+        if (native && version >= TStorageContractVersion{1, 2}) {
+            AddOperations(contract,
+                {EStorageOperation::PlanScan,
+                    EStorageOperation::NextScanSplits,
+                    EStorageOperation::ReadSplit,
+                    EStorageOperation::CancelScanPlan});
+            contract.Features.push_back(EStorageFeature::ScanSplits);
+            contract.EffectiveLimits.ScanSplits = TScanSplitLimits{};
+        }
+        if (native && version >= TStorageContractVersion{1, 3}) {
+            contract.Operations.push_back(EStorageOperation::NegotiateScan);
+            contract.Features.push_back(EStorageFeature::ScanNegotiation);
+        }
         if (mode == CollectionMode::KeyValue) {
             contract.Operations.push_back(EStorageOperation::Lookup);
         }
     }
     if (supportedMode && capabilities.append) {
         contract.Operations.push_back(EStorageOperation::CreateCollection);
+        if (native && version >= TStorageContractVersion{1, 4}) {
+            AddOperations(contract,
+                {EStorageOperation::BeginWrite,
+                    EStorageOperation::PutPart,
+                    EStorageOperation::GetPartReceipt,
+                    EStorageOperation::SealWrite,
+                    EStorageOperation::CommitWrite,
+                    EStorageOperation::GetWriteStatus,
+                    EStorageOperation::GetWriteOutcome,
+                    EStorageOperation::AbortWrite,
+                    EStorageOperation::CleanupWrites});
+            contract.Features.push_back(EStorageFeature::StagedWrites);
+            contract.EffectiveLimits.WriteSessions = TWriteSessionLimits{};
+        }
         if (mode == CollectionMode::Append) {
             contract.Operations.push_back(EStorageOperation::Append);
             contract.Features.push_back(EStorageFeature::SnapshotPreconditions);
@@ -91,7 +129,7 @@ TStorageContract DescribeContract(TStorageContractVersion version,
     {
         contract.Features.push_back(EStorageFeature::TypedNulls);
     }
-    if (version < CurrentVersion) {
+    if (version < ArchiveVersion) {
         return contract;
     }
     // Full verification is the store-wide recovery path, like Reconcile.
@@ -134,13 +172,8 @@ Result<TStorageContract> NegotiateStorageContract(const TStorageContractRequest&
     {
         return std::unexpected(ErrorDetail{"INVALID_ARGUMENT", "invalid contract version range or collection mode"});
     }
-    // The highest implemented version inside the inclusive range.
-    TStorageContractVersion version;
-    if (request.MinVersion <= CurrentVersion && request.MaxVersion >= CurrentVersion) {
-        version = CurrentVersion;
-    } else if (request.MinVersion <= FirstVersion && request.MaxVersion >= FirstVersion) {
-        version = FirstVersion;
-    } else {
+    const auto version = std::min(request.MaxVersion, CurrentVersion);
+    if (request.MinVersion > version || version < TStorageContractVersion{1, 0}) {
         return std::unexpected(ErrorDetail{"UNSUPPORTED_CONTRACT_VERSION", "no supported contract version in range"});
     }
     auto contract = DescribeContract(version, request.Mode, capabilities, limits);

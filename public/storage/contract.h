@@ -1,6 +1,9 @@
 #pragma once
 
 #include "storage/metadata.h"
+#include "storage/read_view.h"
+#include "storage/scan_split.h"
+#include "storage/write_session.h"
 
 #include <compare>
 #include <cstdint>
@@ -39,7 +42,27 @@ enum class EStorageOperation : uint16_t {
     Reconcile,
     StorageFootprint,
     Shutdown,
-    // Contract 1.1: snapshot archive maintenance and explicit full verification.
+    AcquireReadView,
+    ReadViewInfo,
+    ScanReadView,
+    RenewReadView,
+    ReleaseReadView,
+    CancelReadView,
+    PlanScan,
+    NextScanSplits,
+    ReadSplit,
+    CancelScanPlan,
+    NegotiateScan,
+    BeginWrite,
+    PutPart,
+    GetPartReceipt,
+    SealWrite,
+    CommitWrite,
+    GetWriteStatus,
+    GetWriteOutcome,
+    AbortWrite,
+    CleanupWrites,
+    // Contract 1.5: snapshot archive maintenance and explicit full verification.
     UpdateSnapshotArchive,
     ArchiveSnapshots,
     VerifyStoreFull
@@ -52,10 +75,13 @@ enum class EStorageFeature : uint16_t {
     AuthoritativeOutcomes,
     SnapshotPreconditions,
     DurableNoOp,
-    // Proposed capabilities: never advertised by contract 1.0 or 1.1.
+    // Native read views are advertised only from contract 1.1.
     IndependentReadView,
+    // Native splits are advertised only from contract 1.2.
     ScanSplits,
+    // Native append/upsert sessions from 1.4; requires an explicit staging owner.
     StagedWrites,
+    // Proposed capabilities, not advertised.
     StableCAbi,
     ArrowFlight,
     RemoteDescriptors,
@@ -64,7 +90,9 @@ enum class EStorageFeature : uint16_t {
     SqlMutations,
     SchemaEvolution,
     CrossCollectionTransactions,
-    // Contract 1.1: snapshots older than a collection's hot window stay
+    // Native scan negotiation is advertised only from contract 1.3.
+    ScanNegotiation,
+    // Contract 1.5: snapshots older than a collection's hot window stay
     // readable by ID from the catalog archive; a fresh open of an archive-tier
     // store rebuilds from verified checkpoints instead of re-verifying history.
     ArchivedSnapshotReads,
@@ -97,7 +125,12 @@ struct TStorageContractLimits
     int64_t BulkDecodedBytes = 0;
     int64_t LookupKeys = 0;
     int64_t DeleteKeys = 0;
-    // Contract 1.1, when UpdateSnapshotArchive is advertised: hot_snapshots of
+    // Present only when native IndependentReadView is advertised.
+    std::optional<TReadViewLimits> ReadViews{};
+    std::optional<TScanSplitLimits> ScanSplits{};
+    // Default configurable staging ceilings. A directory retains its chosen limits.
+    std::optional<TWriteSessionLimits> WriteSessions{};
+    // Contract 1.5, when UpdateSnapshotArchive is advertised: hot_snapshots of
     // a new append collection that does not choose one, and its largest value.
     int64_t DefaultHotSnapshots = 0;
     int64_t MaxHotSnapshots = 0;

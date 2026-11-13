@@ -36,8 +36,8 @@ if(NOT GLAMDB_IO_ONLY)
     add_library(glamdb_core STATIC resources/resources.cpp resources/arrow_pool.cpp resources/metadata_result.cpp api/canonical.cpp api/codec.cpp api/arrow_input.cpp api/bulk_input.cpp
         api/write_settings.cpp api/scalars.cpp api/kv.cpp api/contract.cpp scan/read_budget.cpp
         catalog/sqlite.cpp catalog/durable_sqlite_catalog.cpp
-        engine/storage_mapping.cpp engine/store_lease.cpp engine/engine.cpp engine/metadata_pages.cpp
-        scan/predicate.cpp)
+        engine/storage_mapping.cpp engine/store_lease.cpp engine/engine.cpp engine/metadata_pages.cpp engine/read_views.cpp
+        scan/predicate.cpp scan/negotiation.cpp write_sessions/journal.cpp write_sessions/sessions.cpp)
     add_library(glamdb::core ALIAS glamdb_core)
     target_link_libraries(glamdb_core PRIVATE "$<BUILD_INTERFACE:glamdb_build_options>" SQLite::SQLite3
         iceberg::iceberg_sql_catalog_static Arrow::arrow_static glamdb_logging glamdb_metrics)

@@ -69,6 +69,20 @@ Result<std::shared_ptr<ResourceReservation>> ResourceOwner::Reserve(ResourceClas
 Result<std::shared_ptr<ResourceReservation>>
 ResourceOwner::ReserveDevice(const std::string& absolute_path, uint64_t bytes, uint64_t inodes)
 {
+    return ReserveStagingDevice(absolute_path, bytes, inodes, 0, 0);
+}
+
+Result<std::shared_ptr<ResourceReservation>> ResourceOwner::ReserveStagingDevice(const std::string& absolute_path,
+    uint64_t bytes,
+    uint64_t inodes,
+    uint64_t completionBytes,
+    uint64_t completionInodes)
+{
+    if (bytes > UINT64_MAX - completionBytes || inodes > UINT64_MAX - completionInodes) {
+        return std::unexpected(Exhausted());
+    }
+    const auto admittedBytes = bytes + completionBytes;
+    const auto admittedInodes = inodes + completionInodes;
     std::filesystem::path path(absolute_path);
     if (!path.is_absolute() || absolute_path.find('\0') != std::string::npos) {
         return std::unexpected(ErrorDetail{"INVALID_ARGUMENT", "device path must be absolute", RetryHint::FixInput});
@@ -95,12 +109,12 @@ ResourceOwner::ReserveDevice(const std::string& absolute_path, uint64_t bytes, u
     const auto& limits = State_->Limits;
     const auto available = Multiply(space.f_bavail, space.f_frsize);
     const auto freeInodes = static_cast<uint64_t>(space.f_favail);
-    if (!Fits(pending.Bytes, bytes, limits.device_reserved_bytes) ||
-        !Fits(pending.Inodes, inodes, limits.device_reserved_inodes) ||
+    if (!Fits(pending.Bytes, admittedBytes, limits.device_reserved_bytes) ||
+        !Fits(pending.Inodes, admittedInodes, limits.device_reserved_inodes) ||
         !Fits(limits.device_free_bytes, pending.Bytes, available) ||
-        !Fits(limits.device_free_bytes + pending.Bytes, bytes, available) ||
+        !Fits(limits.device_free_bytes + pending.Bytes, admittedBytes, available) ||
         !Fits(limits.device_free_inodes, pending.Inodes, freeInodes) ||
-        !Fits(limits.device_free_inodes + pending.Inodes, inodes, freeInodes))
+        !Fits(limits.device_free_inodes + pending.Inodes, admittedInodes, freeInodes))
     {
         return std::unexpected(Exhausted());
     }

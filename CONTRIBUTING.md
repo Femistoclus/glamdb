@@ -58,7 +58,7 @@ The `Native tests` workflow runs normal, ASan, UBSan, and TSan jobs on every PR,
 including documentation-only changes. Pushes to `main` and manual runs also
 include MSan and LSan. `Workbench checks` runs Python, Node, and browser jobs
 only on pushes to `main` and manual dispatch, skipping documentation-only pushes.
-See [test CI](docs/development/BUILDING.md#test-ci)
+See [build checks](docs/BUILDING.md#checks)
 for discovery, sanitizer scope, and failure logs.
 External contributors' workflow runs require a maintainer to approve execution;
 approval to run CI does not approve the pull request for merging.
@@ -83,8 +83,8 @@ and the possibility of data loss. Record relevant performance measurements.
   `.github/allowed-actions.json` in sync with those settings. An unlisted Action
   rejects the entire workflow before jobs start, leaving required checks at
   **Expected — Waiting for status to be reported**. Inspect the run's annotation
-  for the rejected Action; see [test CI](docs/development/BUILDING.md#test-ci)
-  for the command to apply reviewed allowlist changes.
+  for the rejected Action; see [build checks](docs/BUILDING.md#checks)
+  and `.github/allowed-actions.json` for the reviewed allowlist.
 - PR workflows run on GitHub-hosted runners with read-only repository access,
   without release credentials or other secrets.
 - Keep privileged release jobs separate from PR code. Do not execute fork code

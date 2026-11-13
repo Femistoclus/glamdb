@@ -5,6 +5,7 @@
 
 namespace glamdb {
 
+// Provenance only: this enum does not certify that a raw bound is an exact scalar.
 enum class MetricKind : uint8_t { Unavailable, Metadata, Estimate, Measured };
 
 // An unavailable value is null, never a fabricated zero. Metadata values are
